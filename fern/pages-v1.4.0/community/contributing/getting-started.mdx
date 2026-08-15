@@ -1,0 +1,104 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Contributor Getting Started
+sidebar-title: Getting Started
+subtitle: Set up a fork and create a signed, validated change
+---
+
+Use this tutorial to prepare a local checkout and create your first contribution. For the policy
+that determines whether you should open an issue first, see [Contribution Flow](contribution-flow.mdx).
+
+<Steps toc={true}>
+  <Step title="Choose a contribution">
+    Browse [good first issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue),
+    [help wanted issues](https://github.com/ai-dynamo/dynamo/labels/help-wanted), or the complete
+    [issue list](https://github.com/ai-dynamo/dynamo/issues).
+
+    You can submit typo corrections and other focused fixes directly. Before beginning a feature,
+    broad refactor, or architectural change, follow the issue-first guidance in
+    [Contribution Flow](contribution-flow.mdx#decide-whether-to-open-an-issue).
+  </Step>
+
+  <Step title="Fork and clone the repository">
+    [Fork the Dynamo repository](https://github.com/ai-dynamo/dynamo/fork), then clone your fork and
+    add the upstream repository:
+
+    ```bash
+    git clone https://github.com/YOUR-USERNAME/dynamo.git
+    cd dynamo
+    git remote add upstream https://github.com/ai-dynamo/dynamo.git
+    git fetch upstream
+    ```
+  </Step>
+
+  <Step title="Prepare the development environment">
+    Follow [Building from Source](../../developer-guide/advanced-customizations/building-from-source.md) for system packages,
+    Rust, Python, and build instructions.
+
+    You can also use the repository's
+    [development container](https://github.com/ai-dynamo/dynamo/tree/v1.4.0/.devcontainer) for a
+    preconfigured environment.
+  </Step>
+
+  <Step title="Install pre-commit hooks">
+    Install the hooks once in your checkout:
+
+    ```bash
+    uv pip install pre-commit
+    pre-commit install
+    ```
+
+    Before committing, run the hooks against the files in your change:
+
+    ```bash
+    pre-commit run
+    ```
+
+    Use `pre-commit run --all-files` when you need to validate the entire repository.
+  </Step>
+
+  <Step title="Configure DCO sign-off">
+    Configure the name and email that should appear in your commits:
+
+    ```bash
+    git config user.name "Your Name"
+    git config user.email "you@example.com"
+    ```
+
+    Every commit must include a Developer Certificate of Origin (DCO) sign-off. Add it with `-s`:
+
+    ```bash
+    git commit -s -m "fix(component): describe the change"
+    ```
+
+    For the full requirement and repair instructions, see
+    [DCO and Licensing](dco-and-licensing.md).
+  </Step>
+
+  <Step title="Verify the commit">
+    Confirm that the latest commit message contains a `Signed-off-by` trailer:
+
+    ```bash
+    git show -s --format='%B' HEAD
+    ```
+
+    The output must end with a line like:
+
+    ```text
+    Signed-off-by: Your Name <you@example.com>
+    ```
+
+    Then inspect the change you are about to submit:
+
+    ```bash
+    git status
+    git diff upstream/main...HEAD
+    ```
+  </Step>
+
+  <Step title="Continue to the pull request flow">
+    Follow [Contribution Flow](contribution-flow.mdx) to decide whether an issue is required, push
+    your branch, open the pull request, and work through CI and review.
+  </Step>
+</Steps>

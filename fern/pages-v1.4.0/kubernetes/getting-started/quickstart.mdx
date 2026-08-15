@@ -1,0 +1,245 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Kubernetes Quickstart
+subtitle: Get a model running on Kubernetes and send your first request.
+---
+
+import { KubernetesContainerSelector } from "@/components/KubernetesContainerSelector";
+
+Select **NVIDIA GPU** or **Intel GPU** based on the accelerator hardware in your cluster, and
+follow that tab throughout the guide. The Intel GPU path uses the XPU runtime and tooling.
+
+<KubernetesContainerSelector />
+
+<Steps>
+  <Step title="Check the prerequisites">
+    <Tabs>
+      <Tab title="NVIDIA GPU">
+        You need:
+
+        - A Kubernetes v1.30 or later cluster with NVIDIA GPU nodes
+        - `kubectl` v1.30 or later configured for the cluster
+        - Helm v3 or later
+      </Tab>
+      <Tab title="Intel GPU">
+        You need:
+
+        - A Kubernetes v1.34 or later cluster with Intel GPU nodes and Dynamic Resource Allocation (DRA) API v1 enabled
+        - `kubectl` matching the cluster's Kubernetes minor version
+        - Helm v3 or later
+        - Docker and access to a container registry
+        - A local clone of the Dynamo repository
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Install accelerator support">
+    <Tabs>
+      <Tab title="NVIDIA GPU">
+        Install the NVIDIA GPU Operator:
+
+```bash
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --force-update
+helm repo update nvidia
+helm upgrade --install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator \
+  --create-namespace \
+  --wait \
+  --timeout=10m
+```
+
+<Tip>
+If your cluster provider installs the NVIDIA driver, add `--set driver.enabled=false`.
+Add `--set toolkit.enabled=false` only when the provider also configures the GPU container runtime.
+</Tip>
+      </Tab>
+      <Tab title="Intel GPU">
+        Install the [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes),
+        then verify that the `gpu.intel.com` device class is available:
+
+```bash
+kubectl get deviceclass gpu.intel.com
+kubectl get resourceslices
+```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Install Dynamo">
+    Use the `DYNAMO_VERSION` value from the selector above to install the Dynamo platform chart in a dedicated namespace. Helm creates the namespace for you:
+
+```bash
+export NAMESPACE=dynamo-system
+
+helm upgrade --install dynamo-platform \
+  "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${DYNAMO_VERSION}.tgz" \
+  --namespace "$NAMESPACE" \
+  --create-namespace \
+  --wait \
+  --timeout=10m
+
+kubectl get pods --namespace "$NAMESPACE"
+```
+
+    For the NVIDIA GPU DGDR path, `DYNAMO_IMAGE` points to the Dynamo planner image from the selector above. The planner profiles the model and creates the worker deployment; you do not need to choose a separate runtime image for that path.
+  </Step>
+
+  <Step title="Create the model access secret">
+    `Qwen/Qwen3-0.6B` is public and does not require a Hugging Face token. The DGDR profiler and
+    example DGD expect a Secret named `hf-token-secret`, so create it with an empty token:
+
+```bash
+kubectl create secret generic hf-token-secret \
+  --namespace "$NAMESPACE" \
+  --from-literal=HF_TOKEN= \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+    For a gated or private model, replace the empty value with your Hugging Face token.
+  </Step>
+
+  <Step title="Deploy Qwen3 0.6B">
+    <Tabs>
+      <Tab title="NVIDIA GPU">
+        Apply a `DynamoGraphDeploymentRequest` (DGDR). The DGDR profiles the model and creates the
+        `DynamoGraphDeployment` (DGD) that serves it.
+
+```bash
+cat <<EOF | kubectl apply --namespace "$NAMESPACE" -f -
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-quickstart
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: auto
+  image: ${DYNAMO_IMAGE}
+  runtimeVersionOverride: "${DYNAMO_RUNTIME_VERSION:-${DYNAMO_VERSION}}"
+EOF
+```
+      </Tab>
+      <Tab title="Intel GPU">
+        From the root of your Dynamo clone, build and push the vLLM XPU runtime image:
+
+```bash
+export IMAGE_REGISTRY='registry.example.com/my-team'
+export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:quickstart"
+
+python3 container/render.py \
+  --framework=vllm \
+  --device=xpu \
+  --target=runtime \
+  --output-short-filename
+docker build --tag "$XPU_IMAGE" --file container/rendered.Dockerfile .
+docker push "$XPU_IMAGE"
+```
+
+        Apply the aggregated XPU `DynamoGraphDeployment` (DGD), replacing the template image tags
+        with the images for this quickstart:
+
+```bash
+sed \
+  -e "s|nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0|nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_VERSION}|g" \
+  -e "s|nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:1.4.0|${XPU_IMAGE}|g" \
+  examples/backends/vllm/deploy/xpu/agg_xpu_dra.yaml \
+  | kubectl apply --namespace "$NAMESPACE" -f -
+```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Wait for the deployment">
+    Model download and startup can take several minutes.
+
+    <Tabs>
+      <Tab title="NVIDIA GPU">
+
+```bash
+kubectl wait \
+  --for=jsonpath='{.status.phase}'=Deployed \
+  dgdr/qwen3-quickstart \
+  --namespace "$NAMESPACE" \
+  --timeout=30m
+
+export DGD_NAME=$(kubectl get dgdr/qwen3-quickstart \
+  --namespace "$NAMESPACE" \
+  --output=jsonpath='{.status.dgdName}')
+export FRONTEND_SERVICE="${DGD_NAME}-frontend"
+```
+      </Tab>
+      <Tab title="Intel GPU">
+
+```bash
+kubectl wait \
+  --for=condition=Ready \
+  dgd/vllm-agg-xpu-dra \
+  --namespace "$NAMESPACE" \
+  --timeout=30m
+
+export FRONTEND_SERVICE=vllm-agg-xpu-dra-frontend
+```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Send a request">
+    Port-forward the Frontend, wait for its health endpoint, and send a chat completion request:
+
+```bash
+kubectl port-forward \
+  --namespace "$NAMESPACE" \
+  "service/${FRONTEND_SERVICE}" 8000:8000 \
+  >/tmp/dynamo-port-forward.log 2>&1 &
+export PORT_FORWARD_PID=$!
+
+until curl --silent --fail http://localhost:8000/health >/dev/null; do
+  sleep 2
+done
+
+curl --silent --show-error http://localhost:8000/v1/chat/completions \
+  --header "Content-Type: application/json" \
+  --data '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [
+      {"role": "user", "content": "What is NVIDIA Dynamo?"}
+    ],
+    "max_tokens": 200
+  }' | python3 -m json.tool
+```
+  </Step>
+</Steps>
+
+## What You Did
+
+- Installed the accelerator support required by your hardware.
+- Installed the Dynamo platform on your Kubernetes cluster.
+- Created either a DGDR that generated a DGD, or a DGD directly.
+- Sent an OpenAI-compatible request to the deployed model.
+
+## Clean Up
+
+Stop the port-forward and remove the quickstart deployment:
+
+```bash
+kill "$PORT_FORWARD_PID"
+```
+
+<Tabs>
+  <Tab title="NVIDIA GPU">
+
+```bash
+kubectl delete dgdr/qwen3-quickstart --namespace "$NAMESPACE" --ignore-not-found
+kubectl delete dgd/"$DGD_NAME" --namespace "$NAMESPACE" --ignore-not-found
+```
+  </Tab>
+  <Tab title="Intel GPU">
+
+```bash
+kubectl delete \
+  --filename examples/backends/vllm/deploy/xpu/agg_xpu_dra.yaml \
+  --namespace "$NAMESPACE" \
+  --ignore-not-found
+```
+  </Tab>
+</Tabs>

@@ -1,0 +1,1188 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Navigation structure for Dynamo docs
+# Tab-based navigation: Home, Kubernetes Guide, CLI Guide, Use Cases, Recipes,
+# Developer Guide, Reference,
+# Blog, and Community. The Kubernetes Guide and CLI Guide tabs retain their
+# kubernetes/ and cli/ URL prefixes; Recipes retains its recipes/ prefix.
+# Other content tabs use skip-slug: true so their page URLs remain stable.
+
+tabs:
+  home:
+    display-name: Home
+    icon: house
+    skip-slug: true
+  kubernetes-guide:
+    display-name: Kubernetes Guide
+    icon: fa-brands fa-kubernetes
+    slug: kubernetes
+  cli-guide:
+    display-name: CLI Guide
+    icon: fa-solid fa-rectangle-terminal
+    slug: cli
+  use-cases:
+    display-name: Use Cases
+    icon: puzzle-piece
+    skip-slug: true
+  recipes:
+    display-name: Recipes
+    icon: file-code
+  developer-guide:
+    display-name: Developer Guide
+    icon: code
+    skip-slug: true
+  reference:
+    display-name: Reference
+    icon: book
+  blog:
+    display-name: Blog
+    icon: newspaper
+    skip-slug: true
+  community:
+    display-name: Community
+    icon: users
+    skip-slug: true
+navigation:
+  - tab: home
+    layout:
+      # Sole entry: the landing page sets `layout: page`, which drops the
+      # sidebar. The Slack and Community Calendar links that used to sit here
+      # are the two community cards in the hero, so they were duplicated.
+      - page: Welcome
+        path: ../index.mdx
+  # ==================== Kubernetes Guide ====================
+  - tab: kubernetes-guide
+    layout:
+      # ==================== Getting Started ====================
+      - section: Getting Started
+        icon: rocket
+        collapsed: open-by-default
+        contents:
+          - page: Introduction
+            path: ../pages-v1.4.0/kubernetes/getting-started/introduction.mdx
+          - page: Quickstart
+            path: ../pages-v1.4.0/kubernetes/getting-started/quickstart.mdx
+          - link: Compatibility
+            href: /dynamo/v1.4.0/reference/compatibility
+            target: _blank
+            # - page: Local Quickstart
+            #   path: pages/cli/getting-started/quickstart.mdx
+      - section: Installation
+        icon: download
+        collapsed: true
+        contents:
+          - page: Install Dynamo
+            path: ../pages-v1.4.0/kubernetes/installation/install-dynamo.md
+          - page: Multinode Orchestration
+            path: ../pages-v1.4.0/kubernetes/installation/multinode-orchestration.md
+          - page: Gateway API Inference Extension
+            path: ../pages-v1.4.0/kubernetes/installation/gateway-api-routing.mdx
+          - section: RDMA Setup
+            contents:
+              - page: Overview
+                path: ../pages-v1.4.0/kubernetes/installation/rdma-setup/overview.md
+              - page: Infiniband on Azure
+                path: ../pages-v1.4.0/kubernetes/installation/rdma-setup/infiniband-on-azure.mdx
+              - page: EFA on AWS
+                path: ../pages-v1.4.0/kubernetes/installation/rdma-setup/efa-on-aws.mdx
+          - section: Model Storage
+            contents:
+              - page: Overview
+                path: ../pages-v1.4.0/kubernetes/installation/model-storage/overview.md
+              - page: AKS Storage
+                path: ../pages-v1.4.0/kubernetes/installation/model-storage/aks-storage.md
+              - page: Azure Lustre CSI Driver
+                path: ../pages-v1.4.0/kubernetes/installation/model-storage/azure-lustre-csi-driver.mdx
+              - page: EFS
+                path: ../pages-v1.4.0/kubernetes/installation/model-storage/efs.mdx
+          - section: Managed Kubernetes
+            contents:
+              - section: EKS
+                contents:
+                  - page: EKS Setup
+                    path: ../pages-v1.4.0/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx
+                  - page: ECS
+                    path: ../pages-v1.4.0/kubernetes/installation/managed-kubernetes/eks/ecs.mdx
+              - section: Azure
+                contents:
+                  - page: AKS Setup
+                    path: ../pages-v1.4.0/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx
+                  - page: Spot VMs
+                    slug: spot-vms
+                    path: ../pages-v1.4.0/kubernetes/installation/managed-kubernetes/azure/spot-vms.mdx
+              - section: GCP
+                contents:
+                  - page: GKE Setup
+                    path: ../pages-v1.4.0/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx
+      # ==================== Usage ====================
+      - section: Model Deployment
+        icon: microchip
+        collapsed: true
+        contents:
+          - page: Introduction
+            path: ../pages-v1.4.0/kubernetes/model-deployment/introduction.mdx
+          - page: Sidecar Backends (Experimental)
+            path: ../pages-v1.4.0/kubernetes/model-deployment/sidecar-backends.md
+          - page: Deploy with DGD
+            path: ../pages-v1.4.0/kubernetes/model-deployment/deploy-with-dgd.md
+          - page: Expose the Frontend
+            path: ../pages-v1.4.0/kubernetes/model-deployment/expose-the-frontend.md
+          - page: Deploy on Intel GPUs
+            path: ../pages-v1.4.0/kubernetes/model-deployment/deploy-on-intel-gpus.mdx
+          - page: Multinode Deployments
+            path: ../pages-v1.4.0/kubernetes/model-deployment/multinode-deployments.md
+          - section: Model Loading
+            collapsed: true
+            contents:
+              - page: Model Caching
+                path: ../pages-v1.4.0/kubernetes/model-deployment/model-loading/model-caching.mdx
+              - page: Fast Model Loading
+                path: ../pages-v1.4.0/kubernetes/model-deployment/model-loading/fast-model-loading.mdx
+      - section: KV-Aware Routing
+        icon: route
+        collapsed: true
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/kubernetes/kv-aware-routing/overview.md
+          - page: Using the Dynamo Frontend
+            path: ../pages-v1.4.0/kubernetes/kv-aware-routing/dynamo-frontend.md
+          - page: Using GAIE with Dynamo
+            path: ../pages-v1.4.0/kubernetes/kv-aware-routing/gateway-api.mdx
+          - page: Using GAIE with vanilla vLLM
+            path: ../pages-v1.4.0/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx
+            slug: vanilla-vllm-onramp
+      - section: Disaggregated Serving
+        icon: arrows-split-up-and-left
+        collapsed: true
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/kubernetes/disaggregated-serving/overview.md
+          - page: Sizing with AIConfigurator
+            slug: size-with-ai-configurator
+            path: ../pages-v1.4.0/kubernetes/disaggregated-serving/sizing-with-aiconfigurator.mdx
+      - section: KV Cache Offloading
+        icon: database
+        collapsed: true
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/kubernetes/kv-cache-offloading/overview.mdx
+      - section: Fault Tolerance
+        icon: shield-halved
+        collapsed: true
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/kubernetes/fault-tolerance/introduction.md
+          - page: Request Migration
+            path: ../pages-v1.4.0/kubernetes/fault-tolerance/request-migration.md
+          - page: Request Rejection
+            path: ../pages-v1.4.0/kubernetes/fault-tolerance/request-rejection.md
+          - page: Graceful Shutdown
+            path: ../pages-v1.4.0/kubernetes/fault-tolerance/graceful-shutdown.md
+          - page: Shadow Engine Failover
+            path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md
+      - section: Auto Deployment
+        icon: wand-magic-sparkles
+        collapsed: true
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/kubernetes/auto-deployment/overview.mdx
+          - page: Auto Deploy with DGDR
+            slug: dgdr-walkthrough
+            path: ../pages-v1.4.0/kubernetes/auto-deployment/auto-deploy-with-dgdr.md
+          - page: Dynamo Profiler
+            path: ../pages-v1.4.0/kubernetes/auto-deployment/dynamo-profiler.md
+          - page: Dynamo Planner
+            path: ../pages-v1.4.0/kubernetes/auto-deployment/dynamo-planner.mdx
+      - section: Operations
+        icon: screwdriver-wrench
+        collapsed: open-by-default
+        contents:
+          - page: Observability
+            path: ../pages-v1.4.0/kubernetes/operations/observability.mdx
+          - section: Cold Start Optimizations
+            collapsed: true
+            contents:
+              - page: Dynamo Snapshot
+                path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md
+              - page: Model Express
+                path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md
+          - section: Simulation with DynoSim
+            slug: dynosim
+            contents:
+              - page: Overview
+                path: ../pages-v1.4.0/kubernetes/operations/simulation-with-dynosim/overview.md
+              - page: Simulation Model
+                slug: simulation-model
+                path: ../pages-v1.4.0/kubernetes/operations/simulation-with-dynosim/simulation-model.md
+              - page: Mocker Live Simulation
+                slug: live-simulation-with-mocker
+                path: ../pages-v1.4.0/kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx
+              - page: DynoSim Replay
+                slug: simulation-runs
+                path: ../pages-v1.4.0/kubernetes/operations/simulation-with-dynosim/dynosim-replay.mdx
+              - page: DynoSim Sweeps
+                slug: simulation-sweeps
+                path: ../pages-v1.4.0/kubernetes/operations/simulation-with-dynosim/dynosim-sweeps.mdx
+              - page: DynoSim Planner Replay
+                slug: planner-simulation-benchmarking
+                path: ../pages-v1.4.0/kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx
+          - page: Benchmarking with AIPerf
+            path: ../pages-v1.4.0/kubernetes/operations/benchmarking-with-aiperf.mdx
+          - page: Performance Tuning
+            path: ../pages-v1.4.0/kubernetes/operations/performance-tuning.md
+          - page: LoRA Adapters
+            path: ../pages-v1.4.0/kubernetes/operations/lora-adapters.md
+  # ==================== CLI Guide ====================
+  - tab: cli-guide
+    layout:
+      - section: Getting Started
+        icon: rocket
+        collapsed: open-by-default
+        contents:
+          - page: Introduction
+            path: ../pages-v1.4.0/cli/getting-started/introduction.mdx
+          - page: Quickstart
+            path: ../pages-v1.4.0/cli/getting-started/quickstart.mdx
+          - link: Compatibility
+            href: /dynamo/v1.4.0/reference/compatibility
+            target: _blank
+      - section: Installation
+        icon: download
+        collapsed: true
+        contents:
+          - page: Install Dynamo
+            path: ../pages-v1.4.0/cli/installation/install-dynamo.mdx
+          - page: Minikube Setup
+            path: ../pages-v1.4.0/cli/installation/minikube-setup.mdx
+      - section: Model Deployment
+        icon: microchip
+        collapsed: true
+        contents:
+          - page: Introduction
+            path: ../pages-v1.4.0/cli/model-deployment/introduction.mdx
+          - page: Multi-Node Deployment
+            path: ../pages-v1.4.0/cli/model-deployment/multi-node-deployment.mdx
+      - section: KV-Aware Routing
+        icon: route
+        collapsed: true
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/cli/kv-aware-routing/overview.mdx
+          - page: Standalone Router
+            slug: standalone-router
+            path: ../pages-v1.4.0/cli/kv-aware-routing/standalone-router.md
+      - section: Disaggregated Serving
+        icon: arrows-split-up-and-left
+        collapsed: true
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/cli/disaggregated-serving/overview.mdx
+          - page: Sizing with AIConfigurator
+            path: ../pages-v1.4.0/cli/disaggregated-serving/sizing-with-aiconfigurator.mdx
+      - section: KV Cache Offloading
+        icon: database
+        collapsed: true
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/cli/kv-cache-offloading/overview.mdx
+      - section: Operations
+        icon: screwdriver-wrench
+        collapsed: open-by-default
+        contents:
+          - page: Observability
+            path: ../pages-v1.4.0/cli/operations/observability.mdx
+          - section: Simulation with DynoSim
+            slug: dynosim
+            contents:
+              - page: Overview
+                path: ../pages-v1.4.0/cli/operations/simulation-with-dynosim/overview.md
+              - page: Simulation Model
+                slug: simulation-model
+                path: ../pages-v1.4.0/cli/operations/simulation-with-dynosim/simulation-model.md
+              - page: Mocker Live Simulation
+                path: ../pages-v1.4.0/cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx
+              - page: DynoSim Replay
+                slug: simulation-runs
+                path: ../pages-v1.4.0/cli/operations/simulation-with-dynosim/dynosim-replay.mdx
+              - page: DynoSim Sweeps
+                slug: simulation-sweeps
+                path: ../pages-v1.4.0/cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx
+          - page: Benchmarking with AIPerf
+            path: ../pages-v1.4.0/cli/operations/benchmarking-with-aiperf.mdx
+          - page: LoRA Adapters
+            path: ../pages-v1.4.0/cli/operations/lora-adapters.md
+  - tab: use-cases
+    layout:
+      # ==================== Features ====================
+      - section: Agents
+        collapsed: true
+        icon: users
+        slug: agents
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/use-cases/agents/overview.md
+          - page: Session IDs
+            path: ../pages-v1.4.0/use-cases/agents/session-ids.mdx
+          - page: Agent Hints
+            path: ../pages-v1.4.0/use-cases/agents/agent-hints.md
+          - page: Priority Scheduling
+            path: ../pages-v1.4.0/use-cases/agents/priority-scheduling.md
+          - page: Agent Harnesses
+            path: ../pages-v1.4.0/use-cases/agents/agent-harnesses.mdx
+          - page: Agent Tracing
+            path: ../pages-v1.4.0/use-cases/agents/agent-tracing.md
+          - page: Agent Simulation
+            path: ../pages-v1.4.0/use-cases/agents/agent-simulation.mdx
+          - page: ThunderAgent Program Scheduler
+            path: ../pages-v1.4.0/use-cases/agents/thunderagent-program-scheduler.md
+      - section: Reinforcement Learning
+        collapsed: true
+        icon: brain
+        slug: reinforcement-learning
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/use-cases/reinforcement-learning/overview.md
+          - page: RL Implementation Guide
+            path: ../pages-v1.4.0/use-cases/reinforcement-learning/implementation-guide.md
+      - section: Multimodal Serving
+        collapsed: true
+        icon: photo-film
+        slug: multimodal
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/use-cases/multimodal-serving/overview.md
+          - page: Parallel Media Decoding
+            path: ../pages-v1.4.0/use-cases/multimodal-serving/parallel-media-decoding.md
+          - page: Embedding Cache
+            path: ../pages-v1.4.0/use-cases/multimodal-serving/embedding-cache.md
+          - page: Multimodal KV Routing
+            slug: multimodal-kv-routing
+            path: ../pages-v1.4.0/use-cases/multimodal-serving/multimodal-kv-routing.md
+          - page: Encoder Disaggregation
+            path: ../pages-v1.4.0/use-cases/multimodal-serving/encoder-disaggregation.md
+          - page: Video Decode GPU Requirements
+            slug: video-decode-gpu-requirements
+            path: ../pages-v1.4.0/use-cases/multimodal-serving/video-decode-gpu-requirements.md
+          - page: Additional Media Decoders
+            slug: additional-media-decoders
+            path: ../pages-v1.4.0/use-cases/multimodal-serving/additional-media-decoders.md
+      - section: Diffusion
+        collapsed: true
+        icon: wand-magic-sparkles
+        slug: diffusion
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/use-cases/diffusion/overview.md
+          - section: Workflows
+            collapsed: true
+            skip-slug: true
+            contents:
+              - page: Text-to-Image
+                slug: text-to-image
+                path: ../pages-v1.4.0/use-cases/diffusion/workflows/text-to-image.md
+              - page: Text-to-Video
+                slug: text-to-video
+                path: ../pages-v1.4.0/use-cases/diffusion/workflows/text-to-video.md
+              - page: Image-to-Video
+                slug: image-to-video
+                path: ../pages-v1.4.0/use-cases/diffusion/workflows/image-to-video.md
+              - page: Text-to-Audio
+                slug: text-to-audio
+                path: ../pages-v1.4.0/use-cases/diffusion/workflows/text-to-audio.md
+              - page: Text-to-Text (LLM Diffusion)
+                slug: text-to-text
+                path: ../pages-v1.4.0/use-cases/diffusion/workflows/text-to-text-llm-diffusion.md
+      - section: Tool Calling & Reasoning
+        collapsed: true
+        icon: screwdriver-wrench
+        slug: parsing
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/use-cases/tool-calling-and-reasoning/overview.mdx
+          - page: Chat Processors
+            path: ../pages-v1.4.0/use-cases/tool-calling-and-reasoning/chat-processors.mdx
+          - page: Tool Call Parsing
+            path: ../pages-v1.4.0/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx
+          - page: Structural Tag
+            path: ../pages-v1.4.0/use-cases/tool-calling-and-reasoning/structural-tag.md
+          - page: Reasoning Parsing
+            path: ../pages-v1.4.0/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
+          - page: Troubleshooting Tool Calls
+            path: ../pages-v1.4.0/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
+  - tab: recipes
+    layout:
+      # ==================== Model Recipes ====================
+      - section: Model Recipes
+        icon: file-code
+        skip-slug: true
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/recipes/model-recipes/overview.mdx
+            slug: browse
+          - page: Kimi-K3
+            path: ../pages-v1.4.0/recipes/model-recipes/kimi-k3.mdx
+            slug: kimi-k3
+          - page: Qwen3.8-2.4T-A95B
+            path: ../pages-v1.4.0/recipes/model-recipes/qwen-3-8-2-4t-a95b-fp8.mdx
+            slug: qwen-3-8-2-4t-a95b-fp8
+          - page: GLM-5.2
+            path: ../pages-v1.4.0/recipes/model-recipes/glm-5-2.mdx
+            slug: glm-5-2
+          - page: Inkling NVFP4
+            path: ../pages-v1.4.0/recipes/model-recipes/inkling-nvfp4.mdx
+            slug: inkling
+          - page: Kimi-K2.6
+            path: ../pages-v1.4.0/recipes/model-recipes/kimi-k2-6.mdx
+            slug: kimi-k2-6
+          - page: Nemotron-3.5-Lightning
+            path: ../pages-v1.4.0/recipes/model-recipes/nemotron-3-5-lightning.mdx
+            slug: nemotron-3-5-lightning
+          - page: Nemotron 3 Ultra
+            path: ../pages-v1.4.0/recipes/model-recipes/nemotron-3-ultra.mdx
+            slug: nemotron-3-ultra
+          - page: Nemotron 3 Super
+            path: ../pages-v1.4.0/recipes/model-recipes/nemotron-3-super.mdx
+            slug: nemotron-3-super
+          - page: GLM-5 NVFP4
+            path: ../pages-v1.4.0/recipes/model-recipes/glm-5-nvfp4.mdx
+            slug: glm-5-nvfp4
+          - page: DeepSeek-V4-Pro
+            path: ../pages-v1.4.0/recipes/model-recipes/deepseek-v4-pro.mdx
+            slug: deepseek-v4-pro
+          - page: DeepSeek-V4-Flash
+            path: ../pages-v1.4.0/recipes/model-recipes/deepseek-v4-flash.mdx
+            slug: deepseek-v4-flash
+          - page: DeepSeek V3.2 NVFP4
+            path: ../pages-v1.4.0/recipes/model-recipes/deepseek-v3-2-nvfp4.mdx
+            slug: deepseek-v3-2-nvfp4
+          - page: GPT-OSS-120B
+            path: ../pages-v1.4.0/recipes/model-recipes/gpt-oss-120b.mdx
+            slug: gpt-oss-120b
+          - page: Qwen3-32B
+            path: ../pages-v1.4.0/recipes/model-recipes/qwen3-32b.mdx
+            slug: qwen3-32b
+          - page: Qwen3.5-122B-A10B
+            path: ../pages-v1.4.0/recipes/model-recipes/qwen3-5-122b.mdx
+            slug: qwen3-5-122b
+          - page: Qwen3-235B-A22B FP8
+            path: ../pages-v1.4.0/recipes/model-recipes/qwen3-235b-a22b-fp8.mdx
+            slug: qwen3-235b-a22b-fp8
+          - page: Qwen3-32B FP8
+            path: ../pages-v1.4.0/recipes/model-recipes/qwen3-32b-fp8.mdx
+            slug: qwen3-32b-fp8
+          - page: Llama-3.3-70B FP8
+            path: ../pages-v1.4.0/recipes/model-recipes/llama-3-3-70b-fp8.mdx
+            slug: llama-3-3-70b
+      # ==================== Kubernetes Templates ====================
+      - section: Kubernetes Templates
+        icon: fa-brands fa-kubernetes
+        contents:
+          - section: DGD
+            collapsed: open-by-default
+            contents:
+              - page: vLLM
+                path: ../pages-v1.4.0/recipes/kubernetes-templates/dgd/vllm.mdx
+              - page: TensorRT-LLM
+                path: ../pages-v1.4.0/recipes/kubernetes-templates/dgd/tensorrt-llm.mdx
+              - page: SGLang
+                path: ../pages-v1.4.0/recipes/kubernetes-templates/dgd/sglang.mdx
+          - page: DGDR
+            path: ../pages-v1.4.0/recipes/kubernetes-templates/dgdr.mdx
+      # ==================== CLI Templates ====================
+      - section: CLI Templates
+        icon: rectangle-terminal
+        contents:
+          - page: vLLM
+            path: ../pages-v1.4.0/recipes/cli-templates/vllm.mdx
+          - page: TensorRT-LLM
+            path: ../pages-v1.4.0/recipes/cli-templates/tensorrt-llm.mdx
+          - page: SGLang
+            path: ../pages-v1.4.0/recipes/cli-templates/sglang.mdx
+      # ==================== Feature Benchmarks ====================
+      # Evidence pages behind the recipes: controlled A/B benchmarks whose
+      # winning configs promote into recipes. Kept adjacent to Recipes so the
+      # cross-links between the two surfaces resolve. Detail pages are hidden
+      # from the sidebar (the Browse landing rows are the real index) — same
+      # pattern as main.
+      - section: Feature Benchmarks
+        path: ../pages-v1.4.0/recipes/feature-benchmarks/browse-all-benchmarks.mdx
+        slug: benchmarks
+        contents:
+          - page: Browse All Benchmarks
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/browse-all-benchmarks.mdx
+            slug: browse
+          - page: Benchmarking Guide
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/benchmarking-guide.md
+            slug: benchmarking
+            hidden: true
+          - page: Embedding Cache
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/embedding-cache.md
+            slug: embedding-cache
+            hidden: true
+          - page: Mocker Trace Replay
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/mocker-trace-replay.md
+            slug: mocker-trace-replay
+            hidden: true
+          - page: Planner Replay Benchmarking
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/planner-replay-benchmarking.md
+            slug: planner-replay-benchmarking
+            hidden: true
+          - page: Qwen3-32B KV Routing A/B
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/qwen3-32b-kv-routing-a-b.mdx
+            slug: qwen3-32b-kv-routing
+            hidden: true
+          - page: Agentic Coding Throughput Stack - Kimi-K2.5
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/agentic-coding-throughput-stack-kimi-k2-5.mdx
+            slug: kimi-k2-5-feature-stack
+            hidden: true
+          - page: Qwen3.6-35B Feature Stack
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/qwen3-6-35b-feature-stack.mdx
+            slug: qwen3-6-35b-feature-stack
+            hidden: true
+          - page: Qwen3-VL Embedding Cache
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/qwen3-vl-embedding-cache.mdx
+            slug: qwen3-vl-embedding-cache
+            hidden: true
+          - page: DeepSeek V3.2 WideEP Routing
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/deepseek-v3-2-wideep-routing.mdx
+            slug: deepseek-v3-2-wideep-routing
+            hidden: true
+          - page: Llama-3.3-70B Topology
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/llama-3-3-70b-topology.mdx
+            slug: llama-3-70b-topology
+            hidden: true
+          - page: KV Router A/B Testing
+            path: ../pages-v1.4.0/recipes/feature-benchmarks/kv-router-a-b-testing.md
+            slug: kv-router-ab-testing
+            hidden: true
+  - tab: developer-guide
+    layout:
+      # ==================== Knowledge Base ====================
+      - section: Knowledge Base
+        icon: book-open
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/developer-guide/knowledge-base/overview.md
+          - section: Concepts
+            collapsed: open-by-default
+            contents:
+              - section: System Architecture
+                collapsed: true
+                contents:
+                  - page: Architecture Flow
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/system-architecture/architecture-flow.md
+                  - page: Distributed Runtime
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/system-architecture/distributed-runtime.md
+                  - page: Sidecar Backends (Experimental)
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/system-architecture/sidecar-backends.md
+                  - page: Disaggregated Serving
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md
+              - section: Communication Planes
+                collapsed: true
+                contents:
+                  - page: Discovery Plane
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/communication-planes/discovery-plane.md
+                  - page: Request Plane
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/communication-planes/request-plane.md
+                  - page: Event Plane
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/communication-planes/event-plane.md
+              - page: Observability Architecture
+                path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/observability-architecture.md
+              - section: Simulation
+                collapsed: true
+                contents:
+                  - page: DynoSim Architecture
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/simulation/dynosim-architecture.md
+              - section: Fault Tolerance
+                collapsed: true
+                contents:
+                  - page: Request Migration Architecture
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md
+                  - page: Request Cancellation Architecture
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md
+                  - page: Request Rejection Architecture
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md
+                  - page: Graceful Shutdown Architecture
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md
+                  - page: Fault Tolerance Testing
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/concepts/fault-tolerance/fault-tolerance-testing.md
+          - section: Modular Components
+            collapsed: open-by-default
+            contents:
+              - section: Frontend
+                collapsed: true
+                contents:
+                  - page: Overview
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/frontend/overview.md
+                  - page: Frontend Guide
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md
+                  - page: Python Route Extensions
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md
+                  - page: Tokenizer
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/frontend/tokenizer.md
+              - section: Router
+                collapsed: true
+                contents:
+                  - page: Overview
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/overview.md
+                  - page: Router Guide
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/router-guide.md
+                  - page: Routing Concepts
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/routing-concepts.md
+                  - page: Router Filtering
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/worker-filtering.md
+                  - page: Configuration and Tuning
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md
+                  - page: Deficit Round Robin
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/deficit-round-robin.md
+                  - page: Disaggregated Serving
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/disaggregated-serving.md
+                  - page: Offloading Support Matrix
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/offloading-support-matrix.md
+                  - page: Topology-Aware KV Transfer
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md
+                  - page: Multi-DC KV Routing
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
+                  - page: Router Operations
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/router-operations.md
+                  - page: Router Testing
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/router-testing.md
+                  - page: Router Examples
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/router-examples.md
+                  - page: Global Router Configuration
+                    path: ../pages-v1.4.0/reference/components/global-router-configuration.mdx
+                  - page: Standalone Indexer
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/standalone-indexer.md
+                  - page: Standalone Slot Tracker
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/standalone-slot-tracker.md
+                  - page: Standalone Selection
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/standalone-selection.md
+                  - page: KV Event Replay Comparison
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/kv-event-replay-comparison.md
+                  - page: Router Design
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/router/router-design.md
+              - section: Planner
+                collapsed: true
+                contents:
+                  - page: Overview
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/planner/overview.md
+                  - page: Planner Guide
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/planner/planner-guide.md
+                  - page: Global Planner Guide
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md
+                  - page: Planner Examples
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/planner/planner-examples.md
+                  - page: Planner Design
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/planner/planner-design.md
+              - section: Profiler
+                collapsed: true
+                contents:
+                  - page: Overview
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/profiler/overview.md
+                  - page: Profiler Guide
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md
+                  - page: Profiler Examples
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/profiler/profiler-examples.md
+              - section: AI Simulate (Experimental)
+                slug: ai-simulate
+                collapsed: true
+                contents:
+                  - page: Overview
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/overview.md
+                  - section: Spica (Experimental)
+                    slug: spica
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/overview.md
+                      - page: Search Flow
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-flow.md
+                      - page: Optimization Goals
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/optimization-goals.md
+                      - page: Traffic
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/traffic.md
+                      - page: Search Space
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-space.md
+                      - page: Unrolled Samples
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/unrolled-samples.md
+                      - page: GLM-5-FP8 Pareto Sweep
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/glm-5-fp8-pareto-sweep.md
+                      - page: Planner Goodput-per-GPU Sweep
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/planner-goodput-per-gpu-sweep.md
+                      - page: Router End-to-End Latency Sweep
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/router-end-to-end-latency-sweep.md
+              - section: KVBM
+                collapsed: true
+                contents:
+                  - page: Overview
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/kvbm/overview.md
+                  - page: KVBM Guide
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/kvbm/kvbm-guide.md
+                  - page: KVBM Design
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/kvbm/kvbm-design.md
+              - section: Backends
+                collapsed: open-by-default
+                contents:
+                  - section: SGLang
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/sglang/overview.md
+                      - page: Sidecar
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md
+                      - page: Reference Guide
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md
+                      - page: Agents on SGLang
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md
+                      - page: Chat Processor
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md
+                      - page: Disaggregation
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/sglang/disaggregation.md
+                      - page: HiCache
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/sglang/hicache.md
+                      - page: Observability
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/sglang/observability.md
+                      - page: Multimodal
+                        slug: sglang-multimodal
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md
+                  - section: TensorRT-LLM
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md
+                      - page: Sidecar
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md
+                      - page: Reference Guide
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/reference-guide.md
+                      - page: Observability
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/observability.md
+                      - page: Known Issues
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/known-issues.md
+                      - page: Multimodal
+                        slug: tensorrt-llm-multimodal
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md
+                  - section: vLLM
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/vllm/overview.md
+                      - page: Sidecar
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md
+                      - page: Reference Guide
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md
+                      - page: Chat Processor
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/vllm/chat-processor.md
+                      - page: KV Cache Offloading
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/vllm/kv-cache-offloading.md
+                      - page: Native KV Offloading
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/vllm/native-kv-offloading.md
+                      - page: Observability
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/vllm/observability.md
+                      - page: Multimodal
+                        slug: vllm-multimodal
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md
+                      - page: vLLM-Omni Disaggregated Serving
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/vllm/vllm-omni-disaggregated-serving.md
+                  - section: Mocker
+                    collapsed: true
+                    contents:
+                      - page: Mocker Engine Architecture
+                        path: ../pages-v1.4.0/developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md
+          - section: Kubernetes
+            collapsed: true
+            contents:
+              - section: Model Loading
+                collapsed: true
+                contents:
+                  - page: Model Caching
+                    path: ../pages-v1.4.0/kubernetes/model-deployment/model-loading/model-caching.mdx
+                  - page: ModelExpress
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md
+              - section: Kubernetes Operator
+                collapsed: true
+                contents:
+                  - page: Dynamo Operator
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md
+                  - page: Service Discovery
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/service-discovery.md
+                  - page: Webhooks
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/webhooks.md
+                  - page: Managing Models (DynamoModel)
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/managing-models-dynamomodel.md
+                  - page: Autoscaling
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md
+                  - page: Rolling Update
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/rolling-update.md
+                  - page: Snapshot
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md
+                  - page: Shadow Engine Failover
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md
+                  - page: Disagg Communication
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md
+                  - page: Gateway API Routing
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/gateway-api-routing.md
+              - section: Multinode
+                collapsed: true
+                contents:
+                  - page: Multinode Deployments
+                    path: ../pages-v1.4.0/kubernetes/model-deployment/multinode-deployments.md
+                  - page: Grove
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/multinode/grove.md
+                  - page: Topology Aware Scheduling
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/multinode/topology-aware-scheduling.md
+                  - page: Topology-Aware KV Transfer
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/multinode/topology-aware-kv-transfer.md
+                  - page: LWS
+                    path: ../pages-v1.4.0/developer-guide/knowledge-base/kubernetes/multinode/lws.md
+      - section: Advanced Customizations
+        slug: advanced-customizations
+        icon: sliders
+        contents:
+          - page: Building from Source
+            path: ../pages-v1.4.0/developer-guide/advanced-customizations/building-from-source.md
+          - page: Custom Vision Encoders
+            slug: custom-vision-encoders
+            path: ../pages-v1.4.0/developer-guide/advanced-customizations/custom-vision-encoders.md
+          - page: FastTokens Tokenizer
+            slug: fastokens-tokenizer
+            path: ../pages-v1.4.0/use-cases/fastokens-tokenizer/overview.md
+          - section: Writing Custom Backends
+            contents:
+              - page: Custom Backend Overview
+                path: ../pages-v1.4.0/developer-guide/advanced-customizations/writing-custom-backends/custom-backend-overview.md
+              - page: Writing Unified Backends
+                path: ../pages-v1.4.0/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md
+              - page: Writing Python Workers
+                path: ../pages-v1.4.0/developer-guide/advanced-customizations/writing-custom-backends/writing-python-workers.md
+              - page: Publish KV Events
+                path: ../pages-v1.4.0/developer-guide/advanced-customizations/writing-custom-backends/publish-kv-events.md
+              - page: Runtime Containers
+                path: ../pages-v1.4.0/developer-guide/advanced-customizations/writing-custom-backends/runtime-containers.md
+          - page: Metrics Developer Guide
+            path: ../pages-v1.4.0/developer-guide/advanced-customizations/metrics-developer-guide.md
+          - page: Developing with Tilt
+            path: ../pages-v1.4.0/developer-guide/advanced-customizations/developing-with-tilt.md
+      # ==================== Hidden Pages (User Guide) ====================
+      # Pages accessible via direct URL but not shown in main navigation.
+      - section: Additional Resources
+        hidden: true
+        contents:
+          - page: Runtime Development Guide
+            path: ../pages-v1.4.0/developer-guide/additional-resources/runtime-development-guide.md
+          - page: Jail Stream
+            path: ../pages-v1.4.0/developer-guide/additional-resources/jail-stream.md
+          # -- Kubernetes (hidden sub-pages) --
+          - page: FluxCD
+            path: ../pages-v1.4.0/developer-guide/additional-resources/fluxcd.md
+          - page: Model Caching with Fluid
+            path: ../pages-v1.4.0/developer-guide/additional-resources/model-caching-with-fluid.md
+          # -- Frontend (hidden sub-pages) --
+          - page: NVIDIA Request Extensions (nvext)
+            path: ../pages-v1.4.0/developer-guide/additional-resources/nvidia-request-extensions-nvext.md
+          # -- Backend detail pages --
+          - section: TensorRT-LLM Details
+            contents:
+              - page: Building a Custom Container
+                path: ../pages-v1.4.0/developer-guide/additional-resources/tensorrt-llm-details/building-a-custom-container.md
+              - page: KV Cache Transfer
+                path: ../pages-v1.4.0/developer-guide/additional-resources/tensorrt-llm-details/kv-cache-transfer.md
+              - page: Logits Processing
+                path: ../pages-v1.4.0/developer-guide/additional-resources/tensorrt-llm-details/logits-processing.md
+              - page: DP Rank Routing
+                path: ../pages-v1.4.0/developer-guide/additional-resources/tensorrt-llm-details/dp-rank-routing.md
+              - page: Multinode Examples
+                path: ../pages-v1.4.0/developer-guide/additional-resources/tensorrt-llm-details/multinode-examples.md
+              - page: Llama4 + Eagle
+                path: ../pages-v1.4.0/developer-guide/additional-resources/tensorrt-llm-details/llama4-plus-eagle.md
+              - page: Gemma3 Sliding Window
+                path: ../pages-v1.4.0/developer-guide/additional-resources/tensorrt-llm-details/gemma3-sliding-window.md
+              - page: GPT-OSS
+                path: ../pages-v1.4.0/developer-guide/additional-resources/tensorrt-llm-details/gpt-oss.md
+          # -- Features (hidden sub-pages) --
+          - page: AIConfigurator Reference
+            path: ../pages-v1.4.0/developer-guide/additional-resources/aiconfigurator-reference.md
+          - section: Speculative Decoding
+            contents:
+              - page: Overview
+                path: ../pages-v1.4.0/developer-guide/additional-resources/speculative-decoding/overview.md
+              - page: Speculative Decoding with vLLM
+                path: ../pages-v1.4.0/developer-guide/additional-resources/speculative-decoding/speculative-decoding-with-vllm.md
+  - tab: reference
+    layout:
+      - page: Compatibility
+        path: ../pages-dev/reference/general/compatibility.mdx
+        slug: compatibility
+      - section: Releases
+        slug: releases
+        path: ../pages-dev/reference/general/releases/release-history.mdx
+        collapsed: true
+        contents:
+          - page: Dynamo v1.3.0
+            path: ../pages-dev/reference/general/releases/dynamo-v1-3-0.mdx
+            slug: v1-3-0
+          - page: Dynamo v1.2.0
+            path: ../pages-dev/reference/general/releases/dynamo-v1-2-0.mdx
+            slug: v1-2-0
+          - page: Dynamo v1.1.0
+            path: ../pages-dev/reference/general/releases/dynamo-v1-1-0.mdx
+            slug: v1-1-0
+          - page: Dynamo v1.0.0
+            path: ../pages-dev/reference/general/releases/dynamo-v1-0-0.mdx
+            slug: v1-0-0
+          - page: Known Issues
+            path: ../pages-dev/reference/general/releases/known-issues.mdx
+          - page: Deprecations
+            path: ../pages-dev/reference/general/releases/deprecations.mdx
+      # Machine-readable mirror of releases.data.ts for agents; reachable
+      # by URL and llms indexes, not the sidebar.
+      - page: Releases (machine-readable)
+        path: ../pages-dev/reference/general/releases-machine-readable.mdx
+        slug: releases-data
+        hidden: true
+      - page: Release Artifacts
+        path: ../pages-dev/reference/general/release-artifacts.mdx
+        slug: release-artifacts
+      - page: Nightly Releases
+        path: ../pages-dev/reference/general/nightly-releases.md
+        slug: nightly-releases
+      - page: Model Early Access Builds
+        path: ../pages-dev/reference/general/model-early-access-builds.mdx
+        slug: model-early-access-builds
+      - page: Examples
+        path: ../pages-dev/reference/general/examples.md
+        slug: examples
+      # ==================== API Reference ====================
+      # docs/fern/scripts/gen_python_api.py generates the Python landing page
+      # and one deterministic MDX per curated module. Each per-module page is a
+      # visible sibling of the Python landing, so opening the section exposes
+      # every published module. Python and Kubernetes both collapse: leaving
+      # Python open stood eleven 'dynamo.*' rows beside a one-line Kubernetes
+      # section, which read as an oversight once the two became peers.
+      #
+      # Python API and Rust API sit at the top level as siblings of Kubernetes
+      # API, so the three language surfaces read as peers. Their slugs stay
+      # nested under 'api/' even though the nav no longer is: Fern derives URLs
+      # from the nav, and every published /reference/api/... URL -- including
+      # the twenty anchored redirects in docs.yml that carry the retired
+      # NIXL Connect class pages -- would otherwise move.
+      - page: API Reference
+        path: ../pages-v1.4.0/reference/api/README.mdx
+        slug: api
+      - section: Python API
+        icon: fa-brands fa-python
+        path: ../pages-v1.4.0/reference/api/python/README.mdx
+        slug: api/python
+        collapsed: true
+        contents:
+          - page: dynamo._core
+            path: ../pages-v1.4.0/reference/api/python/_core.mdx
+            slug: _core
+          - page: dynamo.runtime
+            path: ../pages-v1.4.0/reference/api/python/runtime.mdx
+            slug: runtime
+          - page: dynamo.llm
+            path: ../pages-v1.4.0/reference/api/python/llm.mdx
+            slug: llm
+          - page: dynamo.frontend
+            path: ../pages-v1.4.0/reference/api/python/frontend.mdx
+            slug: frontend
+          - page: dynamo.common
+            path: ../pages-v1.4.0/reference/api/python/common.mdx
+            slug: common
+          - page: dynamo.health_check
+            path: ../pages-v1.4.0/reference/api/python/health_check.mdx
+            slug: health_check
+          - page: dynamo.logits_processing
+            path: ../pages-v1.4.0/reference/api/python/logits_processing.mdx
+            slug: logits_processing
+          - page: dynamo.planner
+            path: ../pages-v1.4.0/reference/api/python/planner.mdx
+            slug: planner
+          - page: dynamo.router
+            path: ../pages-v1.4.0/reference/api/python/router.mdx
+            slug: router
+          - page: dynamo.mocker
+            path: ../pages-v1.4.0/reference/api/python/mocker.mdx
+            slug: mocker
+          - page: dynamo.nixl_connect
+            path: ../pages-v1.4.0/reference/api/python/nixl_connect.mdx
+            slug: nixl_connect
+      - page: Rust API
+        icon: fa-brands fa-rust
+        path: ../pages-v1.4.0/reference/api/rust/README.mdx
+        slug: api/rust
+      - section: Kubernetes API
+        icon: fa-brands fa-kubernetes
+        slug: api/kubernetes
+        collapsed: true
+        contents:
+          - page: DynamoGraphDeployment
+            path: ../pages-v1.4.0/reference/kubernetes-api/dynamo-graph-deployment.mdx
+          - page: DynamoGraphDeploymentRequest
+            path: ../pages-v1.4.0/reference/kubernetes-api/dynamo-graph-deployment-request.mdx
+          - page: DynamoComponentDeployment
+            path: ../pages-v1.4.0/reference/kubernetes-api/dynamo-component-deployment.mdx
+          - page: Full API Reference
+            path: ../pages-v1.4.0/reference/kubernetes-api/full-api-reference.mdx
+          # Accessible by direct URL but not shown in the sidebar.
+          - section: Additional Resources
+            hidden: true
+            contents:
+              - page: API Reference (K8s)
+                path: ../pages-v1.4.0/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+      - section: Components
+        icon: sliders
+        slug: components
+        collapsed: true
+        contents:
+          - page: Runtime Configuration
+            path: ../pages-v1.4.0/reference/components/runtime-configuration.mdx
+          - page: Frontend Configuration
+            path: ../pages-v1.4.0/reference/components/frontend-configuration.mdx
+          - page: Planner Configuration
+            path: ../pages-v1.4.0/reference/components/planner-configuration.mdx
+          - page: Profiler Configuration
+            path: ../pages-v1.4.0/reference/components/profiler-configuration.mdx
+          - page: KVBM Configuration
+            path: ../pages-v1.4.0/reference/components/kvbm-configuration.mdx
+          - page: Mocker CLI Reference
+            path: ../pages-v1.4.0/reference/components/mocker-cli-reference.mdx
+          - page: DynoSim Replay CLI Reference
+            path: ../pages-v1.4.0/reference/components/dynosim-replay-cli-reference.mdx
+          - page: DynoSim Sweep Reference
+            path: ../pages-v1.4.0/reference/components/dynosim-sweep-reference.mdx
+          - page: Global Router Configuration
+            path: ../pages-v1.4.0/reference/components/global-router-configuration.mdx
+          - page: Gateway API Routing
+            path: ../pages-v1.4.0/reference/components/gateway-api-routing.mdx
+          - page: ThunderAgent Scheduler
+            path: ../pages-v1.4.0/reference/components/thunderagent-scheduler.mdx
+      - section: Backends
+        icon: server
+        slug: backends
+        collapsed: true
+        contents:
+          - page: vLLM Configuration
+            path: ../pages-v1.4.0/reference/backends/vllm-configuration.mdx
+          - page: vLLM-Omni Configuration
+            path: ../pages-v1.4.0/reference/backends/vllm-omni-configuration.mdx
+          - page: SGLang Configuration
+            path: ../pages-v1.4.0/reference/backends/sglang-configuration.mdx
+          - page: TensorRT-LLM Configuration
+            path: ../pages-v1.4.0/reference/backends/tensorrt-llm-configuration.mdx
+      - section: Observability
+        icon: gauge
+        slug: observability
+        collapsed: true
+        contents:
+          - page: Local Stack
+            path: ../pages-v1.4.0/reference/observability/local-stack.mdx
+          - page: Health Checks
+            path: ../pages-v1.4.0/reference/observability/health-checks.mdx
+          - page: Logging
+            path: ../pages-v1.4.0/reference/observability/logging.mdx
+          - page: Forward Pass Metrics Traces
+            path: ../pages-v1.4.0/reference/observability/forward-pass-metrics-traces.mdx
+          - page: Request Traces
+            path: ../pages-v1.4.0/reference/observability/request-traces.mdx
+          - page: Environment Variables
+            path: ../pages-v1.4.0/reference/observability/environment-variables.mdx
+          - page: Metrics Catalog
+            path: ../pages-v1.4.0/reference/observability/metrics-catalog.mdx
+          - page: Metrics Comparison
+            path: ../pages-v1.4.0/reference/observability/metrics-comparison.md
+          - page: Metric Labels
+            path: ../pages-v1.4.0/reference/observability/metric-labels.mdx
+          - page: Operator Metrics
+            path: ../pages-v1.4.0/reference/observability/operator-metrics.mdx
+          - page: Local Resource Monitor (Local)
+            path: ../pages-v1.4.0/reference/observability/local-resource-monitor-local.mdx
+      - section: NIXL Connect
+        icon: right-left
+        slug: nixl-connect
+        collapsed: true
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/reference/nixl-connect/overview.mdx
+      - page: Glossary
+        path: ../pages-dev/reference/general/glossary.md
+        slug: glossary
+  - tab: blog
+    layout:
+      # Three siblings at the top of the tab: the partner list, the papers, and
+      # the team's own writing.
+      - page: External publications
+        path: ../pages-v1.4.0/blog/external-publications.mdx
+        slug: external-publications
+      - page: Research publications
+        path: ../pages-v1.4.0/blog/research-publications.mdx
+        slug: research-publications
+      # "Latest" is no longer its own sidebar entry. The page it pointed at is
+      # this section's overview instead, so the page is not orphaned and every
+      # URL is unchanged: the section keeps `slug: digest`, so the overview
+      # stays at /dynamo/dev/digest and each article at
+      # /dynamo/dev/digest/<slug>.
+      - section: Dynamo blogs
+        path: ../pages-v1.4.0/blog/latest.mdx
+        slug: digest
+        collapsed: open-by-default
+        contents:
+          # Keep this archive in reverse chronological order. Publication dates are
+          # rendered in each article header and on the custom landing page.
+          - page: "DynoSim Pareto Frontier"
+            path: ../pages-v1.4.0/blog/2026/dynosim-pareto-frontier.mdx
+            slug: dynosim-pareto-frontier
+          - page: "Dynamo Snapshot"
+            path: ../pages-v1.4.0/blog/2026/dynamo-snapshot.mdx
+            slug: dynamo-snapshot-fast-startup
+          - page: "TokenSpeed Day 0 Support"
+            path: ../pages-v1.4.0/blog/2026/tokenspeed-day-0-support.mdx
+            slug: tokenspeed-day-0
+          - page: "Agentic Harness Support"
+            path: ../pages-v1.4.0/blog/2026/agentic-harness-support.mdx
+            slug: agentic-harnesses
+          - page: "Agentic Inference Optimizations"
+            path: ../pages-v1.4.0/blog/2026/agentic-inference-optimizations.mdx
+            slug: agentic-inference
+          - page: "Flash Indexer"
+            path: ../pages-v1.4.0/blog/2026/flash-indexer.mdx
+            slug: flash-indexer
+  - tab: community
+    layout:
+      - page: Community
+        path: ../pages-v1.4.0/community/community.mdx
+      - section: Contributing
+        icon: code-pull-request
+        contents:
+          - page: Overview
+            path: ../pages-v1.4.0/community/contributing/overview.md
+            slug: contribution-guide
+          - page: Getting Started
+            path: ../pages-v1.4.0/community/contributing/getting-started.mdx
+          - page: Contribution Flow
+            path: ../pages-v1.4.0/community/contributing/contribution-flow.mdx
+          - page: Code Quality
+            path: ../pages-v1.4.0/community/contributing/code-quality.md
+          - page: DCO and Licensing
+            path: ../pages-v1.4.0/community/contributing/dco-and-licensing.md
+          - section: Documentation
+            contents:
+              - page: Documentation Style Guide
+                path: ../pages-v1.4.0/community/contributing/documentation/documentation-style-guide.md
+                slug: style-guide
+              - page: Building and Publishing
+                path: ../pages-v1.4.0/community/contributing/documentation/building-and-publishing.md
+                slug: building-and-publishing

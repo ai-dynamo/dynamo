@@ -37,14 +37,18 @@ landing-page:
 # Keep Home and the documentation tabs in the same versioned navigation.
 # Standalone versioning avoids rendering a product selector for one product.
 versions:
-  - display-name: Latest (v1.3.0)
-    path: ./versions/v1.3.0.yml
+  - display-name: Latest (v1.4.0)
+    path: ./versions/v1.4.0.yml
     slug: latest
     availability: stable
   - display-name: dev
     path: ./versions/dev.yml
     slug: dev
     availability: beta
+  - display-name: v1.4.0
+    path: ./versions/v1.4.0.yml
+    slug: v1.4.0
+    availability: stable
   - display-name: v1.3.0
     path: ./versions/v1.3.0.yml
     slug: v1.3.0

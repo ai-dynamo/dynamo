@@ -1,0 +1,263 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3.5-122B-A10B"
+subtitle: "Serve Qwen3.5-122B-A10B with Dynamo and vLLM on B200 or H200 for long-context agentic workloads."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+All four targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A10B — a 122B total / 10B active hybrid MoE combining Gated DeltaNet linear attention with full attention every fourth layer — tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit) with KV-aware routing. B200 runs the NVFP4 checkpoint at TP1; H200 runs FP8, where the weights leave less room for paged KV, so the aggregated profile shards to TP2 and adds MTP speculative decoding. Aggregated is the recommended path on both SKUs. Pick your target; every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" defaultChecked />
+<label htmlFor="recipe-sku-h200">H200 · FP8</label>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" />
+<label htmlFor="recipe-sku-b200">B200 · NVFP4</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
+<span><b>Checkpoint</b> Qwen/Qwen3.5-122B-A10B-FP8</span>
+<span><b>Precision</b> FP8 weights, BF16 KV</span>
+<span><b>GPUs</b> 2x H200 per replica, `replicas: 2` (4x)</span>
+<span><b>Parallelism</b> TP2</span>
+<span><b>Spec decode</b> MTP, 3 tokens</span>
+<span><b>Routing</b> KV-aware</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg">
+<span><b>Checkpoint</b> Qwen/Qwen3.5-122B-A10B-FP8</span>
+<span><b>Precision</b> FP8 + FP8 KV</span>
+<span><b>GPUs</b> 1x H200 prefill + 2x H200 decode</span>
+<span><b>Parallelism</b> TP1 per worker</span>
+<span><b>Spec decode</b> None — see Limitations</span>
+<span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg">
+<span><b>Checkpoint</b> nvidia/Qwen3.5-122B-A10B-NVFP4</span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 1x B200 per replica, `replicas: 2` (2x)</span>
+<span><b>Parallelism</b> TP1</span>
+<span><b>Spec decode</b> None</span>
+<span><b>Routing</b> KV-aware</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg">
+<span><b>Checkpoint</b> nvidia/Qwen3.5-122B-A10B-NVFP4</span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 1x B200 prefill + 2x B200 decode</span>
+<span><b>Parallelism</b> TP1 per worker</span>
+<span><b>Spec decode</b> None</span>
+<span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
+</div>
+</div>
+
+## Prerequisites
+
+1. Dynamo Platform installed on the target cluster with DGD CRDs served.
+2. A Hugging Face token stored as `hf-token-secret`. The checkpoint is public and Apache-2.0.
+3. A `model-cache` PVC (ReadWriteMany), populated with the manifests in `model-cache/`.
+
+<div data-variant="disagg">
+
+4. GPU-local RDMA NICs exposed to pods (an `rdma/ib` device plugin) for NIXL KV transfer.
+
+</div>
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" -n ${NAMESPACE}
+```
+
+## Deploy
+
+Create the cache and download the checkpoint. Set `storageClassName` in `model-cache.yaml` to a ReadWriteMany class first.
+
+<div data-sku="h200">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/fp8/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3.5-122b/fp8/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+</div>
+
+<div data-sku="b200">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/nvfp4/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3.5-122b/nvfp4/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+</div>
+
+<div data-sku="h200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/fp8/vllm/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen35-122b-agg-h200-agentic \
+  -n ${NAMESPACE} --timeout=7200s
+```
+
+Deploy `replicas: 2` or more so the KV-aware router has replicas to route shared prefixes across. Each replica is TP2, so a full 8x H200 node runs `replicas: 4`.
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/fp8/vllm/disagg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen35-122b-disagg-h200-agentic \
+  -n ${NAMESPACE} --timeout=7200s
+```
+
+</div>
+
+<div data-sku="b200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen35-122b-agg-b200-agentic \
+  -n ${NAMESPACE} --timeout=7200s
+```
+
+Deploy `replicas: 2` or more so the KV-aware router has replicas to route shared prefixes across. Each replica is TP1, so a full 8x B200 node runs `replicas: 8`.
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/nvfp4/vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen35-122b-disagg-b200-agentic \
+  -n ${NAMESPACE} --timeout=7200s
+```
+
+</div>
+
+First cold starts take 30-45 minutes while the runtime loads the weights and captures CUDA graphs; a measured cold load spent 28.5 minutes on weights alone before graph capture began.
+
+## Smoke Test
+
+```bash
+kubectl port-forward -n ${NAMESPACE} \
+  svc/$(kubectl get svc -o name -n ${NAMESPACE} | grep frontend | head -1 | cut -d/ -f2) 8000:8000 &
+
+curl http://localhost:8000/v1/models
+
+curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "Qwen/Qwen3.5-122B-A10B",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "max_tokens": 32
+}'
+```
+
+Both SKUs serve the model as `Qwen/Qwen3.5-122B-A10B` regardless of the underlying checkpoint.
+
+## Benchmark
+
+The benchmark replays a Mooncake-format agentic trace through AIPerf.
+
+<div data-sku="b200">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/nvfp4/perf/perf.yaml -n ${NAMESPACE}
+```
+
+See [nvfp4/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/v1.4.0/recipes/qwen3.5-122b/nvfp4/perf/README.md) for the full workflow.
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/fp8/perf/perf.yaml -n ${NAMESPACE}
+```
+
+Edit `ENDPOINT` and `CONCURRENCY` in the Job to select a target — aggregated at c64, disaggregated at c18. See [fp8/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/v1.4.0/recipes/qwen3.5-122b/fp8/perf/README.md) for the full workflow.
+
+AIPerf builds its replay schedule from a `timestamp` field. The shipped trace rows have none, and without one AIPerf replays a small default instead of the whole file, so add one before staging the trace on the PVC:
+
+```bash
+git lfs install
+git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"
+python3 -c "
+import json
+src='recipes/qwen3.5-122b/fp8/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+for line in open(src):
+    print(json.dumps({'timestamp': 0, **json.loads(line)}))
+" > mooncake_agentic.jsonl
+```
+
+Confirm a run replayed the whole file: `Request Count` in `profile_export_aiperf.csv` should be about 3,411, plus roughly 130 rows that exceed the 262,144-token context and return errors.
+
+</div>
+
+## Expected Performance
+
+Measured on the 3,541-request agentic Mooncake trace, block size 512, closed-loop. SLA: P50 TTFT under 5 s and P50 output at or above 50 tok/s/user. Each target is reported at its highest SLA-passing concurrency.
+
+| Target | GPUs | Concurrency | User output tok/s | TTFT (P50) | System output tok/s/GPU |
+|--------|------|-------------|-------------------|------------|-------------------------|
+| B200 aggregated, 2x TP1 | 2 | 50 | 52.4 | 246 ms | 1173.2 |
+| B200 disaggregated 1P2D | 3 | 60 | 51.4 | 1353 ms | 916.6 |
+| H200 aggregated, 2x TP2 + MTP | 4 | 64 | 52.9 | 313 ms | 720.3 |
+| H200 disaggregated 1P2D | 3 | 18 | 52.5 | 3087 ms | 256.5 |
+
+## Compare All Targets
+
+| Target | GPU | Topology | GPUs | Spec decode | Reported point |
+|--------|-----|----------|------|-------------|----------------|
+| `agg-b200-agentic` | B200 | Aggregated | 2 | None | c50, at the 50 tok/s/user floor |
+| `disagg-b200-agentic` | B200 | Disaggregated 1P2D | 3 | None | c60, at the 50 tok/s/user floor |
+| `agg-h200-agentic` | H200 | Aggregated | 4 | MTP, 3 tokens | c64, at the 50 tok/s/user floor |
+| `disagg-h200-agentic` | H200 | Disaggregated 1P2D | 3 | None | c18, at the 50 tok/s/user floor |
+
+Aggregated leads on both SKUs at the same SLA: 1173.2 against 916.6 output tok/s per GPU on B200, 720.3 against 256.5 on H200. **Aggregated is the recommended profile; the disaggregated targets are a functional reference rather than a throughput recommendation.** At 90% KV-cache hit the dedicated prefill worker has little to do yet emits no output tokens, and both disaggregated targets pay ~7% for `--no-async-scheduling` on vLLM < 0.26.0. MTP runs on H200 aggregated only — H200 disaggregated gives it up, and neither B200 profile runs it. Choose disaggregation to scale prefill and decode independently, or for a workload with a lower cache-hit rate.
+
+## Notes
+
+- Worker `--block-size` must match the frontend `--kv-cache-block-size`. If they diverge, prefix hashing does not line up and KV-aware routing silently degrades toward round-robin.
+- The H200 aggregated target runs `--kv-cache-dtype auto`; the disaggregated targets and both B200 targets use `fp8`. FP8 KV costs compute and only pays back when the cache is the binding constraint, which it is not at TP2.
+
+<div data-sku="h200" data-variant="agg">
+
+- Ship the `speculative-config` ConfigMap key; benchmark with `speculative-config-synthetic`, which forces the acceptance length of 2.937 measured against real text. Real MTP reports about 3.2 on this trace because the Mooncake rows synthesise prompts from `hash_ids`, which the draft predicts more easily than real text.
+
+</div>
+
+## Limitations
+
+- Prefill and decode must use the same tensor-parallel size when disaggregated — asymmetric sharding fails the NIXL transfer with a block-size mismatch.
+- MTP is not supported with disaggregation on this architecture. NIXL's Mamba conv-state transfer needs `VLLM_SSM_CONV_STATE_LAYOUT=DS`, which conflicts with the `mamba_cache_mode='align'` that MTP plus prefix caching forces ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)).
+
+<div data-variant="disagg">
+
+- Disaggregated decode requires `--no-async-scheduling` on vLLM earlier than 0.26.0. Without it the KV-block zeroing kernel races the NIXL RDMA write and silently erases transferred KV. The flag costs about 7% throughput and can be dropped on a runtime shipping vLLM 0.26.0 or later.
+
+</div>
+
+## Source
+
+- [recipes/qwen3.5-122b](https://github.com/ai-dynamo/dynamo/tree/v1.4.0/recipes/qwen3.5-122b)
+- [H200 aggregated deploy manifest](https://github.com/ai-dynamo/dynamo/blob/v1.4.0/recipes/qwen3.5-122b/fp8/vllm/agg-h200-agentic/deploy.yaml)
+- [H200 disaggregated deploy manifest](https://github.com/ai-dynamo/dynamo/blob/v1.4.0/recipes/qwen3.5-122b/fp8/vllm/disagg-h200-agentic/deploy.yaml)
+- [B200 aggregated deploy manifest](https://github.com/ai-dynamo/dynamo/blob/v1.4.0/recipes/qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/deploy.yaml)
+- [B200 disaggregated deploy manifest](https://github.com/ai-dynamo/dynamo/blob/v1.4.0/recipes/qwen3.5-122b/nvfp4/vllm/disagg-b200-agentic/deploy.yaml)
