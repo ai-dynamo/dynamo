@@ -87,11 +87,23 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
+mod push_egress;
 mod python_payload;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
     ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
+
+/// Ingress for the push egress path (handlers that declare `response_sender`).
+///
+/// Requests still decode into a Python object (the handler wants one), but
+/// responses are owned Rust values by the time they reach the channel, so the
+/// response encoder never needs the GIL. See `push_egress.rs`.
+type PythonPushEgressIngress = Ingress<
+    SingleIn<python_payload::PythonPayload>,
+    ManyOut<push_egress::PushFrame>,
     python_payload::PythonIngressPayloadAdapter,
 >;
 
@@ -251,6 +263,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
+    push_egress::add_to_module(m)?;
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
     backend::add_to_module(m)?;
@@ -1397,16 +1410,70 @@ impl Endpoint {
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let engine = Arc::new(engine::PythonAsyncEngine::new(
-            generator,
-            self.event_loop.clone(),
-        )?);
-        let network_engine = Arc::new(engine.network_engine());
-        let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
-            network_engine,
-            python_payload::PythonIngressPayloadAdapter,
-        )
-        .map_err(to_pyerr)?;
+        // Push egress: the handler pushes each response into a Rust channel via
+        // its `response_sender` argument, instead of Rust pulling `__anext__`
+        // off its generator on a tokio thread once per response. Selected per
+        // handler, purely by signature -- a handler must declare a
+        // `response_sender` parameter, which in practice means the TRT-LLM
+        // workers' `@push_egress_capable` decorator. NOT `context`, which every
+        // handler accepts and would therefore make this check always true,
+        // rendering the pull path unreachable. Anything else stays on pull.
+        let use_push_egress = push_egress::handler_supports_push(&generator);
+
+        // An endpoint has two doors, and this branch answers for both: the
+        // ingress that serves network requests, and the engine registered in
+        // the local (in-process) registry.
+        //
+        // Push endpoints need BOTH. The local registry — used by in-process
+        // callers and by the canary health check
+        // (`lib/runtime/src/health_check.rs`) — takes a `SingleIn`/`ManyOut`
+        // engine, which has nowhere to put a per-request sender. A pull engine
+        // over the SAME handler supplies one: called without a
+        // `response_sender`, `@push_egress_capable` hands back the handler's
+        // own async generator, so that door is ordinary pull egress.
+        // Registering it also keeps the endpoint in
+        // `SystemHealth::health_check_targets` — without which health status
+        // ignores endpoint readiness entirely and falls through to the
+        // process-wide `system_health`, a permanent 503 for a worker that never
+        // sets it (see `system_health.rs` tests).
+        //
+        // Both outcomes are logged: push mode is chosen by signature
+        // inspection, which can silently answer "no", and without the pull line
+        // the only symptom would be the absence of the push line.
+        let endpoint_name = self.inner.name().to_string();
+        let (ingress, local_engine): (
+            Arc<dyn rs::pipeline::network::PushWorkHandler>,
+            Option<Arc<engine::PythonAsyncEngine>>,
+        ) = if use_push_egress {
+            tracing::info!(endpoint = %endpoint_name, "serving endpoint with push egress");
+            // Same handler object, two engines: a refcount bump, not a copy.
+            let local = Arc::new(engine::PythonAsyncEngine::new(
+                generator.clone_ref(py),
+                self.event_loop.clone(),
+            )?);
+            let ingress = PythonPushEgressIngress::for_engine_with_adapter(
+                Arc::new(push_egress::PythonPushEngine::new(
+                    generator,
+                    self.event_loop.clone(),
+                )),
+                python_payload::PythonIngressPayloadAdapter,
+            )
+            .map_err(to_pyerr)?;
+            (ingress, Some(local))
+        } else {
+            tracing::debug!(endpoint = %endpoint_name, "serving endpoint with pull egress");
+            let engine = Arc::new(engine::PythonAsyncEngine::new(
+                generator,
+                self.event_loop.clone(),
+            )?);
+            let network_engine = Arc::new(engine.network_engine());
+            let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
+                network_engine,
+                python_payload::PythonIngressPayloadAdapter,
+            )
+            .map_err(to_pyerr)?;
+            (ingress, Some(engine))
+        };
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -1434,12 +1501,17 @@ impl Endpoint {
             .metrics_labels(metrics_labels)
             .handler(ingress);
 
+        // Applies to both paths. `start_with_registration` bails if a payload is
+        // set while canary is enabled and no local engine is registered; the
+        // push branch above registers one precisely so this stays valid.
         if let Some(payload) = health_payload_json {
             builder = builder.health_check_payload(payload);
         }
 
         // Register the engine in the local endpoint registry for in-process calls
-        builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
+        if let Some(engine) = local_engine {
+            builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
+        }
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

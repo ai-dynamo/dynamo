@@ -454,8 +454,8 @@ navigation:
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
           - page: Qwen3.8-2.4T-A95B
-            path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b.mdx
-            slug: qwen-3-8-2-4t-a95b
+            path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b-fp8.mdx
+            slug: qwen-3-8-2-4t-a95b-fp8
           - page: GLM-5.2
             path: pages/recipes/model-recipes/glm-5-2.mdx
             slug: glm-5-2

@@ -24,6 +24,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
@@ -811,6 +812,11 @@ async def register_vllm_model(
         media_fetcher=media_fetcher,
         worker_type=worker_type,
         needs=needs,
+        # Advertise this worker set's own routing strategy when --router-mode is
+        # set; None inherits the frontend's global config. Combined with
+        # worker_type, this is what lets a disaggregated deployment route to its
+        # prefill and decode tiers differently.
+        router_config=build_router_config(config.router_advertisement),
         ignore_weights=should_register_model_ignore_weights(config),
         model_aliases=config.served_model_aliases or None,
         # Advertise LoRA capacity on the BASE card so the frontend can place the first

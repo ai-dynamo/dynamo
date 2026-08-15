@@ -5,11 +5,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # Qwen3.8-2.4T-A95B Recipes
 
-Recipes for [Qwen3.8-2.4T-A95B](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B) on Dynamo + vLLM and SGLang.
+Recipes for [Qwen3.8-2.4T-A95B](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B-FP8) on Dynamo + vLLM and SGLang.
 
 Qwen3.8-2.4T-A95B is a hybrid gated-delta-net + MoE model: gated delta-net (GDN, linear attention with a
 short convolution state) interleaved with full grouped-query attention (GQA), a 512-expert MoE, and a
 262,144-token context. Weights are FP8.
+
+> **Existing deployments:** if you previously ran `model-download` against `Qwen/Qwen3.8-2.4T-A95B`,
+> re-run the Job — workers resolve weights from the HF cache key `models--Qwen--Qwen3.8-2.4T-A95B-FP8`
+> and will fail offline until the new download completes. The old `models--Qwen--Qwen3.8-2.4T-A95B`
+> directory (~2.4 TB) can be removed once the new download is verified.
 
 ## Configurations
 
@@ -93,7 +98,7 @@ Dynamo + SGLang chat deployment profiles:
    kubectl get crd | grep computedomain
    ```
    The manifest creates its own `ComputeDomain` (`qwen38max-compute-domain`) and the workers claim its channel.
-3. **Hugging Face token** with access to `Qwen/Qwen3.8-2.4T-A95B`. The workers read the weights from the
+3. **Hugging Face token** with access to `Qwen/Qwen3.8-2.4T-A95B-FP8`. The workers read the weights from the
    `model-cache` PVC — see [Download the model](#3-download-the-model).
 
 ## Quick Start
@@ -126,7 +131,7 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 ```
 
 The Job sets `HF_HOME=/model-cache`, so the checkpoint lands in the PVC's Hugging Face cache; each
-worker passes the repo id (`Qwen/Qwen3.8-2.4T-A95B`) to `--model` and resolves the weights from there.
+worker passes the repo id (`Qwen/Qwen3.8-2.4T-A95B-FP8`) to `--model` and resolves the weights from there.
 
 > [!NOTE]
 > The containers run as `runAsUser: 0` because the cached weight files are root-owned while the image
@@ -162,7 +167,7 @@ kubectl port-forward svc/qwen38max-agg-frontend 8000:8000 -n ${NAMESPACE} &
 curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "Qwen/Qwen3.8-2.4T-A95B",
+    "model": "Qwen/Qwen3.8-2.4T-A95B-FP8",
     "messages": [{"role": "user", "content": "Hello, who are you?"}],
     "max_tokens": 128
   }'
@@ -179,7 +184,7 @@ qwen3` on the worker command.
 curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "Qwen/Qwen3.8-2.4T-A95B",
+    "model": "Qwen/Qwen3.8-2.4T-A95B-FP8",
     "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
     "tools": [{
       "type": "function",
@@ -204,7 +209,7 @@ Expected: `choices[0].message.tool_calls[0].function.name` is `get_weather` and 
 Non-obvious knobs, all already set in the manifest:
 
 - **Model resolution.** Each worker pod mounts the `model-cache` PVC at `/model-cache` with
-  `HF_HOME=/model-cache` and passes the repo id (`Qwen/Qwen3.8-2.4T-A95B`) to `--model`, so vLLM loads
+  `HF_HOME=/model-cache` and passes the repo id (`Qwen/Qwen3.8-2.4T-A95B-FP8`) to `--model`, so vLLM loads
   the checkpoint out of the PVC's Hugging Face cache. `envFrom: hf-token-secret` covers the hub lookup
   at startup. The frontend does not mount the PVC.
 - **Async scheduling off.** `--no-async-scheduling` is required for these fixed serving shapes.
