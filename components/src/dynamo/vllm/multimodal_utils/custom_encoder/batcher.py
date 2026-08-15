@@ -97,6 +97,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
             runs as one ``fn`` call (``cost`` ignored).
         queue_wait_s: Maximum time after the first queued item to wait for peers.
             ``0`` preserves immediate eager-drain behavior.
+        max_queue_wait_s: Hard coalescing deadline. When greater than
+            ``queue_wait_s``, the batch stays open while peers keep arriving,
+            and closes after one quiet ``queue_wait_s`` interval.
         on_start: Optional callable run once on the worker thread before serving
             (model build / warmup); its failure surfaces from ``start()``.
         on_stop: Optional callable run once on the worker thread at teardown (after
@@ -112,6 +115,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
         *,
         max_batch_cost: Optional[int] = None,
         queue_wait_s: float = 0.0,
+        max_queue_wait_s: Optional[float] = None,
         on_start: Optional[Callable[[], None]] = None,
         on_stop: Optional[Callable[[], None]] = None,
         name: str = "micro-batcher",
@@ -126,9 +130,19 @@ class ThreadedMicroBatcher(Generic[T, R]):
             or queue_wait_s < 0
         ):
             raise ValueError("queue_wait_s must be a finite non-negative number")
+        if max_queue_wait_s is None:
+            max_queue_wait_s = queue_wait_s
+        if (
+            isinstance(max_queue_wait_s, bool)
+            or not isinstance(max_queue_wait_s, (int, float))
+            or not math.isfinite(max_queue_wait_s)
+            or max_queue_wait_s < 0
+        ):
+            raise ValueError("max_queue_wait_s must be a finite non-negative number")
         self._fn = fn
         self._max_batch_cost = max_batch_cost
         self._queue_wait_s = float(queue_wait_s)
+        self._max_queue_wait_s = float(max_queue_wait_s)
         self._on_start = on_start
         self._on_stop = on_stop
         self._name = name
@@ -336,13 +350,13 @@ class ThreadedMicroBatcher(Generic[T, R]):
             return None
         works: List[_Work] = [first]
         if self._queue_wait_s:
-            deadline = time.monotonic() + self._queue_wait_s
+            deadline = time.monotonic() + self._max_queue_wait_s
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 try:
-                    item = self._queue.get(timeout=remaining)
+                    item = self._queue.get(timeout=min(self._queue_wait_s, remaining))
                 except queue.Empty:
                     break
                 if item is _SHUTDOWN:

@@ -68,6 +68,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
         *,
         preprocess_concurrency: int | None = None,
         batch_queue_wait_s: float = 0.0,
+        batch_queue_max_wait_s: float | None = None,
         name: str = "vision-encoder",
     ) -> None:
         # The backend declares whether it needs off-loop preprocessing; the
@@ -97,6 +98,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
         self._backend = backend
         self._preprocess_concurrency = conc
         self._batch_queue_wait_s = batch_queue_wait_s
+        self._batch_queue_max_wait_s = batch_queue_max_wait_s
         self._name = name
         self._batcher: ThreadedMicroBatcher[ItemT, ArtifactT] | None = None
         self._pool: ThreadPoolExecutor | None = None
@@ -121,6 +123,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
                 self._backend.forward_batch,
                 max_batch_cost=self._backend.max_batch_cost,
                 queue_wait_s=self._batch_queue_wait_s,
+                max_queue_wait_s=self._batch_queue_max_wait_s,
                 on_start=lambda: self._backend.build(model_id),
                 on_stop=self._backend.close,
                 name=self._name,

@@ -53,6 +53,7 @@ class EncoderStage:
         *,
         model: str,
         batch_queue_wait_s: float = 0.0,
+        batch_queue_max_wait_s: float | None = None,
         name: str = "workflow-vision-encoder",
     ) -> "EncoderStage":
         """Load an author-provided linear-embedding backend into this stage."""
@@ -69,6 +70,7 @@ class EncoderStage:
         encoder: AsyncVisionEncoder[Any, Any, torch.Tensor] = AsyncVisionEncoder(
             backend,
             batch_queue_wait_s=batch_queue_wait_s,
+            batch_queue_max_wait_s=batch_queue_max_wait_s,
             name=name,
         )
         try:

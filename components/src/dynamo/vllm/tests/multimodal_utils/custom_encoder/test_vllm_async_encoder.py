@@ -266,11 +266,16 @@ def test_preprocess_concurrency_rejects_negative():
 
 
 def test_batch_queue_wait_is_forwarded_to_micro_batcher():
-    enc = AsyncVisionEncoder(_FakeBackend(), batch_queue_wait_s=0.002)
+    enc = AsyncVisionEncoder(
+        _FakeBackend(),
+        batch_queue_wait_s=0.002,
+        batch_queue_max_wait_s=0.05,
+    )
     enc.load("m")
     try:
         assert enc._batcher is not None
         assert enc._batcher._queue_wait_s == 0.002
+        assert enc._batcher._max_queue_wait_s == 0.05
     finally:
         enc.shutdown()
 
