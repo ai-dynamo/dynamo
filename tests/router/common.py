@@ -3816,3 +3816,126 @@ def _test_disagg_per_role_router_modes(
             f"{set(converged)} (KV) while decode spread across "
             f"{set(decode_ids)} (round-robin)"
         )
+
+
+def _test_disagg_per_role_session_affinity(
+    prefill_workers,
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+):
+    """Validate that session affinity is configured per hop, not per deployment.
+
+    The prefill workers advertise a session-affinity TTL; the decode workers
+    advertise the same router mode without one. Both hops then run round-robin,
+    so the only thing that can pin a session is its own affinity setting:
+
+    1. Repeated requests carrying one session id stay on ONE prefill worker,
+       because that hop has affinity.
+    2. The same requests spread across MULTIPLE decode workers, because that hop
+       does not -- round-robin rotates.
+
+    Assertion 2 is the one that fails if the two hops share a TTL: decode would
+    pin alongside prefill.
+
+    This covers configurability, not expiry. Proving a TTL elapses would mean
+    sleeping past it and asserting a rebind, which is timing-dependent and can
+    re-select the same worker.
+    """
+    num_requests = 4
+
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        decode_workers.namespace,
+        store_backend,
+        request_plane=request_plane,
+        router_mode="round-robin",
+        min_initial_workers=decode_workers.num_workers,
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=(
+                    prefill_workers.num_workers + decode_workers.num_workers
+                ),
+                timeout=120,
+                engine_workers=[prefill_workers, decode_workers],
+                store_backend=store_backend,
+                request_plane=request_plane,
+            )
+        )
+
+        session_headers = {"x-dynamo-session-id": f"per-role-ttl-{uuid.uuid4()}"}
+        content = test_payload["messages"][0]["content"]
+
+        async def send_session_requests():
+            prefill_ids: list[int] = []
+            decode_ids: list[int] = []
+            async with aiohttp.ClientSession() as session:
+                for i in range(num_requests):
+                    payload = {
+                        **test_payload,
+                        "messages": [{"role": "user", "content": content}],
+                        "nvext": {"extra_fields": ["worker_id"]},
+                        "stream": True,
+                        "max_tokens": 1,
+                    }
+                    async with session.post(
+                        chat_url, json=payload, headers=session_headers
+                    ) as response:
+                        assert (
+                            response.status == 200
+                        ), f"Request {i + 1} failed with status {response.status}"
+                        # worker_id repeats across chunks of one stream; record
+                        # it once per request so the counts match the requests.
+                        prefill_wid = None
+                        decode_wid = None
+                        body = await response.text()
+                        for data in parse_sse_json_chunks(body):
+                            worker_id_info = data.get("nvext", {}).get("worker_id", {})
+                            if "prefill_worker_id" in worker_id_info:
+                                prefill_wid = worker_id_info["prefill_worker_id"]
+                            if "decode_worker_id" in worker_id_info:
+                                decode_wid = worker_id_info["decode_worker_id"]
+                        if prefill_wid is not None:
+                            prefill_ids.append(prefill_wid)
+                        if decode_wid is not None:
+                            decode_ids.append(decode_wid)
+                    await asyncio.sleep(0.5)
+            return prefill_ids, decode_ids
+
+        prefill_ids, decode_ids = asyncio.run(send_session_requests())
+        logger.info(f"Session-pinned prefill_worker_ids: {prefill_ids}")
+        logger.info(f"Session-pinned decode_worker_ids: {decode_ids}")
+
+        assert (
+            len(prefill_ids) == num_requests
+        ), f"Expected {num_requests} prefill_worker_ids, got {len(prefill_ids)}."
+        assert (
+            len(decode_ids) == num_requests
+        ), f"Expected {num_requests} decode_worker_ids, got {len(decode_ids)}."
+
+        assert len(set(prefill_ids)) == 1, (
+            f"Prefill advertised a session-affinity TTL, so one session must stay "
+            f"pinned to one prefill worker; got {set(prefill_ids)}. Full: {prefill_ids}"
+        )
+        assert len(set(decode_ids)) > 1, (
+            f"Decode advertised no session-affinity TTL, so the same session must "
+            f"not be pinned there; all {num_requests} requests landed on "
+            f"{set(decode_ids)}. That means the hops are sharing one TTL."
+        )
+
+        logger.info(
+            "Verified per-hop session affinity: prefill pinned to "
+            f"{set(prefill_ids)} (TTL advertised) while decode spread across "
+            f"{set(decode_ids)} (no TTL)"
+        )
