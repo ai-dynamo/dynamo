@@ -16,7 +16,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     VisionEncoderBackend,
 )
-from dynamo.workflow import StageContext, StageContract, ValueSpec
+from dynamo.workflow import StageContext, StageContract, StreamSpec, ValueSpec
 
 _IMAGE_URL_PORT = "image_url"
 _URL_VARIANT = "Url"
@@ -191,14 +191,26 @@ class EncoderStage:
 
 
 class DynamoVllmStage:
-    """Contract implemented by a stock aggregated Dynamo vLLM worker."""
+    """Contracts implemented by a stock aggregated Dynamo vLLM worker."""
 
-    contract = StageContract(
-        id="dynamo-vllm",
+    complete_contract = StageContract(
+        id="dynamo-vllm-complete",
         inputs={
             "request": REQUEST,
             "encoder_features": ENCODER_FEATURES,
             "encoder_metadata": ENCODER_METADATA,
         },
-        outputs={"chunk": ValueSpec(type="json")},
+        outputs={"completion": ValueSpec(type="json")},
+    )
+
+    # This declares the intended streaming ABI. The workflow compiler rejects
+    # StreamSpec execution until scheduling and frontend propagation are added.
+    stream_contract = StageContract(
+        id="dynamo-vllm-stream",
+        inputs={
+            "request": REQUEST,
+            "encoder_features": ENCODER_FEATURES,
+            "encoder_metadata": ENCODER_METADATA,
+        },
+        outputs={"chunks": StreamSpec(item=ValueSpec(type="json"))},
     )
