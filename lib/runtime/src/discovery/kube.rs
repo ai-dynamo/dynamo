@@ -480,6 +480,19 @@ async fn run_metadata_watch(
     // Track complete values so same-ID model taint updates are observable.
     let mut known = initial;
 
+    // Both of these resolve at most once over the task's life, so build them once and
+    // reborrow each pass instead of reconstructing them on every loop iteration. The
+    // cancellation future degrades to one that never resolves when no token was supplied,
+    // so both arms are always armed. `watch_rx.changed()` stays inside the loop because it
+    // advances receiver state and must be re-armed after each snapshot.
+    let mut receiver_closed = std::pin::pin!(event_tx.closed());
+    let mut cancelled = std::pin::pin!(async {
+        match cancel_token.as_ref() {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending().await,
+        }
+    });
+
     loop {
         tracing::trace!(
             stream_id = %stream_id,
@@ -488,23 +501,17 @@ async fn run_metadata_watch(
         );
 
         // Wait for the next snapshot, for the consumer to drop the stream, or for
-        // cancellation. The cancellation arm degrades to a future that never resolves
-        // when no token was supplied, so the other two arms are always armed.
+        // cancellation.
         let watch_result = tokio::select! {
             result = watch_rx.changed() => result,
-            _ = event_tx.closed() => {
+            _ = receiver_closed.as_mut() => {
                 tracing::debug!(
                     stream_id = %stream_id,
                     "Watch receiver dropped"
                 );
                 break;
             }
-            _ = async {
-                match cancel_token.as_ref() {
-                    Some(token) => token.cancelled().await,
-                    None => std::future::pending().await,
-                }
-            } => {
+            _ = cancelled.as_mut() => {
                 tracing::info!(
                     stream_id = %stream_id,
                     "Watch cancelled via cancel token"
