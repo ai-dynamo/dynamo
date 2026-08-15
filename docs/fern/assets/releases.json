@@ -1337,8 +1337,8 @@
       "category": "crate",
       "name": "dynamo-protocols",
       "description": "Async OpenAI-compatible API client",
-      "meta": "Registry dependency · own release line",
-      "badge": "Consumed",
+      "meta": "Own release line",
+      "group": "consumed",
       "href": "https://crates.io/crates/dynamo-protocols/5.0.1",
       "tags": [
         {
@@ -1365,8 +1365,8 @@
       "category": "crate",
       "name": "dynamo-parsers",
       "description": "Protocol parsers (SSE, JSON streaming)",
-      "meta": "Registry dependency · own release line",
-      "badge": "Consumed",
+      "meta": "Own release line",
+      "group": "consumed",
       "href": "https://crates.io/crates/dynamo-parsers/7.0.1",
       "tags": [
         {
@@ -1418,8 +1418,8 @@
       "category": "crate",
       "name": "dynamo-tokenizers",
       "description": "Tokenizer library for LLM inference",
-      "meta": "Registry dependency · own release line",
-      "badge": "Consumed",
+      "meta": "Own release line",
+      "group": "consumed",
       "href": "https://crates.io/crates/dynamo-tokenizers/1.5.4",
       "tags": [
         {
@@ -1614,8 +1614,8 @@
       "category": "crate",
       "name": "dynamo-renderer",
       "description": "Chat-template rendering used by the Dynamo Frontend",
-      "meta": "Registry dependency · own release line",
-      "badge": "Consumed",
+      "meta": "Own release line",
+      "group": "consumed",
       "href": "https://crates.io/crates/dynamo-renderer/4.0.0",
       "tags": [
         {
@@ -1628,8 +1628,8 @@
       "category": "crate",
       "name": "dynamo-parsers-v2",
       "description": "Second-generation protocol parsers consumed by the Frontend",
-      "meta": "Registry dependency · own release line",
-      "badge": "Consumed",
+      "meta": "Own release line",
+      "group": "consumed",
       "href": "https://crates.io/crates/dynamo-parsers-v2/0.1.23",
       "tags": [
         {
@@ -1642,8 +1642,8 @@
       "category": "crate",
       "name": "fastokens",
       "description": "High-performance Rust tokenizer backend consumed by the Frontend",
-      "meta": "Registry dependency · own release line",
-      "badge": "Consumed",
+      "meta": "Own release line",
+      "group": "consumed",
       "href": "https://crates.io/crates/fastokens/0.2.0",
       "tags": [
         {

@@ -567,7 +567,7 @@ export type ArtifactCategory = "container" | "wheel" | "helm" | "crate";
 
 export interface Artifact {
   category: ArtifactCategory;
-  group?: "runtime" | "component";
+  group?: "runtime" | "component" | "consumed";
   name: string;
   description: string;
   meta?: string;
@@ -730,8 +730,8 @@ export const ARTIFACTS: Artifact[] = [
     category: "crate",
     name: "dynamo-protocols",
     description: "Async OpenAI-compatible API client",
-    meta: "Registry dependency · own release line",
-    badge: "Consumed",
+    meta: "Own release line",
+    group: "consumed",
     href: "https://crates.io/crates/dynamo-protocols/5.0.1",
     tags: [{ label: "cargo add dynamo-protocols@5.0.1", clipboard: "cargo add dynamo-protocols@5.0.1" }],
   },
@@ -748,8 +748,8 @@ export const ARTIFACTS: Artifact[] = [
     category: "crate",
     name: "dynamo-parsers",
     description: "Protocol parsers (SSE, JSON streaming)",
-    meta: "Registry dependency · own release line",
-    badge: "Consumed",
+    meta: "Own release line",
+    group: "consumed",
     href: "https://crates.io/crates/dynamo-parsers/7.0.1",
     tags: [{ label: "cargo add dynamo-parsers@7.0.1", clipboard: "cargo add dynamo-parsers@7.0.1" }],
   },
@@ -782,8 +782,8 @@ export const ARTIFACTS: Artifact[] = [
     category: "crate",
     name: "dynamo-tokenizers",
     description: "Tokenizer library for LLM inference",
-    meta: "Registry dependency · own release line",
-    badge: "Consumed",
+    meta: "Own release line",
+    group: "consumed",
     href: "https://crates.io/crates/dynamo-tokenizers/1.5.4",
     tags: [{ label: "cargo add dynamo-tokenizers@1.5.4", clipboard: "cargo add dynamo-tokenizers@1.5.4" }],
   },
@@ -903,8 +903,8 @@ export const ARTIFACTS: Artifact[] = [
     category: "crate",
     name: "dynamo-renderer",
     description: "Chat-template rendering used by the Dynamo Frontend",
-    meta: "Registry dependency · own release line",
-    badge: "Consumed",
+    meta: "Own release line",
+    group: "consumed",
     href: "https://crates.io/crates/dynamo-renderer/4.0.0",
     tags: [{ label: "cargo add dynamo-renderer@4.0.0", clipboard: "cargo add dynamo-renderer@4.0.0" }],
   },
@@ -912,8 +912,8 @@ export const ARTIFACTS: Artifact[] = [
     category: "crate",
     name: "dynamo-parsers-v2",
     description: "Second-generation protocol parsers consumed by the Frontend",
-    meta: "Registry dependency · own release line",
-    badge: "Consumed",
+    meta: "Own release line",
+    group: "consumed",
     href: "https://crates.io/crates/dynamo-parsers-v2/0.1.23",
     tags: [{ label: "cargo add dynamo-parsers-v2@0.1.23", clipboard: "cargo add dynamo-parsers-v2@0.1.23" }],
   },
@@ -921,8 +921,8 @@ export const ARTIFACTS: Artifact[] = [
     category: "crate",
     name: "fastokens",
     description: "High-performance Rust tokenizer backend consumed by the Frontend",
-    meta: "Registry dependency · own release line",
-    badge: "Consumed",
+    meta: "Own release line",
+    group: "consumed",
     href: "https://crates.io/crates/fastokens/0.2.0",
     tags: [{ label: "cargo add fastokens@0.2.0", clipboard: "cargo add fastokens@0.2.0" }],
   },
