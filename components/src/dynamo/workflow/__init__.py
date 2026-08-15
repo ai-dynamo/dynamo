@@ -5,9 +5,9 @@
 
 from dynamo.workflow.builder import StageHandle, Workflow
 from dynamo.workflow.compiler import DeploymentSpec, compile_workflow
-from dynamo.workflow.executor import WorkflowExecutor
 from dynamo.workflow.ir import StageIR, WorkflowIR
-from dynamo.workflow.plan import EdgePlan, ExecutionPlan, LocalBinding
+from dynamo.workflow.orchestrator import WorkflowOrchestrator
+from dynamo.workflow.plan import EdgePlan, ExecutionPlan, InlineBinding
 from dynamo.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
 from dynamo.workflow.types import (
     PortSpec,
@@ -33,9 +33,9 @@ __all__ = [
     "Workflow",
     "WorkflowIR",
     "WorkflowExecutionError",
-    "WorkflowExecutor",
+    "WorkflowOrchestrator",
     "WorkflowValidationError",
     "ExecutionPlan",
-    "LocalBinding",
+    "InlineBinding",
     "compile_workflow",
 ]
