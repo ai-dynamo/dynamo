@@ -106,9 +106,17 @@ def test_workspace_version_matches_current_release(
     # The invariant that actually matters is directional. A crate pinned
     # *ahead* of the shipped tag would link docs.rs at something never
     # published; a crate behind it is the normal state of a patch release.
+    # Off-train registry crates (member_path is None) ship on their own
+    # version lines — dynamo-parsers 7.x, dynamo-protocols 5.x — and their
+    # docs.rs pages exist at those versions, so the directional bound only
+    # holds for workspace crates released on the Dynamo tag.
     version_key = rust_api_discovery._version_key
     tag = version_key(reference.release_tag)
-    current = [crate for crate in reference.crates if crate.badge != "Deprecated"]
+    current = [
+        crate
+        for crate in reference.crates
+        if crate.badge != "Deprecated" and crate.member_path is not None
+    ]
     assert current, "expected at least one non-deprecated crate"
     for crate in current:
         assert version_key(crate.version) <= tag, (
