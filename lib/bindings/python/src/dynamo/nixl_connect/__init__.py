@@ -179,8 +179,16 @@ class AbstractOperation(ABC):
 
         # Register local descriptors with NIXL.
         # Note: Only local descriptors should be registered with NIXL,
+        descriptor_list = (
+            local_descriptors
+            if isinstance(local_descriptors, list)
+            else [local_descriptors]
+        )
+        self._owns_local_registrations = tuple(
+            not descriptor.is_registered for descriptor in descriptor_list
+        )
         if isinstance(local_descriptors, list):
-            for d in local_descriptors:
+            for d in descriptor_list:
                 d.register_with_connector(self._connection)
                 logger.debug(
                     f"dynamo.nixl_connect.{self.__class__.__name__}: Registered descriptor {d} with connector {self._connection}."
@@ -217,7 +225,11 @@ class AbstractOperation(ABC):
         """
         # Deregister local descriptors from NIXL, allowing them to reused by a future operation.
         if isinstance(self._local_desc_list, list):
-            for d in self._local_desc_list:
+            for d, owns_registration in zip(
+                self._local_desc_list, self._owns_local_registrations
+            ):
+                if not owns_registration:
+                    continue
                 if d.is_registered:
                     d.deregister_with_connector(self._connection)
                 else:
@@ -225,6 +237,8 @@ class AbstractOperation(ABC):
                         f"dynamo.nixl_connect.{self.__class__.__name__}: Descriptor {d} was not registered, skipping deregistration."
                     )
         else:
+            if not self._owns_local_registrations[0]:
+                return
             if self._local_desc_list.is_registered:
                 self._local_desc_list.deregister_with_connector(self._connection)
             else:
@@ -623,7 +637,11 @@ class Connection:
         self._nixl = nixl_api.nixl_agent(self._name)
 
         self._remote_refs: dict[str, int] = {}  # ref-count remote agents
+        self._loaded_remote_names: set[str] = set()
+        self._remote_names_by_metadata: dict[bytes, str] = {}
         self._remote_refs_lock = threading.Lock()
+        self._notification_keys: set[str] = set()
+        self._notification_lock = threading.Lock()
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
@@ -665,6 +683,51 @@ class Connection:
         with self._remote_refs_lock:
             self._remote_refs[name] = self._remote_refs.get(name, 0) + 1
 
+    def acquire_remote(
+        self,
+        metadata: bytes,
+        expected_name: Optional[str] = None,
+        *,
+        partial_metadata: Optional[bytes] = None,
+    ) -> str:
+        """Load remote metadata and retain one operation reference.
+
+        Full snapshots establish a remote agent and its backend connections.
+        Once established, distinct partial snapshots merge newly registered
+        memory without reloading connection information.
+        """
+        with self._remote_refs_lock:
+            name = self._remote_names_by_metadata.get(metadata)
+            agent_is_loaded = expected_name in self._loaded_remote_names
+            if name is None and agent_is_loaded:
+                name = expected_name
+            if name is None:
+                name = self._nixl.add_remote_agent(metadata)
+                if isinstance(name, bytes):
+                    name = name.decode("utf-8")
+                if expected_name is not None and name != expected_name:
+                    raise RuntimeError(
+                        "Loaded NIXL remote agent name does not match metadata: "
+                        f"{name!r} != {expected_name!r}"
+                    )
+                self._loaded_remote_names.add(name)
+                self._remote_names_by_metadata[metadata] = name
+            elif partial_metadata is not None:
+                # The first full snapshot contains its operation's memory. Each
+                # later operation contributes fresh marginal metadata. Do not
+                # cache these payloads: registrations may reuse an address with
+                # a new remote key, and the cache would grow per transfer.
+                updated_name = self._nixl.add_remote_agent(partial_metadata)
+                if isinstance(updated_name, bytes):
+                    updated_name = updated_name.decode("utf-8")
+                if updated_name != name:
+                    raise RuntimeError(
+                        "Loaded NIXL partial metadata name does not match agent: "
+                        f"{updated_name!r} != {name!r}"
+                    )
+            self._remote_refs[name] = self._remote_refs.get(name, 0) + 1
+            return name
+
     def release_remote_ref(self, name: str) -> bool:
         """Returns True when the last reference is released."""
         with self._remote_refs_lock:
@@ -676,6 +739,51 @@ class Connection:
                 return True
             self._remote_refs[name] = ref_count - 1
             return False
+
+    def release_remote(self, name: str) -> None:
+        """Release one operation reference while retaining connection metadata.
+
+        NIXL remote-agent metadata is connection-scoped, not transfer-scoped.
+        Removing it when the last current operation finishes races with a new
+        operation that is loading the same producer: the delayed removal can
+        invalidate the newly initialized transfer.  Keep the loaded agent for
+        the lifetime of this connection and let NIXL tear it down with the
+        owning local agent.
+        """
+        with self._remote_refs_lock:
+            ref_count = self._remote_refs.get(name)
+            if ref_count is None:
+                return
+            if ref_count == 1:
+                self._remote_refs.pop(name, None)
+            else:
+                self._remote_refs[name] = ref_count - 1
+
+    def consume_notification(self, notification_key: str) -> bool:
+        """Poll once and retain notifications until their operation consumes them."""
+
+        with self._notification_lock:
+            if notification_key in self._notification_keys:
+                self._notification_keys.remove(notification_key)
+                return True
+            notifications = self._nixl.update_notifs()
+            if not isinstance(notifications, dict):
+                return False
+            for values in notifications.values():
+                if not isinstance(values, list):
+                    raise TypeError(
+                        "Expected `dict[str, list[bytes]]` from NIXL "
+                        f"notification query; got {type(notifications)}."
+                    )
+                self._notification_keys.update(
+                    value.decode("utf-8")
+                    for value in values
+                    if isinstance(value, bytes)
+                )
+            if notification_key not in self._notification_keys:
+                return False
+            self._notification_keys.remove(notification_key)
+            return True
 
     async def initialize(self) -> None:
         # Only initialize the connection once.
@@ -1228,6 +1336,8 @@ class Descriptor:
         # Mark as bound after successful registration.
         self._nixl_hndl = nixl_hndl
         self._connection = connection
+        self._name = ""
+        self._released = True
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Registered {self.__repr__()} with NIXL."
@@ -1524,31 +1634,56 @@ class PassiveOperation(AbstractOperation):
         if self._serialized_request is None:
             # When we've not yet cached the serialized request, we need to generate one before returning it.
             # Handle both cases: multiple and single descriptors.
-            if isinstance(self._local_desc_list, list):
-                descriptors = [desc.metadata for desc in self._local_desc_list]
+            if (
+                isinstance(self._local_desc_list, list)
+                or not self._owns_local_registrations[0]
+            ):
+                descriptors = (
+                    [desc.metadata for desc in self._local_desc_list]
+                    if isinstance(self._local_desc_list, list)
+                    else [self._local_desc_list.metadata]
+                )
+                nixl_metadata = self._connection.metadata
+                partial_nixl_metadata = None
             else:
                 descriptors = [self._local_desc_list.metadata]
-
-            original_len = len(self._connection.metadata)
-            nixl_metadata = self._connection.metadata
-            nixl_metadata = zlib.compress(nixl_metadata, level=6)
-            compressed_len = len(nixl_metadata)
-            logger.debug(
-                f"dynamo.nixl_connect.{self.__class__.__name__}: Compressed NIXL metadata from {original_len} bytes to {compressed_len} bytes."
-            )
-            if compressed_len > original_len:
-                logger.warning(
-                    f"dynamo.nixl_connect.{self.__class__.__name__}: Compressed NIXL metadata is larger than original ({compressed_len} > {original_len})."
+                registration = self._local_desc_list._nixl_hndl
+                if registration is None:
+                    raise RuntimeError(
+                        "Cannot serialize NIXL metadata for unregistered memory."
+                    )
+                nixl_metadata = self._connection.metadata
+                partial_nixl_metadata = (
+                    self._connection._nixl.get_partial_agent_metadata(
+                        registration,
+                        inc_conn_info=False,
+                    )
                 )
 
-            if not hex_encode:
-                encoded_metadata = base64.b64encode(nixl_metadata).decode("utf-8")
-                encoded_metadata = "b64:" + encoded_metadata
-            else:
-                encoded_metadata = nixl_metadata.hex()
+            def encode(raw_metadata: bytes) -> str:
+                original_len = len(raw_metadata)
+                compressed = zlib.compress(raw_metadata, level=6)
+                compressed_len = len(compressed)
+                logger.debug(
+                    f"dynamo.nixl_connect.{self.__class__.__name__}: Compressed NIXL metadata from {original_len} bytes to {compressed_len} bytes."
+                )
+                if compressed_len > original_len:
+                    logger.warning(
+                        f"dynamo.nixl_connect.{self.__class__.__name__}: Compressed NIXL metadata is larger than original ({compressed_len} > {original_len})."
+                    )
+                if hex_encode:
+                    return compressed.hex()
+                return "b64:" + base64.b64encode(compressed).decode("utf-8")
+
             self._serialized_request = RdmaMetadata(
                 descriptors=descriptors,
-                nixl_metadata=encoded_metadata,
+                agent_name=self._connection.name or "",
+                nixl_metadata=encode(nixl_metadata),
+                partial_nixl_metadata=(
+                    ""
+                    if partial_nixl_metadata is None
+                    else encode(partial_nixl_metadata)
+                ),
                 notification_key=self._notification_key,
                 operation_kind=int(self._operation_kind),
             )
@@ -1571,35 +1706,11 @@ class PassiveOperation(AbstractOperation):
 
         old_status = self._status
 
-        # Query NIXL for any notifications.
-        notifications = self._connection._nixl.update_notifs()
-
-        if isinstance(notifications, dict):
-            remote_state = OperationStatus.IN_PROGRESS
+        if self._connection.consume_notification(self._notification_key):
+            self._status = OperationStatus.COMPLETE
             logger.debug(
-                f"dynamo.nixl_connect.{self.__class__.__name__}: NIXL reported notifications: {len(notifications)}."
+                f"dynamo.nixl_connect.{self.__class__.__name__}: {{ remote: '{self._connection.name}' status: '{old_status}' => '{self._status}' }}."
             )
-
-            for key, values in notifications.items():
-                if not isinstance(values, list):
-                    raise TypeError(
-                        f"Expected `dict[str, list[bytes]]` from NIXL notification query; got {type(notifications)}."
-                    )
-                for value in values:
-                    if not isinstance(value, bytes):
-                        continue
-                    notification_key = value.decode("utf-8")
-
-                    # Once we've found the notification key, we know the operation is complete.
-                    if notification_key == self._notification_key:
-                        remote_state = OperationStatus.COMPLETE
-                        break
-
-            if remote_state == OperationStatus.COMPLETE:
-                self._status = remote_state
-                logger.debug(
-                    f"dynamo.nixl_connect.{self.__class__.__name__}: {{ remote: '{self._connection.name}' status: '{old_status}' => '{self._status}' }}."
-                )
 
         return self._status
 
@@ -1648,7 +1759,12 @@ class ReadOperation(ActiveOperation):
         if remote_metadata.operation_kind != OperationKind.READ.value:
             raise ValueError("Argument `remote_metadata` must be of kind `READ`.")
 
-        remote = Remote(connection, remote_metadata.nixl_metadata)
+        remote = Remote(
+            connection,
+            remote_metadata.nixl_metadata,
+            expected_name=remote_metadata.agent_name or None,
+            partial_nixl_metadata=remote_metadata.partial_nixl_metadata or None,
+        )
         remote_descriptors = remote_metadata.to_descriptors()
 
         if not (
@@ -1766,7 +1882,9 @@ class RdmaMetadata(BaseModel):
         arbitrary_types_allowed=True,
     )
     descriptors: List[SerializedDescriptor] = []
+    agent_name: str = ""
     nixl_metadata: str = ""
+    partial_nixl_metadata: str = ""
     notification_key: str = ""
     operation_kind: int = 0
 
@@ -1801,6 +1919,8 @@ class Remote:
         self,
         connection: Connection,
         nixl_metadata: bytes | str,
+        expected_name: Optional[str] = None,
+        partial_nixl_metadata: Optional[bytes | str] = None,
     ) -> None:
         if not isinstance(connection, Connection):
             raise TypeError(
@@ -1813,24 +1933,28 @@ class Remote:
 
         self._connection = connection
 
-        # When `nixl_metadata` is a string, it is assumed to have come from a remote worker
-        # via a `RdmaMetadata` object and therefore can assumed be a b64-encoded, compressed
-        # representation of the NIXL metadata.
-        if isinstance(nixl_metadata, str):
-            if nixl_metadata.startswith("b64:"):
+        def decode(metadata: bytes | str) -> bytes:
+            # Strings are compressed wire values from an RdmaMetadata object.
+            if not isinstance(metadata, str):
+                return metadata
+            if metadata.startswith("b64:"):
                 # Decode the b64-encoded string into bytes.
-                nixl_metadata = base64.b64decode(nixl_metadata[4:])
+                compressed = base64.b64decode(metadata[4:])
             else:
                 # fallback for earlier versions of nixl connect
-                nixl_metadata = bytes.fromhex(nixl_metadata)
-            # Decompress the NIXL metadata.
-            nixl_metadata = zlib.decompress(nixl_metadata)
+                compressed = bytes.fromhex(metadata)
+            return zlib.decompress(compressed)
 
-        self._name = connection._nixl.add_remote_agent(nixl_metadata)
-        if isinstance(self._name, bytes):
-            self._name = self._name.decode("utf-8")
+        nixl_metadata = decode(nixl_metadata)
+        partial_metadata = (
+            None if partial_nixl_metadata is None else decode(partial_nixl_metadata)
+        )
 
-        connection.acquire_remote_ref(self._name)
+        self._name = connection.acquire_remote(
+            nixl_metadata,
+            expected_name,
+            partial_metadata=partial_metadata,
+        )
         self._released = False
 
         logger.debug(
@@ -1862,8 +1986,7 @@ class Remote:
         if self._released:
             return
         self._released = True
-        if self._connection.release_remote_ref(self._name):
-            self._connection._nixl.remove_remote_agent(self._name)
+        self._connection.release_remote(self._name)
 
     @property
     def connection(self) -> Connection:
@@ -2034,7 +2157,12 @@ class WriteOperation(ActiveOperation):
         if remote_metadata.operation_kind != OperationKind.WRITE.value:
             raise ValueError("Argument `remote_metadata` must be of kind `WRITE`.")
 
-        remote = Remote(connection, remote_metadata.nixl_metadata)
+        remote = Remote(
+            connection,
+            remote_metadata.nixl_metadata,
+            expected_name=remote_metadata.agent_name or None,
+            partial_nixl_metadata=remote_metadata.partial_nixl_metadata or None,
+        )
         remote_descriptors = remote_metadata.to_descriptors()
 
         super().__init__(
