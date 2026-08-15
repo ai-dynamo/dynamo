@@ -800,6 +800,43 @@ async fn session_affinity_legacy_conflict_wins_during_rolling_upgrade() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn session_affinity_legacy_fence_restores_the_last_versioned_target() {
+    let coordinator = coordinator();
+    let versioned_target = target(8, Some(0));
+    let legacy_target = target(7, Some(0));
+
+    assert_eq!(
+        coordinator.apply_replica_revision_for_test("replicated", versioned_target, 100, 99),
+        ReplicaApplyOutcome::Inserted
+    );
+    assert_eq!(
+        coordinator.apply_replica_revision_for_test("replicated", legacy_target, 0, 42),
+        ReplicaApplyOutcome::ReplacedLegacy
+    );
+
+    let active = coordinator
+        .acquire(&SessionAffinityId::new("replicated"), None)
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(11)).await;
+
+    assert_eq!(
+        coordinator
+            .query_target(&SessionAffinityId::new("replicated"), None)
+            .unwrap(),
+        Some(versioned_target)
+    );
+    assert!(
+        !coordinator
+            .query_binding(&SessionAffinityId::new("replicated"))
+            .unwrap()
+            .unwrap()
+            .hard_constraint
+    );
+    drop(active);
+}
+
+#[tokio::test(start_paused = true)]
 async fn session_affinity_replica_duplicate_refreshes_local_ttl() {
     let coordinator = coordinator();
     let replicated_id = SessionAffinityId::new("replicated");
