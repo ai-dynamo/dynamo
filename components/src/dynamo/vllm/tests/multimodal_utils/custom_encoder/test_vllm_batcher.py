@@ -184,10 +184,45 @@ async def test_queue_wait_coalesces_request_arriving_after_first_item():
         b.shutdown()
 
 
+async def test_queue_wait_extends_until_quiet_with_a_hard_deadline():
+    batches: list[list[str]] = []
+
+    def fn(items):
+        batches.append(list(items))
+        return list(items)
+
+    b = ThreadedMicroBatcher(
+        fn,
+        queue_wait_s=0.02,
+        max_queue_wait_s=0.1,
+    )
+    b.start()
+    try:
+        first = asyncio.create_task(b.submit(["first"]))
+        await asyncio.sleep(0.01)
+        second = asyncio.create_task(b.submit(["second"]))
+        await asyncio.sleep(0.015)
+        third = asyncio.create_task(b.submit(["third"]))
+        assert await asyncio.gather(first, second, third) == [
+            ["first"],
+            ["second"],
+            ["third"],
+        ]
+        assert batches == [["first", "second", "third"]]
+    finally:
+        b.shutdown()
+
+
 @pytest.mark.parametrize("queue_wait_s", [-1, float("inf"), float("nan"), True])
 def test_queue_wait_rejects_invalid_values(queue_wait_s):
     with pytest.raises(ValueError, match="queue_wait_s"):
         ThreadedMicroBatcher(_echo, queue_wait_s=queue_wait_s)
+
+
+@pytest.mark.parametrize("max_queue_wait_s", [-1, float("inf"), float("nan"), True])
+def test_max_queue_wait_rejects_invalid_values(max_queue_wait_s):
+    with pytest.raises(ValueError, match="max_queue_wait_s"):
+        ThreadedMicroBatcher(_echo, max_queue_wait_s=max_queue_wait_s)
 
 
 async def test_cost_budget_caps_each_batch():
