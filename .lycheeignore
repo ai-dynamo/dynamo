@@ -51,13 +51,3 @@
 # it 404 from CI until the PR merges. Remove this entry once agg.yaml lands on main
 # (afterwards lychee validates the URL again, catching any later rename/move).
 ^https://github\.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg\.yaml
-
-# The v1.4.0 release entry lands with the current-release promotion; the tag
-# URL 404s from CI until v1.4.0 is cut. Remove after the tag exists.
-^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.4\.0$
-# docs.rs pages for the 1.4.0 crates exist only after the GA crates publish.
-# Remove after v1.4.0 crates are on crates.io.
-^https://docs\.rs/[a-z0-9-]+/1\.4\.0$
-# First-time crate in the 1.4.0 publish list; its crates.io page exists
-# only after GA publish. Remove after v1.4.0 crates are on crates.io.
-^https://crates\.io/crates/dynamo-truthy(/.*)?$
