@@ -49,7 +49,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Direct dispatch now bypasses local worker inhibition** ([#11993](https://github.com/ai-dynamo/dynamo/pull/11993)).
 
-  > **Migrate:** Rely on service discovery removal (or set DYN_RUNTIME_INHIBITED_DURATION_SECS explicitly) if you depended on inhibited workers being skipped for direct-routed requests.
+  > **Migrate:** Remove the worker through service discovery if you depended on inhibited workers being skipped for direct-routed requests; direct dispatch does not consult the local inhibition set.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Decode workers now advertise local indexer support** ([#12084](https://github.com/ai-dynamo/dynamo/pull/12084)).
 
@@ -135,9 +135,9 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Set `DYN_EPP_TOKENIZER_PROTOCOL=vllm-render` in existing standalone EPP deployments, otherwise config parsing fails at startup.
 
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **New required env var DYN_EPP_VLLM_RENDER_URL for standalone EPP** ([#11827](https://github.com/ai-dynamo/dynamo/pull/11827)).
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **New required env var DYN_EPP_TOKENIZER_SERVICE_URL for standalone EPP** ([#11827](https://github.com/ai-dynamo/dynamo/pull/11827)).
 
-  > **Migrate:** Set `DYN_EPP_VLLM_RENDER_URL` to the vLLM render endpoint base URL; validation rejects empty or non-absolute URLs.
+  > **Migrate:** Set `DYN_EPP_TOKENIZER_SERVICE_URL` to the vLLM render endpoint base URL; validation rejects empty or non-absolute URLs.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **HTTP header capture in trace records is an explicit fail-closed allowlist**: request headers appear in `request_payload` records only when named in `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST`; when the variable is unset or empty, no headers are captured ([#11386](https://github.com/ai-dynamo/dynamo/pull/11386)).
 
