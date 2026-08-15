@@ -142,6 +142,34 @@ impl FromStr for TokenizerBackend {
     }
 }
 
+/// NIXL side-channel coordinates published by a prefill worker running vLLM's
+/// push-mode KV connector (`NixlPushConnector`).
+///
+/// Pull mode never needs these in discovery: the decode worker learns them from
+/// the prefill response and then issues a NIXL READ. Push mode inverts the
+/// transfer -- the decode worker registers its freshly allocated blocks with the
+/// prefill worker, which WRITEs into them -- so the decode leg must be able to
+/// name the prefill engine *before* prefill finishes. Publishing them here is
+/// what lets the frontend dispatch both legs concurrently.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NixlPushEndpoint {
+    /// The prefill engine's `KVTransferConfig.engine_id`.
+    pub engine_id: String,
+
+    /// `VLLM_NIXL_SIDE_CHANNEL_HOST` as resolved by the prefill worker.
+    pub host: String,
+
+    /// `VLLM_NIXL_SIDE_CHANNEL_PORT` offset by the engine's data-parallel index,
+    /// matching how vLLM's NIXL scheduler derives its own listening port.
+    pub port: u16,
+
+    /// Prefill-side tensor-parallel size.
+    pub tensor_parallel_size: u32,
+
+    /// Prefill-side pipeline-parallel size.
+    pub pipeline_parallel_size: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct DisaggregatedEndpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +177,13 @@ pub struct DisaggregatedEndpoint {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_port: Option<u16>,
+
+    /// Present only when the worker runs vLLM's `NixlPushConnector`. A frontend
+    /// that predates this field simply routes the hop sequentially, which push
+    /// mode still tolerates -- the prefill worker holds its finished blocks
+    /// until the late registration arrives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nixl_push: Option<NixlPushEndpoint>,
 }
 
 /// Controls how historical `function.arguments` are serialized before being
@@ -1186,5 +1221,68 @@ mod tests {
         ] {
             assert!(config.validate_config().is_err());
         }
+    }
+
+    #[test]
+    fn nixl_push_endpoint_round_trips_alongside_bootstrap_fields() {
+        let config = ModelRuntimeConfig {
+            disaggregated_endpoint: Some(DisaggregatedEndpoint {
+                bootstrap_host: Some("10.0.0.1".to_string()),
+                bootstrap_port: Some(8998),
+                nixl_push: Some(NixlPushEndpoint {
+                    engine_id: "prefill-engine-001".to_string(),
+                    host: "10.0.0.1".to_string(),
+                    port: 5600,
+                    tensor_parallel_size: 4,
+                    pipeline_parallel_size: 1,
+                }),
+            }),
+            ..Default::default()
+        };
+
+        let decoded: ModelRuntimeConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+
+        assert_eq!(
+            decoded.disaggregated_endpoint,
+            config.disaggregated_endpoint
+        );
+    }
+
+    /// A worker from before push mode publishes `disaggregated_endpoint` without
+    /// `nixl_push`; reading it must not fail closed, since bootstrap-based
+    /// disagg does not involve this field at all.
+    #[test]
+    fn disaggregated_endpoint_without_nixl_push_still_deserializes() {
+        let decoded: DisaggregatedEndpoint =
+            serde_json::from_str(r#"{"bootstrap_host":"10.0.0.1","bootstrap_port":8998}"#).unwrap();
+
+        assert_eq!(decoded.bootstrap_host.as_deref(), Some("10.0.0.1"));
+        assert!(decoded.nixl_push.is_none());
+    }
+
+    /// Push mode has no bootstrap server, so the two halves must be
+    /// independently omittable rather than travelling as a unit.
+    #[test]
+    fn nixl_push_endpoint_serializes_without_bootstrap_fields() {
+        let endpoint = DisaggregatedEndpoint {
+            bootstrap_host: None,
+            bootstrap_port: None,
+            nixl_push: Some(NixlPushEndpoint {
+                engine_id: "prefill-engine-001".to_string(),
+                host: "10.0.0.1".to_string(),
+                port: 5600,
+                tensor_parallel_size: 1,
+                pipeline_parallel_size: 1,
+            }),
+        };
+
+        let encoded = serde_json::to_string(&endpoint).unwrap();
+
+        assert!(!encoded.contains("bootstrap_host"), "{encoded}");
+        assert_eq!(
+            serde_json::from_str::<DisaggregatedEndpoint>(&encoded).unwrap(),
+            endpoint
+        );
     }
 }
