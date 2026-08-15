@@ -167,13 +167,18 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     selector.add_argument("--use-v1", action="store_true")
+    selector.add_argument("--all-devices", action="store_true")
     options, remaining = selector.parse_known_args(argv)
+    if options.all_devices and not options.use_v1:
+        selector.error("--all-devices requires --use-v1")
     if options.use_v1:
-        if any(argument in {"-h", "--help"} for argument in remaining):
+        if options.all_devices and not any(
+            argument in {"-h", "--help"} for argument in remaining
+        ):
+            _run_v1_savers(remaining)
+        else:
             v1_saver = importlib.import_module("gpu_memory_service.v1.snapshot.saver")
             v1_saver.main(remaining)
-        else:
-            _run_v1_savers(remaining)
         return
 
     parser = _build_parser()
