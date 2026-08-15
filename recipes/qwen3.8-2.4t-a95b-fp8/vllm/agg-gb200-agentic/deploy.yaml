@@ -2,24 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Qwen3.8-2.4T-A95B on vLLM via Dynamo, aggregated, GB200 (TP=16) over MNNVL.
+# Target workload: 64k/400 agentic (SSP=57600, ISL=6400, OSL=400, 90% prefix reuse).
 ---
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
-  name: qwen38max-agg-cd
+  name: qwen38max-agg-agentic-cd
 spec:
   numNodes: 0
   channel:
     allocationMode: Single
     resourceClaimTemplate:
-      name: qwen38max-agg-cd-channel
+      name: qwen38max-agg-agentic-cd-channel
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen38max-agg
+  name: qwen38max-agg-agentic
   labels:
-    app.kubernetes.io/name: qwen38max-agg
+    app.kubernetes.io/name: qwen38max-agg-agentic
     engine: vllm
     hardware: gb200
     mode: agg
@@ -70,7 +71,7 @@ spec:
         - {key: kubernetes.io/arch, operator: Equal, value: arm64,         effect: NoSchedule}
         resourceClaims:
         - name: compute-domain-channel
-          resourceClaimTemplateName: qwen38max-agg-cd-channel
+          resourceClaimTemplateName: qwen38max-agg-agentic-cd-channel
         terminationGracePeriodSeconds: 60
         containers:
         - name: main
@@ -81,9 +82,9 @@ spec:
           args:
           - |
             exec python3 -m dynamo.vllm \
-              --model Qwen/Qwen3.8-2.4T-A95B \
+              --model Qwen/Qwen3.8-2.4T-A95B-FP8 \
               --hf-overrides '{"architectures":["Qwen3_5MoeForCausalLM"]}' \
-              --served-model-name Qwen/Qwen3.8-2.4T-A95B \
+              --served-model-name Qwen/Qwen3.8-2.4T-A95B-FP8 \
               --trust-remote-code \
               --tensor-parallel-size 16 \
               --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
@@ -163,5 +164,5 @@ spec:
           persistentVolumeClaim: {claimName: model-cache}
         - name: compile-cache
           hostPath:
-            path: /mnt/stateful_partition/kube-ephemeral-ssd/cache/qwen38max-agg
+            path: /mnt/stateful_partition/kube-ephemeral-ssd/cache/qwen38max-agg-agentic
             type: DirectoryOrCreate
