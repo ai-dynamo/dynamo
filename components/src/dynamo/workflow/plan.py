@@ -73,6 +73,8 @@ def validate_binding_contract(binding: Binding, contract: StageContract) -> None
         raise WorkflowValidationError(
             "Generate endpoint stage output must be completion"
         )
+
+
 @dataclass(frozen=True)
 class ExecutionPlan:
     """A workflow plus immutable in-memory stage bindings."""
