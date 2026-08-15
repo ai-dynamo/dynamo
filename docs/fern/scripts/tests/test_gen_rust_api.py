@@ -27,7 +27,6 @@ RELEASES_DATA = FERN_ROOT / "components" / "releases.data.ts"
 # Frontend consumes at pinned versions (badge: Consumed).
 EXPECTED_CRATES = {
     "dynamo-async-openai",
-    "dynamo-backend-common",
     "dynamo-bench",
     "dynamo-config",
     "dynamo-data-gen",

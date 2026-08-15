@@ -845,14 +845,6 @@ export const ARTIFACTS: Artifact[] = [
   },
   {
     category: "crate",
-    name: "dynamo-backend-common",
-    description: "Shared runtime glue for Rust LLM backends",
-    meta: "MSRV Rust v1.82",
-    href: "https://crates.io/crates/dynamo-backend-common/1.4.0",
-    tags: [{ label: "cargo add dynamo-backend-common@1.4.0", clipboard: "cargo add dynamo-backend-common@1.4.0" }],
-  },
-  {
-    category: "crate",
     name: "dynamo-truthy",
     description: "Canonical truthy/falsy boolean flag parsing",
     meta: "MSRV Rust v1.82",
