@@ -21,7 +21,7 @@ use dynamo_llm::{
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::block_manager::cache_stats::CacheStatsTracker;
+use crate::block_manager::cache_stats::{CacheStatsReporter, CacheStatsTracker};
 use crate::{get_current_cancel_token, get_current_tokio_handle};
 
 use super::*;
@@ -179,6 +179,9 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     _transfer_engine_handle: Option<CriticalTaskExecutionHandle>,
     /// Cache statistics tracker
     cache_stats: Arc<CacheStatsTracker>,
+    /// Owns the periodic cache-hit-rate reporter; dropped with this struct,
+    /// which stops the reporter task and releases the state it captured.
+    _cache_stats_reporter: CacheStatsReporter,
     /// KVBM metrics for exposing cache hit rates
     #[allow(dead_code)]
     kvbm_metrics: KvbmMetrics,
@@ -204,23 +207,15 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let kvbm_metrics_clone = kvbm_metrics.clone();
-        let cache_stats_clone = cache_stats.clone();
-
-        // Spawn a background task to periodically update metrics and log cache hit rates
-        let handle = get_current_tokio_handle();
-        handle.spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                // Update Prometheus metrics
-                let host_rate = cache_stats_clone.host_hit_rate();
-                let disk_rate = cache_stats_clone.disk_hit_rate();
-                kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate, 0.0);
-                // Also log cache hit rates periodically
-                cache_stats_clone.maybe_log();
-            }
-        });
+        // Periodically update metrics and log cache hit rates. The returned
+        // reporter is stored on the struct so the task is retired when this
+        // manager is dropped.
+        let cache_stats_reporter = CacheStatsReporter::spawn(
+            &get_current_tokio_handle(),
+            cache_stats.clone(),
+            kvbm_metrics.clone(),
+            std::time::Duration::from_secs(5),
+        );
         tracing::debug!(
             "creating slot manager with block size: {}",
             block_manager.block_size()
@@ -258,7 +253,8 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             xfer_tx,
             _transfer_engine_handle: Some(xfer_engine_task),
             cache_stats,
-            kvbm_metrics: kvbm_metrics.clone(),
+            _cache_stats_reporter: cache_stats_reporter,
+            kvbm_metrics,
             offload_min_priority,
         }
     }
