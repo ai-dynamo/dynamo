@@ -23,6 +23,7 @@ SAMPLER_PID=""
 CONCURRENCY_CAP=512
 DEFAULT_CELL_PLAN="40:1:direct 40:1:workflow 40:2:workflow 40:2:direct 40:3:direct 40:3:workflow 50:1:direct 50:1:workflow 50:2:workflow 50:2:direct 50:3:direct 50:3:workflow"
 CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
+RUN_ID="$(printf '%s' "$OUTPUT_ROOT" | sha256sum | cut -c1-12)"
 
 if [[ -e "$OUTPUT_ROOT" ]]; then
     echo >&2 "DYN_BENCH_OUTPUT_ROOT already exists: $OUTPUT_ROOT"
@@ -239,11 +240,10 @@ run_cell() {
     local repetition="$2"
     local topology="$3"
     local output_dir="$OUTPUT_ROOT/rate-$request_rate/rep-$repetition/$topology"
-    local zmq_prefix="/tmp/aiperf-qwen-r${request_rate}-p${repetition}-${topology}"
+    local zmq_prefix="/tmp/aiperf-${RUN_ID}-r${request_rate}-p${repetition}-${topology}"
 
     mkdir -p "$output_dir/warmup" "$output_dir/measured"
     cleanup_cell
-    rm -f "${zmq_prefix}-warmup"* "${zmq_prefix}-measured"* || true
     launch_topology "$topology" "$output_dir"
     wait_control_plane "$output_dir"
     wait_generation_ready "$output_dir"

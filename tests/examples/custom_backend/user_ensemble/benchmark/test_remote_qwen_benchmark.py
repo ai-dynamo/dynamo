@@ -111,6 +111,8 @@ def test_runner_waits_for_real_generation_without_touching_encoder_counts() -> N
     )[0]
     assert '"content":"readiness"' in readiness
     assert "image_url" not in readiness
+    assert 'RUN_ID="$(printf' in runner
+    assert 'rm -f "${zmq_prefix}' not in runner
 
 
 def _cell(wall_seconds: float, request_throughput: float) -> dict:
