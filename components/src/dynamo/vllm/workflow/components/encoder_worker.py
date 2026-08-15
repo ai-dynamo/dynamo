@@ -9,6 +9,7 @@ import argparse
 import asyncio
 
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     resolve_vision_encoder_backend_class,
 )
@@ -59,6 +60,7 @@ async def encoder_worker(
 
 
 def main() -> None:
+    configure_dynamo_logging(service_name="dynamo.vllm.workflow.encoder")
     parser = argparse.ArgumentParser(
         description="Run a custom vision encoder as a remote workflow stage",
         allow_abbrev=False,

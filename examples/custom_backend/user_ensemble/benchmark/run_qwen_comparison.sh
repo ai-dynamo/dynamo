@@ -197,7 +197,7 @@ run_cell() {
 
     mkdir -p "$output_dir/warmup" "$output_dir/measured"
     cleanup_cell
-    rm -f "${zmq_prefix}-warmup"* "${zmq_prefix}-measured"* || true
+    rm -rf -- "${zmq_prefix}-warmup"* "${zmq_prefix}-measured"* || true
     launch_topology "$topology" "$output_dir"
     wait_control_plane "$output_dir"
 
