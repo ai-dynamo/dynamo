@@ -13,7 +13,7 @@ use async_nats::jetstream;
 use async_trait::async_trait;
 use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
 use dynamo_runtime::transports::nats;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::telemetry::jsonl::{JsonlSinkOptions, JsonlWriter};
@@ -139,7 +139,10 @@ impl RequestTraceSink for JsonlRequestTraceSink {
 }
 
 pub struct JsonlGzipRequestTraceSink {
-    writer: JsonlGzipWriter<RequestTraceRecord>,
+    /// `JsonlGzipWriter::close` consumes the writer, but the sink only ever has
+    /// `&self`, so the writer lives behind interior mutability and `shutdown`
+    /// takes it out to close it. `None` means shutdown already closed it.
+    writer: Mutex<Option<JsonlGzipWriter<RequestTraceRecord>>>,
 }
 
 impl JsonlGzipRequestTraceSink {
@@ -147,7 +150,9 @@ impl JsonlGzipRequestTraceSink {
         let writer = JsonlGzipWriter::new(path.clone(), options)
             .await
             .with_context(|| format!("opening gzip jsonl request trace sink at {path}"))?;
-        Ok(Self { writer })
+        Ok(Self {
+            writer: Mutex::new(Some(writer)),
+        })
     }
 
     async fn from_policy(policy: &RequestTracePolicy) -> anyhow::Result<Self> {
@@ -179,8 +184,28 @@ impl RequestTraceSink for JsonlGzipRequestTraceSink {
     }
 
     async fn emit(&self, record: &RequestTraceRecord) {
-        if self.writer.send(record.clone()).await.is_err() {
+        let writer = self.writer.lock().await;
+        let accepted = match writer.as_ref() {
+            Some(writer) => writer.send(record.clone()).await.is_ok(),
+            None => false,
+        };
+        if !accepted {
             tracing::warn!("request trace file sink closed; dropping record");
+        }
+    }
+
+    async fn shutdown(&self) {
+        // Take the writer out under a short-lived guard so `close`, which awaits
+        // the writer task's final flush, does not run while holding the lock.
+        let writer = self.writer.lock().await.take();
+        if let Some(writer) = writer
+            && let Err(error) = writer.close().await
+        {
+            tracing::warn!(
+                target: "dynamo_llm::request_trace",
+                error = %error,
+                "request trace file sink: gzip writer close failed during shutdown"
+            );
         }
     }
 }
@@ -406,5 +431,45 @@ mod tests {
             }
             assert!(content.contains("\"request_id\":\"req-123\""));
         }
+    }
+
+    #[tokio::test]
+    async fn gzip_sink_shutdown_flushes_buffered_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("request_trace_shutdown");
+        // Nothing but shutdown can flush this record: the buffer dwarfs one
+        // record, the flush tick is a minute away, and neither roll threshold
+        // can trigger.
+        let sink = JsonlGzipRequestTraceSink::new(
+            path.display().to_string(),
+            JsonlGzipSinkOptions {
+                buffer_bytes: 1024 * 1024,
+                flush_interval: Duration::from_secs(60),
+                roll_uncompressed_bytes: 1024 * 1024,
+                roll_lines: None,
+                max_segments: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        sink.emit(&sample_record()).await;
+
+        RequestTraceSink::shutdown(&sink).await;
+        // A second shutdown must return normally rather than panic.
+        RequestTraceSink::shutdown(&sink).await;
+
+        let segment = segment_path(&path, 0);
+        assert!(
+            segment.exists(),
+            "shutdown returned without flushing the gzip segment at {}",
+            segment.display()
+        );
+        let bytes = std::fs::read(&segment).unwrap();
+        let mut content = String::new();
+        MultiGzDecoder::new(bytes.as_slice())
+            .read_to_string(&mut content)
+            .unwrap();
+        assert!(content.contains("\"request_id\":\"req-123\""));
     }
 }
