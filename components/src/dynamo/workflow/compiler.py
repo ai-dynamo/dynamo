@@ -23,6 +23,7 @@ from dynamo.workflow.plan import (
 )
 from dynamo.workflow.types import (
     StreamSpec,
+    ValueRef,
     WorkflowValidationError,
     _require_value_spec,
     validate_name,
@@ -111,51 +112,61 @@ def compile_workflow(
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
         )
 
-    binding_types = {type(binding) for binding in deployment.bindings.values()}
-    if len(binding_types) > 1:
-        raise WorkflowValidationError(
-            "workflow placement must be homogeneous; mixed inline and remote "
-            "bindings are unsupported"
-        )
-
-    remote = bool(binding_types) and binding_types == {RemoteBinding}
     stages_by_id = {stage.id: stage for stage in workflow_ir.stages}
-    if remote:
-        for output_name, source in workflow_ir.outputs.items():
-            if source.stage_id is None:
-                continue
-            source_port = source.output_name
-            assert source_port is not None
-            value_spec = _require_value_spec(
-                stages_by_id[source.stage_id].contract.outputs[source_port],
-                f"workflow output {output_name!r}",
+    for output_name, source in workflow_ir.outputs.items():
+        if source.stage_id is None or not isinstance(
+            deployment.bindings[source.stage_id], RemoteBinding
+        ):
+            continue
+        source_port = source.output_name
+        assert source_port is not None
+        value_spec = _require_value_spec(
+            stages_by_id[source.stage_id].contract.outputs[source_port],
+            f"workflow output {output_name!r}",
+        )
+        if value_spec.type not in INLINE_VALUE_TYPES:
+            raise WorkflowValidationError(
+                f"remote workflow output {output_name!r} cannot carry value type "
+                f"{value_spec.type!r} inline"
             )
-            if value_spec.type not in INLINE_VALUE_TYPES:
-                raise WorkflowValidationError(
-                    f"remote workflow output {output_name!r} cannot carry value type "
-                    f"{value_spec.type!r} inline"
-                )
 
     edges = tuple(
         EdgePlan(
             source=source,
             target_stage=stage.id,
             target_port=port,
-            carrier=INLINE_CARRIER if remote else IN_PROCESS_CARRIER,
+            carrier=_select_edge_carrier(source, stage.id, deployment.bindings),
         )
         for stage in workflow_ir.stages
         for port, source in stage.inputs.items()
     )
-    if remote:
-        for edge in edges:
-            value_spec = _require_value_spec(
-                stages_by_id[edge.target_stage].contract.inputs[edge.target_port],
-                f"stage {edge.target_stage!r} input {edge.target_port!r}",
+    for edge in edges:
+        if edge.carrier == IN_PROCESS_CARRIER:
+            continue
+        value_spec = _require_value_spec(
+            stages_by_id[edge.target_stage].contract.inputs[edge.target_port],
+            f"stage {edge.target_stage!r} input {edge.target_port!r}",
+        )
+        if value_spec.type not in INLINE_VALUE_TYPES:
+            raise WorkflowValidationError(
+                f"cross-process edge targeting stage {edge.target_stage!r} port "
+                f"{edge.target_port!r} cannot carry value type "
+                f"{value_spec.type!r} inline"
             )
-            if value_spec.type not in INLINE_VALUE_TYPES:
-                raise WorkflowValidationError(
-                    f"remote edge targeting stage {edge.target_stage!r} port "
-                    f"{edge.target_port!r} cannot carry value type "
-                    f"{value_spec.type!r} inline"
-                )
     return ExecutionPlan(workflow_ir, deployment.bindings, edges)
+
+
+def _select_edge_carrier(
+    source: ValueRef,
+    target_stage: str,
+    bindings: Mapping[str, Binding],
+) -> str:
+    """Use object identity only when both ends execute in the orchestrator."""
+
+    source_stage = getattr(source, "stage_id", None)
+    source_binding = None if source_stage is None else bindings[source_stage]
+    if isinstance(source_binding, RemoteBinding) or isinstance(
+        bindings[target_stage], RemoteBinding
+    ):
+        return INLINE_CARRIER
+    return IN_PROCESS_CARRIER

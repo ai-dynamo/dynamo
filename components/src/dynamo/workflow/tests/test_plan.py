@@ -111,7 +111,7 @@ def test_remote_plan_selects_inline_carrier() -> None:
     assert plan.edges[0].carrier == "inline"
 
 
-def test_mixed_placement_is_rejected() -> None:
+def test_mixed_placement_selects_carrier_per_edge() -> None:
     contract = StageContract(
         id="text-stage",
         inputs={"text": ValueSpec(type="text")},
@@ -123,16 +123,17 @@ def test_mixed_placement_is_rejected() -> None:
     second = workflow.stage("second", contract, text=first.text)
     workflow.output("text", second.text)
 
-    with pytest.raises(WorkflowValidationError, match="homogeneous"):
-        compile_workflow(
-            workflow,
-            DeploymentSpec(
-                {
-                    "first": InlineBinding("first"),
-                    "second": RemoteBinding("workflows.second.generate"),
-                }
-            ),
-        )
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec(
+            {
+                "first": InlineBinding("first"),
+                "second": RemoteBinding("workflows.second.generate"),
+            }
+        ),
+    )
+
+    assert [edge.carrier for edge in plan.edges] == ["in_process", "inline"]
 
 
 @pytest.mark.parametrize(

@@ -4,7 +4,7 @@
 import asyncio
 
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.workflow import DeploymentSpec, WorkflowExecutor, compile_workflow
+from dynamo.workflow import DeploymentSpec, WorkflowOrchestrator, compile_workflow
 from examples.custom_backend.workflow_remote.workflow import define_workflow
 
 
@@ -18,7 +18,7 @@ async def client(runtime: DistributedRuntime) -> None:
             generator="workflows.generator.generate",
         ),
     )
-    executor = await WorkflowExecutor.bind(plan, runtime=runtime)
+    executor = await WorkflowOrchestrator.bind(plan, runtime=runtime)
     result = await executor.run(
         {"text": "Dynamo workflow runs across processes"},
         attempt_id="remote-cpu-e2e",

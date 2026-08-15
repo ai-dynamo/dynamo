@@ -104,14 +104,6 @@ class ExecutionPlan:
                 )
             bindings[stage_id] = binding
 
-        binding_types = {type(binding) for binding in bindings.values()}
-        if len(binding_types) > 1:
-            raise WorkflowValidationError(
-                "workflow placement must be homogeneous; mixed inline and remote "
-                "bindings are unsupported"
-            )
-        remote = bool(binding_types) and binding_types == {RemoteBinding}
-
         expected_stages = set(self.stage_contracts)
         actual_stages = set(bindings)
         if actual_stages != expected_stages:
@@ -153,7 +145,14 @@ class ExecutionPlan:
                     f"edge targeting stage {key[0]!r} port {key[1]!r} "
                     "does not match the workflow definition"
                 )
-            expected_carrier = INLINE_CARRIER if remote else IN_PROCESS_CARRIER
+            source_binding = (
+                None if source.stage_id is None else bindings[source.stage_id]
+            )
+            target_binding = bindings[key[0]]
+            crosses_process = isinstance(source_binding, RemoteBinding) or isinstance(
+                target_binding, RemoteBinding
+            )
+            expected_carrier = INLINE_CARRIER if crosses_process else IN_PROCESS_CARRIER
             if edge.carrier != expected_carrier:
                 raise WorkflowValidationError(
                     f"stage {key[0]!r} port {key[1]!r} requires "
@@ -163,27 +162,28 @@ class ExecutionPlan:
                 stages_by_id[key[0]].contract.inputs[key[1]],
                 f"stage {key[0]!r} input {key[1]!r}",
             )
-            if remote and value_spec.type not in INLINE_VALUE_TYPES:
+            if crosses_process and value_spec.type not in INLINE_VALUE_TYPES:
                 raise WorkflowValidationError(
-                    f"remote edge targeting stage {key[0]!r} port {key[1]!r} "
+                    f"cross-process edge targeting stage {key[0]!r} port {key[1]!r} "
                     f"cannot carry value type {value_spec.type!r} inline"
                 )
 
-        if remote:
-            for output_name, source in self.workflow.outputs.items():
-                if source.stage_id is None:
-                    continue
-                source_port = source.output_name
-                assert source_port is not None
-                value_spec = _require_value_spec(
-                    stages_by_id[source.stage_id].contract.outputs[source_port],
-                    f"workflow output {output_name!r}",
+        for output_name, source in self.workflow.outputs.items():
+            if source.stage_id is None or not isinstance(
+                bindings[source.stage_id], RemoteBinding
+            ):
+                continue
+            source_port = source.output_name
+            assert source_port is not None
+            value_spec = _require_value_spec(
+                stages_by_id[source.stage_id].contract.outputs[source_port],
+                f"workflow output {output_name!r}",
+            )
+            if value_spec.type not in INLINE_VALUE_TYPES:
+                raise WorkflowValidationError(
+                    f"remote workflow output {output_name!r} cannot carry value "
+                    f"type {value_spec.type!r} inline"
                 )
-                if value_spec.type not in INLINE_VALUE_TYPES:
-                    raise WorkflowValidationError(
-                        f"remote workflow output {output_name!r} cannot carry value "
-                        f"type {value_spec.type!r} inline"
-                    )
 
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
         object.__setattr__(
