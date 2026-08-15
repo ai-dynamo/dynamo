@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental vLLM integrations for Dynamo workflows."""
+"""Reusable vLLM-oriented workflow stages."""
 
-from dynamo.experimental.workflow.vllm.stages import DynamoVllmStage
+from dynamo.experimental.workflow.vllm.stages import DynamoVllmStage, EncoderStage
 
-__all__ = ["DynamoVllmStage"]
+__all__ = ["DynamoVllmStage", "EncoderStage"]
