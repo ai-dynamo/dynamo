@@ -62,7 +62,19 @@ class _Readable:
         self.released = False
 
     def metadata(self):
-        return _Metadata({"key": self.key})
+        return _Metadata(
+            {
+                "key": self.key,
+                "descriptors": [
+                    {
+                        "device": "cpu",
+                        "ptr": 1,
+                        "size": self.descriptor.tensor.numel()
+                        * self.descriptor.tensor.element_size(),
+                    }
+                ],
+            }
+        )
 
     async def wait_for_completion(self):
         await self.completed.wait()
@@ -243,8 +255,12 @@ async def test_send_pool_reuses_slot_after_all_fanout_reads() -> None:
     )
     source = torch.ones((2, 8), dtype=torch.float16)
 
-    await carrier.export_tensor_fanout(
+    references = await carrier.export_tensor_fanout(
         source, ("classifier.embedding", "generator.embedding")
+    )
+    assert all(
+        reference["rdma_metadata"]["descriptors"][0]["size"] == 32
+        for reference in references.values()
     )
     blocked = asyncio.create_task(carrier.export_tensor(source, "next.embedding"))
     await asyncio.sleep(0)

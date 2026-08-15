@@ -329,6 +329,38 @@ def _model_dump(value: Any) -> dict[str, Any]:
     return result
 
 
+def _limit_transfer_metadata(metadata: Any, transfer_bytes: int) -> dict[str, Any]:
+    """Describe only the live prefix of a larger registered pool slot."""
+
+    result = _model_dump(metadata)
+    descriptors = result.get("descriptors")
+    if descriptors is None:
+        return result
+    if not isinstance(descriptors, list) or len(descriptors) != 1:
+        raise WorkflowExecutionError(
+            "NIXL pooled tensor export requires exactly one descriptor"
+        )
+    descriptor = descriptors[0]
+    if hasattr(descriptor, "model_dump"):
+        descriptor = descriptor.model_dump()
+    elif isinstance(descriptor, Mapping):
+        descriptor = dict(descriptor)
+    else:
+        raise WorkflowExecutionError("NIXL descriptor metadata must be an object")
+    registered_bytes = descriptor.get("size")
+    if (
+        isinstance(registered_bytes, bool)
+        or not isinstance(registered_bytes, int)
+        or transfer_bytes > registered_bytes
+    ):
+        raise WorkflowExecutionError(
+            "NIXL tensor exceeds its registered transfer descriptor"
+        )
+    descriptor["size"] = transfer_bytes
+    result["descriptors"] = [descriptor]
+    return result
+
+
 class NixlTensorCarrier:
     """Export and import torch tensors with explicit NIXL READ operations."""
 
@@ -524,7 +556,9 @@ class NixlTensorCarrier:
                     shape=tuple(tensor.shape),
                     dtype=str(tensor.dtype).rsplit(".", 1)[-1],
                     device=str(tensor.device),
-                    rdma_metadata=_model_dump(readable.metadata()),
+                    rdma_metadata=_limit_transfer_metadata(
+                        readable.metadata(), tensor_bytes
+                    ),
                 )
             self._leases.track_fanout(
                 readables,
