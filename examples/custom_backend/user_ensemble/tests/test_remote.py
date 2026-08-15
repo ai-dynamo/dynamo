@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -22,8 +20,9 @@ pytest.importorskip(
 
 from dynamo.workflow import (  # noqa: E402
     GenerateEndpointBinding,
+    InlineBinding,
     RemoteBinding,
-    WorkflowExecutor,
+    WorkflowOrchestrator,
 )
 from examples.custom_backend.user_ensemble.remote import (  # noqa: E402
     classifier_worker as classifier_worker_module,
@@ -90,6 +89,7 @@ def test_remote_plan_uses_nixl_fanout_and_stock_generate_protocol():
     assert type(plan.bindings["encoder"]) is RemoteBinding
     assert type(plan.bindings["classifier"]) is RemoteBinding
     assert isinstance(plan.bindings["generator"], GenerateEndpointBinding)
+    assert plan.bindings["response"] == InlineBinding("response")
     assert plan.bindings["encoder"].endpoint_id == ENCODER_ENDPOINT
     assert plan.bindings["classifier"].endpoint_id == CLASSIFIER_ENDPOINT
     assert plan.bindings["generator"].endpoint_id == GENERATOR_ENDPOINT
@@ -99,44 +99,27 @@ def test_remote_plan_uses_nixl_fanout_and_stock_generate_protocol():
         "generator.request": "inline",
         "generator.encoder_features": "nixl",
         "generator.encoder_metadata": "inline",
+        "response.completion": "inline",
+        "response.scores": "inline",
     }
 
 
-async def test_frontend_provider_binds_plan_and_result_adapter(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    executor = object.__new__(WorkflowExecutor)
-    bind = AsyncMock(return_value=executor)
+async def test_frontend_provider_binds_remote_plan_and_inline_response():
+    orchestrator = object.__new__(WorkflowOrchestrator)
+    bind = AsyncMock(return_value=orchestrator)
     runtime = object()
-    config = SimpleNamespace(model_path=None, model_name="served-workflow")
-    template = Path("templates/vision.jinja")
-    monkeypatch.setenv("DYN_MODEL", "org/text-model")
-    monkeypatch.setenv("DYN_CUSTOM_JINJA_TEMPLATE", str(template))
 
     with patch(
-        "examples.custom_backend.user_ensemble.remote.provider.WorkflowExecutor.bind",
+        "examples.custom_backend.user_ensemble.remote.provider.WorkflowOrchestrator.bind",
         bind,
     ):
-        application = await provide_workflow(runtime, config)
+        provided = await provide_workflow(runtime)
 
     assert bind.await_args.args == (compile_remote_workflow(),)
-    assert bind.await_args.kwargs == {"runtime": runtime}
-    assert application.executor is executor
-    assert application.model_path == "org/text-model"
-    assert application.model_name == "served-workflow"
-    assert application.custom_template_path == template
-    assert application.result_adapter(
-        {
-            "chunk": {"token_ids": [42], "engine_data": {"trace": "kept"}},
-            "scores": {"answer": 1.0},
-        }
-    ) == {
-        "token_ids": [42],
-        "engine_data": {
-            "trace": "kept",
-            "ensemble": {"classifier_scores": {"answer": 1.0}},
-        },
-    }
+    assert bind.await_args.kwargs["runtime"] is runtime
+    response = bind.await_args.kwargs["inline_runners"]["response"]
+    assert response.contract.id == "ensemble-response"
+    assert provided is orchestrator
 
 
 async def test_classifier_worker_serves_workflow_protocol_and_closes_carrier():

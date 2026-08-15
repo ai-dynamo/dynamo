@@ -7,6 +7,7 @@ from dynamo.workflow import (
     DeploymentSpec,
     ExecutionPlan,
     GenerateEndpointBinding,
+    InlineBinding,
     RemoteBinding,
     compile_workflow,
 )
@@ -31,6 +32,7 @@ def compile_remote_workflow() -> ExecutionPlan:
                     tensor_carrier="nixl",
                 ),
                 "generator": GenerateEndpointBinding(GENERATOR_ENDPOINT),
+                "response": InlineBinding("response"),
             }
         ),
     )

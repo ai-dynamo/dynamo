@@ -43,3 +43,43 @@ class DummyClassifier:
                 "negative-mean": 1.0 - positive,
             }
         }
+
+
+class EnsembleResponseStage:
+    """Join the completed generation and classifier result for the frontend."""
+
+    contract = StageContract(
+        id="ensemble-response",
+        inputs={
+            "completion": ValueSpec(type="json"),
+            "scores": ValueSpec(type="json"),
+        },
+        outputs={"chunk": ValueSpec(type="json")},
+    )
+
+    async def run(
+        self, inputs: Mapping[str, Any], context: StageContext
+    ) -> Mapping[str, Any]:
+        context.raise_if_cancelled()
+        completion = inputs["completion"]
+        scores = inputs["scores"]
+        if not isinstance(completion, Mapping):
+            raise TypeError("ensemble response requires a completion object")
+        if not isinstance(scores, Mapping):
+            raise TypeError("ensemble response requires a scores object")
+
+        chunk = dict(completion)
+        engine_data = chunk.get("engine_data") or {}
+        if not isinstance(engine_data, Mapping):
+            raise TypeError("completion engine_data must be an object when present")
+        merged_engine_data = dict(engine_data)
+        ensemble = merged_engine_data.get("ensemble") or {}
+        if not isinstance(ensemble, Mapping):
+            raise TypeError(
+                "completion ensemble metadata must be an object when present"
+            )
+        merged_ensemble = dict(ensemble)
+        merged_ensemble["classifier_scores"] = dict(scores)
+        merged_engine_data["ensemble"] = merged_ensemble
+        chunk["engine_data"] = merged_engine_data
+        return {"chunk": chunk}
