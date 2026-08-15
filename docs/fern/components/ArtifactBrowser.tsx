@@ -461,7 +461,7 @@ export function ArtifactBrowser() {
           {publishedCrates.map((a) => (
             <ArtifactRow key={a.name} artifact={a} />
           ))}
-          <GroupHeader label="Frontend crate dependencies — own release lines" cat="crate" />
+          <GroupHeader label="Frontend crate dependencies (own release lines)" cat="crate" />
           {consumedCrates.map((a) => (
             <ArtifactRow key={a.name} artifact={a} />
           ))}
