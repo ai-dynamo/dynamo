@@ -649,7 +649,7 @@ impl QuicResponseServer {
             transport.stream_receive_window(quinn::VarInt::from_u32(window));
         }
 
-        let socket = bind_reuseport_udp(bind_address).map_err(|error| {
+        let socket = bind_server_udp(bind_address, false).map_err(|error| {
             PipelineError::Generic(format!(
                 "failed binding QUIC response server socket on {bind_address}: {error}"
             ))
@@ -667,7 +667,7 @@ impl QuicResponseServer {
                     .take()
                     .expect("first QUIC response socket exists")
             } else {
-                bind_reuseport_udp(bound_address).map_err(|error| {
+                bind_server_udp(bound_address, true).map_err(|error| {
                     PipelineError::Generic(format!(
                         "failed binding QUIC response reuse-port socket {index} on {bound_address}: {error}"
                     ))
@@ -839,17 +839,27 @@ impl Drop for QuicResponseServer {
     }
 }
 
-fn bind_reuseport_udp(address: SocketAddr) -> std::io::Result<UdpSocket> {
+fn bind_server_udp(address: SocketAddr, join_reuseport: bool) -> std::io::Result<UdpSocket> {
     let socket = Socket::new(
         Domain::for_address(address),
         Type::DGRAM,
         Some(Protocol::UDP),
     )?;
-    socket.set_reuse_address(true)?;
     #[cfg(target_os = "linux")]
-    socket.set_reuse_port(true)?;
+    if join_reuseport {
+        socket.set_reuse_address(true)?;
+        socket.set_reuse_port(true)?;
+    }
     socket.set_nonblocking(true)?;
     socket.bind(&address.into())?;
+    // Bind the first endpoint exclusively so an ephemeral port cannot join an
+    // unrelated server's reuse-port group. Linux permits enabling reuse-port
+    // after that first bind, and the remaining seven endpoints can then join.
+    #[cfg(target_os = "linux")]
+    if !join_reuseport {
+        socket.set_reuse_address(true)?;
+        socket.set_reuse_port(true)?;
+    }
     Ok(socket.into())
 }
 
@@ -3070,5 +3080,18 @@ mod tests {
         drop(server);
         assert!(accept_shutdown.is_cancelled());
         assert!(!shutdown.is_cancelled());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn primary_udp_bind_is_exclusive_before_reuseport_siblings_join() {
+        let ephemeral = "127.0.0.1:0".parse().unwrap();
+        let primary = bind_server_udp(ephemeral, false).unwrap();
+        let bound = primary.local_addr().unwrap();
+        let sibling = bind_server_udp(bound, true).unwrap();
+        assert_eq!(sibling.local_addr().unwrap(), bound);
+
+        let other_primary = bind_server_udp(ephemeral, false).unwrap();
+        assert_ne!(other_primary.local_addr().unwrap(), bound);
     }
 }
