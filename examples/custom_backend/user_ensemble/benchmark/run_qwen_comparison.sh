@@ -14,6 +14,7 @@ LAUNCH_ROOT="${DYN_BENCH_LAUNCH_ROOT:-$REPO_ROOT}"
 WORKLOAD_ROOT="${DYN_BENCH_WORKLOAD_ROOT:-/dynamo-tmp/logs/08-05/qwen25-user-ensemble-textisl644-osl7-mixed1000/workload}"
 OUTPUT_ROOT="${DYN_BENCH_OUTPUT_ROOT:?set DYN_BENCH_OUTPUT_ROOT to a new result directory}"
 CONTAINER_IMAGE="${DYN_BENCH_CONTAINER_IMAGE:?set DYN_BENCH_CONTAINER_IMAGE}"
+AIPERF_BIN="${DYN_BENCH_AIPERF_BIN:-aiperf}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 MEASURED_INPUT="$WORKLOAD_ROOT/measured/image_custom_1000_textisl644.jsonl"
@@ -87,6 +88,7 @@ GPU_INFO="$(nvidia-smi \
     --query-gpu=name,power.limit,clocks.max.sm,memory.total \
     --format=csv,noheader,nounits | sed -n '1p')"
 TORCH_GPU_COUNT="$(python -c 'import torch; print(torch.cuda.device_count())')"
+AIPERF_VERSION="${DYN_BENCH_AIPERF_VERSION:-$("$AIPERF_BIN" --version 2>&1)}"
 
 python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
     capture-metadata \
@@ -97,7 +99,8 @@ python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark 
     --container-image "$CONTAINER_IMAGE" \
     --cuda-visible-devices "$CUDA_VISIBLE_DEVICES" \
     --gpu-info "$GPU_INFO" \
-    --torch-gpu-count "$TORCH_GPU_COUNT"
+    --torch-gpu-count "$TORCH_GPU_COUNT" \
+    --aiperf-version "$AIPERF_VERSION"
 
 sha256sum \
     "$REPO_ROOT/examples/custom_backend/user_ensemble/workflow.py" \
@@ -200,7 +203,7 @@ run_cell() {
 
     # The warmup is also the real-inference readiness gate. The measured run is
     # not started unless all 20 image-bearing requests complete successfully.
-    aiperf profile "${common_aiperf_args[@]}" \
+    "$AIPERF_BIN" profile "${common_aiperf_args[@]}" \
         --input-file "$WARMUP_INPUT" \
         --concurrency 20 \
         --conversation-num 20 \
@@ -221,7 +224,7 @@ run_cell() {
     SAMPLER_PID=$!
 
     TIMEFORMAT='%R'
-    { time aiperf profile "${common_aiperf_args[@]}" \
+    { time "$AIPERF_BIN" profile "${common_aiperf_args[@]}" \
         --input-file "$MEASURED_INPUT" \
         --concurrency 64 \
         --conversation-num 1000 \
