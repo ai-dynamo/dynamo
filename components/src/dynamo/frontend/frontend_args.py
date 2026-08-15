@@ -44,12 +44,13 @@ def validate_model_name(value: str) -> str:
 
 
 def validate_model_path(value: str) -> str:
-    """Validate that model-path is a valid directory on disk."""
-    if not os.path.isdir(value):
+    """Validate a local model directory or remote model identifier."""
+
+    if not isinstance(value, str) or not value.strip():
         raise argparse.ArgumentTypeError(
-            f"model-path must be a valid directory on disk, got: {value}"
+            f"model-path must be a non-empty path or model identifier, got: {value}"
         )
-    return value
+    return value.strip()
 
 
 def validate_custom_jinja_template(value: str) -> str:
@@ -428,7 +429,10 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--model-path",
             env_var="DYN_MODEL_PATH",
             default=None,
-            help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
+            help=(
+                "Local model directory or remote model identifier used for "
+                "frontend preprocessing."
+            ),
             arg_type=validate_model_path,
         )
         add_argument(
