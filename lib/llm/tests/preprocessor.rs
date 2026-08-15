@@ -1425,7 +1425,10 @@ mod embedding_without_chat_template {
                 Ok(_) => panic!("invalid environment value must fail construction"),
                 Err(err) => err,
             };
-            assert!(err.to_string().contains("expected true/false/yes/no/1/0"));
+            assert!(
+                err.to_string()
+                    .contains("expected true/false/on/off/yes/no/1/0")
+            );
         })
         .await;
     }

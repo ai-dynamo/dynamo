@@ -39,10 +39,12 @@ pytestmark = [
         (None, ModelInput.Text),
         ("0", ModelInput.Text),
         ("false", ModelInput.Text),
+        ("off", ModelInput.Text),
         ("no", ModelInput.Text),
         (" NO ", ModelInput.Text),
         ("1", ModelInput.Tokens),
         ("true", ModelInput.Tokens),
+        ("on", ModelInput.Tokens),
         ("yes", ModelInput.Tokens),
         (" TRUE ", ModelInput.Tokens),
     ],
@@ -59,7 +61,7 @@ def test_embedding_model_input(
     assert _embedding_model_input() == expected
 
 
-@pytest.mark.parametrize("env_value", ["", "on", "off", "yes-please"])
+@pytest.mark.parametrize("env_value", ["", "yes-please"])
 def test_embedding_model_input_rejects_invalid_values(
     monkeypatch: pytest.MonkeyPatch,
     env_value: str,
@@ -67,7 +69,7 @@ def test_embedding_model_input_rejects_invalid_values(
     monkeypatch.setenv("DYN_EMBEDDING_FRONTEND_TOKENIZATION", env_value)
     with pytest.raises(
         ValueError,
-        match="expected true/false/yes/no/1/0",
+        match="expected true/false/on/off/yes/no/1/0",
     ):
         _embedding_model_input()
 

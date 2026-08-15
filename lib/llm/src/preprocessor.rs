@@ -688,11 +688,7 @@ pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
 const EMBEDDING_ADD_SPECIAL_TOKENS_ENV: &str = "DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS";
 
 fn parse_embedding_add_special_tokens(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" => Some(true),
-        "0" | "false" | "no" => Some(false),
-        _ => None,
-    }
+    parse_bool_opt(value)
 }
 
 fn embedding_add_special_tokens_env() -> Result<Option<bool>> {
@@ -701,13 +697,13 @@ fn embedding_add_special_tokens_env() -> Result<Option<bool>> {
             Some(value) => Ok(Some(value)),
             None => bail!(
                 "invalid value {value:?} for {EMBEDDING_ADD_SPECIAL_TOKENS_ENV}; \
-                 expected true/false/yes/no/1/0"
+                 expected true/false/on/off/yes/no/1/0"
             ),
         },
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => bail!(
             "{EMBEDDING_ADD_SPECIAL_TOKENS_ENV} must be valid Unicode and one of \
-             true/false/yes/no/1/0"
+             true/false/on/off/yes/no/1/0"
         ),
     }
 }
@@ -718,13 +714,13 @@ mod embedding_add_special_tokens_env_tests {
 
     #[test]
     fn parser_uses_the_documented_truth_table() {
-        for value in ["1", "true", "yes", " TRUE ", "Yes"] {
+        for value in ["1", "true", "on", "yes", " TRUE ", "On", "Yes"] {
             assert_eq!(parse_embedding_add_special_tokens(value), Some(true));
         }
-        for value in ["0", "false", "no", " FALSE ", "No"] {
+        for value in ["0", "false", "off", "no", " FALSE ", "Off", "No"] {
             assert_eq!(parse_embedding_add_special_tokens(value), Some(false));
         }
-        for value in ["", "on", "off", "yes-please"] {
+        for value in ["", "yes-please"] {
             assert_eq!(parse_embedding_add_special_tokens(value), None);
         }
     }
