@@ -634,7 +634,11 @@ class Connection:
         # If NIXL bindings are absent, `nixl_api` is a `_NixlImportProxy`
         # and the next line raises the deferred ImportError on attribute
         # access — no explicit guard needed.
-        self._nixl = nixl_api.nixl_agent(self._name)
+        if connector.enable_progress_thread:
+            self._nixl = nixl_api.nixl_agent(self._name)
+        else:
+            config = nixl_api.nixl_agent_config(enable_prog_thread=False)
+            self._nixl = nixl_api.nixl_agent(self._name, config)
 
         self._remote_refs: dict[str, int] = {}  # ref-count remote agents
         self._loaded_remote_names: set[str] = set()
@@ -806,6 +810,8 @@ class Connector:
     def __init__(
         self,
         worker_id: Optional[str] = None,
+        *,
+        enable_progress_thread: bool = True,
     ) -> None:
         """
         Creates a new Connector instance.
@@ -825,9 +831,12 @@ class Connector:
         )
         if not isinstance(worker_id, str) or len(worker_id) == 0:
             raise TypeError("Argument `worker_id` must be a non-empty `str` or `None`.")
+        if not isinstance(enable_progress_thread, bool):
+            raise TypeError("Argument `enable_progress_thread` must be of type `bool`.")
 
         self._connection_count: int = 0
         self._worker_id = worker_id
+        self._enable_progress_thread = enable_progress_thread
         self._hostname = socket.gethostname()
 
         self._shared_connection: Optional[Connection] = None
@@ -882,6 +891,12 @@ class Connector:
         Get the name of the worker.
         """
         return self._worker_id
+
+    @property
+    def enable_progress_thread(self) -> bool:
+        """Whether each NIXL agent owns a background progress thread."""
+
+        return self._enable_progress_thread
 
     async def begin_read(
         self,

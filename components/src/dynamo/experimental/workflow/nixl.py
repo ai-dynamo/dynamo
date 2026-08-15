@@ -342,6 +342,7 @@ class NixlTensorCarrier:
         torch_module: Any = None,
         send_pool_capacity: int = 0,
         send_pool_bytes: int = 0,
+        enable_progress_thread: bool = False,
     ) -> None:
         if nixl_module is None:
             try:
@@ -371,11 +372,17 @@ class NixlTensorCarrier:
             raise ValueError(
                 "send_pool_capacity and send_pool_bytes must both be zero or positive"
             )
+        if not isinstance(enable_progress_thread, bool):
+            raise TypeError("enable_progress_thread must be a bool")
         self._nixl = nixl_module
         self._torch = torch_module
         if connector is None:
-            self._connector = nixl_module.Connector()
-            self._export_connector_factory = nixl_module.Connector
+            self._connector = nixl_module.Connector(
+                enable_progress_thread=enable_progress_thread
+            )
+            self._export_connector_factory = lambda: nixl_module.Connector(
+                enable_progress_thread=enable_progress_thread
+            )
         else:
             self._connector = connector
             self._export_connector_factory = None

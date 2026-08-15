@@ -122,6 +122,7 @@ async def test_encoder_worker_serves_and_cleans_up(serve_error):
     from_backend.assert_called_once_with(
         backend_class.return_value,
         model="org/model",
+        batch_queue_wait_s=0.0,
         name="workflow-vision",
     )
     assert runtime.endpoint_ids == ["workflows.encoder.generate"]
