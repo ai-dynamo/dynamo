@@ -39,6 +39,14 @@ inputs:
   ecr_repository:
     description: 'ECR repository path'
     required: true
+  output_registry:
+    description: 'Optional registry hostname for final image tags; defaults to ECR'
+    required: false
+    default: ''
+  output_repository:
+    description: 'Optional repository path for final image tags; defaults to the ECR repository'
+    required: false
+    default: ''
   azure_acr_hostname:
     description: 'Optional Azure ACR hostname for docker login'
     required: false
@@ -171,9 +179,12 @@ runs:
       env:
         ECR_REGISTRY: ${{ inputs.ecr_registry }}
         ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+        OUTPUT_REGISTRY: ${{ inputs.output_registry }}
+        OUTPUT_REPOSITORY: ${{ inputs.output_repository }}
       run: |
-        ECR_DEFAULT_IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
-        IMAGE_URIS=("${ECR_DEFAULT_IMAGE_BASE}:${{ inputs.image_tag }}")
+        IMAGE_REGISTRY="${OUTPUT_REGISTRY:-${ECR_REGISTRY}}"
+        IMAGE_REPOSITORY="${OUTPUT_REPOSITORY:-${ECR_REPOSITORY}}"
+        IMAGE_URIS=("${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${{ inputs.image_tag }}")
 
         # Append optional full extra image URIs provided by caller.
         while IFS= read -r extra_image; do

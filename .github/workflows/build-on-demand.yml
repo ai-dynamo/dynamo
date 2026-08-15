@@ -73,6 +73,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
+      push_to_acr: true
     secrets: inherit
 
   sglang-build:
@@ -101,16 +102,6 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
-    secrets: inherit
-
-  vllm-copy-to-acr:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
-    uses: ./.github/workflows/shared-copy.yml
-    with:
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      copy_timeout_minutes: 20
     secrets: inherit
 
   sglang-copy-to-acr:
@@ -156,11 +147,12 @@ jobs:
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           ecr_registry: ${{ vars.ECR_REGISTRY }}
           ecr_repository: ${{ vars.ECR_REPOSITORY }}
+          output_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          output_repository: ${{ vars.ACR_REPOSITORY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-operator
             ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.init.outputs.sanitized_ref_name }}-operator
 
   # ============================================================================
@@ -175,20 +167,17 @@ jobs:
   #
   # Two modes:
   #   (a) build_vllm=true + build_vllm_placeholder=true
-  #       -> chains vllm-build -> vllm-copy-to-acr -> here, exactly as pr.yaml's
-  #          snapshot-placeholder-vllm does, and uses the freshly copied ACR tag.
+  #       -> chains vllm-build -> here and uses the freshly built ACR tag.
   #   (b) placeholder_base_image=<existing ACR vllm-runtime URI>
   #       -> skips the runtime build entirely and builds straight from that tag.
   snapshot-placeholder-vllm:
     name: vLLM Snapshot Placeholder
-    needs: [init, vllm-copy-to-acr]
-    # `always()` so mode (b) still runs while vllm-build/vllm-copy-to-acr are
-    # skipped. Mode (a) additionally requires the ACR copy to have succeeded,
-    # because BASE_IMAGE points at its output tag.
+    needs: [init, vllm-build]
+    # `always()` lets mode (b) run while vllm-build is skipped.
     if: |
       always() && !cancelled() && inputs.build_vllm_placeholder &&
       (inputs.placeholder_base_image != '' ||
-       needs.vllm-copy-to-acr.result == 'success')
+       needs.vllm-build.result == 'success')
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -197,40 +186,25 @@ jobs:
           persist-credentials: false
 
       # Resolve BASE_IMAGE and the output tags. An explicit placeholder_base_image
-      # wins; otherwise use the ACR tag just produced by vllm-copy-to-acr.
-      # Tags mirror shared-copy.yml's "${DYNAMO_VERSION}-ci-${SOURCE_TAG}" shape.
+      # wins; otherwise use the ACR tag just produced by vllm-build.
       - name: Resolve placeholder image references
         id: refs
         shell: bash
         env:
           EXPLICIT_BASE: ${{ inputs.placeholder_base_image }}
-          COPIED_BASE: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
-          RUNTIME_VERSION: ${{ needs.vllm-copy-to-acr.outputs.runtime_version }}
           ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
           SANITIZED_REF: ${{ needs.init.outputs.sanitized_ref_name }}
           GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           ACR_IMAGE_BASE="${ACR_HOSTNAME}/ai-dynamo/dynamo"
+          VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' pyproject.toml | head -1)
+          VERSION="${VERSION%%[-+]*}"
 
           if [[ -n "${EXPLICIT_BASE}" ]]; then
             BASE_IMAGE="${EXPLICIT_BASE}"
-            # Reuse the base tag's own version prefix so the placeholder sits
-            # next to the runtime it was built from. Falls back to the
-            # workspace version when the tag is not in <ver>-ci-<sha>- form.
-            BASE_TAG="${BASE_IMAGE##*:}"
-            VERSION="${BASE_TAG%%-ci-*}"
-            if [[ "${VERSION}" == "${BASE_TAG}" ]]; then
-              VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' pyproject.toml | head -1)
-              VERSION="${VERSION%%[-+]*}"
-            fi
           else
-            if [[ -z "${COPIED_BASE}" ]]; then
-              echo "::error::vllm-copy-to-acr produced no image_tag; set placeholder_base_image or build_vllm=true"
-              exit 1
-            fi
-            BASE_IMAGE="${ACR_IMAGE_BASE}:${COPIED_BASE}"
-            VERSION="${RUNTIME_VERSION}"
+            BASE_IMAGE="${ACR_IMAGE_BASE}:${GIT_SHA}-vllm-runtime"
           fi
 
           # <sha>-vllm-placeholder is the primary (ECR) tag, matching pr.yaml's
@@ -262,12 +236,13 @@ jobs:
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           ecr_registry: ${{ vars.ECR_REGISTRY }}
           ecr_repository: ${{ vars.ECR_REPOSITORY }}
+          output_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          output_repository: ${{ vars.ACR_REPOSITORY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ steps.refs.outputs.acr_ci_image }}
-            ${{ steps.refs.outputs.acr_sha_image }}
             ${{ steps.refs.outputs.acr_branch_image }}
           extra_build_args: |
             BASE_IMAGE=${{ steps.refs.outputs.base_image }}
@@ -342,12 +317,13 @@ jobs:
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           ecr_registry: ${{ vars.ECR_REGISTRY }}
           ecr_repository: ${{ vars.ECR_REPOSITORY }}
+          output_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          output_repository: ${{ vars.ACR_REPOSITORY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ steps.refs.outputs.acr_ci_image }}
-            ${{ steps.refs.outputs.acr_sha_image }}
             ${{ steps.refs.outputs.acr_branch_image }}
 
       - name: Summarize snapshot agent images
