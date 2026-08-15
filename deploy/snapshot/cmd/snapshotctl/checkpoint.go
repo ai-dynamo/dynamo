@@ -16,13 +16,14 @@ import (
 const defaultGeneratedCheckpointIDPrefix = "manual-snapshot"
 
 type checkpointOptions struct {
-	ManifestPath       string
-	Namespace          string
-	KubeContext        string
-	CheckpointID       string
-	Container          string
-	CudaCheckpointWrap bool
-	Timeout            time.Duration
+	ManifestPath           string
+	Namespace              string
+	KubeContext            string
+	CheckpointID           string
+	Container              string
+	CudaCheckpointWrap     bool
+	EnableCUDAVMMInterpose bool
+	Timeout                time.Duration
 }
 
 type result struct {
@@ -69,13 +70,27 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	}
 
 	checkpointJobName := pod.Name + "-checkpoint"
-	job, err := snapshotprotocol.NewCheckpointJob(&corev1.PodTemplateSpec{
+	podTemplate := &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      pod.Labels,
 			Annotations: pod.Annotations,
 		},
 		Spec: *pod.Spec.DeepCopy(),
-	}, snapshotprotocol.CheckpointJobOptions{
+	}
+	if opts.EnableCUDAVMMInterpose {
+		targetContainer := containerByName(podTemplate.Spec.Containers, containers[0])
+		if targetContainer == nil {
+			return nil, fmt.Errorf("checkpoint job pod template has no container named %q", containers[0])
+		}
+		if len(targetContainer.Command) == 0 {
+			return nil, fmt.Errorf("checkpoint job requires container.command when CUDA VMM interposition is enabled")
+		}
+		targetContainer.Command, targetContainer.Args = wrapWithCUDAVMMInterposeLauncher(
+			targetContainer.Command,
+			targetContainer.Args,
+		)
+	}
+	job, err := snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{
 		Namespace:       namespace,
 		TargetContainer: containers[0],
 		CheckpointID:    checkpointID,
@@ -135,4 +150,20 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		res.BoundContent = *snap.Status.BoundPodSnapshotContentName
 	}
 	return res, nil
+}
+
+func containerByName(containers []corev1.Container, name string) *corev1.Container {
+	for index := range containers {
+		if containers[index].Name == name {
+			return &containers[index]
+		}
+	}
+	return nil
+}
+
+func wrapWithCUDAVMMInterposeLauncher(command, args []string) ([]string, []string) {
+	wrappedArgs := make([]string, 0, len(command)+len(args))
+	wrappedArgs = append(wrappedArgs, command...)
+	wrappedArgs = append(wrappedArgs, args...)
+	return []string{"snapshot-cuda-vmm-launch"}, wrappedArgs
 }
