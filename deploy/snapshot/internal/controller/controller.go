@@ -520,12 +520,13 @@ func (w *NodeController) startRestoreForContainer(
 }
 
 // runRestore runs the full restore workflow for one target container:
-//  1. Annotate the pod with restore in_progress
-//  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
-//  3. Write a restore-complete sentinel: the CRIU-restored process resumes
+//  1. Remove any restore-complete sentinel left by an earlier incarnation
+//  2. Annotate the pod with restore in_progress
+//  3. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
+//  4. Write a restore-complete sentinel: the CRIU-restored process resumes
 //     inside the polling loop that waits on this file, exits quiescence,
 //     and resumes the engine
-//  4. Annotate the pod with restore completed
+//  5. Annotate the pod with restore completed
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID string, checkpointLocation checkpointLocations, restoreAttemptKey string, startedAt time.Time) error {
 	releaseOnExit := true
 	defer func() {
@@ -574,6 +575,14 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return nil
 	}
 
+	placeholderHostPID, _, err := w.runtime.ResolveContainer(restoreCtx, containerID)
+	if err != nil {
+		return fmt.Errorf("resolve restore standby container: %w", err)
+	}
+	if err := snapshotruntime.RemoveControlSentinel(placeholderHostPID, snapshotprotocol.RestoreCompleteFile); err != nil {
+		return fmt.Errorf("remove stale restore-complete sentinel: %w", err)
+	}
+
 	if err := setRestoreStatus(snapshotprotocol.RestoreStatusInProgress); err != nil {
 		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
 	}
@@ -591,7 +600,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
 	}
-	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req, w.injector)
+	placeholderHostPID, err = executor.Restore(restoreCtx, w.runtime, log, req, w.injector)
 	if err != nil {
 		log.Error(err, "External restore failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
