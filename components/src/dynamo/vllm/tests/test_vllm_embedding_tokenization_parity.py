@@ -18,10 +18,7 @@ pytestmark = [
 ]
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[5]
-TOKENIZER_DIR = (
-    WORKSPACE_ROOT
-    / "lib/llm/tests/data/sample-models/TinyLlama_v1.1"
-)
+TOKENIZER_DIR = WORKSPACE_ROOT / "lib/llm/tests/data/sample-models/TinyLlama_v1.1"
 PARITY_FIXTURE = json.loads(
     (TOKENIZER_DIR / "embedding_right_truncation_parity.json").read_text()
 )
