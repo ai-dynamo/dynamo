@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import uuid
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -196,6 +197,14 @@ class _Lease:
     on_release: Optional[Callable[[], None]]
 
 
+@dataclass
+class _ReceivePool:
+    backing: Any
+    descriptors: tuple[Any, ...]
+    available: asyncio.Queue[int]
+    connection: Any
+
+
 class NixlLeaseRegistry:
     """Keep producer memory registered until every read is confirmed complete."""
 
@@ -375,6 +384,9 @@ class NixlTensorCarrier:
         send_pool_capacity: int = 0,
         send_pool_bytes: int = 0,
         enable_progress_thread: bool = False,
+        receive_pool_capacity: Optional[int] = None,
+        receive_pool_max_bytes: Optional[int] = None,
+        receive_pool_max_size_classes: Optional[int] = None,
     ) -> None:
         if nixl_module is None:
             try:
@@ -394,15 +406,38 @@ class NixlTensorCarrier:
             not isinstance(receive_device, str) or not receive_device
         ):
             raise ValueError("NIXL receive_device must be non-empty when set")
+        receive_pool_capacity = self._receive_pool_option(
+            receive_pool_capacity, "DYN_NIXL_RECEIVE_POOL_CAPACITY"
+        )
+        receive_pool_max_bytes = self._receive_pool_option(
+            receive_pool_max_bytes, "DYN_NIXL_RECEIVE_POOL_MAX_BYTES"
+        )
+        receive_pool_max_size_classes = self._receive_pool_option(
+            receive_pool_max_size_classes,
+            "DYN_NIXL_RECEIVE_POOL_MAX_SIZE_CLASSES",
+        )
         for field_name, value in (
             ("send_pool_capacity", send_pool_capacity),
             ("send_pool_bytes", send_pool_bytes),
+            ("receive_pool_capacity", receive_pool_capacity),
+            ("receive_pool_max_bytes", receive_pool_max_bytes),
+            ("receive_pool_max_size_classes", receive_pool_max_size_classes),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{field_name} must be a non-negative integer")
         if bool(send_pool_capacity) != bool(send_pool_bytes):
             raise ValueError(
                 "send_pool_capacity and send_pool_bytes must both be zero or positive"
+            )
+        receive_pool_options = (
+            receive_pool_capacity,
+            receive_pool_max_bytes,
+            receive_pool_max_size_classes,
+        )
+        if any(receive_pool_options) and not all(receive_pool_options):
+            raise ValueError(
+                "receive pool capacity, max bytes, and max size classes must "
+                "all be zero or positive"
             )
         if not isinstance(enable_progress_thread, bool):
             raise TypeError("enable_progress_thread must be a bool")
@@ -429,6 +464,23 @@ class NixlTensorCarrier:
         self._send_pool_backing: Any = None
         self._send_pool_descriptors: list[Any] = []
         self._send_pool_connection: Any = None
+        self._receive_pool_capacity = receive_pool_capacity
+        self._receive_pool_max_bytes = receive_pool_max_bytes
+        self._receive_pool_max_size_classes = receive_pool_max_size_classes
+        self._receive_pool_lock = asyncio.Lock()
+        self._receive_pools: dict[tuple[str, int], _ReceivePool] = {}
+
+    @staticmethod
+    def _receive_pool_option(value: Optional[int], env_name: str) -> int:
+        if value is None:
+            raw = os.environ.get(env_name, "0")
+            try:
+                value = int(raw)
+            except ValueError as error:
+                raise ValueError(
+                    f"{env_name} must be a non-negative integer"
+                ) from error
+        return value
 
     @property
     def active_leases(self) -> int:
@@ -604,6 +656,25 @@ class NixlTensorCarrier:
             raise WorkflowExecutionError(
                 "NIXL tensor shape exceeds the remote transfer buffer"
             )
+        pool = await self._receive_pool(transfer_bytes, device)
+        if pool is not None:
+            slot = await pool.available.get()
+            try:
+                operation = await self._connector.begin_read(
+                    rdma_metadata, pool.descriptors[slot]
+                )
+                try:
+                    await operation.wait_for_completion()
+                finally:
+                    operation.__exit__(None, None, None)
+                return (
+                    pool.backing[slot][:tensor_bytes]
+                    .view(dtype)
+                    .view(parsed.shape)
+                    .clone()
+                )
+            finally:
+                pool.available.put_nowait(slot)
         storage = self._torch.empty(
             transfer_bytes, dtype=self._torch.uint8, device=device
         )
@@ -615,6 +686,55 @@ class NixlTensorCarrier:
             operation.__exit__(None, None, None)
         return storage[:tensor_bytes].view(dtype).view(parsed.shape)
 
+    async def _receive_pool(
+        self, transfer_bytes: int, device: str
+    ) -> Optional[_ReceivePool]:
+        if (
+            not self._receive_pool_capacity
+            or transfer_bytes <= 0
+            or transfer_bytes > self._receive_pool_max_bytes
+        ):
+            return None
+        key = (str(device), transfer_bytes)
+        pool = self._receive_pools.get(key)
+        if pool is not None:
+            return pool
+        async with self._receive_pool_lock:
+            pool = self._receive_pools.get(key)
+            if pool is not None:
+                return pool
+            if len(self._receive_pools) >= self._receive_pool_max_size_classes:
+                return None
+            connection = await self._connector._create_connection()
+            backing = self._torch.empty(
+                (self._receive_pool_capacity, transfer_bytes),
+                dtype=self._torch.uint8,
+                device=device,
+            )
+            available: asyncio.Queue[int] = asyncio.Queue(
+                maxsize=self._receive_pool_capacity
+            )
+            descriptors = []
+            try:
+                for slot in range(self._receive_pool_capacity):
+                    descriptor = self._nixl.Descriptor(backing[slot])
+                    descriptor.register_with_connector(connection)
+                    descriptors.append(descriptor)
+                    available.put_nowait(slot)
+            except BaseException:
+                for descriptor in descriptors:
+                    if descriptor.is_registered:
+                        descriptor.deregister_with_connector(connection)
+                raise
+            pool = _ReceivePool(
+                backing=backing,
+                descriptors=tuple(descriptors),
+                available=available,
+                connection=connection,
+            )
+            self._receive_pools[key] = pool
+            return pool
+
     async def close(self) -> None:
         await self._leases.close()
         if self._leases.active_count == 0 and self._send_pool_connection is not None:
@@ -623,3 +743,8 @@ class NixlTensorCarrier:
                     descriptor.deregister_with_connector(self._send_pool_connection)
             self._send_pool_descriptors.clear()
             self._send_pool_backing = None
+        for pool in self._receive_pools.values():
+            for descriptor in pool.descriptors:
+                if descriptor.is_registered:
+                    descriptor.deregister_with_connector(pool.connection)
+        self._receive_pools.clear()
