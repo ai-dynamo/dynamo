@@ -329,7 +329,7 @@ Note: `global.*.install` controls whether the bundled subcharts are deployed. Wh
 
 ## 📚 Additional Resources
 
-- [Dynamo Cloud Deployment Installation Guide](../../../../docs/fern/kubernetes/installation-guide.md)
+- [Dynamo Cloud Deployment Installation Guide](../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md)
 - [NATS Documentation](https://docs.nats.io/)
 - [etcd Documentation](https://etcd.io/docs/)
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)

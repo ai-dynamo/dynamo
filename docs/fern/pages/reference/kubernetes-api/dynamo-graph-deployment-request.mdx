@@ -1,0 +1,961 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: DynamoGraphDeploymentRequest (DGDR) Reference
+subtitle: Field reference and lifecycle for the DynamoGraphDeploymentRequest custom resource — Dynamo's deploy-by-intent generator.
+---
+
+A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's deploy-by-intent generator for [`DynamoGraphDeployment`](dynamo-graph-deployment.mdx) (DGD) resources. You describe what you want to run and your performance targets; the profiler determines a configuration and produces the DGD that serves traffic.
+
+For the task-oriented walkthrough — authoring a request step by step — see [Auto Deploy with DGDR](../../kubernetes/auto-deployment/auto-deploy-with-dgdr.md). For ready-to-copy manifests, see [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx).
+
+This page documents the `nvidia.com/v1beta1` API — the served, storage version.
+
+## Spec reference
+
+Only `model` is required; every other field has a default or is auto-detected.
+
+<ParamField path="model" type="string" required={true}>
+  Model to deploy — a HuggingFace ID (for example `Qwen/Qwen3-0.6B`, `meta-llama/Llama-3-70b`) or a private model name. Must be non-empty.
+</ParamField>
+
+<ParamField path="image" type="string">
+  Container image for the profiling job (the planner image), for example `nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0`. For Dynamo < 1.1.0, use `dynamo-frontend`.
+</ParamField>
+
+<ParamField path="runtimeVersionOverride" type="string">
+  Dynamo runtime version propagated to generated DGD components when `image` has no parseable semantic-version tag or its tag does not identify the intended runtime.
+</ParamField>
+
+<ParamField path="backend" type="string" default="auto">
+  Inference backend used for profiling and deployment.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
+</ParamField>
+
+<ParamField path="searchStrategy" type="string" default="rapid">
+  Profiling depth. `rapid` performs a fast, AIC-backed sweep (~30s); `thorough` explores more configurations on real GPUs (2–4h).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>rapid</Badge> <Badge intent="note" minimal>thorough</Badge></span>
+</ParamField>
+
+<ParamField path="autoApply" type="boolean" default="true">
+  Automatically create a DGD after profiling completes. When `false`, the generated spec is stored in `status` for manual review instead of being applied.
+</ParamField>
+
+### Profiler image version compatibility
+
+When `spec.image` is omitted, the operator defaults it on creation to
+`nvcr.io/nvidia/ai-dynamo/dynamo-planner:<operatorVersion>`. The operator
+requires `operatorVersion` to be valid semantic versioning, so the default
+image has a parseable version tag.
+
+The DGDR-level `spec.runtimeVersionOverride` supplies a default for generated
+DGD components. After the profiler materializes the DGD and applies
+`spec.overrides.dgd`, the operator copies the DGDR value only to components that
+do not already have an explicit override. This behavior applies across profiler
+versions. Profilers through Dynamo 1.3.0 may discard the field while parsing the
+DGDR, but the operator reapplies the default from the stored DGDR.
+
+Set `spec.runtimeVersionOverride` when an effective generated component image
+uses a non-semantic-version tag or digest, or when its tag does not identify the
+intended Dynamo runtime version. The DGDR value also covers images replaced
+through `spec.overrides.dgd` when that component does not set its own
+`runtimeVersionOverride`. An explicit component-level value takes precedence.
+
+While a DGDR has `autoApply: false`, you may set or change
+`runtimeVersionOverride` during `Profiling` or `Ready`. After it reaches
+`Ready`, you may enable `autoApply`, either separately or while changing the
+override. The operator applies the current value while creating the new DGD.
+These updates do not modify `status.profilingResults.selectedConfig` or the
+`nvidia.com/generated-dgd-spec` annotation. Other spec updates remain
+forbidden after profiling starts.
+
+When the DGDR-level field is unset, each effective generated DGD component
+follows the DGD component rules independently. An overridden image without a
+parseable semantic-version tag requires `runtimeVersionOverride` on that
+component.
+
+Profilers through Dynamo 1.3.0 discard the embedded DGD override's `apiVersion`
+and `kind`, then directly merge the remaining dictionary into a generated
+`v1alpha1` DGD. Raw storage preserves the override fields but does not convert
+between DGD schemas. Use a `v1alpha1`-shaped override under `spec.services`; a
+`v1beta1` `spec.components` override is not translated into the generated
+service.
+
+<ParamField path="workload" type="WorkloadSpec">
+  Expected workload characteristics for SLA-based profiling.
+</ParamField>
+
+<Indent>
+  <ParamField path="isl" type="integer" default="4000">
+    Input Sequence Length — expected average input tokens.
+  </ParamField>
+  <ParamField path="osl" type="integer" default="1000">
+    Output Sequence Length — expected average output tokens.
+  </ParamField>
+  <ParamField path="concurrency" type="number">
+    Optional target concurrency level. Mutually exclusive with `requestRate`. When neither field is set and the Planner is disabled, the profiler uses its default maximum-throughput selection.
+  </ParamField>
+  <ParamField path="requestRate" type="number">
+    Optional target request rate in requests per second. Mutually exclusive with `concurrency`. When neither field is set and the Planner is disabled, the profiler uses its default maximum-throughput selection.
+  </ParamField>
+</Indent>
+
+<ParamField path="sla" type="SLASpec">
+  Service-level agreement targets that drive profiling optimization.
+</ParamField>
+
+<Indent>
+  <ParamField path="ttft" type="number" default="2000">
+    Time To First Token target, in milliseconds.
+  </ParamField>
+  <ParamField path="itl" type="number" default="30">
+    Inter-Token Latency target, in milliseconds.
+  </ParamField>
+  <ParamField path="e2eLatency" type="number">
+    End-to-end request latency target, in milliseconds. An alternative to specifying `ttft` + `itl`; cannot be combined with them.
+  </ParamField>
+  <ParamField path="optimizationType" type="OptimizationType">
+    Optimization target for SLA profiling.
+
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>latency</Badge> <Badge intent="note" minimal>throughput</Badge></span>
+  </ParamField>
+</Indent>
+
+
+<ParamField path="hardware" type="HardwareSpec">
+  GPU hardware for profiling and deployment.
+</ParamField>
+
+<Indent>
+  <ParamField path="gpuSku" type="GPUSKUType">
+    GPU type to target (see [SKU format](#sku-format)). When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose the GPU type; discovery and `totalGpus` are then restricted to matching nodes.
+  </ParamField>
+  <ParamField path="vramMb" type="number">
+    VRAM per GPU in MiB. Auto-detected from cluster GPU nodes when omitted.
+  </ParamField>
+  <ParamField path="totalGpus" type="integer">
+    GPU budget for profiling and deployment; the profiler uses it to determine parallelism and replica count. When omitted, computed by counting GPUs on discovered nodes (filtered by `gpuSku` when set), temporarily capped at 32 to limit the profiler search space. Set explicitly to override the cap.
+  </ParamField>
+  <ParamField path="numGpusPerNode" type="integer">
+    GPUs per node. Auto-detected when omitted.
+  </ParamField>
+  <ParamField path="interconnect" type="string">
+    Primary GPU-to-GPU interconnect within a node, for example `nvlink` or `pcie`. Capability metadata for profiling and planning only — it does not enable any interconnect. Best-effort discovery distinguishes `nvlink` from `pcie` when omitted. An over-optimistic value can lead the planner to overestimate intra-node bandwidth and pick overly aggressive parallelism.
+  </ParamField>
+  <ParamField path="rdma" type="boolean">
+    Whether the cluster has RDMA-capable networking for Dynamo data movement. Capability metadata only — it does not install or configure RDMA. Best-effort discovery via node labels when omitted. A false positive can cause transports to assume RDMA is usable and fail to connect; a false negative falls back to non-RDMA transports.
+  </ParamField>
+</Indent>
+
+<ParamField path="modelCache" type="ModelCacheSpec">
+  Optional PVC configuration for pre-downloaded model weights. When set, weights are loaded from the PVC instead of downloading from HuggingFace.
+</ParamField>
+
+<Indent>
+  <ParamField path="pvcName" type="string">
+    Name of a `ReadWriteMany` PVC containing cached model weights. The PVC must exist in the same namespace as the DGDR.
+  </ParamField>
+  <ParamField path="pvcModelPath" type="string">
+    Path to the model checkpoint directory within the PVC, for example `deepseek-r1` or `models/Llama-3.1-405B-FP8`.
+  </ParamField>
+  <ParamField path="pvcMountPath" type="string" default="/opt/model-cache">
+    Mount path for the PVC inside the container.
+  </ParamField>
+</Indent>
+
+<ParamField path="features" type="FeaturesSpec">
+  Optional Dynamo platform features in the generated deployment.
+</ParamField>
+
+<Indent>
+  <ParamField path="planner" type="runtime.RawExtension">
+    A `PlannerConfig` object passed to the Planner service. The presence of this field (non-null) enables the planner in the generated DGD. DGDR passes it through without field-level validation; the Planner service validates it at startup. See [Planner](#planner) for the full field list.
+
+    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
+  </ParamField>
+  <ParamField path="mocker" type="MockerSpec">
+    Configures the simulated (mocker) backend for testing without GPUs.
+  </ParamField>
+  <Indent>
+    <ParamField path="enabled" type="boolean">
+      Deploy mocker workers instead of real inference workers.
+    </ParamField>
+  </Indent>
+</Indent>
+
+<Note>
+  DGDR does not currently expose a `features.kvRouter` field. To configure router mode or KV-aware routing, use a direct DGD, a tuned recipe, or `overrides.dgd` (see [Generated DGD overrides](#generated-dgd-overrides)).
+</Note>
+
+### Overrides
+
+<ParamField path="overrides" type="OverridesSpec">
+  Customizes the profiling job and the generated DGD.
+</ParamField>
+
+<Indent>
+  <ParamField path="profilingJob" type="batch/v1.JobSpec">
+    Overrides merged into the controller-generated profiling Job spec (for example, tolerations or node selectors). Only customizes the profiling Job — not the deployed worker pods.
+
+    <a href="https://pkg.go.dev/k8s.io/api/batch/v1#JobSpec" target="_blank">batch/v1.JobSpec</a>
+  </ParamField>
+  <ParamField path="dgd" type="runtime.RawExtension">
+    A partial, versioned DGD merged into the generated deployment. Use `nvidia.com/v1beta1` for new overrides; `nvidia.com/v1alpha1` remains supported for compatibility. See [Generated DGD overrides](#generated-dgd-overrides).
+
+    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
+  </ParamField>
+</Indent>
+
+## Planner
+
+`spec.features.planner` is a `PlannerConfig` object, passed through to the Planner service without field-level validation; the Planner validates it at startup. Setting it (non-null) enables the planner in the generated DGD. The same object is documented standalone at [Planner Configuration](../components/planner-configuration.mdx); its fields are reproduced here. Nested list-and-object types are expanded under [Additional Types](#additional-types). All fields are optional.
+
+### Core settings
+
+<ParamField path="mode" type="string" default="disagg">
+  Planner operating mode, matching the deployment topology.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>disagg</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>agg</Badge></span>
+</ParamField>
+
+<ParamField path="backend" type="string" default="vllm">
+  Inference backend the Planner scales.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge> <Badge intent="note" minimal>mocker</Badge></span>
+</ParamField>
+
+<ParamField path="environment" type="string" default="kubernetes">
+  Runtime environment that determines how the Planner applies scaling actions.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>kubernetes</Badge> <Badge intent="note" minimal>virtual</Badge> <Badge intent="note" minimal>global-planner</Badge></span>
+</ParamField>
+
+<ParamField path="namespace" type="string" default="env DYN_NAMESPACE, else dynamo">
+  Dynamo namespace of the deployment the Planner manages. Defaults from `DYN_NAMESPACE`, which the operator injects as `{k8s_namespace}-{dgd_name}`. Excluded from serialized output.
+</ParamField>
+
+<ParamField path="model_name" type="string" default="null">
+  Optional model name override. Auto-detected from the deployment when unset.
+</ParamField>
+
+<ParamField path="global_planner_namespace" type="string" default="null">
+  Namespace where the GlobalPlanner runs. Required when `environment` is `global-planner`.
+</ParamField>
+
+<ParamField path="log_dir" type="string" default="null">
+  Optional directory for Planner log output.
+</ParamField>
+
+### Optimization target
+
+<ParamField path="optimization_target" type="string" default="throughput">
+  Scaling strategy. `throughput` and `latency` use static thresholds on queue depth and KV cache utilization — no SLA targets or profiling required. `load` uses user-defined prefill queue-token and decode KV-utilization thresholds. `sla` uses the Rust engine performance model to target specific `ttft_ms` / `itl_ms` values. Under any target other than `sla`, the Planner forces load scaling on, throughput scaling off, and ignores `ttft_ms` / `itl_ms`.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>throughput</Badge> <Badge intent="note" minimal>latency</Badge> <Badge intent="note" minimal>load</Badge> <Badge intent="note" minimal>sla</Badge></span>
+</ParamField>
+
+<ParamField path="enable_throughput_scaling" type="boolean" default="true">
+  Enable predictive, traffic-based scaling. Only honored when `optimization_target` is `sla`.
+</ParamField>
+
+<ParamField path="enable_load_scaling" type="boolean" default="false">
+  Enable reactive, load-based scaling. Only honored when `optimization_target` is `sla`. At least one scaling mode must be enabled.
+</ParamField>
+
+<ParamField path="ttft_ms" type="number" default="500.0">
+  Time To First Token SLA target, in milliseconds. Also accepts the alias `ttft`. Must be greater than 0. Used only under `optimization_target: sla`.
+</ParamField>
+
+<ParamField path="itl_ms" type="number" default="50.0">
+  Inter-Token Latency SLA target, in milliseconds. Also accepts the alias `itl`. Used only under `optimization_target: sla`.
+</ParamField>
+
+### Performance model and pre-deployment sweeping
+
+<ParamField path="pre_deployment_sweeping_mode" type="string" default="rapid">
+  How to generate optional bootstrap performance data. `none` skips bootstrap data; `rapid` uses AIConfigurator to simulate engine performance (~30s); `thorough` measures on real GPUs (several hours).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>none</Badge> <Badge intent="note" minimal>rapid</Badge> <Badge intent="note" minimal>thorough</Badge></span>
+</ParamField>
+
+<ParamField path="profile_results_dir" type="string" default="profiling_results">
+  Directory holding profiler-generated performance data (npz or JSON), used to bootstrap or tune the performance model when the `get_perf_metrics` endpoint is unavailable.
+</ParamField>
+
+<ParamField path="aic_perf_model" type="AICPerfModelSpec" default="null">
+  Native AIConfigurator forward-pass model identity for the Rust engine performance shim, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
+</ParamField>
+
+<Indent>
+  <ParamField path="hf_id" type="string" required={true}>
+    HuggingFace model id, for example `Qwen/Qwen3-32B`.
+  </ParamField>
+  <ParamField path="system" type="string" required={true}>
+    AIC system identifier, for example `h200_sxm`.
+  </ParamField>
+  <ParamField path="backend" type="string" required={true}>
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>trtllm</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+  </ParamField>
+  <ParamField path="backend_version" type="string" default="null">
+    Optional backend version string.
+  </ParamField>
+  <ParamField path="prefill_pick" type="PickedParallelConfig" default="null">
+    Parallelism pick for the prefill engine. Required for `mode` `disagg` or `prefill`. See [PickedParallelConfig](#pickedparallelconfig).
+  </ParamField>
+  <ParamField path="decode_pick" type="PickedParallelConfig" default="null">
+    Parallelism pick for the decode engine. Required for `mode` `disagg`, `decode`, or `agg`. See [PickedParallelConfig](#pickedparallelconfig).
+  </ParamField>
+  <ParamField path="model_arch" type="string" default="null">
+    Optional model architecture override.
+  </ParamField>
+  <ParamField path="weight_dtype" type="string" default="null">
+    Optional weight dtype.
+  </ParamField>
+  <ParamField path="moe_dtype" type="string" default="null">
+    Optional Mixture-of-Experts dtype.
+  </ParamField>
+  <ParamField path="activation_dtype" type="string" default="null">
+    Optional activation dtype.
+  </ParamField>
+  <ParamField path="kv_cache_dtype" type="string" default="null">
+    Optional KV cache dtype.
+  </ParamField>
+</Indent>
+
+<ParamField path="aic_interpolation" type="AICInterpolationSpec" default="null">
+  AIConfigurator interpolation spec. Populated by the profiler in rapid mode and written onto the Planner ConfigMap; you do not normally set this by hand. When present, the Planner runs the AIC sweep in-process at bootstrap to seed the performance model. See [AICInterpolationSpec](#aicinterpolationspec).
+</ParamField>
+
+### GPU budget
+
+<ParamField path="max_gpu_budget" type="integer" default="8">
+  Maximum total GPUs the Planner may allocate across worker types.
+</ParamField>
+
+<ParamField path="min_gpu_budget" type="integer" default="-1">
+  Per-DGD GPU floor enforced by the local Planner. `-1` disables it. When set with `max_gpu_budget` such that `min == max`, the Planner pins the per-DGD total and only redistributes replicas between prefill and decode.
+</ParamField>
+
+<ParamField path="min_endpoint" type="integer" default="1">
+  Minimum number of engine endpoints (replicas) to maintain per worker type.
+</ParamField>
+
+<ParamField path="decode_engine_num_gpu" type="integer" default="null">
+  GPUs per decode engine replica. Auto-detected from the deployment when unset.
+</ParamField>
+
+<ParamField path="prefill_engine_num_gpu" type="integer" default="null">
+  GPUs per prefill engine replica. Auto-detected from the deployment when unset.
+</ParamField>
+
+### Throughput-based scaling
+
+<ParamField path="throughput_adjustment_interval_seconds" type="integer" default="180">
+  Seconds between throughput-based scaling decisions. Also accepts the alias `throughput_adjustment_interval`.
+</ParamField>
+
+<ParamField path="throughput_metrics_source" type="string" default="frontend">
+  Prometheus traffic source. `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` from a LocalRouter (use for a pool-local Planner in GlobalPlanner deployments).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>frontend</Badge> <Badge intent="note" minimal>router</Badge></span>
+</ParamField>
+
+### Load-based scaling
+
+<ParamField path="load_adjustment_interval_seconds" type="integer" default="5">
+  Seconds between FPM tuning updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations feed the performance model at this interval. Also accepts the alias `load_adjustment_interval`. Must be greater than 0 and, when both scaling modes are on, shorter than `throughput_adjustment_interval_seconds`.
+</ParamField>
+
+<ParamField path="max_num_fpm_samples" type="integer" default="64">
+  Maximum retained ForwardPassMetrics observations for online tuning and regression fallback.
+</ParamField>
+
+<ParamField path="fpm_sample_bucket_size" type="integer" default="16">
+  Number of buckets for observation retirement. Must be a perfect square.
+</ParamField>
+
+<ParamField path="load_scaling_down_sensitivity" type="integer" default="80">
+  Scale-down sensitivity from 0 to 100 (0 = never scale down, 100 = aggressive).
+</ParamField>
+
+<ParamField path="load_min_observations" type="integer" default="5">
+  Minimum observations before load-based scaling decisions begin (cold-start threshold).
+</ParamField>
+
+<ParamField path="prefill_scale_up_queue_tokens" type="integer" default="null">
+  Prefill queue-token count that triggers scale-up. Required (with the scale-down field) when `optimization_target` is `load` and `mode` includes prefill. Must be greater than 0 and greater than `prefill_scale_down_queue_tokens`.
+</ParamField>
+
+<ParamField path="prefill_scale_down_queue_tokens" type="integer" default="null">
+  Prefill queue-token count that allows scale-down. Required alongside `prefill_scale_up_queue_tokens`.
+</ParamField>
+
+<ParamField path="decode_scale_up_kv_rate" type="number" default="null">
+  Decode KV-utilization percentage (0–100) that triggers scale-up. Required (with the scale-down field) when `optimization_target` is `load` and `mode` includes decode. Must be greater than `decode_scale_down_kv_rate`.
+</ParamField>
+
+<ParamField path="decode_scale_down_kv_rate" type="number" default="null">
+  Decode KV-utilization percentage (0–100) that allows scale-down. Required alongside `decode_scale_up_kv_rate`.
+</ParamField>
+
+<ParamField path="speculative_nextn" type="integer" default="0">
+  Manual fallback speculative-decoding depth. A worker's published `runtime_config.runtime_data.spec_decode.nextn` takes precedence when present. Must be 0 or greater.
+</ParamField>
+
+### Load prediction
+
+<ParamField path="load_predictor" type="string" default="arima">
+  Prediction method for request count, ISL, and OSL.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>constant</Badge> <Badge intent="note" minimal>arima</Badge> <Badge intent="note" minimal>kalman</Badge> <Badge intent="note" minimal>prophet</Badge></span>
+</ParamField>
+
+<ParamField path="load_predictor_log1p" type="boolean" default="false">
+  Apply a log1p transform to predicted request count, ISL, and OSL.
+</ParamField>
+
+<ParamField path="prophet_window_size" type="integer" default="50">
+  Window size (seconds) for the Prophet predictor.
+</ParamField>
+
+<ParamField path="load_predictor_warmup_trace" type="string" default="null">
+  Path to a warmup trace file for bootstrapping predictions.
+</ParamField>
+
+<ParamField path="kalman_q_level" type="number" default="1.0">
+  Kalman process noise for the level component.
+</ParamField>
+
+<ParamField path="kalman_q_trend" type="number" default="0.1">
+  Kalman process noise for the trend component.
+</ParamField>
+
+<ParamField path="kalman_r" type="number" default="10.0">
+  Kalman measurement noise.
+</ParamField>
+
+<ParamField path="kalman_min_points" type="integer" default="5">
+  Minimum data points before Kalman predictions activate.
+</ParamField>
+
+### Prometheus metrics
+
+These fields default from environment variables and are excluded from serialized output.
+
+<ParamField path="metric_pulling_prometheus_endpoint" type="string" default="env PROMETHEUS_ENDPOINT">
+  Prometheus endpoint the Planner queries for traffic metrics. Defaults to `PROMETHEUS_ENDPOINT`, else the in-cluster `kube-prometheus` service URL.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_token" type="string" default="env PROMETHEUS_TOKEN">
+  Optional bearer token sent as `Authorization: Bearer <token>` on every PromQL request. Read once at startup.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_token_file" type="string" default="env PROMETHEUS_TOKEN_FILE">
+  Path to a file containing a bearer token, re-read before every request so rotated tokens are picked up without a restart.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_ssl_verify" type="boolean" default="false">
+  Verify the upstream Prometheus TLS certificate. Defaults from `PROMETHEUS_SSL_VERIFY` (`1`/`true`/`yes` enable it). Pair with a CA bundle for a private CA.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_extra_query_params" type="object" default="env PROMETHEUS_EXTRA_QUERY_PARAMS">
+  Fixed key/value pairs appended as URL query parameters on every PromQL request. Set `PROMETHEUS_EXTRA_QUERY_PARAMS` as a URL query string, for example `namespace=my-ns&tenant=foo`.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_ca_bundle" type="string" default="env PROMETHEUS_CA_BUNDLE">
+  Path to a CA bundle for verifying the upstream Prometheus TLS certificate. When set, the bundle is used for verification regardless of `metric_pulling_prometheus_ssl_verify`. Must point to an existing file.
+</ParamField>
+
+<ParamField path="metric_reporting_prometheus_port" type="integer" default="0">
+  Port on which the Planner exposes its own `dynamo_planner_*` metrics. Defaults from `PLANNER_PROMETHEUS_PORT`. `0` disables.
+</ParamField>
+
+### Advisory and diagnostics
+
+<ParamField path="advisory" type="boolean" default="false">
+  Suggestion-only mode. The Planner computes, logs, exports, and reports recommended replica counts without executing scaling actions or changing the deployment. Use it to evaluate a new configuration or validate SLA targets against production traffic.
+</ParamField>
+
+<ParamField path="report_interval_hours" type="number" default="24.0">
+  Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable. Must be a positive finite number or `null`.
+</ParamField>
+
+<ParamField path="report_output_dir" type="string" default="./planner_reports">
+  Directory for HTML diagnostics reports.
+</ParamField>
+
+<ParamField path="report_filename" type="string" default="null">
+  Fixed report filename written under `report_output_dir`. When unset, a timestamped name is used.
+</ParamField>
+
+<ParamField path="report_write_gzip_log" type="boolean" default="true">
+  Write a compressed JSONL diagnostics log (`.log.jsonl.gz`) next to each HTML report.
+</ParamField>
+
+<ParamField path="live_dashboard_port" type="integer" default="8080">
+  Port for the live diagnostics dashboard HTTP server. `0` disables. When enabled, visit `http://host:port/` for a real-time Plotly report.
+</ParamField>
+
+### Scheduling and plugin pipeline
+
+<ParamField path="scheduling" type="SchedulingConfig">
+  Plugin-pipeline scheduling. Rejects unknown fields.
+</ParamField>
+
+<Indent>
+  <ParamField path="scale_interval_seconds" type="number" default="gcd of enabled builtin intervals">
+    Base pipeline cadence. The pipeline wakes once per interval; each plugin's `execution_interval_seconds` decides whether it fires. When unset, computed as the gcd of `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`. Must be greater than 0 and evenly divide both adjustment intervals.
+  </ParamField>
+  <ParamField path="tick_max_duration_seconds" type="number" default="30.0">
+    Outer deadline wrapping the full 4-stage pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Must be greater than 0.
+  </ParamField>
+  <ParamField path="external_plugins" type="[]ExternalPluginEntry" default="[]">
+    Static external-plugin registrations applied at startup. Per-entry failures are logged but do not crash the Planner. See [ExternalPluginEntry](#externalpluginentry).
+  </ParamField>
+  <ParamField path="gateway" type="GatewayConfig">
+    gRPC registration gateway for self-registering plugins. Disabled by default.
+  </ParamField>
+  <Indent>
+    <ParamField path="enabled" type="boolean" default="false">
+      Open the gRPC gateway at `listen`. Not needed for static `external_plugins`.
+    </ParamField>
+    <ParamField path="listen" type="string" default="unix:///var/run/dynamo/planner/registry.sock">
+      Bind address. A `unix:` socket path for in-Pod registration, or `host:port` for TCP.
+    </ParamField>
+    <ParamField path="allow_insecure" type="boolean" default="false">
+      Permit binding a plaintext (no-TLS) gateway on a TCP listen. Fails closed by default because the gateway receives plugins' shared-secret tokens. `unix:` listens are always allowed.
+    </ParamField>
+  </Indent>
+</Indent>
+
+<ParamField path="plugin_registration" type="PluginRegistrationConfig">
+  Plugin registry configuration — auth, transport, heartbeat, and in-process plugins. Rejects unknown fields.
+</ParamField>
+
+<Indent>
+  <ParamField path="auth" type="AuthConfig">
+    Registry authentication. In the Planner process, an empty `trusted_sources` activates a legacy compatibility fallback to unauthenticated access and logs a warning. This fallback is **DEV ONLY**; do not rely on it as an intentional configuration. Select `allow_unauthenticated` explicitly for development. Production deployments must configure `static_secret`.
+  </ParamField>
+  <Indent>
+    <ParamField path="trusted_sources" type="[]string" default="[]">
+      Accepted auth sources. Use `['allow_unauthenticated']` for development, or `['static_secret']` with `static_secrets` for production.
+
+      <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>static_secret</Badge> <Badge intent="note" minimal>allow_unauthenticated</Badge></span>
+    </ParamField>
+    <ParamField path="static_secrets" type="object" default="{}">
+      Map of `secret_value` to `subject_label`. Populate from a mounted Kubernetes Secret rather than hard-coding in the ConfigMap.
+    </ParamField>
+  </Indent>
+  <ParamField path="transport" type="TransportConfig">
+    Outbound gRPC transport settings for calling plugins.
+  </ParamField>
+  <Indent>
+    <ParamField path="allow_insecure_grpc" type="boolean" default="false">
+      Allow plaintext `grpc://` plugin endpoints. Required to use any `grpc://` endpoint; mTLS support is not yet shipped.
+    </ParamField>
+    <ParamField path="request_timeout_seconds" type="number" default="5.0">
+      Per-RPC timeout applied to every plugin call. Must be greater than 0.
+    </ParamField>
+    <ParamField path="keepalive_time_ms" type="integer" default="30000">
+      gRPC keepalive time, in milliseconds.
+    </ParamField>
+    <ParamField path="max_message_size_bytes" type="integer" default="10485760">
+      Maximum gRPC message size (10 MB).
+    </ParamField>
+  </Indent>
+  <ParamField path="protocol_version_min" type="string" default="1.0">
+    Minimum accepted plugin protocol version.
+  </ParamField>
+  <ParamField path="protocol_version_max" type="string" default="1.0">
+    Maximum accepted plugin protocol version.
+  </ParamField>
+  <ParamField path="heartbeat_timeout_seconds" type="number" default="15.0">
+    Reserved liveness setting. Heartbeats update registry timestamps, but no monitor currently applies this timeout or evicts plugins automatically.
+  </ParamField>
+  <ParamField path="heartbeat_missed_threshold" type="integer" default="2">
+    Reserved liveness setting. Automatic missed-heartbeat eviction is not currently wired.
+  </ParamField>
+  <ParamField path="in_process_plugins" type="[]InProcessPluginSpec" default="[]">
+    In-process plugins loaded from Python modules at startup. See [InProcessPluginSpec](#inprocesspluginspec).
+  </ParamField>
+  <ParamField path="admin" type="AdminAuthConfig">
+    Admin (ListPlugins) RBAC config. Parsed but currently inert — the gateway default-denies `ListPlugins` regardless of `mode`.
+  </ParamField>
+  <Indent>
+    <ParamField path="mode" type="string" default="allow_all">
+      <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>allow_all</Badge> <Badge intent="note" minimal>k8s_rbac</Badge></span>
+    </ParamField>
+  </Indent>
+</Indent>
+
+<Note>
+  `spec.overrides.dgd` is not required to enable the Planner. Use `spec.features.planner` for Planner enablement and configuration; use `spec.overrides.dgd` to customize profiler-generated benchmark deployments and the final DGD. For the deployment workflow, scaling-mode concepts, and cross-field validation rules, see the [Planner Configuration reference](../components/planner-configuration.mdx) and [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md).
+</Note>
+
+## Generated DGD overrides
+
+`spec.overrides.dgd` is a partial, versioned DGD. It does not define or extend
+the profiler's candidate topology. Thorough profiling merges the override into
+each generated benchmark candidate before measurement and into the
+interpolation deployment. Every search strategy merges it into the final
+generated DGD. Use `apiVersion: nvidia.com/v1beta1` and
+`kind: DynamoGraphDeployment` for new overrides. Components, pod-template
+containers, and container environment variables merge by `name`; atomic lists
+such as graph-level `spec.env` and container `args` replace their generated
+values.
+
+For example, set an environment variable on one generated component:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-sglang
+spec:
+  model: Qwen/Qwen3-30B-A3B
+  backend: sglang
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1beta1
+      kind: DynamoGraphDeployment
+      spec:
+        components:
+        - name: SGLangDecodeWorker  # replace with the generated component name
+          podTemplate:
+            spec:
+              containers:
+              - name: main
+                env:
+                - name: TRITON_PTXAS_PATH
+                  value: /usr/local/cuda/bin/ptxas
+```
+
+Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` to find component names.
+Overrides can modify only components present in the generated DGD; unknown names are ignored with a
+warning, and an override cannot add deployment topology. Labels and annotations merge,
+`metadata.name` selects the final DGD name, and other identity metadata is ignored. `status`, null
+values for typed fields, and field deletion are not supported.
+
+<Note>
+  Existing `nvidia.com/v1alpha1` overrides remain supported. They use the older `spec.services`
+  shape, merge services by name, and append `extraPodSpec.mainContainer.args` to generated worker
+  arguments. In `v1beta1`, container `args` is atomic and replaces the generated list. Use
+  `v1beta1` for new overrides and provide the complete desired argument list when overriding
+  `args`.
+</Note>
+
+<Note>
+  `overrides.profilingJob` customizes only the profiling Job. Use `overrides.dgd` for settings that
+  must appear on deployed components.
+</Note>
+
+For worked examples, see [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx). For router configuration and EPP
+topologies, see the [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md) and
+[Gateway API Inference Extension](../../kubernetes/kv-aware-routing/gateway-api.mdx).
+
+## SKU format
+
+`hardware.gpuSku` uses lowercase underscore format (`h100_sxm`, not `H100-SXM5-80GB`).
+
+<span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>gb200_sxm</Badge> <Badge intent="note" minimal>gb10</Badge> <Badge intent="note" minimal>b200_sxm</Badge> <Badge intent="note" minimal>h200_sxm</Badge> <Badge intent="note" minimal>h100_sxm</Badge> <Badge intent="note" minimal>h100_pcie</Badge> <Badge intent="note" minimal>a100_sxm</Badge> <Badge intent="note" minimal>a100_pcie</Badge> <Badge intent="note" minimal>a30</Badge> <Badge intent="note" minimal>l40s</Badge> <Badge intent="note" minimal>l40</Badge> <Badge intent="note" minimal>l4</Badge> <Badge intent="note" minimal>v100_sxm</Badge> <Badge intent="note" minimal>v100_pcie</Badge> <Badge intent="note" minimal>t4</Badge> <Badge intent="note" minimal>mi200</Badge> <Badge intent="note" minimal>mi300</Badge></span>
+
+<Note>
+  Not all SKUs are supported by the AIC profiler for `rapid` mode.
+</Note>
+
+<Warning>
+  **PCIe variants not yet supported by the profiler.** The CRD admits PCIe SKUs (`h100_pcie`, `a100_pcie`, `v100_pcie`), but the profiler does not currently ship training data for them. You can submit a DGDR with a PCIe value; the operator accepts it but profiler-assisted sizing falls back to defaults. Profiler support for PCIe SKUs is tracked as an engineering follow-up.
+</Warning>
+
+## Status
+
+The operator maintains observed state under `status`. See [Lifecycle](#lifecycle) for how `phase` and `profilingPhase` progress, and for the full condition-type list.
+
+<ParamField path="status.phase" type="DGDRPhase">
+  High-level lifecycle phase of the deployment request.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Pending</Badge> <Badge intent="note" minimal>Profiling</Badge> <Badge intent="note" minimal>Ready</Badge> <Badge intent="note" minimal>Deploying</Badge> <Badge intent="note" minimal>Deployed</Badge> <Badge intent="note" minimal>Failed</Badge></span>
+</ParamField>
+
+<ParamField path="status.profilingPhase" type="ProfilingPhase">
+  Current sub-phase of the profiling pipeline. Only meaningful while `phase` is `Profiling`; cleared when profiling completes or fails.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Initializing</Badge> <Badge intent="note" minimal>SweepingPrefill</Badge> <Badge intent="note" minimal>SweepingDecode</Badge> <Badge intent="note" minimal>SelectingConfig</Badge> <Badge intent="note" minimal>BuildingCurves</Badge> <Badge intent="note" minimal>GeneratingDGD</Badge> <Badge intent="note" minimal>Done</Badge></span>
+</ParamField>
+
+<ParamField path="status.dgdName" type="string">
+  Name of the generated or created `DynamoGraphDeployment`.
+</ParamField>
+
+<ParamField path="status.profilingJobName" type="string">
+  Name of the Kubernetes Job running the profiler.
+</ParamField>
+
+<ParamField path="status.conditions" type="[]metav1.Condition">
+  Latest observed conditions. Standard types include `Succeeded`, `Validation`, `Profiling`, `SpecGenerated`, and `DeploymentReady` — see [Conditions](#conditions).
+
+  <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
+</ParamField>
+
+<ParamField path="status.profilingResults" type="ProfilingResultsStatus">
+  Output of the profiling process, including the selected deployment configuration.
+</ParamField>
+
+<Indent>
+  <ParamField path="pareto" type="[]ParetoConfig">
+    Deprecated compatibility field retained for status objects written by older releases. The current controller does not populate it.
+  </ParamField>
+  <ParamField path="selectedConfig" type="runtime.RawExtension">
+    Recommended configuration chosen by the profiler based on the SLA targets. This is the configuration used for deployment when `autoApply` is `true`.
+
+    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
+  </ParamField>
+</Indent>
+
+<ParamField path="status.deploymentInfo" type="DeploymentInfoStatus">
+  State of the deployed `DynamoGraphDeployment`. Populated once a DGD has been created (via `autoApply` or manually).
+</ParamField>
+
+<Indent>
+  <ParamField path="replicas" type="integer">
+    Desired number of replicas.
+  </ParamField>
+  <ParamField path="availableReplicas" type="integer">
+    Number of replicas that are available and ready.
+  </ParamField>
+</Indent>
+
+<ParamField path="status.observedGeneration" type="integer">
+  Most recent `metadata.generation` observed by the controller.
+</ParamField>
+
+## Additional Types
+
+Nested struct types referenced by the fields above, broken out here to keep the field lists shallow. Types prefixed `batch/v1.`, `metav1.`, or `runtime.` are standard Kubernetes types and link to their Go package documentation instead of being expanded.
+
+### ParetoConfig
+
+Deprecated compatibility type for `status.profilingResults.pareto`. Current
+profiling runs do not populate this type.
+
+<ParamField path="config" type="runtime.RawExtension">
+  Full deployment configuration for this Pareto point.
+
+  <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
+</ParamField>
+
+### PickedParallelConfig
+
+A parallelism pick emitted by AIConfigurator. Referenced by `features.planner.aic_perf_model.prefill_pick` / `decode_pick` and by [AICInterpolationSpec](#aicinterpolationspec).
+
+<ParamField path="tp" type="integer" default="1">
+  Tensor-parallel size.
+</ParamField>
+<ParamField path="pp" type="integer" default="1">
+  Pipeline-parallel size.
+</ParamField>
+<ParamField path="dp" type="integer" default="1">
+  Data-parallel (attention-DP) size.
+</ParamField>
+<ParamField path="moe_tp" type="integer" default="1">
+  Mixture-of-Experts tensor-parallel size.
+</ParamField>
+<ParamField path="moe_ep" type="integer" default="1">
+  Mixture-of-Experts expert-parallel size.
+</ParamField>
+
+### AICInterpolationSpec
+
+Everything the Planner needs to reproduce a rapid-mode AIC sweep. Written by the profiler onto the Planner ConfigMap; not normally hand-authored. Referenced by `features.planner.aic_interpolation`.
+
+<ParamField path="hf_id" type="string" required={true}>
+  HuggingFace model id.
+</ParamField>
+<ParamField path="system" type="string" required={true}>
+  AIC system identifier.
+</ParamField>
+<ParamField path="backend" type="string" required={true}>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>trtllm</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+</ParamField>
+<ParamField path="isl" type="integer" required={true}>
+  Input sequence length for the sweep. Must be greater than 0.
+</ParamField>
+<ParamField path="osl" type="integer" required={true}>
+  Output sequence length for the sweep. Must be greater than 0.
+</ParamField>
+<ParamField path="sweep_max_context_length" type="integer" required={true}>
+  Maximum context length swept. Must be greater than 0.
+</ParamField>
+<ParamField path="prefill_interpolation_granularity" type="integer" required={true}>
+  Number of prefill interpolation points. Must be greater than 0.
+</ParamField>
+<ParamField path="decode_interpolation_granularity" type="integer" required={true}>
+  Number of decode interpolation points. Must be greater than 0.
+</ParamField>
+<ParamField path="prefill_pick" type="PickedParallelConfig" required={true}>
+  Prefill parallelism pick. See [PickedParallelConfig](#pickedparallelconfig).
+</ParamField>
+<ParamField path="decode_pick" type="PickedParallelConfig" required={true}>
+  Decode parallelism pick. See [PickedParallelConfig](#pickedparallelconfig).
+</ParamField>
+
+### ExternalPluginEntry
+
+One static external-plugin registration under `features.planner.scheduling.external_plugins`. Rejects unknown fields.
+
+<ParamField path="plugin_id" type="string" required={true}>
+  Unique identifier. Must not collide with a builtin plugin id.
+</ParamField>
+<ParamField path="plugin_type" type="string" required={true}>
+  Pipeline stage the plugin participates in.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>predict</Badge> <Badge intent="note" minimal>propose</Badge> <Badge intent="note" minimal>reconcile</Badge> <Badge intent="note" minimal>constrain</Badge></span>
+</ParamField>
+<ParamField path="priority" type="integer" required={true}>
+  Stage priority. Smaller number is more authoritative.
+</ParamField>
+<ParamField path="endpoint" type="string" required={true}>
+  Wire endpoint. Must start with `grpc://host:port`; `inproc://` is rejected here.
+</ParamField>
+<ParamField path="auth_token" type="string" default="">
+  Bearer token validated by the registry. Populate from a mounted Secret.
+</ParamField>
+<ParamField path="protocol_version" type="string" default="1.0">
+  Plugin protocol version. Must fall within the registry's supported range.
+</ParamField>
+<ParamField path="version" type="string" default="v1">
+  Plugin's own version string, surfaced in ListPlugins.
+</ParamField>
+<ParamField path="execution_interval_seconds" type="number" default="0.0">
+  `0.0` runs every tick; a positive value throttles to every N seconds. Must be 0 or greater.
+</ParamField>
+<ParamField path="hold_policy" type="string" default="HOLD_LAST">
+  Behavior when throttled. `HOLD_LAST` reuses the cached result; `ACCEPT_WHEN_IDLE` treats the plugin as no-opinion when not due. Accepts the name (case-insensitive) or its integer value.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>HOLD_LAST</Badge> <Badge intent="note" minimal>ACCEPT_WHEN_IDLE</Badge></span>
+</ParamField>
+<ParamField path="needs" type="[]string" default="[]">
+  Capability list consumed by the type-aware merge.
+</ParamField>
+<ParamField path="requires_produced_fields" type="[]string" default="[]">
+  Dot-paths into the pipeline context (for example `predictions`, `observations.traffic`) that must be set for the plugin to fire on a tick. Empty means no gating.
+</ParamField>
+<ParamField path="observation_window_seconds" type="number" default="0.0">
+  Aggregation window for windowed observation types in `needs`. `0.0` uses `scale_interval` freshness; a positive value aggregates over the last N seconds and must be an integer multiple of `scale_interval_seconds`.
+</ParamField>
+
+### InProcessPluginSpec
+
+One in-process plugin under `features.planner.plugin_registration.in_process_plugins`. Rejects unknown fields.
+
+<ParamField path="module" type="string" required={true}>
+  Python module path containing the plugin class.
+</ParamField>
+<ParamField path="class" type="string" required={true}>
+  Plugin class name within `module`.
+</ParamField>
+<ParamField path="plugin_id" type="string" required={true}>
+  Unique plugin identifier.
+</ParamField>
+<ParamField path="plugin_type" type="string" required={true}>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>predict</Badge> <Badge intent="note" minimal>propose</Badge> <Badge intent="note" minimal>reconcile</Badge> <Badge intent="note" minimal>constrain</Badge></span>
+</ParamField>
+<ParamField path="priority" type="integer" required={true}>
+  Stage priority. Smaller number is more authoritative.
+</ParamField>
+<ParamField path="execution_interval_seconds" type="number" default="0.0">
+  `0.0` runs every tick; a positive value throttles to every N seconds.
+</ParamField>
+<ParamField path="hold_policy" type="string" default="ACCEPT_WHEN_IDLE">
+  Behavior when throttled.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ACCEPT_WHEN_IDLE</Badge> <Badge intent="note" minimal>HOLD_LAST</Badge></span>
+</ParamField>
+<ParamField path="needs" type="[]string" default="[]">
+  Capability list consumed by the type-aware merge.
+</ParamField>
+<ParamField path="requires_produced_fields" type="[]string" default="[]">
+  Dot-paths into the pipeline context that must be set for the plugin to fire on a tick.
+</ParamField>
+<ParamField path="observation_window_seconds" type="number" default="0.0">
+  Aggregation window for windowed observation types in `needs`. Must be `0.0` or a positive integer multiple of `scale_interval_seconds`.
+</ParamField>
+<ParamField path="kwargs" type="object" default="{}">
+  Keyword arguments passed to the plugin class constructor.
+</ParamField>
+
+## Lifecycle
+
+When you create a DGDR, it progresses through these phases (`status.phase`):
+
+| Phase | What is happening |
+|---|---|
+| `Pending` | Spec validated; operator is discovering GPU hardware and preparing the profiling job |
+| `Profiling` | Profiling job running — sub-phases in `status.profilingPhase`: `Initializing`, `SweepingPrefill`, `SweepingDecode`, `SelectingConfig`, `BuildingCurves`, `GeneratingDGD`, `Done` |
+| `Ready` | Profiling complete; optimal config stored in `status.profilingResults.selectedConfig`. Waits for manual application or for `autoApply` to be enabled. |
+| `Deploying` | Creating the DGD (only when `autoApply: true`) |
+| `Deployed` | DGD is running and healthy |
+| `Failed` | Unrecoverable error — profiling failures are not retried (`backoffLimit: 0`); check events and conditions for details |
+
+### Conditions
+
+The operator maintains these conditions on `status.conditions`:
+
+| Condition | Meaning |
+|---|---|
+| `Validation` | Spec validation passed or failed |
+| `Profiling` | Profiling job is running, succeeded, or failed |
+| `SpecGenerated` | Generated DGD spec is available |
+| `DeploymentReady` | DGD is deployed and healthy |
+| `Succeeded` | Aggregate condition — true when the DGDR has reached its target state |
+
+### Monitoring
+
+```bash
+# Watch phase transitions
+kubectl get dgdr my-model -n $NAMESPACE -w
+
+# Detailed status, conditions, and events
+kubectl describe dgdr my-model -n $NAMESPACE
+
+# Profiling sub-phase
+kubectl get dgdr my-model -n $NAMESPACE -o jsonpath='{.status.profilingPhase}'
+
+# Profiling job logs
+PROFILING_JOB=$(kubectl get dgdr my-model -n "$NAMESPACE" -o jsonpath='{.status.profilingJobName}')
+kubectl logs -f "job/${PROFILING_JOB}" -c profiler -n "$NAMESPACE"
+
+# View generated DGD spec (when autoApply: false)
+kubectl get dgdr my-model -n $NAMESPACE \
+  -o jsonpath='{.status.profilingResults.selectedConfig}' | python3 -m json.tool
+
+```
+
+### Resource ownership
+
+- The DGDR does **not** set an owner reference on the DGD it creates. Deleting a DGDR does not delete the DGD — it persists independently so it can continue serving traffic.
+- The relationship is tracked via labels: `dgdr.nvidia.com/name` and `dgdr.nvidia.com/namespace`.
+- Additional resources (planner ConfigMaps) are created in the same namespace and labeled with `dgdr.nvidia.com/name`.
+
+## Known issues
+
+- **PCIe profiler data not yet available.** See the PCIe callout under [SKU format](#sku-format).
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Auto Deploy with DGDR" icon="wand-magic-sparkles" href="../../kubernetes/auto-deployment/auto-deploy-with-dgdr.md">
+    Step-by-step walkthrough of authoring a request.
+  </Card>
+  <Card title="DGDR Templates" icon="file-code" href="../../recipes/kubernetes-templates/dgdr.mdx">
+    Ready-to-copy manifests for SLA targets, private models, MoE, and overrides.
+  </Card>
+  <Card title="DGD Reference" icon="diagram-project" href="dynamo-graph-deployment.mdx">
+    The resource DGDR generates.
+  </Card>
+  <Card title="Profiler Guide" icon="magnifying-glass-chart" href="../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md">
+    Profiling algorithms, modes, and gate checks.
+  </Card>
+</CardGroup>

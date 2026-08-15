@@ -71,6 +71,6 @@ kubectl delete -f deploy/namespace.yaml
 
 ## Related docs
 
-- [Fault Tolerance Testing](../../../../docs/fern/design-docs/fault-tolerance-testing.md) — test infrastructure reference
-- [Fault Tolerance README](../../../../docs/fern/fault-tolerance/README.md) — Dynamo's runtime fault-tolerance features (distinct from this test harness)
+- [Fault Tolerance Testing](../../../../docs/fern/pages/developer-guide/knowledge-base/concepts/fault-tolerance/fault-tolerance-testing.md) — test infrastructure reference
+- [Fault Tolerance README](../../../../docs/fern/pages/kubernetes/fault-tolerance/introduction.md) — Dynamo's runtime fault-tolerance features (distinct from this test harness)
 - [`cuda_fault_injection/README.md`](cuda_fault_injection/README.md) — CUDA-level fault helpers

@@ -17,7 +17,7 @@ The examples cover direct Hugging Face Hub downloads and an HF-to-MinIO synchron
 - Kubernetes cluster with GPU support
 - Helm 3.x installed
 - `kubectl` configured to access your cluster
-- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../docs/fern/kubernetes/installation-guide.md))
+- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md))
 - Hugging Face token for downloading private base models and LoRA adapters
 
 ## Files in This Directory
@@ -339,4 +339,4 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 - [vLLM Deployment Guide](../README.md) - Other deployment patterns
 - [Dynamo Kubernetes Guide](../../../../../docs/fern/kubernetes/quickstart.mdx) - Platform setup
-- [Installation Guide](../../../../../docs/fern/kubernetes/installation-guide.md) - Platform installation
+- [Installation Guide](../../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md) - Platform installation

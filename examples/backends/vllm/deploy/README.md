@@ -121,7 +121,7 @@ docker build -f container/rendered.Dockerfile .
 
 ### Planner Perf Model Bootstrap (SLA Planner Only)
 
-The SLA Planner deployment (`disagg_planner.yaml`) can start from native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See the [pre-deployment profiling guide](../../../../docs/fern/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
+The SLA Planner deployment (`disagg_planner.yaml`) can start from native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See the [pre-deployment profiling guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) for the optional bootstrap workflow.
 
 ## Usage
 
@@ -264,7 +264,7 @@ All templates use **Qwen/Qwen3-0.6B** as the default model, but you can use any 
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/fern/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fern/pages/kubernetes/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -274,13 +274,13 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Deploy with DGD](../../../../docs/fern/kubernetes/dgd-guide.md)
+- **Deployment Guide**: [Deploy with DGD](../../../../docs/fern/pages/kubernetes/model-deployment/deploy-with-dgd.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/fern/kubernetes/quickstart.mdx)
-- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/fern/kubernetes/installation-guide.md)
-- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/fern/components/planner/planner-guide.md)
-- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/fern/components/planner/global-planner.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md)
+- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md)
+- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md)
 - **Kubernetes Templates**: [vLLM Deployment Templates](../../../../docs/fern/templates/vllm.mdx)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/fern/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/fern/components/router/README.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md), [KV-Aware Routing](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/overview.md)
 
 ## Troubleshooting
 
