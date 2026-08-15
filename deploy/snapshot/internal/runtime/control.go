@@ -32,6 +32,19 @@ func WriteControlSentinel(hostPID int, name string) error {
 	return writeSentinelInDir(dir, name)
 }
 
+// RemoveControlSentinel removes a sentinel from the workload container's
+// snapshot-control volume. A missing sentinel is already removed.
+func RemoveControlSentinel(hostPID int, name string) error {
+	if hostPID <= 0 {
+		return fmt.Errorf("invalid host PID %d for control sentinel %q", hostPID, name)
+	}
+	path := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", snapshotprotocol.SnapshotControlMountPath, name)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove control sentinel %s: %w", path, err)
+	}
+	return nil
+}
+
 func writeSentinelInDir(dir, name string) error {
 	tmpPath := filepath.Join(dir, "."+name+".tmp")
 	finalPath := filepath.Join(dir, name)
