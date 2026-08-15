@@ -21,7 +21,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 ## v1.4.0 — Aug 14, 2026
 
-48 entries — 43 behavioral changes, 5 deprecated and removed.
+52 entries — 43 behavioral changes, 9 deprecated and removed.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Multimodal load sites no longer force trust_remote_code=True** ([#10738](https://github.com/ai-dynamo/dynamo/pull/10738)).
 
@@ -211,7 +211,15 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Pass `--disaggregation-mode prefill` or `--disaggregation-mode decode` instead of the removed boolean flags.
 
-<a id="v130"></a>
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed bundled software video decoders from the runtime images** — H.264/H.265 video inputs decode in hardware via NVDEC, and other codecs (or H.264/H.265 where NVDEC is unavailable) fail with an actionable error naming the missing package and installer command instead of decoding in software ([#11836](https://github.com/ai-dynamo/dynamo/pull/11836), [#12725](https://github.com/ai-dynamo/dynamo/pull/12725)).
+
+  > **Migrate:** Grant containers the `video` NVIDIA driver capability for H.264/H.265 input, or install software decoders with `python -m dynamo.common.utils.install_media_decoders <vllm|sglang|trtllm>`.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Common backend interfaces are no longer a published integration surface** — the Rust `dynamo-backend-common` crate is not published for v1.4.0 (last published as 1.2.1), and it is retained in-tree together with the Python `dynamo.common.backend` module solely for the in-development sidecar path following the unified backend engine removal ([#11831](https://github.com/ai-dynamo/dynamo/pull/11831)); treat these interfaces as internal and subject to change until the sidecar ships.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Go-based EPP deprecated in favor of the Rust-based EPP** — the gateway-api-inference-extension-based Go Endpoint Picker under `deploy/inference-gateway/epp` is deprecated; the Rust ext-proc EPP introduced in v1.3.0 ([#8783](https://github.com/ai-dynamo/dynamo/pull/8783)) replaces it, and the default switches in an upcoming release.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Namespace-restricted operator mode deprecated** — the operator's namespace-restricted mode is deprecated and will be removed in a future release; run the cluster-wide operator instead. Namespace-restricted installs already depend on the cluster-wide operator for CRDs (`dynamo-operator.upgradeCRD=false`).
 
 <a id="v130"></a>
 
