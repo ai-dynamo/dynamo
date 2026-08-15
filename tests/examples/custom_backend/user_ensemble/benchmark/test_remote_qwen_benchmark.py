@@ -147,7 +147,7 @@ def test_summary_reports_each_rate_and_workflow_gate(
             "gpu": {"name": "NVIDIA H100 80GB HBM3"},
             "benchmark": {
                 "request_rates": [40, 50],
-                "concurrency_cap": 512,
+                "concurrency_cap": 64,
             },
         },
     )
@@ -195,5 +195,5 @@ def test_summary_reports_each_rate_and_workflow_gate(
     assert (tmp_path / "summary.json").is_file()
     assert (tmp_path / "report.md").is_file()
     report = (tmp_path / "report.md").read_text()
-    assert "rates: 40/50 req/s; concurrency cap: 512" in report
+    assert "rates: 40/50 req/s; concurrency cap: 64" in report
     assert "Overall >=90% gate: **True**" in report

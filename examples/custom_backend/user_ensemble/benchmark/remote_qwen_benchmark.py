@@ -21,7 +21,7 @@ from typing import Any
 
 MEASURED_REQUESTS = 1000
 WARMUP_REQUESTS = 20
-CONCURRENCY_CAP = 512
+SUPPORTED_CONCURRENCY_CAPS = frozenset({64, 512})
 REQUEST_RATES = (40, 50)
 OUTPUT_TOKENS = 7
 TEXT_TOKENS = 644
@@ -353,9 +353,10 @@ def _parse_gpu_info(gpu_info: str, torch_gpu_count: int) -> dict[str, Any]:
 
 
 def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
-    if args.concurrency_cap != CONCURRENCY_CAP:
+    if args.concurrency_cap not in SUPPORTED_CONCURRENCY_CAPS:
         raise BenchmarkAuditError(
-            f"concurrency cap is {args.concurrency_cap}; expected {CONCURRENCY_CAP}"
+            f"unsupported concurrency cap {args.concurrency_cap}; expected one of "
+            f"{sorted(SUPPORTED_CONCURRENCY_CAPS)}"
         )
     packages: dict[str, str] = {}
     for package in ("ai-dynamo", "aiperf", "torch", "transformers", "vllm"):
@@ -595,7 +596,8 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         f"- GPU: {metadata['gpu']}",
         f"- Workload SHA-256: `{workload['measured_sha256']}`",
         "- Raw text: 644 tokens plus one image; decoder ISL 773/976",
-        "- OSL: 7; rates: 40/50 req/s; concurrency cap: 512",
+        "- OSL: 7; rates: 40/50 req/s; concurrency cap: "
+        f"{metadata['benchmark']['concurrency_cap']}",
         "- 1,000 measured requests; 20 warmups per cell",
         "- Non-streaming; TTFT and ITL are intentionally not compared",
         "",

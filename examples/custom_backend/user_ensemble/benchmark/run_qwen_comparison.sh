@@ -20,10 +20,15 @@ MEASURED_INPUT="$WORKLOAD_ROOT/measured/image_custom_1000_textisl644.jsonl"
 WARMUP_INPUT="$WORKLOAD_ROOT/warmup/image_custom_20_textisl644.jsonl"
 SERVER_PID=""
 SAMPLER_PID=""
-CONCURRENCY_CAP=512
+CONCURRENCY_CAP="${DYN_BENCH_CONCURRENCY_CAP:-512}"
 DEFAULT_CELL_PLAN="40:1:direct 40:1:workflow 40:2:workflow 40:2:direct 40:3:direct 40:3:workflow 50:1:direct 50:1:workflow 50:2:workflow 50:2:direct 50:3:direct 50:3:workflow"
 CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
 RUN_ID="$(printf '%s' "$OUTPUT_ROOT" | sha256sum | cut -c1-12)"
+
+if [[ ! "$CONCURRENCY_CAP" =~ ^(64|512)$ ]]; then
+    echo >&2 "DYN_BENCH_CONCURRENCY_CAP must be 64 or 512, got: $CONCURRENCY_CAP"
+    exit 2
+fi
 
 if [[ -e "$OUTPUT_ROOT" ]]; then
     echo >&2 "DYN_BENCH_OUTPUT_ROOT already exists: $OUTPUT_ROOT"
