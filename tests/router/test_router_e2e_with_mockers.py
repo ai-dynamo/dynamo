@@ -24,6 +24,7 @@ from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
     _test_disagg_per_role_router_modes,
+    _test_disagg_per_role_session_affinity,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
@@ -1458,6 +1459,51 @@ def test_disagg_per_role_router_modes(
         enable_disagg_bootstrap=False,
     ) as (prefill_workers, decode_workers):
         _test_disagg_per_role_router_modes(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+        )
+
+
+@pytest.mark.timeout(180)
+def test_disagg_per_role_session_affinity(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+):
+    """Session affinity is configured per hop: prefill pins, decode does not.
+
+    Both tiers advertise round-robin; only prefill advertises a TTL. If the two
+    hops shared a session-affinity setting, decode would pin alongside prefill.
+    """
+    logger.info("Starting per-hop session affinity disagg test")
+
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    base_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        # Same mode on both tiers, so affinity is the only difference between them.
+        prefill_mocker_args={
+            **base_mocker_args,
+            "router_mode": "round-robin",
+            "router_session_affinity_ttl_secs": 300,
+        },
+        decode_mocker_args={**base_mocker_args, "router_mode": "round-robin"},
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_session_affinity(
             prefill_workers=prefill_workers,
             decode_workers=decode_workers,
             block_size=BLOCK_SIZE,
