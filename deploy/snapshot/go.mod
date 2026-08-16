@@ -2,6 +2,8 @@ module github.com/ai-dynamo/dynamo/deploy/snapshot
 
 go 1.26.3
 
+tool google.golang.org/protobuf/cmd/protoc-gen-go
+
 require (
 	github.com/ai-dynamo/dynamo/deploy/operator v0.0.0
 	github.com/checkpoint-restore/go-criu/v8 v8.4.0

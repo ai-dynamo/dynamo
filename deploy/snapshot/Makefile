@@ -56,6 +56,14 @@ lint: golangci-lint ## Run golangci-lint linter.
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
 	$(GOLANGCI_LINT) run --fix
 
+.PHONY: pagebroker-generate
+pagebroker-generate: protoc-gen-go ## Generate the PageBroker Go binding.
+	PATH="$(LOCALBIN):$$PATH" go generate ./internal/pagebroker
+
+.PHONY: pagebroker-check-generated
+pagebroker-check-generated: pagebroker-generate ## Check the PageBroker Go binding is current.
+	git diff --exit-code -- internal/pagebroker/pagebroker.pb.go
+
 ##@ Build
 
 .PHONY: build
@@ -114,6 +122,10 @@ GOLANGCI_LINT_VERSION ?= v1.62.2
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
+
+.PHONY: protoc-gen-go
+protoc-gen-go: $(LOCALBIN) ## Install the pinned Go protobuf generator.
+	GOBIN=$(LOCALBIN) go install tool
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary (ideally with version)
