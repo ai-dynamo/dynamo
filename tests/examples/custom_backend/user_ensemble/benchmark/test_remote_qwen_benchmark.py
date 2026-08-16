@@ -120,7 +120,7 @@ def _cell(wall_seconds: float, request_throughput: float) -> dict:
     }
 
 
-def test_summary_reports_both_throughput_boundaries_and_no_gate(
+def test_summary_reports_remote_achieved_to_offered_gate(
     tmp_path: Path,
 ) -> None:
     _write_json(
@@ -129,6 +129,13 @@ def test_summary_reports_both_throughput_boundaries_and_no_gate(
             "dynamo_commit": "abc123",
             "container_image": "example/runtime:test",
             "gpu": {"name": "NVIDIA H100 80GB HBM3"},
+            "benchmark": {
+                "load_mode": "constant",
+                "request_rates": [50],
+                "concurrency": None,
+                "topologies": ["remote"],
+                "response_placement": "inline",
+            },
         },
     )
     _write_json(
@@ -137,12 +144,8 @@ def test_summary_reports_both_throughput_boundaries_and_no_gate(
     )
     for repetition in range(1, 4):
         _write_json(
-            tmp_path / f"rep-{repetition}/inline/cell_audit.json",
-            _cell(10.0, 100.0),
-        )
-        _write_json(
             tmp_path / f"rep-{repetition}/remote/cell_audit.json",
-            _cell(20.0, 50.0),
+            _cell(20.0, 49.5),
         )
         _write_json(
             tmp_path / f"rep-{repetition}/remote/joined_smoke.json",
@@ -155,11 +158,35 @@ def test_summary_reports_both_throughput_boundaries_and_no_gate(
     result = summarize(tmp_path)
 
     assert result["comparison"] == {
-        "remote_to_inline_full_client_process_ratio": 0.5,
-        "remote_full_client_process_delta_percent": -50.0,
-        "remote_to_inline_request_window_ratio": 0.5,
-        "remote_request_window_delta_percent": -50.0,
+        "topology": "remote",
+        "offered_request_rate_req_s": 50,
+        "achieved_request_window_req_s": 49.5,
+        "achieved_to_offered_ratio": 0.99,
+        "minimum_ratio": 0.98,
+        "minimum_rate_req_s": 49.0,
+        "passed": True,
     }
-    assert "pass" not in result["comparison"]
+    assert result["gate"] == {
+        "minimum_achieved_to_offered_ratio": 0.98,
+        "passed": True,
+    }
     assert (tmp_path / "summary.json").is_file()
     assert (tmp_path / "report.md").is_file()
+    report = (tmp_path / "report.md").read_text()
+    assert "rate: 50 req/s; concurrency: unlimited" in report
+    assert "Response placement: inline" in report
+
+
+def test_runner_omits_measured_concurrency_limit() -> None:
+    runner = (
+        Path(__file__).parents[5]
+        / "examples/custom_backend/user_ensemble/benchmark/run_qwen_comparison.sh"
+    ).read_text(encoding="utf-8")
+
+    measured = runner.split("TIMEFORMAT='%R'", maxsplit=1)[1].split(
+        'kill "$SAMPLER_PID"', maxsplit=1
+    )[0]
+    assert '--request-rate "$REQUEST_RATE"' in measured
+    assert "--request-rate-mode constant" in measured
+    assert "--concurrency" not in measured
+    assert 'DEFAULT_CELL_PLAN="1:remote 2:remote 3:remote"' in runner

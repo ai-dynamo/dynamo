@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Compare the inline custom encoder with the remote encoder fan-out workflow.
-# Every cell starts fresh server processes, while the two topologies alternate
-# across three repetitions to reduce run-order bias.
+# Qualify the remote encoder -> NIXL -> Dynamo vLLM workflow at a constant
+# offered load. Every repetition starts fresh server processes.
 
 set -euo pipefail
 
@@ -21,8 +20,14 @@ MEASURED_INPUT="$WORKLOAD_ROOT/measured/image_custom_1000_textisl644.jsonl"
 WARMUP_INPUT="$WORKLOAD_ROOT/warmup/image_custom_20_textisl644.jsonl"
 SERVER_PID=""
 SAMPLER_PID=""
-DEFAULT_CELL_PLAN="1:inline 1:remote 2:remote 2:inline 3:inline 3:remote"
+REQUEST_RATE="${DYN_BENCH_REQUEST_RATE:-50}"
+DEFAULT_CELL_PLAN="1:remote 2:remote 3:remote"
 CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
+
+if [[ "$REQUEST_RATE" != 50 ]]; then
+    echo >&2 "DYN_BENCH_REQUEST_RATE must be 50, got: $REQUEST_RATE"
+    exit 2
+fi
 
 if [[ -e "$OUTPUT_ROOT" ]]; then
     echo >&2 "DYN_BENCH_OUTPUT_ROOT already exists: $OUTPUT_ROOT"
@@ -106,6 +111,7 @@ python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark 
     --cuda-visible-devices "$CUDA_VISIBLE_DEVICES" \
     --gpu-info "$GPU_INFO" \
     --torch-gpu-count "$TORCH_GPU_COUNT" \
+    --request-rate "$REQUEST_RATE" \
     --aiperf-version "$AIPERF_VERSION"
 
 sha256sum \
@@ -142,22 +148,13 @@ common_aiperf_args=(
 launch_topology() {
     local topology="$1"
     local output_dir="$2"
-    local launch_script
-    local launch_args=(--no-enable-prefix-caching)
+    local launch_script="$LAUNCH_ROOT/examples/custom_backend/user_ensemble/remote/launch.sh"
+    local launch_args=(--max-num-seqs 64 --no-enable-prefix-caching)
 
-    case "$topology" in
-        inline)
-            launch_script="$LAUNCH_ROOT/examples/custom_encoder/launch/agg_qwen2_5_vl_benchmark.sh"
-            ;;
-        remote)
-            launch_script="$LAUNCH_ROOT/examples/custom_backend/user_ensemble/remote/launch.sh"
-            launch_args=(--max-num-seqs 64 --no-enable-prefix-caching)
-            ;;
-        *)
-            echo >&2 "unknown topology: $topology"
-            return 2
-            ;;
-    esac
+    if [[ "$topology" != remote ]]; then
+        echo >&2 "unknown topology: $topology"
+        return 2
+    fi
 
     export VLLM_CACHE_ROOT="/tmp/vllm-cache-user-ensemble-$topology"
     export XDG_CACHE_HOME="/tmp/xdg-cache-user-ensemble-$topology"
@@ -235,7 +232,8 @@ run_cell() {
     TIMEFORMAT='%R'
     { time "$AIPERF_BIN" profile "${common_aiperf_args[@]}" \
         --input-file "$MEASURED_INPUT" \
-        --concurrency 64 \
+        --request-rate "$REQUEST_RATE" \
+        --request-rate-mode constant \
         --conversation-num 1000 \
         --artifact-dir "$output_dir/measured" \
         --zmq-ipc-path "${zmq_prefix}-measured" \
@@ -270,7 +268,9 @@ run_cell() {
 for cell in $CELL_PLAN; do
     repetition="${cell%%:*}"
     topology="${cell#*:}"
-    if [[ "$repetition" == "$cell" || ! "$repetition" =~ ^[1-9][0-9]*$ ]]; then
+    if [[ "$repetition" == "$cell" \
+        || ! "$repetition" =~ ^[1-3]$ \
+        || "$topology" != remote ]]; then
         echo >&2 "invalid DYN_BENCH_CELL_PLAN entry: $cell"
         exit 2
     fi
