@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Audit and summarize the inline-versus-remote Qwen workflow benchmark."""
+"""Audit and summarize the remote Qwen workflow open-loop benchmark."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from typing import Any
 
 MEASURED_REQUESTS = 1000
 WARMUP_REQUESTS = 20
-CONCURRENCY = 64
+REQUEST_RATE = 50
 OUTPUT_TOKENS = 7
 TEXT_TOKENS = 644
 EXPECTED_AVERAGE_ISL = 874.5
@@ -35,7 +35,8 @@ EXPECTED_PATCH_COST = 907_800
 EXPECTED_GRIDS = {"1x22x22", "1x36x36"}
 EXPECTED_GRAPH_CAPTURES = 14
 REPETITIONS = 3
-TOPOLOGIES = ("inline", "remote")
+TOPOLOGY = "remote"
+MIN_ACHIEVED_TO_OFFERED_RATIO = 0.98
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 _DISPATCH_RE = re.compile(
@@ -351,6 +352,10 @@ def _parse_gpu_info(gpu_info: str, torch_gpu_count: int) -> dict[str, Any]:
 
 
 def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
+    if args.request_rate != REQUEST_RATE:
+        raise BenchmarkAuditError(
+            f"request rate is {args.request_rate}; expected {REQUEST_RATE}"
+        )
     packages: dict[str, str] = {}
     for package in ("ai-dynamo", "aiperf", "torch", "transformers", "vllm"):
         try:
@@ -367,15 +372,20 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "gpu": _parse_gpu_info(args.gpu_info, args.torch_gpu_count),
         "versions": packages,
         "topology_order_by_repetition": [
-            ["inline", "remote"],
-            ["remote", "inline"],
-            ["inline", "remote"],
+            [TOPOLOGY],
+            [TOPOLOGY],
+            [TOPOLOGY],
         ],
         "benchmark": {
+            "load_mode": "constant",
             "repetitions": REPETITIONS,
             "warmup_requests": WARMUP_REQUESTS,
             "measured_requests": MEASURED_REQUESTS,
-            "concurrency": CONCURRENCY,
+            "request_rate_mode": "constant",
+            "request_rates": [args.request_rate],
+            "concurrency": None,
+            "topologies": [TOPOLOGY],
+            "response_placement": "inline",
             "streaming": False,
             "max_tokens": OUTPUT_TOKENS,
             "min_tokens": OUTPUT_TOKENS,
@@ -514,34 +524,39 @@ def _summarize_topology(root: Path, topology: str) -> dict[str, Any]:
 def summarize(root: Path) -> dict[str, Any]:
     metadata = _read_json(root / "benchmark_metadata.json")
     workload = _read_json(root / "workload_audit.json")
-    topologies = {
-        topology: _summarize_topology(root, topology) for topology in TOPOLOGIES
-    }
+    benchmark = metadata.get("benchmark")
+    if not isinstance(benchmark, Mapping):
+        raise BenchmarkAuditError("benchmark metadata is missing benchmark settings")
+    request_rates = benchmark.get("request_rates")
+    if request_rates != [REQUEST_RATE] or benchmark.get("concurrency") is not None:
+        raise BenchmarkAuditError(
+            "summary requires 50 req/s constant load without a concurrency limit"
+        )
+    topology = _summarize_topology(root, TOPOLOGY)
     joined_smokes = [
         _read_json(root / f"rep-{repetition}" / "remote" / "joined_smoke.json")
         for repetition in range(1, REPETITIONS + 1)
     ]
-    inline_full = topologies["inline"]["full_client_process_throughput_req_s"][
-        "from_mean_wall"
-    ]
-    remote_full = topologies["remote"]["full_client_process_throughput_req_s"][
-        "from_mean_wall"
-    ]
-    inline_window = topologies["inline"]["request_window_throughput_req_s"]["mean"]
-    remote_window = topologies["remote"]["request_window_throughput_req_s"]["mean"]
+    window = topology["request_window_throughput_req_s"]
+    minimum_rate = REQUEST_RATE * MIN_ACHIEVED_TO_OFFERED_RATIO
+    run_rates = [float(value) for value in window["runs"]]
+    comparison = {
+        "topology": TOPOLOGY,
+        "offered_request_rate_req_s": REQUEST_RATE,
+        "achieved_request_window_req_s": float(window["mean"]),
+        "achieved_to_offered_ratio": float(window["mean"]) / REQUEST_RATE,
+        "minimum_ratio": MIN_ACHIEVED_TO_OFFERED_RATIO,
+        "minimum_rate_req_s": minimum_rate,
+        "passed": all(value >= minimum_rate for value in run_rates),
+    }
     summary = {
         "metadata": metadata,
         "workload": workload,
-        "topologies": topologies,
-        "comparison": {
-            "remote_to_inline_full_client_process_ratio": remote_full / inline_full,
-            "remote_full_client_process_delta_percent": (
-                remote_full / inline_full - 1.0
-            )
-            * 100,
-            "remote_to_inline_request_window_ratio": remote_window / inline_window,
-            "remote_request_window_delta_percent": (remote_window / inline_window - 1.0)
-            * 100,
+        "topologies": {TOPOLOGY: topology},
+        "comparison": comparison,
+        "gate": {
+            "minimum_achieved_to_offered_ratio": MIN_ACHIEVED_TO_OFFERED_RATIO,
+            "passed": comparison["passed"],
         },
         "joined_response_smokes": joined_smokes,
     }
@@ -557,10 +572,10 @@ def _format_runs(values: list[Any]) -> str:
 def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
     metadata = summary["metadata"]
     workload = summary["workload"]
-    topologies = summary["topologies"]
+    topology = summary["topologies"][TOPOLOGY]
     comparison = summary["comparison"]
     lines = [
-        "# Inline versus remote Qwen workflow",
+        "# Remote Qwen workflow open-loop qualification",
         "",
         "## Audited configuration",
         "",
@@ -569,7 +584,9 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         f"- GPU: {metadata['gpu']}",
         f"- Workload SHA-256: `{workload['measured_sha256']}`",
         "- Raw text: 644 tokens plus one image; decoder ISL 773/976",
-        "- OSL: 7; concurrency: 64; 1,000 measured requests; 20 warmups",
+        "- OSL: 7; rate: 50 req/s; concurrency: unlimited; "
+        "1,000 measured requests; 20 warmups",
+        "- Response placement: inline",
         "- Non-streaming; TTFT and ITL are intentionally not compared",
         "",
         "## Throughput",
@@ -578,24 +595,23 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         "Request-window runs (req/s) | Window mean |",
         "| --- | --- | ---: | --- | ---: |",
     ]
-    for topology in TOPOLOGIES:
-        full = topologies[topology]["full_client_process_throughput_req_s"]
-        window = topologies[topology]["request_window_throughput_req_s"]
-        lines.append(
-            f"| {topology} | {_format_runs(full['runs'])} | "
-            f"{full['from_mean_wall']:.3f} | {_format_runs(window['runs'])} | "
-            f"{window['mean']:.3f} |"
-        )
+    full = topology["full_client_process_throughput_req_s"]
+    window = topology["request_window_throughput_req_s"]
+    lines.append(
+        f"| {TOPOLOGY} | {_format_runs(full['runs'])} | "
+        f"{full['from_mean_wall']:.3f} | {_format_runs(window['runs'])} | "
+        f"{window['mean']:.3f} |"
+    )
     lines.extend(
         [
             "",
-            "Remote/inline full-process ratio: "
-            f"**{comparison['remote_to_inline_full_client_process_ratio']:.3f}** "
-            f"({comparison['remote_full_client_process_delta_percent']:+.2f}%).",
+            "Achieved/offered request-window ratio: "
+            f"**{comparison['achieved_to_offered_ratio']:.3f}**; "
+            f"every run >= {comparison['minimum_rate_req_s']:.3f} req/s: "
+            f"**{comparison['passed']}**.",
             "",
-            "Remote/inline request-window ratio: "
-            f"**{comparison['remote_to_inline_request_window_ratio']:.3f}** "
-            f"({comparison['remote_request_window_delta_percent']:+.2f}%).",
+            "Overall >=98% achieved/offered in every run gate: "
+            f"**{summary['gate']['passed']}**.",
             "",
             "## Correctness",
             "",
@@ -626,6 +642,7 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--cuda-visible-devices", required=True)
     metadata.add_argument("--gpu-info", required=True)
     metadata.add_argument("--torch-gpu-count", type=int, required=True)
+    metadata.add_argument("--request-rate", type=int, required=True)
     metadata.add_argument("--aiperf-version", required=True)
 
     cell = subparsers.add_parser("validate-cell")
