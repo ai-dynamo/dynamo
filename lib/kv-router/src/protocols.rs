@@ -201,6 +201,20 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
     compute_seq_hash_for_block_with(block_hashes, compute_next_seq_hash)
 }
 
+/// The sequence hash of one block that extends `parent`.
+///
+/// `None` roots the chain, so the block's own token hash is its sequence hash. This is the
+/// per-block step of [`compute_seq_hash_for_block`], for producers that observe blocks one at a
+/// time and never hold the whole sequence. The two must stay in agreement: a producer keying
+/// storage by this and a consumer probing with [`compute_seq_hash_for_block`] have to derive the
+/// same address for the same prefix.
+#[inline]
+pub fn chain_seq_hash(parent: Option<SequenceHash>, tokens_hash: LocalBlockHash) -> SequenceHash {
+    parent.map_or(tokens_hash.0, |parent_sequence| {
+        compute_next_seq_hash(parent_sequence, tokens_hash)
+    })
+}
+
 /// Compute rolling sequence hashes directly from canonical token blocks with
 /// separate XXH3 block and chain seeds, without materializing block hashes.
 pub(crate) fn compute_seq_hash_for_tokens_with_seeds(

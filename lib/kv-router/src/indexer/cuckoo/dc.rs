@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent, StorageTier,
-    WorkerId, WorkerWithDpRank, compute_next_seq_hash,
+    WorkerId, WorkerWithDpRank, chain_seq_hash,
 };
 
 use super::addressing::CkfAddressing;
@@ -121,6 +121,7 @@ pub struct DcCkfAggregationStats {
     contribution_count: usize,
     unique_block_count: usize,
     unknown_removals: u64,
+    unchainable_batches: u64,
     capacity_failures: u64,
     occupied_bucket_count: usize,
     occupied_slot_count: usize,
@@ -141,6 +142,15 @@ impl DcCkfAggregationStats {
 
     pub const fn unknown_removals(&self) -> u64 {
         self.unknown_removals
+    }
+
+    /// Stored batches dropped because this pool does not track their parent block.
+    ///
+    /// Expected while a source is live-only, since no tree dump seeds the chain. Against a source
+    /// that does recover, a rising count means prefix coverage is silently short: the blocks are
+    /// resident in the engine but absent from the published filter.
+    pub const fn unchainable_batches(&self) -> u64 {
+        self.unchainable_batches
     }
 
     pub const fn capacity_failures(&self) -> u64 {
@@ -341,8 +351,9 @@ impl PublicationWindow {
 #[derive(Debug, Default)]
 struct DcCkfTelemetry {
     unknown_removals: u64,
+    unchainable_batches: u64,
     /// Latches once an unchainable batch has been reported, so a live-only source cannot turn
-    /// every event into a log line.
+    /// every event into a log line. The counter above still tracks the rate the log cannot.
     unchainable_batch_reported: bool,
     capacity_failures: u64,
     physical_touches: u64,
@@ -447,6 +458,8 @@ impl DcCkfState {
                     // Inserting anyway would place blocks at addresses no query can reach, which
                     // buys nothing over dropping them but does spend capacity and add false
                     // positives.
+                    self.telemetry.unchainable_batches =
+                        self.telemetry.unchainable_batches.saturating_add(1);
                     if !self.telemetry.unchainable_batch_reported {
                         self.telemetry.unchainable_batch_reported = true;
                         tracing::warn!(
@@ -587,6 +600,9 @@ impl DcCkfState {
         }
         replacement.publication.pending_events = 1;
         replacement.telemetry.unknown_removals = self.telemetry.unknown_removals;
+        replacement.telemetry.unchainable_batches = self.telemetry.unchainable_batches;
+        replacement.telemetry.unchainable_batch_reported =
+            self.telemetry.unchainable_batch_reported;
         replacement.telemetry.capacity_failures = self.telemetry.capacity_failures;
         replacement.telemetry.physical_touches = self
             .telemetry
@@ -647,6 +663,7 @@ impl DcCkfState {
                 contribution_count: self.member_blocks.values().map(FxHashSet::len).sum(),
                 unique_block_count: self.dc_refcounts.len(),
                 unknown_removals: self.telemetry.unknown_removals,
+                unchainable_batches: self.telemetry.unchainable_batches,
                 capacity_failures: self.telemetry.capacity_failures,
                 occupied_bucket_count: self.current_occupied_bucket_count(),
                 occupied_slot_count: self.dc_refcounts.len(),
@@ -736,19 +753,26 @@ impl DcCkfState {
     ) {
         let mut parent = root;
         for block in blocks {
-            // Mirrors `compute_seq_hash_for_block`, which a prefix query applies to the same
-            // token hashes: the first block's sequence hash is its token hash, and every
-            // subsequent one folds in its parent.
-            let sequence = parent.map_or(block.tokens_hash.0, |parent_sequence| {
-                compute_next_seq_hash(parent_sequence, block.tokens_hash)
-            });
+            // `chain_seq_hash` is the per-block step of the `compute_seq_hash_for_block` that a
+            // prefix query applies to the same token hashes. Both sides have to derive it
+            // identically, so neither may reimplement it.
+            let sequence = chain_seq_hash(parent, block.tokens_hash);
             parent = Some(sequence);
             if let Err(error) = self.store(worker, DcBlockKey::new(block.block_hash, sequence)) {
-                if matches!(error, KvCacheEventError::CapacityExhausted) {
+                let exhausted = matches!(error, KvCacheEventError::CapacityExhausted);
+                if exhausted {
                     self.telemetry.capacity_failures =
                         self.telemetry.capacity_failures.saturating_add(1);
                 }
                 retain_first_error(first_error, error);
+                if exhausted {
+                    // Every later block in this batch chains through the one just omitted, so a
+                    // prefix query stops at the omission and cannot reach them. Storing them
+                    // anyway spends capacity that is already exhausted on addresses nothing looks
+                    // up. Truncating also keeps the batch's stored blocks a contiguous prefix,
+                    // which is what the omission had already reduced them to.
+                    break;
+                }
             }
         }
     }
@@ -1204,17 +1228,19 @@ mod tests {
         // one it would occupy as a sequence root.
         state.apply_event(stored_under(worker, 2, Some(1), &[3]));
 
-        let rooted = DcBlockKey::new(ExternalSequenceBlockHash(3), 3);
-        let chained = compute_next_seq_hash(1, LocalBlockHash(3));
+        // Derived through the same helper the query side's `compute_seq_hash_for_block` folds,
+        // so this pins agreement between the two rather than restating the arithmetic.
+        let rooted = chain_seq_hash(None, LocalBlockHash(3));
+        let chained = chain_seq_hash(Some(1), LocalBlockHash(3));
         assert_eq!(
             state.dc_refcounts[&ExternalSequenceBlockHash(3)].sequence,
             chained
         );
-        assert_ne!(chained, rooted.sequence);
+        assert_ne!(chained, rooted);
     }
 
     #[test]
-    fn a_batch_whose_parent_is_untracked_is_dropped() {
+    fn a_batch_whose_parent_is_untracked_is_dropped_and_counted() {
         let worker = WorkerWithDpRank::new(1, 0);
         let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
 
@@ -1223,7 +1249,7 @@ mod tests {
         // Storing at an unchained address would be worse than dropping: the blocks are
         // unreachable either way, but they would occupy capacity and answer false positives.
         assert_eq!(state.stats().aggregation().unique_block_count(), 0);
-        assert!(!state.contains(ExternalSequenceBlockHash(2)));
+        assert_eq!(state.stats().aggregation().unchainable_batches(), 1);
         assert!(!state.contains(ExternalSequenceBlockHash(1)));
     }
 

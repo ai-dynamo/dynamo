@@ -24,7 +24,7 @@ use dynamo_kv_router::indexer::cuckoo::{
 };
 use dynamo_kv_router::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent,
-    StorageTier, WorkerId, WorkerWithDpRank, compute_next_seq_hash,
+    StorageTier, WorkerId, WorkerWithDpRank, chain_seq_hash,
 };
 use dynamo_tokens::SequenceHash;
 #[cfg(feature = "ckf-diagnostics")]
@@ -1227,9 +1227,7 @@ fn replacement_keys(
             .try_reserve(store.blocks.len())
             .map_err(|_| allocation_failed())?;
         for block in store.blocks {
-            let sequence = parent.map_or(block.tokens_hash.0, |parent_sequence| {
-                compute_next_seq_hash(parent_sequence, block.tokens_hash)
-            });
+            let sequence = chain_seq_hash(parent, block.tokens_hash);
             parent = Some(sequence);
             sequences.insert(block.block_hash, sequence);
             keys.insert(DcBlockKey::new(block.block_hash, sequence));
