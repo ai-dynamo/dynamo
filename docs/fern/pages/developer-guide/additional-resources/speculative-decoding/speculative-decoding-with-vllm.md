@@ -109,6 +109,32 @@ See `examples/backends/vllm/launch/agg_spec_decoding.sh` for the full configurat
 
 - Currently only supports Eagle3 as the draft model
 - Requires compatible model architectures between target and draft
+- The draft checkpoint should carry its own `embed_tokens` weights
+
+### Draft Checkpoints Without Their Own `embed_tokens`
+
+Some draft checkpoints ship no embedding table of their own and expect vLLM to share the
+target model's. vLLM detects this at load and logs a line such as:
+
+```text
+Detected EAGLE model without its own embed_tokens in the checkpoint.
+Sharing target model embedding weights with the draft model.
+```
+
+> [!WARNING]
+> On some vLLM builds this path fails at load with `AttributeError: 'NoneType' object has
+> no attribute 'weight'`, raised while vLLM compares the target and draft embedding
+> dimensions. Every tensor-parallel worker fails identically during `WorkerProc` init, so
+> the engine never becomes ready and no request is ever served.
+
+The fault is in vLLM's speculative-decoding proposer, not in Dynamo: the dimension check
+dereferences the draft embedding on exactly the branch that runs when the draft has no
+embedding to dereference. Dynamo passes `--speculative-config` through to vLLM unchanged
+and has no configuration that avoids the branch.
+
+To work around it, use a draft checkpoint that ships its own `embed_tokens`, run a vLLM
+build whose dimension check skips a missing draft embedding, or drop `--speculative-config`
+and serve the target model on its own.
 
 ## See Also
 
