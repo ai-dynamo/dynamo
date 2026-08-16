@@ -21,6 +21,9 @@ _INITIAL_MODEL_LOAD_TARGET = (
     "sglang.srt.model_executor.model_runner_components.load_model_utils."
     "load_model_with_memory_saver"
 )
+_INIT_ALL_CUDA_GRAPHS_TARGET = (
+    "sglang.srt.managers.scheduler.Scheduler.init_all_cuda_graphs"
+)
 _RELEASE_MEMORY_OCCUPATION_TARGET = (
     "sglang.srt.managers.scheduler_components.weight_updater."
     "SchedulerWeightUpdaterManager.release_memory_occupation"
@@ -61,7 +64,7 @@ class GMSV1MemorySaverAdapter(TorchMemorySaverAdapter):
 
     def pause(self, tag: str) -> None:
         if tag == "weights":
-            self.client.publish_weights(self._models)
+            self._publish_weights()
             self.client.suspend()
 
     def resume(self, tag: str) -> None:
@@ -74,6 +77,9 @@ class GMSV1MemorySaverAdapter(TorchMemorySaverAdapter):
 
     def observe_model(self, model: object) -> None:
         self._models.append(model)
+
+    def _publish_weights(self) -> None:
+        self.client.publish_weights(self._models)
 
 
 @cache
@@ -92,6 +98,11 @@ def _after_initial_model_load(result, *args, **kwargs) -> None:
     _adapter().observe_model(result.model)
 
 
+def _before_init_all_cuda_graphs(_scheduler: object) -> None:
+    # Publication rebinds non-Parameter tensors, so it must precede graph capture.
+    _adapter()._publish_weights()
+
+
 def _after_release_memory_occupation(result, manager, *args, **kwargs):
     torch.distributed.barrier(group=manager.tp_cpu_group)
     return result
@@ -105,6 +116,11 @@ def register_gms_v1_plugin() -> None:
         _INITIAL_MODEL_LOAD_TARGET,
         _after_initial_model_load,
         HookType.AFTER,
+    )
+    HookRegistry.register(
+        _INIT_ALL_CUDA_GRAPHS_TARGET,
+        _before_init_all_cuda_graphs,
+        HookType.BEFORE,
     )
     HookRegistry.register(
         _FACTORY_TARGET,
