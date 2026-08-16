@@ -19,6 +19,8 @@ void
 Transaction::set_state(State state)
 {
   state_ = state;
+  if (state == State::PREPARING)
+    staging_started_at_ = std::chrono::steady_clock::now();
 }
 
 const Transaction::Descriptor&
@@ -46,6 +48,12 @@ Transaction::retain_terminal()
     return false;
   terminal_retained_ = true;
   return true;
+}
+
+bool
+Transaction::expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const
+{
+  return state_ == State::STAGED && now - staging_started_at_ >= lifetime;
 }
 
 }  // namespace snapshot::pagebroker

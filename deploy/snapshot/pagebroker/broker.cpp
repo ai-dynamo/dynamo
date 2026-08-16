@@ -16,6 +16,7 @@ namespace {
 
 constexpr auto kTerminalTransactionRetention = std::chrono::seconds(60);
 constexpr size_t kMaxRetainedTerminalTransactions = 1024;
+constexpr auto kLiveTransactionLifetime = std::chrono::hours(1);
 
 Response
 Reply(const Request& request)
@@ -103,8 +104,40 @@ TransactionDirectory(const Path& transaction_root, const std::string& transactio
 Broker::Broker(Path staging_root) : staging_root_(fs::weakly_canonical(std::move(staging_root)))
 {
   io_engines_.push_back(std::make_unique<PosixCopyEngine>());
+  fs::remove_all(staging_root_ / "restore");
+  fs::remove_all(staging_root_ / "checkpoint");
   fs::create_directories(staging_root_ / "restore");
   fs::create_directories(staging_root_ / "checkpoint");
+}
+
+void
+Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
+{
+  std::vector<std::pair<std::string, TransactionHandle>> transactions;
+  {
+    std::lock_guard lock(transactions_mutex_);
+    for (const auto& [id, transaction] : transactions_) transactions.emplace_back(id, transaction);
+  }
+
+  for (const auto& [id, transaction] : transactions) {
+    std::lock_guard transaction_lock(transaction->mutex());
+    if (!transaction->expired(now, kLiveTransactionLifetime))
+      continue;
+
+    std::error_code restore_error;
+    std::error_code checkpoint_error;
+    fs::remove_all(TransactionDirectory(staging_root_ / "restore", id), restore_error);
+    fs::remove_all(TransactionDirectory(staging_root_ / "checkpoint", id), checkpoint_error);
+    if (restore_error || checkpoint_error)
+      continue;
+    transaction->clear_descriptor();
+    transaction->set_state(Transaction::State::ABORTED);
+
+    std::lock_guard transactions_lock(transactions_mutex_);
+    const auto current = transactions_.find(id);
+    if (current != transactions_.end() && current->second == transaction)
+      transactions_.erase(current);
+  }
 }
 
 Broker::TransactionHandle

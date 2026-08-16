@@ -19,6 +19,7 @@ class Broker {
  public:
   explicit Broker(Path staging_root);
   Response HandleRequest(const Request& request);
+  void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
 
  private:
   using Engines = std::vector<std::unique_ptr<TransferEngine>>;

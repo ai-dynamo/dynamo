@@ -120,6 +120,38 @@ TEST_F(BrokerTest, RejectsConcurrentRestoreForSameTransaction)
   EXPECT_NE(first_response.has_staged_restore_directory(), second_response.has_staged_restore_directory());
 }
 
+TEST_F(BrokerTest, ReapsExpiredStagedTransactions)
+{
+  auto restore = RequestFor("expired");
+  Configure(
+      restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(), source_);
+  const auto staged = broker().HandleRequest(restore);
+  ASSERT_TRUE(staged.has_staged_restore_directory());
+  const fs::path staging_directory(staged.staged_restore_directory().image_directory());
+
+  broker().ReapExpiredTransactions(std::chrono::steady_clock::now() + std::chrono::hours(1));
+  EXPECT_FALSE(fs::exists(staging_directory));
+
+  auto commit = RequestFor("expired");
+  commit.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+
+  auto retry = RequestFor("expired");
+  Configure(retry.mutable_staged_restore()->mutable_source(), retry.mutable_staged_restore()->mutable_io_engine(), source_);
+  EXPECT_TRUE(broker().HandleRequest(retry).has_staged_restore_directory());
+}
+
+TEST_F(BrokerTest, CleansStaleStagingOnStart)
+{
+  broker_.reset();
+  const fs::path stale = root_ / "tmpfs" / "restore" / "stale";
+  fs::create_directories(stale);
+  std::ofstream(stale / "image") << "image";
+
+  broker_.emplace(root_ / "tmpfs");
+  EXPECT_FALSE(fs::exists(stale));
+}
+
 TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)
 {
   for (const auto& id :

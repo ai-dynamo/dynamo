@@ -33,6 +33,7 @@ namespace {
 constexpr uint32_t kMaxMessageSize = 64 << 10;  // 64 KB
 constexpr timeval kConnectionTimeout{30, 0};
 constexpr int kShutdownPollTimeoutMs = 1000;
+constexpr auto kTransactionReapInterval = std::chrono::minutes(2);
 volatile sig_atomic_t shutting_down;
 
 void
@@ -287,8 +288,14 @@ void
 Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrency)
 {
   std::vector<std::future<void>> handlers;
+  auto next_transaction_reap = std::chrono::steady_clock::now();
   while (!shutting_down) {
     ReapHandlers(handlers);
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next_transaction_reap) {
+      broker.ReapExpiredTransactions(now);
+      next_transaction_reap = now + kTransactionReapInterval;
+    }
     pollfd poll_descriptor{listener.get(), POLLIN, 0};
     const int ready = poll(&poll_descriptor, 1, kShutdownPollTimeoutMs);
     if (ready == 0)
