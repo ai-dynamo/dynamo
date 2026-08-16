@@ -145,7 +145,11 @@ DRR, and deadline ordering is never bypassed inside a class.
 
 New arrivals also join an existing backlog in their resolved class instead of
 bypassing queued work. Queue limits, ordering, and DRR charging apply equally
-to allow-listed and unconstrained requests.
+to allow-listed and unconstrained requests, and to work a custom
+queue-admission policy released from deferral — but only to work the router
+decides has to wait. A request that finds no same-class backlog and an unbusy
+eligible worker is admitted directly, never enters queue storage, and therefore
+never meets a class limit, the queue deadline check, or DRR.
 
 ## Complexity and Progress
 
@@ -395,9 +399,11 @@ structured body:
 the value above is illustrative: it depends on when the next poll happens, not
 on the configuration. `stage` names where the deadline was found to have passed:
 `dispatch` means the request had already been queued and was shed at the class
-head; `admission` means it was already late when it reached queue storage, and
-`deferred_wake` means it expired while a custom queue-admission policy held it.
-The same rejection increments
+head, and `admission` means it was already late when it reached queue storage.
+Work a custom queue-admission policy held is checked at `admission` like any
+other request that has to wait, because it selects its class only once the
+policy releases it; if the router can admit it directly at that point, no
+deadline check applies to it at all. The same rejection increments
 `dynamo_frontend_router_queue_deadline_expired_total{policy_class="latency",stage="dispatch"}`,
 and the class's pending-request gauge returns to its previous value because
 shedding reverses the queue accounting the request applied on the way in.

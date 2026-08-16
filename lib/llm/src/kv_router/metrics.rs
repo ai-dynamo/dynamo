@@ -569,7 +569,6 @@ pub struct RouterQueueMetricHandles {
     pub raw_isl_limit_rejections: IntCounter,
     pub cached_token_limit_rejections: IntCounter,
     pub admission_deadline_expiries: IntCounter,
-    pub deferred_wake_deadline_expiries: IntCounter,
     pub dispatch_deadline_expiries: IntCounter,
 }
 
@@ -657,7 +656,6 @@ impl RouterQueueMetrics {
             raw_isl_limit_rejections: rejection("raw_isl_token_limit"),
             cached_token_limit_rejections: rejection("cached_token_limit"),
             admission_deadline_expiries: expiry("admission"),
-            deferred_wake_deadline_expiries: expiry("deferred_wake"),
             dispatch_deadline_expiries: expiry("dispatch"),
         }
     }
@@ -1315,7 +1313,6 @@ dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"d
 # HELP dynamo_frontend_router_queue_deadline_expired_total Total number of requests rejected because their router policy class SLO deadline passed
 # TYPE dynamo_frontend_router_queue_deadline_expired_total counter
 dynamo_frontend_router_queue_deadline_expired_total{model=\"model\",policy_class=\"default\",stage=\"admission\",worker_type=\"decode\"} 0
-dynamo_frontend_router_queue_deadline_expired_total{model=\"model\",policy_class=\"default\",stage=\"deferred_wake\",worker_type=\"decode\"} 0
 dynamo_frontend_router_queue_deadline_expired_total{model=\"model\",policy_class=\"default\",stage=\"dispatch\",worker_type=\"decode\"} 1
 # HELP dynamo_frontend_router_queue_pending_cached_tokens Estimated cached tokens for requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_cached_tokens gauge

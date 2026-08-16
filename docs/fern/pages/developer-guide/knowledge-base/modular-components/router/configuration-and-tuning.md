@@ -55,9 +55,10 @@ profile does not configure is rejected with HTTP 400 and
 another class's SLO and DRR weight.
 
 Every class configures one required, positive `slo_ms`. The router captures one
-monotonic arrival timestamp when it accepts the request and computes that
-request's deadline once, as `arrival + slo_ms`. The same deadline is carried
-through deferral, wake-up, queue insertion, and dispatch; it is never recomputed
+monotonic arrival timestamp when it accepts the request and keeps that timestamp
+across deferral by a custom queue-admission policy. When the request is queued,
+the class it selected derives its deadline once, as `arrival + slo_ms`, and that
+value is carried through queue insertion and dispatch; it is never recomputed
 from a later clock reading, so time spent waiting always counts against the SLO.
 
 Each class owns exactly one runnable queue, ordered by `(deadline, arrival
@@ -70,12 +71,10 @@ classes moving. Per-request `strict_priority` and `priority` hints do not
 reorder a configured class.
 
 The router rejects work whose deadline has already passed rather than
-dispatching it, at three points:
+dispatching it, at two points:
 
 - **Admission**, immediately before the request enters queue storage. Requests
-  dispatched without queueing never reach this check.
-- **Deferred wake-up**, when a custom queue-admission policy releases work whose
-  deadline passed while it was parked.
+  the router admits directly, without queueing, never reach this check.
 - **Dispatch**, at each deficit-round-robin poll of a class, which sheds every
   expired head until the next head is inside its deadline or the class queue is
   empty.
@@ -84,16 +83,21 @@ Expired work is rejected with HTTP 529 and a structured body naming the class,
 the stage, the class SLO, and how far past the deadline it was. It never spends
 class deficit and never advances the DRR cursor. Each rejection increments
 `dynamo_frontend_router_queue_deadline_expired_total` with a `stage` label of
-`admission`, `deferred_wake`, or `dispatch`.
+`admission` or `dispatch`.
 
 Absolute and fractional busy thresholds use OR semantics. A class queues on
 busy-threshold pressure only when at least one threshold is configured and every
 eligible worker is busy for that class, but a new arrival cannot bypass an
-existing backlog in the same class. A class with an `slo_ms` and no busy
-threshold never queues for capacity; it can still hold work when a custom
+existing backlog in the same class. Anything else the router admits directly:
+that request never enters queue storage, so class limits, the Admission gate,
+and DRR do not apply to it. A class with an `slo_ms` and no busy threshold never
+queues for capacity. Work can still be held above the classes, before it selects
+one, when a custom
 [queue admission policy](../../../advanced-customizations/custom-worker-selection.mdx)
-returns `Defer`, and that deferred work is checked against the same deadline
-when the policy wakes it.
+returns `Defer`. When the policy releases it, the router repeats the same
+decision with the request's original arrival: if it has to queue, the time it
+spent deferred has already counted against its class SLO; if capacity is free it
+is admitted directly, exactly as a fresh arrival would be.
 
 Queue limits are configured per discovered worker endpoint with
 `request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and

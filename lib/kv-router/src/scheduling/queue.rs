@@ -24,14 +24,14 @@ use super::policy_queue::{
 };
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::{
-    QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionWorker,
-    QueueAdmissionWorkerSnapshot, WorkerPlacement,
+    AdmissionHandoff, AdmissionRequestOutcome, QueueAdmissionEvent, QueueAdmissionId,
+    QueueAdmissionLayer, QueueAdmissionWorker, QueueAdmissionWorkerSnapshot,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, KvSchedulerError, NonMaxOverlapSelection,
     NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
-    SchedulingResponse, WorkerAvailabilityProvider,
+    SchedulingResponse, WorkerAvailabilityProvider, WorkerPlacement,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
@@ -58,9 +58,22 @@ pub struct ClassQueueStats {
     pub pending_cached_tokens: usize,
 }
 
+/// One request the scheduler owns between router arrival and dispatch.
+///
+/// This is the actor's handoff payload, so it carries only neutral request
+/// facts and no layer reads another's fields. The admission layer may retain it
+/// while a policy defers the request. After the handoff, `should_queue` decides
+/// what becomes of it: direct dispatch consumes it outright, or a policy class
+/// stores it until its deficit-round-robin turn. `admission_id` is the identity
+/// the admission layer reports this request's lifecycle under, and is absent for
+/// a bypassed or unmanaged request.
 struct QueuedRequest {
     request: SchedulingRequest,
-    enqueue_at: Instant,
+    /// Monotonic router arrival. A class that stores this request derives its
+    /// fixed-SLO deadline from this instant, so time spent deferred is spent
+    /// from the same latency budget; a request dispatched directly gets no
+    /// deadline from it.
+    arrival_at: Instant,
     block_hashes: Option<Vec<LocalBlockHash>>,
     admission_id: Option<QueueAdmissionId>,
 }
@@ -70,6 +83,19 @@ struct SelectedWorkerForRequest {
     selected_worker_tiers: SelectedWorkerTierSnapshot,
     selected_worker_load: AdvisoryWorkerLoad,
     non_max_overlap_selection: Option<NonMaxOverlapSelection>,
+}
+
+/// What the router's direct-versus-queued decision did with one request the
+/// queue-admission layer handed over.
+enum ScheduleOutcome {
+    /// Sent straight to worker selection: the request's class had no runnable
+    /// backlog and an eligible worker was free, so it never entered queue
+    /// storage and never met a class limit, the queue Admission gate, or DRR.
+    Admitted { owns_lifecycle: bool },
+    /// Stored in its policy class's queue to wait for a deficit-round-robin turn.
+    Queued,
+    /// Answered with an error before it could run.
+    Rejected,
 }
 
 fn non_max_overlap_selection<C: WorkerConfigLike>(
@@ -108,6 +134,16 @@ fn non_max_overlap_selection<C: WorkerConfigLike>(
         highest_overlap_blocks,
         selected_overlap_blocks,
     })
+}
+
+/// The policy-class name carried in request metadata, with an empty name
+/// normalized to "no preference".
+#[inline]
+fn requested_policy_class(request: &SchedulingRequest) -> Option<&str> {
+    request
+        .policy_class
+        .as_deref()
+        .filter(|name| !name.is_empty())
 }
 
 /// How far past `deadline` `now` is, or `None` when the request is still inside
@@ -159,12 +195,6 @@ enum AdmissionCommand {
         ack_tx: oneshot::Sender<bool>,
     },
     Cleanup,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum AdmissionRequestOutcome {
-    Completed { context_tokens: Option<usize> },
-    Aborted,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -263,12 +293,17 @@ struct SchedulerQueueActor<
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
+    /// The queue-admission layer, when a worker-selection policy attached one.
+    /// It is independent of `pending`: the actor coordinates the two and is the
+    /// only place they meet.
+    admission: Option<QueueAdmissionLayer<QueuedRequest>>,
+    /// Request IDs whose lifecycle ownership the actor released while processing
+    /// the current command. Only the `Enqueue` arm reads it, and it clears the
+    /// set before it starts, so this never grows past one command's releases.
+    released_lifecycle_request_ids: HashSet<String>,
     admission_worker_snapshot: QueueAdmissionWorkerSnapshot,
     admission_overloaded_worker_ids: Option<Arc<HashSet<WorkerId>>>,
     admission_available_worker_ids: Option<Arc<HashSet<WorkerId>>>,
-    lifecycle_request_ids: HashSet<String>,
-    managed_admission_request_ids: HashSet<String>,
-    admission_bookings: HashMap<String, WorkerWithDpRank>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
 }
 
@@ -375,16 +410,14 @@ impl<
         available_worker_provider: Option<WorkerAvailabilityProvider>,
         admission_channel_capacity: usize,
     ) -> Result<Self, KvSchedulerError> {
-        let admission_policy = selector.take_admission_policy();
-        let admission_reconcile_interval = admission_policy
+        let admission = selector
+            .take_admission_policy()
+            .map(QueueAdmissionLayer::new);
+        let admission_reconcile_interval = admission
             .as_ref()
-            .and_then(|policy| policy.reconcile_interval())
-            .filter(|interval| !interval.is_zero());
-        let has_admission_policy = admission_policy.is_some();
-        let pending = match admission_policy {
-            Some(policy) => PolicyQueue::new(profile.clone()).with_admission_policy(policy),
-            None => PolicyQueue::new(profile.clone()),
-        };
+            .and_then(QueueAdmissionLayer::reconcile_interval);
+        let has_admission_policy = admission.is_some();
+        let pending = PolicyQueue::new(profile.clone());
         let queueing_enabled = profile
             .classes()
             .iter()
@@ -449,12 +482,11 @@ impl<
             overlap_refresh_after,
             overloaded_worker_provider,
             available_worker_provider,
+            admission,
+            released_lifecycle_request_ids: HashSet::new(),
             admission_worker_snapshot: QueueAdmissionWorkerSnapshot::new(0, Vec::new()),
             admission_overloaded_worker_ids: None,
             admission_available_worker_ids: None,
-            lifecycle_request_ids: HashSet::new(),
-            managed_admission_request_ids: HashSet::new(),
-            admission_bookings: HashMap::new(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
         };
         tokio::spawn(actor.run(admission_rx));
@@ -805,6 +837,9 @@ impl<
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
         let mut commands_since_cleanup = 0usize;
         while let Some(command) = rx.recv().await {
+            // Lifecycle releases are only meaningful to the command that
+            // observes them, so the record never outlives one command.
+            self.released_lifecycle_request_ids.clear();
             let drain_cleanup = self.queueing_enabled && {
                 commands_since_cleanup += 1;
                 let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
@@ -826,14 +861,22 @@ impl<
                         .and_then(|_| request.mode.tracked_request_id().map(str::to_owned));
                     let (enqueue_ready, owns_lifecycle) =
                         self.handle_enqueue(request, block_hashes, arrival_at);
-                    if let Some(lease) = lease.as_mut()
-                        && owns_lifecycle
-                    {
-                        lease.request_id = request_id;
-                    }
                     let made_ready = enqueue_ready | (drain_cleanup && self.drain_cleanup());
                     if made_ready {
                         self.handle_update(None, false).await;
+                    }
+                    // Arm the lease only after scheduling and any drain above,
+                    // and only if this request still owns its lifecycle. Either
+                    // route can dispatch it and then lose it to a failed
+                    // selection, booking, or response delivery; a lease armed
+                    // for a request the actor already released would let its
+                    // cleanup kill a later attempt that reused the ID.
+                    if let Some(lease) = lease.as_mut()
+                        && owns_lifecycle
+                        && let Some(request_id) = request_id
+                        && !self.released_lifecycle_request_ids.contains(&request_id)
+                    {
+                        lease.request_id = Some(request_id);
                     }
                     let _ = ack_tx.send(lease);
                 }
@@ -893,177 +936,240 @@ impl<
             let mut request = entry.into_payload().request;
             request.respond(Err(KvSchedulerError::SubscriberShutdown));
         }
+
+        // Work the admission layer still holds never reached a policy class, so
+        // it carries no queue accounting to reverse; it only needs an answer.
+        if let Some(admission) = self.admission.take() {
+            for queued in admission.into_deferred() {
+                let mut request = queued.request;
+                request.respond(Err(KvSchedulerError::SubscriberShutdown));
+            }
+        }
     }
 
-    /// `arrival_at` is the router-acceptance instant carried on the command. It
-    /// is the only basis for this request's class deadline, so actor-channel
-    /// backlog, deferral, wake-up, and a long queue wait all count against the
-    /// class SLO. Load-decay math still reads the current clock.
+    /// Run one arriving request through the queue-admission layer and, unless
+    /// that layer retains it, into the router's scheduling decision.
+    ///
+    /// `arrival_at` is the router-acceptance instant carried on the command. A
+    /// request the router admits directly never gets a queue deadline at all;
+    /// for one that has to wait, this instant is the only basis for it, so
+    /// actor-channel backlog, deferral, wake-up, and a long queue wait all count
+    /// against the class SLO. Load-decay math still reads the current clock.
+    ///
+    /// Returns whether runnable work is now available and whether the caller's
+    /// lease owns this request's lifecycle.
     fn handle_enqueue(
         &mut self,
         mut request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
         arrival_at: Instant,
     ) -> (bool, bool) {
-        let decay_now = Instant::now();
-        // Flat classes resolve from the requested name alone. Only an absent or
-        // empty value means "no preference"; every other value is matched
-        // exactly, so a padded name is unknown rather than silently normalized
-        // onto a class it does not spell.
-        let requested_class = request
-            .policy_class
-            .as_deref()
-            .filter(|name| !name.is_empty());
-        let Some(class_index) = self.profile.resolve_class_index(requested_class) else {
-            let policy_class = requested_class.unwrap_or_default().to_string();
-            tracing::debug!(policy_class, "rejecting unknown router policy class");
-            request.respond(Err(KvSchedulerError::UnknownPolicyClass { policy_class }));
-            return (false, false);
+        // Queue admission runs first and unconditionally: it sits entirely above
+        // policy classes, so it must not be skipped, reordered, or short-circuited
+        // by anything the class layer owns — including an unknown class name,
+        // which is the class layer's rejection to make at the handoff below.
+        let handoff = match self.admit_to_admission_layer(&mut request) {
+            Ok(handoff) => handoff,
+            Err(()) => return (false, false),
         };
-        let lifecycle_request_id = request
-            .mode
-            .lifecycle_request_id()
-            .filter(|_| self.pending.has_admission_policy())
-            .map(str::to_owned);
-        if lifecycle_request_id
-            .as_ref()
-            .is_some_and(|request_id| self.lifecycle_request_ids.contains(request_id))
+        let queued = QueuedRequest {
+            request,
+            arrival_at,
+            block_hashes,
+            admission_id: handoff.admission_id(),
+        };
+        if let AdmissionHandoff::Defer(id) = handoff {
+            // Held above policy classes: no class, no deadline, no class limit,
+            // no class statistics, and no pending accounting until the policy
+            // releases it.
+            tracing::debug!(
+                request_id = queued.request.mode.request_id().unwrap_or("unknown"),
+                "queue admission deferred request"
+            );
+            self.admission
+                .as_mut()
+                .expect("a deferral comes from the admission layer")
+                .defer(id, queued);
+            return (false, true);
+        }
+
+        let mut woken = Vec::new();
+        let outcome = self.schedule_handoff_into(queued, &mut woken);
+        // Only work released by a lifecycle event can need a drain here. A fresh
+        // arrival that was queued is queued precisely because it cannot run yet,
+        // and one that was admitted has already been dispatched.
+        let made_ready = self.admit_woken(woken);
+        match outcome {
+            ScheduleOutcome::Admitted { owns_lifecycle } => (made_ready, owns_lifecycle),
+            ScheduleOutcome::Queued => (made_ready, true),
+            ScheduleOutcome::Rejected => (made_ready, false),
+        }
+    }
+
+    /// Offer one arriving request to the queue-admission layer.
+    ///
+    /// `Err` means the layer refused the request and it has already been
+    /// answered. A request with no lifecycle identity, or a scheduler with no
+    /// admission policy, passes straight through as an unmanaged handoff.
+    fn admit_to_admission_layer(
+        &mut self,
+        request: &mut SchedulingRequest,
+    ) -> Result<AdmissionHandoff, ()> {
+        if self.admission.is_none() {
+            return Ok(AdmissionHandoff::Admit(None));
+        }
+        let Some(request_id) = request.mode.lifecycle_request_id().map(str::to_owned) else {
+            return Ok(AdmissionHandoff::Admit(None));
+        };
+        if !self
+            .admission
+            .as_mut()
+            .expect("checked as some")
+            .begin_lifecycle(&request_id)
         {
             request.respond(Err(KvSchedulerError::BookingFailed(format!(
-                "request ID {} is already managed by queue admission",
-                lifecycle_request_id.as_deref().expect("checked as some")
+                "request ID {request_id} is already managed by queue admission"
             ))));
-            return (false, false);
-        }
-        if let Some(request_id) = lifecycle_request_id.as_ref() {
-            let inserted = self.lifecycle_request_ids.insert(request_id.clone());
-            debug_assert!(inserted, "duplicate lifecycle request ID");
+            return Err(());
         }
 
-        let admission_decision = if lifecycle_request_id.is_some() {
-            self.refresh_admission_worker_snapshot();
-            let workers = self.workers_with_configs.borrow();
-            let routing_eligibility = request.eligibility();
-            let is_worker_eligible = |worker| {
-                routing_eligibility
-                    .validate_worker_rank(&workers, worker)
-                    .is_ok()
-            };
-            self.pending.admit_with_admission_policy(
-                request
-                    .mode
-                    .tracked_request_id()
-                    .expect("lifecycle request is tracked"),
-                request.isl_tokens,
-                request.session_context.as_ref(),
-                &self.admission_worker_snapshot,
-                request.pinned_worker,
-                request.allowed_worker_ids.as_ref(),
-                request.routing_constraints.has_hard_constraints(),
-                &is_worker_eligible,
-            )
-        } else {
-            None
+        self.refresh_admission_worker_snapshot();
+        let workers = self.workers_with_configs.borrow();
+        let routing_eligibility = request.eligibility();
+        let is_worker_eligible = |worker| {
+            routing_eligibility
+                .validate_worker_rank(&workers, worker)
+                .is_ok()
         };
-        if admission_decision.is_some() {
-            let inserted = self
-                .managed_admission_request_ids
-                .insert(lifecycle_request_id.expect("admission request is lifecycle-managed"));
-            debug_assert!(inserted, "duplicate managed admission request ID");
-        }
-        let admission_id = admission_decision.map(|(id, _)| id);
-        let deferred = admission_decision
-            .is_some_and(|(_, decision)| matches!(decision, QueueAdmissionDecision::Defer));
+        Ok(self.admission.as_mut().expect("checked as some").decide(
+            &request_id,
+            request.isl_tokens,
+            request.session_context.as_ref(),
+            &self.admission_worker_snapshot,
+            request.pinned_worker,
+            request.allowed_worker_ids.as_ref(),
+            request.routing_constraints.has_hard_constraints(),
+            &is_worker_eligible,
+        ))
+    }
+
+    /// The one scheduling decision every request handed over by the queue-admission
+    /// layer reaches.
+    ///
+    /// A bypassed request, a request the policy made ready, and a request the
+    /// policy woke from deferral all arrive here and are indistinguishable from
+    /// this point on. This decision is the router's, not the admission policy's
+    /// and not the class queue's: it selects the policy class and then chooses
+    /// between direct admission and queue storage exactly as the router always
+    /// has — a class that has queueing enabled and either a runnable backlog of
+    /// its own or no unbusy eligible worker stores the request; anything else
+    /// goes straight to worker selection.
+    ///
+    /// The clock is read here, at the handoff itself. A custom admission
+    /// policy's callback runs before this point and can take arbitrarily long,
+    /// so a time sampled before that callback could let work that is already
+    /// past its class deadline through the queue Admission gate.
+    ///
+    /// Work released by a lifecycle event this produces is appended to `woken`
+    /// rather than scheduled here, which keeps wake chains iterative.
+    fn schedule_handoff_into(
+        &mut self,
+        queued: QueuedRequest,
+        woken: &mut Vec<QueuedRequest>,
+    ) -> ScheduleOutcome {
+        let now = Instant::now();
+        let Some(class_index) = self.resolve_class_index(&queued.request) else {
+            let policy_class = requested_policy_class(&queued.request)
+                .unwrap_or_default()
+                .to_string();
+            tracing::debug!(policy_class, "rejecting unknown router policy class");
+            let mut request = queued.request;
+            self.abort_lifecycle_into(&request, woken);
+            request.respond(Err(KvSchedulerError::UnknownPolicyClass { policy_class }));
+            return ScheduleOutcome::Rejected;
+        };
 
         let class = self.profile.class(class_index);
-        // Resolve the whole scheduling key once, including this request's
-        // absolute class deadline. The admission check and the queue entry both
-        // read this value; neither recomputes `arrival + slo`.
-        let arrival = QueueArrival::new(
-            arrival_at,
-            arrival_at
-                .saturating_duration_since(self.start_time)
-                .as_secs_f64(),
-            request.priority_jump,
-            request.strict_priority,
-            class,
-        );
-        let should_queue = deferred
-            || self.should_queue(class_index, class, || {
-                self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
-            });
+        let should_queue = self.should_queue(class_index, class, || {
+            self.all_workers_prefill_busy(class, queued.request.eligibility(), now)
+        });
         if !should_queue {
-            // Immediate dispatch never enters class queue storage, so it does
-            // not pass the class-queue admission check.
-            return self.admit_one(request, decay_now, admission_id);
+            // Direct admission. The request never enters queue storage, so it
+            // spends no class limit, takes no deficit-round-robin turn, and does
+            // not pass the queue Admission gate.
+            let QueuedRequest {
+                request,
+                admission_id,
+                ..
+            } = queued;
+            let owns_lifecycle = self.admit_one_into(request, now, admission_id, woken);
+            return ScheduleOutcome::Admitted { owns_lifecycle };
         }
 
-        // Storage is required, so this is the class-queue admission check.
-        // Requests dispatched immediately above never reach it.
+        // Resolve the whole scheduling key once, including this request's
+        // absolute class deadline. The Admission gate and the queue entry both
+        // read this value; neither recomputes `arrival + slo`.
+        let arrival = QueueArrival::new(
+            queued.arrival_at,
+            queued
+                .arrival_at
+                .saturating_duration_since(self.start_time)
+                .as_secs_f64(),
+            queued.request.priority_jump,
+            queued.request.strict_priority,
+            class,
+        );
+
+        // Storage is required, so this is the class-queue Admission gate.
+        // Requests admitted directly above never reach it.
+        //
+        // Read the clock again here rather than reusing `now`: class resolution
+        // and the eligible-worker busy scan run in between, and the scan is
+        // O(workers). A request that crossed its deadline during that work has
+        // missed it, and admitting it would put already-late work into storage.
         let admission_now = Instant::now();
         if let Some(overdue) = overdue_by(arrival.deadline(), admission_now) {
             let error = self.deadline_error(class_index, DeadlineStage::Admission, overdue);
-            let made_ready = request
-                .mode
-                .lifecycle_request_id()
-                .is_some_and(|request_id| self.abort_admission_request(request_id, admission_now));
+            let mut request = queued.request;
+            self.abort_lifecycle_into(&request, woken);
             tracing::debug!(
+                request_id = request.mode.request_id().unwrap_or("unknown"),
                 policy_class = %error.policy_class,
                 overdue_ms = error.overdue_ms,
                 "rejecting request past its policy class deadline before queue storage"
             );
             request.respond(Err(KvSchedulerError::QueueDeadlineExceeded(error)));
-            return (made_ready, false);
+            return ScheduleOutcome::Rejected;
         }
 
-        let snapshot = self.snapshot_for(&request);
+        let snapshot = self.snapshot_for(&queued.request);
         tracing::debug!(
             policy_class = self.profile.class(class_index).name,
             "queueing request"
         );
-        let placement = request
+        let placement = queued
+            .request
             .pinned_worker
             .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
-        let queued = QueuedRequest {
-            request,
-            enqueue_at: arrival_at,
-            block_hashes,
-            admission_id,
-        };
         let worker_count = self.workers_with_configs.borrow().len();
-        let enqueue = match admission_decision {
-            Some((id, QueueAdmissionDecision::Defer)) => self.pending.enqueue_deferred(
-                class_index,
-                worker_count,
-                snapshot,
-                arrival,
-                placement,
-                id,
-                queued,
-            ),
-            _ => self.pending.enqueue(
-                class_index,
-                worker_count,
-                snapshot,
-                arrival,
-                placement,
-                queued,
-            ),
-        };
-        if let Err((rejection, queued)) = enqueue {
+        if let Err((rejection, queued)) = self.pending.enqueue(
+            class_index,
+            worker_count,
+            snapshot,
+            arrival,
+            placement,
+            queued,
+        ) {
             let mut request = queued.request;
-            let made_ready = request
-                .mode
-                .lifecycle_request_id()
-                .is_some_and(|request_id| self.abort_admission_request(request_id, admission_now));
+            self.abort_lifecycle_into(&request, woken);
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
-            return (made_ready, false);
+            return ScheduleOutcome::Rejected;
         }
         self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
         self.pending_isl_tokens
             .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.add_class_counters(class_index, snapshot);
-        (false, true)
+        ScheduleOutcome::Queued
     }
 
     fn should_queue(
@@ -1075,6 +1181,43 @@ impl<
         // Preserve backlog anti-bypass and lazily avoid worker scans when an
         // earlier condition already decides admission.
         class.queueing_enabled() && (self.pending.has_backlog(class_index) || all_workers_busy())
+    }
+
+    /// Push every payload the admission layer released through the same router
+    /// scheduling decision, iteratively.
+    ///
+    /// A released request can be admitted directly, queued, or rejected, and a
+    /// rejection reports one terminal abort that the policy may answer by
+    /// releasing more work, so the batch doubles as the worklist. It terminates
+    /// because deferred storage only ever shrinks during the pass.
+    ///
+    /// Returns whether any of them became runnable queued work, which is the
+    /// only outcome that gives a later poll something new to find.
+    fn admit_woken(&mut self, woken: Vec<QueuedRequest>) -> bool {
+        let mut made_ready = false;
+        let mut batch = woken;
+        let mut next = Vec::new();
+        while !batch.is_empty() {
+            for queued in batch.drain(..) {
+                made_ready |= matches!(
+                    self.schedule_handoff_into(queued, &mut next),
+                    ScheduleOutcome::Queued
+                );
+            }
+            std::mem::swap(&mut batch, &mut next);
+        }
+        made_ready
+    }
+
+    /// The policy class this request names, or `None` for "no preference".
+    ///
+    /// Flat classes resolve from the requested name alone. Only an absent or
+    /// empty value means "no preference"; every other value is matched exactly,
+    /// so a padded name is unknown rather than silently normalized onto a class
+    /// it does not spell.
+    fn resolve_class_index(&self, request: &SchedulingRequest) -> Option<usize> {
+        self.profile
+            .resolve_class_index(requested_policy_class(request))
     }
 
     fn snapshot_for(&self, request: &SchedulingRequest) -> QueueSnapshot {
@@ -1183,50 +1326,27 @@ impl<
         self.admission_available_worker_ids = available_worker_ids;
     }
 
-    /// Deliver one queue-admission lifecycle event and reject any deferred work
-    /// whose class deadline passed while it was parked.
-    ///
-    /// `event` must not borrow from `self`. The `Reconcile` caller drives
-    /// [`PolicyQueue::admission_event`] and [`Self::reject_expired`] directly so
-    /// the borrow of the worker snapshot ends before the rejection pass.
-    fn notify_admission_policy(&mut self, event: QueueAdmissionEvent<'_>, now: Instant) -> bool {
-        let mut expired = Vec::new();
-        let made_ready = self.pending.admission_event(event, now, &mut expired);
-        made_ready | self.reject_expired(&mut expired, now, DeadlineStage::DeferredWake)
-    }
-
-    /// Reject requests past their class deadline, exactly once each: reverse
+    /// Reject every request past its class deadline, exactly once each: reverse
     /// queue accounting, report one terminal lifecycle event for
     /// admission-managed work, and answer the caller.
     ///
-    /// Aborting managed work can wake more deferred requests, and those can
-    /// themselves be expired, so `expired` doubles as the worklist.
+    /// Aborting managed work can release deferred requests. Those repeat the
+    /// actor's ordinary scheduling decision, so what happens to one that aged
+    /// while it was parked depends on that decision and not on the fact that it
+    /// was parked: it meets the Admission gate only if the decision requires
+    /// storage, and a stale release can still be admitted directly when
+    /// capacity is idle. Either way there is no wake-specific stage.
     fn reject_expired(
         &mut self,
         expired: &mut Vec<PolicyQueueEntry<QueuedRequest>>,
         now: Instant,
         stage: DeadlineStage,
     ) -> bool {
-        let mut made_ready = false;
-        let mut batch = std::mem::take(expired);
         let mut woken = Vec::new();
-        let mut stage = stage;
-        loop {
-            for entry in batch.drain(..) {
-                made_ready |= self.reject_one_expired(entry, now, stage, &mut woken);
-            }
-            if woken.is_empty() {
-                break;
-            }
-            // Anything from here surfaced because aborting managed work woke
-            // deferred requests, so it expired while it was parked rather than
-            // at the stage that started this pass. Its typed error and metric
-            // must say so.
-            std::mem::swap(&mut batch, &mut woken);
-            stage = DeadlineStage::DeferredWake;
+        for entry in expired.drain(..) {
+            self.reject_one_expired(entry, now, stage, &mut woken);
         }
-        *expired = batch;
-        made_ready
+        self.admit_woken(woken)
     }
 
     /// Reject one expired request: reverse its queue accounting, report one
@@ -1236,20 +1356,15 @@ impl<
         entry: PolicyQueueEntry<QueuedRequest>,
         now: Instant,
         stage: DeadlineStage,
-        woken: &mut Vec<PolicyQueueEntry<QueuedRequest>>,
-    ) -> bool {
+        woken: &mut Vec<QueuedRequest>,
+    ) {
         let class_index = entry.class_index();
         self.subtract_pending_counters(class_index, entry.snapshot());
         let overdue = overdue_by(entry.deadline(), now).unwrap_or(Duration::ZERO);
         let error = self.deadline_error(class_index, stage, overdue);
         let queued = entry.into_payload();
         let mut request = queued.request;
-        let mut made_ready = false;
-        // Lifecycle ownership, not `admission_id`, decides cleanup: a bypassed
-        // request carries no admission ID but still holds lifecycle state.
-        if let Some(request_id) = request.mode.lifecycle_request_id() {
-            made_ready = self.abort_admission_request_into(request_id, now, woken);
-        }
+        self.abort_lifecycle_into(&request, woken);
         tracing::debug!(
             request_id = request.mode.request_id().unwrap_or("unknown"),
             policy_class = %error.policy_class,
@@ -1258,37 +1373,49 @@ impl<
             "rejecting request past its policy class deadline"
         );
         request.respond(Err(KvSchedulerError::QueueDeadlineExceeded(error)));
-        made_ready
     }
 
-    /// Release one request's admission lifecycle state and report its terminal
-    /// abort to the policy.
+    /// Release one rejected request's admission lifecycle state.
     ///
-    /// Lifecycle state is owned by any lifecycle-tracked request, including one
-    /// the policy bypassed, so it is released unconditionally. Only work the
-    /// policy still manages gets a terminal event, and it gets exactly one.
-    /// Deferred work woken by that event is appended to `woken` rather than
-    /// rejected here, which keeps expiry chains iterative in the caller.
-    fn abort_admission_request_into(
+    /// Lifecycle ownership, not the admission ID, decides cleanup: a bypassed
+    /// request carries no admission ID but still holds lifecycle state. Work
+    /// the abort releases is appended to `woken` rather than admitted here,
+    /// which keeps wake chains iterative in the caller.
+    fn abort_lifecycle_into(
         &mut self,
-        request_id: &str,
-        now: Instant,
-        woken: &mut Vec<PolicyQueueEntry<QueuedRequest>>,
-    ) -> bool {
-        self.lifecycle_request_ids.remove(request_id);
-        self.admission_bookings.remove(request_id);
-        self.managed_admission_request_ids.remove(request_id)
-            && self
-                .pending
-                .admission_event(QueueAdmissionEvent::Aborted { request_id }, now, woken)
+        request: &SchedulingRequest,
+        woken: &mut Vec<QueuedRequest>,
+    ) {
+        let Some(request_id) = request.mode.lifecycle_request_id() else {
+            return;
+        };
+        self.release_lifecycle_into(request_id, woken);
     }
 
-    /// [`Self::abort_admission_request_into`] for callers outside a rejection
-    /// pass: anything the abort wakes that is already expired is rejected here.
-    fn abort_admission_request(&mut self, request_id: &str, now: Instant) -> bool {
+    /// Release one request's admission lifecycle state and admit anything the
+    /// resulting terminal abort released.
+    fn abort_admission_request(&mut self, request_id: &str) -> bool {
         let mut woken = Vec::new();
-        let made_ready = self.abort_admission_request_into(request_id, now, &mut woken);
-        made_ready | self.reject_expired(&mut woken, now, DeadlineStage::DeferredWake)
+        self.release_lifecycle_into(request_id, &mut woken);
+        self.admit_woken(woken)
+    }
+
+    /// Record that the actor gave up lifecycle ownership of `request_id` and
+    /// release the admission layer's state for it.
+    ///
+    /// The record is what keeps a lease honest. An arrival takes lifecycle
+    /// ownership, but scheduling it can lose that ownership again inside the
+    /// same actor command — worker selection, booking, and response delivery can
+    /// all fail, on the direct route as readily as from a drain — and the
+    /// `Enqueue` arm arms its lease only afterwards. Handing back a lease armed
+    /// for a request the actor already released would let the cleanup it
+    /// eventually fires kill a later attempt that reused the ID.
+    fn release_lifecycle_into(&mut self, request_id: &str, woken: &mut Vec<QueuedRequest>) {
+        self.released_lifecycle_request_ids
+            .insert(request_id.to_owned());
+        if let Some(admission) = self.admission.as_mut() {
+            admission.abort(request_id, woken);
+        }
     }
 
     fn deadline_error(
@@ -1312,78 +1439,75 @@ impl<
             return false;
         }
 
-        let now = Instant::now();
-        let mut made_ready = false;
+        let unmanaged_request_ids: HashSet<&str> = dirty
+            .iter()
+            .map(|cleanup| cleanup.request_id.as_str())
+            .collect();
+        let is_abandoned = |queued: &QueuedRequest| {
+            queued
+                .request
+                .mode
+                .tracked_request_id()
+                .is_some_and(|request_id| unmanaged_request_ids.contains(request_id))
+        };
+
+        // Retract every abandoned request from both layers, and reverse its
+        // queue and class accounting, before any lifecycle abort reaches the
+        // policy. An abort can release deferred work straight into class
+        // admission, and that work must be measured against the accounting this
+        // cleanup leaves behind rather than the stale counts it found: a class
+        // at its limit only because of requests this pass is retracting would
+        // otherwise reject the very work the cancellation made room for.
+        if let Some(admission) = self.admission.as_mut() {
+            admission.retain_deferred(|queued| !is_abandoned(queued));
+        }
         let mut removed_ready_head = false;
-        let mut unmanaged_request_ids = HashSet::new();
-        for cleanup in dirty {
+        for class_index in 0..self.profile.classes().len() {
+            let (removed, class_head_removed) =
+                self.pending.take_if_in_class(class_index, is_abandoned);
+            removed_ready_head |= class_head_removed;
+            for entry in removed {
+                self.subtract_pending_counters(class_index, entry.snapshot());
+            }
+        }
+
+        let mut made_ready = false;
+        for cleanup in &dirty {
             let request_id = &cleanup.request_id;
-            made_ready |= self.abort_admission_request(request_id, now);
             if self.slots.request_worker(request_id).is_some() {
                 if let Err(error) = self.slots.free(request_id, Instant::now()) {
                     tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
                 }
                 made_ready = true;
             }
-            unmanaged_request_ids.insert(cleanup.request_id);
         }
-        if !unmanaged_request_ids.is_empty() {
-            for class_index in 0..self.profile.classes().len() {
-                let (removed, class_head_removed) =
-                    self.pending.take_if_in_class(class_index, |queued| {
-                        queued
-                            .request
-                            .mode
-                            .tracked_request_id()
-                            .is_some_and(|request_id| unmanaged_request_ids.contains(request_id))
-                    });
-                removed_ready_head |= class_head_removed;
-                for entry in removed {
-                    self.subtract_pending_counters(class_index, entry.snapshot());
-                }
-            }
+        for cleanup in &dirty {
+            made_ready |= self.abort_admission_request(&cleanup.request_id);
         }
         made_ready || (removed_ready_head && self.has_dispatchable_ready_head())
     }
 
+    /// Relay one terminal response-path outcome to the admission layer.
+    ///
+    /// Returns whether the layer owned the request and, when it did, the worker
+    /// it was booked on.
     fn handle_admission_finished(
         &mut self,
         request_id: &str,
         expected_worker: Option<WorkerWithDpRank>,
         outcome: AdmissionRequestOutcome,
     ) -> (bool, Option<WorkerWithDpRank>) {
-        if !self.lifecycle_request_ids.contains(request_id) {
+        let mut woken = Vec::new();
+        let Some(admission) = self.admission.as_mut() else {
             return (false, None);
-        }
-        let managed = self.managed_admission_request_ids.contains(request_id);
-        let worker = self.admission_bookings.get(request_id).copied();
-        if managed && worker.is_none() {
-            return (false, None);
-        }
-        if expected_worker
-            .zip(worker)
-            .is_some_and(|(expected, actual)| expected != actual)
-        {
-            return (false, None);
-        }
-
-        self.lifecycle_request_ids.remove(request_id);
-        self.admission_bookings.remove(request_id);
-        if !self.managed_admission_request_ids.remove(request_id) {
-            return (true, worker);
-        }
-        let event = match outcome {
-            AdmissionRequestOutcome::Completed { context_tokens } => {
-                QueueAdmissionEvent::Completed {
-                    request_id,
-                    context_tokens,
-                }
-            }
-            AdmissionRequestOutcome::Aborted => QueueAdmissionEvent::Aborted { request_id },
         };
-        // The request is handled either way: whether the event woke other work
-        // is a separate signal and must not mask the terminal acknowledgement.
-        self.notify_admission_policy(event, Instant::now());
+        let Some(worker) = admission.finish(request_id, expected_worker, outcome, &mut woken)
+        else {
+            return (false, None);
+        };
+        // The request is handled either way: whether the event released other
+        // work is a separate signal and must not mask the acknowledgement.
+        self.admit_woken(woken);
         (true, worker)
     }
 
@@ -1418,22 +1542,23 @@ impl<
         _worker: Option<WorkerWithDpRank>,
         reconcile_admission: bool,
     ) {
-        if reconcile_admission && self.pending.has_admission_policy() {
-            let reconcile_now = Instant::now();
+        if reconcile_admission && self.admission.is_some() {
             self.refresh_admission_worker_snapshot();
-            let mut woken_expired = Vec::new();
-            self.pending.admission_event(
+            let mut woken = Vec::new();
+            // Take the worker-snapshot borrow only for the event itself, so it
+            // has ended before released work reaches the scheduling decision.
+            self.admission.as_mut().expect("checked as some").on_event(
                 QueueAdmissionEvent::Reconcile {
                     snapshot: &self.admission_worker_snapshot,
                 },
-                reconcile_now,
-                &mut woken_expired,
+                &mut woken,
             );
-            self.reject_expired(
-                &mut woken_expired,
-                reconcile_now,
-                DeadlineStage::DeferredWake,
-            );
+            // Whatever this callback released repeats the ordinary scheduling
+            // decision, which reads the clock for itself after the callback
+            // returned. A slow reconcile is therefore charged to the class SLO
+            // of anything the decision sends to queue storage, while a release
+            // the decision can dispatch outright is unaffected by it.
+            self.admit_woken(woken);
         }
         if !self.pending.has_ready() {
             return;
@@ -1498,11 +1623,11 @@ impl<
                 self.overlap_refresh_after,
                 queued.block_hashes.as_deref(),
                 queued.request.retain_router_hint_chain,
-                queued.enqueue_at,
+                queued.arrival_at,
                 decay_now,
             )
             .await;
-            let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
+            let wait_ms = queued.arrival_at.elapsed().as_millis() as u64;
             if let Some(snapshot) = refreshed {
                 tracing::info!(
                     request_id = queued.request.mode.request_id().unwrap_or("unknown"),
@@ -1616,26 +1741,50 @@ impl<
         })
     }
 
-    /// Run the full scheduling pipeline for a single request:
-    /// compute projected load -> select worker -> book tracked state -> respond.
+    /// [`Self::admit_one_into`] for the queued route: the drain in
+    /// [`Self::handle_update`] calls this for a request that waited and won its
+    /// deficit-round-robin turn, and it owns the wake pass for whatever that
+    /// dispatch releases.
+    ///
+    /// The direct route does not come through here. It is already inside a wake
+    /// pass of its own, so [`Self::schedule_handoff_into`] calls
+    /// [`Self::admit_one_into`] and lets its caller drive the released work.
     fn admit_one(
+        &mut self,
+        request: SchedulingRequest,
+        decay_now: Instant,
+        admission_id: Option<QueueAdmissionId>,
+    ) -> (bool, bool) {
+        let mut woken = Vec::new();
+        let owns_lifecycle = self.admit_one_into(request, decay_now, admission_id, &mut woken);
+        (self.admit_woken(woken), owns_lifecycle)
+    }
+
+    /// The terminal dispatch pipeline both of the router's routes share, and
+    /// the only place worker selection happens: compute projected load ->
+    /// select worker -> book tracked state -> respond. Neither route is
+    /// privileged over the other; they differ only in what decided to call it.
+    ///
+    /// Work released by the lifecycle events this dispatch reports is appended
+    /// to `woken` instead of being scheduled here. A released request may itself
+    /// dispatch directly and release more work, so recursing would make the
+    /// chain's depth the number of deferred requests; the caller keeps it
+    /// iterative. Returns only whether *this* request owns its lifecycle —
+    /// whatever the wake released is the caller's to report.
+    fn admit_one_into(
         &mut self,
         mut request: SchedulingRequest,
         decay_now: Instant,
         admission_id: Option<QueueAdmissionId>,
-    ) -> (bool, bool) {
+        woken: &mut Vec<QueuedRequest>,
+    ) -> bool {
         let selected = match self.select_worker_for_request(&mut request, decay_now) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
-                let made_ready = request
-                    .mode
-                    .lifecycle_request_id()
-                    .is_some_and(|request_id| {
-                        self.abort_admission_request(request_id, Instant::now())
-                    });
+                self.abort_lifecycle_into(&request, woken);
                 request.respond(Err(e));
-                return (made_ready, false);
+                return false;
             }
         };
 
@@ -1655,7 +1804,7 @@ impl<
         if !request.mode.is_tracked() {
             debug_assert!(admission_id.is_none());
             request.respond(Ok(response));
-            return (false, false);
+            return false;
         }
 
         let request_id = request
@@ -1686,21 +1835,32 @@ impl<
             response,
             non_max_overlap_selection,
         );
-        let made_ready = if owns_lifecycle {
-            admission_id.is_some_and(|id| {
-                let previous = self.admission_bookings.insert(request_id.clone(), worker);
-                debug_assert!(previous.is_none(), "duplicate admission booking request ID");
-                self.notify_admission_policy(
-                    QueueAdmissionEvent::Dispatched { id, worker },
-                    Instant::now(),
-                )
-            })
+        if owns_lifecycle {
+            self.record_admission_dispatch_into(&request_id, admission_id, worker, woken);
         } else {
             // Response delivery lost its race, so the booking rolled back. The
             // request owns lifecycle state whether or not the policy managed it.
-            self.abort_admission_request(&request_id, Instant::now())
+            self.release_lifecycle_into(&request_id, woken);
+        }
+        owns_lifecycle
+    }
+
+    /// Tell the admission layer which worker this request was booked on.
+    ///
+    /// The booking is recorded for every request the layer tracks, including
+    /// bypassed work; `admission_id` decides only whether the policy is told.
+    /// Anything the report releases is appended to `woken` for the caller.
+    fn record_admission_dispatch_into(
+        &mut self,
+        request_id: &str,
+        admission_id: Option<QueueAdmissionId>,
+        worker: WorkerWithDpRank,
+        woken: &mut Vec<QueuedRequest>,
+    ) {
+        let Some(admission) = self.admission.as_mut() else {
+            return;
         };
-        (made_ready, owns_lifecycle)
+        admission.dispatched(request_id, admission_id, worker, woken);
     }
 
     /// A closed receiver means the actor-owned request was abandoned before
@@ -1800,7 +1960,7 @@ impl<
     /// Otherwise when `allowed` is `Some`, only those worker IDs are considered;
     /// otherwise all registered workers are checked.
     /// Returns false when no eligible workers exist so the request falls
-    /// through to `schedule`, which returns a proper `NoEndpoints` error.
+    /// through to `admit_one`, which returns a proper `NoEndpoints` error.
     fn all_workers_prefill_busy(
         &self,
         class: &PolicyClassConfig,
@@ -1887,7 +2047,8 @@ mod tests {
     use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
     use crate::scheduling::{LocalScheduler, OverlapSignals, ScheduleRequest};
     use crate::scheduling::{
-        QueueAdmissionPolicy, QueueAdmissionRequest, RefreshedOverlap, RouterPolicyConfig,
+        QueueAdmissionDecision, QueueAdmissionPolicy, QueueAdmissionRequest, RefreshedOverlap,
+        RouterPolicyConfig,
     };
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -2115,6 +2276,62 @@ mod tests {
 
         fn on_event(&mut self, event: QueueAdmissionEvent<'_>, ready: &mut Vec<QueueAdmissionId>) {
             if matches!(event, QueueAdmissionEvent::Aborted { .. }) {
+                ready.append(&mut self.deferred);
+            }
+        }
+    }
+
+    /// Defers `defer-*` requests and, on an abort, burns wall-clock inside the
+    /// callback before releasing what it holds. A clock read before the callback
+    /// would let the released work through a class deadline it has since missed.
+    struct SlowWakeOnAbort {
+        deferred: Vec<QueueAdmissionId>,
+        stall: Duration,
+    }
+
+    impl QueueAdmissionPolicy for SlowWakeOnAbort {
+        fn admit(&mut self, request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
+            if request.request_id().starts_with("defer-") {
+                self.deferred.push(request.id());
+                return QueueAdmissionDecision::Defer;
+            }
+            QueueAdmissionDecision::Ready
+        }
+
+        fn on_event(&mut self, event: QueueAdmissionEvent<'_>, ready: &mut Vec<QueueAdmissionId>) {
+            if matches!(event, QueueAdmissionEvent::Aborted { .. }) && !self.deferred.is_empty() {
+                std::thread::sleep(self.stall);
+                ready.append(&mut self.deferred);
+            }
+        }
+    }
+
+    /// Returns the decision named by the request-ID prefix and counts both
+    /// `admit` calls and terminal aborts, so a test can prove where queue
+    /// admission sits relative to policy-class selection. It releases whatever
+    /// it deferred on the first abort it sees.
+    struct CountingDecisionPolicy {
+        admits: Arc<AtomicUsize>,
+        aborts: Arc<AtomicUsize>,
+        deferred: Vec<QueueAdmissionId>,
+    }
+
+    impl QueueAdmissionPolicy for CountingDecisionPolicy {
+        fn admit(&mut self, request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
+            self.admits.fetch_add(1, Ordering::Relaxed);
+            if request.request_id().starts_with("bypass-") {
+                QueueAdmissionDecision::Bypass
+            } else if request.request_id().starts_with("defer-") {
+                self.deferred.push(request.id());
+                QueueAdmissionDecision::Defer
+            } else {
+                QueueAdmissionDecision::Ready
+            }
+        }
+
+        fn on_event(&mut self, event: QueueAdmissionEvent<'_>, ready: &mut Vec<QueueAdmissionId>) {
+            if matches!(event, QueueAdmissionEvent::Aborted { .. }) {
+                self.aborts.fetch_add(1, Ordering::Relaxed);
                 ready.append(&mut self.deferred);
             }
         }
@@ -3667,6 +3884,8 @@ policy_classes:
         let (mut queued_second, mut queued_second_rx) = make_request("queued-second", 64);
         queued_second.policy_class = Some("latency".to_string());
         queue.enqueue(queued_second).await;
+        // The class still holds a runnable backlog, so the new arrival joins it
+        // instead of taking the capacity that just freed.
         assert_eq!(
             queue.pending_count(),
             2,
@@ -3758,8 +3977,9 @@ policy_classes:
     async fn unknown_policy_class_is_rejected_before_any_queueing_decision() {
         let (queue, _slots) = make_queue_with_profile(1, 16, 64, flat_class_profile());
 
-        // Workers are idle, so this request would otherwise be dispatched
-        // immediately: an unknown class fails before that decision is made.
+        // Workers are idle, so this request would otherwise be dispatched by the
+        // poll that follows class selection: an unknown class fails at selection,
+        // before any queue storage or dispatch decision.
         let (mut unknown, unknown_rx) = make_request("unknown-class", 64);
         unknown.policy_class = Some("latencee".to_string());
         queue.enqueue(unknown).await;
@@ -3904,36 +4124,106 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn unknown_policy_class_is_rejected_before_the_admission_policy_runs() {
+    async fn queue_admission_runs_above_policy_class_selection() {
+        // Queue admission sits entirely above policy classes, so every arrival
+        // reaches the policy first, whatever class name it carries. The class
+        // layer then rejects an unknown name at the one downstream handoff.
         let admits = Arc::new(AtomicUsize::new(0));
+        let aborts = Arc::new(AtomicUsize::new(0));
         let selector = AdmissionPolicySelector {
             selector: MinDecodeSelector { rendezvous: None },
-            policy: Some(Box::new(CountingSlowPolicy {
+            policy: Some(Box::new(CountingDecisionPolicy {
                 admits: Arc::clone(&admits),
-                ..Default::default()
+                aborts: Arc::clone(&aborts),
+                deferred: Vec::new(),
             })),
         };
-        let (queue, _slots) =
+        let (queue, slots) =
             make_queue_with_profile_and_selector(1, 16, 64, flat_class_profile(), selector);
 
-        let (_lease, response_rx) =
-            enqueue_lifecycle(&queue, "unknown-class", 64, Some("latencee")).await;
-        let error = response_rx.await.unwrap().unwrap_err();
+        // Bypass: unmanaged by the policy, so no terminal event, but the policy
+        // still saw it before the class layer refused the name.
+        let (_bypass_lease, bypass_rx) =
+            enqueue_lifecycle(&queue, "bypass-unknown", 64, Some("latencee")).await;
+        let error = bypass_rx.await.unwrap().unwrap_err();
         let KvSchedulerError::UnknownPolicyClass { policy_class } = &error else {
             panic!("expected unknown policy class, got {error:?}");
         };
         assert_eq!(policy_class, "latencee");
         assert_eq!(
             admits.load(Ordering::Relaxed),
+            1,
+            "queue admission must run before policy-class selection"
+        );
+        assert_eq!(
+            aborts.load(Ordering::Relaxed),
             0,
-            "class resolution must precede the queue admission policy"
+            "a bypassed request is unmanaged, so it reports no terminal event"
         );
 
-        // A configured name reaches the policy, proving the counter is wired.
+        // Ready: managed, so the same downstream rejection reports exactly one
+        // terminal abort.
+        let (_ready_lease, ready_rx) =
+            enqueue_lifecycle(&queue, "ready-unknown", 64, Some("latencee")).await;
+        assert!(matches!(
+            ready_rx.await.unwrap().unwrap_err(),
+            KvSchedulerError::UnknownPolicyClass { .. }
+        ));
+        assert_eq!(admits.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            aborts.load(Ordering::Relaxed),
+            1,
+            "managed work rejected downstream reports exactly one abort"
+        );
+
+        // Defer: the policy holds it despite the unknown class name, so nothing
+        // downstream has seen it yet.
+        let (_defer_lease, defer_rx) =
+            enqueue_lifecycle(&queue, "defer-unknown", 64, Some("latencee")).await;
+        assert_eq!(admits.load(Ordering::Relaxed), 3);
+        assert_eq!(queue.pending_count(), 0);
+        for class_index in 0..2 {
+            assert_eq!(
+                queue.class_queue_stats(class_index).unwrap().pending_count,
+                0,
+                "deferred work has not selected a class, unknown name or not"
+            );
+        }
+        assert_eq!(aborts.load(Ordering::Relaxed), 1);
+
+        // Waking it puts it through the same downstream handoff, where the class
+        // layer refuses the name and the abort is reported exactly once.
+        let (_trigger_lease, trigger_rx) =
+            enqueue_lifecycle(&queue, "ready-trigger", 64, None).await;
+        let trigger_worker = trigger_rx
+            .await
+            .unwrap()
+            .expect("the trigger dispatches through Policy Class and Queue")
+            .best_worker;
+        assert!(
+            queue
+                .abort_request("ready-trigger", None, Some(trigger_worker))
+                .await
+        );
+        assert!(matches!(
+            defer_rx.await.unwrap().unwrap_err(),
+            KvSchedulerError::UnknownPolicyClass { .. }
+        ));
+        assert_eq!(
+            aborts.load(Ordering::Relaxed),
+            3,
+            "the trigger and the woken request each report exactly one abort"
+        );
+        assert_eq!(queue.pending_count(), 0);
+
+        // A configured name takes the identical path and dispatches.
+        slots
+            .free(&"ready-trigger".to_string(), decay_now())
+            .unwrap();
         let (_ok_lease, ok_rx) =
-            enqueue_lifecycle(&queue, "known-class", 64, Some("latency")).await;
+            enqueue_lifecycle(&queue, "ready-known", 64, Some("latency")).await;
         ok_rx.await.unwrap().expect("a configured class dispatches");
-        assert_eq!(admits.load(Ordering::Relaxed), 1);
+        assert_eq!(admits.load(Ordering::Relaxed), 5);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3997,7 +4287,7 @@ policy_classes:
         );
 
         // Free the worker: storage is no longer required, so an equally stale
-        // request is dispatched immediately and never reaches this gate.
+        // request is admitted directly and never reaches this gate.
         slots
             .mark_prefill_completed(&"bypass-active".to_string(), Instant::now())
             .unwrap();
@@ -4009,16 +4299,103 @@ policy_classes:
         immediate_rx
             .await
             .unwrap()
-            .expect("immediate dispatch does not pass the class-queue admission check");
+            .expect("direct admission does not pass the class-queue admission check");
         assert_eq!(
             aborts.load(Ordering::Relaxed),
             1,
-            "an immediately dispatched request must not be aborted"
+            "a directly admitted request must not be aborted"
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_arrival_is_admitted_directly_and_a_busy_one_takes_the_class_limit() {
+        // The class refuses queue storage outright. That limit belongs to the
+        // queue, so it binds only once the router decides the request has to
+        // wait: an arrival that finds an idle worker and no backlog is admitted
+        // directly and never meets it.
+        let profile = policy_profile(
+            r#"
+default_policy_class: closed
+policy_classes:
+  - name: closed
+    slo_ms: 600000
+    quantum: 1
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        let (idle, idle_rx) = make_request("idle", 64);
+        queue.enqueue(idle).await;
+        idle_rx
+            .await
+            .unwrap()
+            .expect("an idle arrival is admitted directly, bypassing the class limit");
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(
+            queue.class_queue_stats(0),
+            Some(ClassQueueStats {
+                pending_count: 0,
+                pending_isl_tokens: 0,
+                pending_cached_tokens: 0,
+            }),
+            "direct admission touches no class accounting"
+        );
+
+        // The worker is busy now, so the next arrival needs storage and the same
+        // limit rejects it.
+        let (busy, busy_rx) = make_request("busy", 64);
+        queue.enqueue(busy).await;
+        let error = busy_rx.await.unwrap().unwrap_err();
+        let KvSchedulerError::QueueRejected(rejection) = &error else {
+            panic!("expected a class-local queue rejection, got {error:?}");
+        };
+        assert_eq!(rejection.policy_class, "closed");
+        assert_eq!(rejection.limit_kind, super::super::QueueLimitKind::Requests);
+        assert_eq!(rejection.limit, 0);
+        assert_eq!(queue.pending_count(), 0);
+
+        // Free the worker and the direct route is available again.
+        slots
+            .mark_prefill_completed(&"idle".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"idle".to_string(), decay_now()).unwrap();
+        let (idle_again, idle_again_rx) = make_request("idle-again", 64);
+        queue.enqueue(idle_again).await;
+        idle_again_rx
+            .await
+            .unwrap()
+            .expect("the direct route returns with the freed worker");
+        slots.free(&"idle-again".to_string(), decay_now()).unwrap();
+    }
+
+    /// Enqueue one lifecycle-tracked request per ID and return the leases and
+    /// response receivers, keyed by request ID.
+    #[allow(clippy::type_complexity)]
+    async fn enqueue_lifecycle_batch<Sel: WorkerSelector<SimpleWorkerConfig> + Send + 'static>(
+        queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, Sel>,
+        request_ids: impl IntoIterator<Item = &'static str>,
+        isl_tokens: usize,
+    ) -> (
+        Vec<Option<Box<RequestLifecycleLease>>>,
+        HashMap<
+            &'static str,
+            tokio::sync::oneshot::Receiver<Result<SchedulingResponse, KvSchedulerError>>,
+        >,
+    ) {
+        let mut leases = Vec::new();
+        let mut receivers = HashMap::new();
+        for request_id in request_ids {
+            let (lease, response_rx) = enqueue_lifecycle(queue, request_id, isl_tokens, None).await;
+            leases.push(lease);
+            receivers.insert(request_id, response_rx);
+        }
+        (leases, receivers)
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn deferred_work_woken_by_a_dispatch_abort_is_attributed_to_the_wake_up() {
+    async fn deferred_work_released_by_an_abort_repeats_the_router_scheduling_decision() {
         let profile = policy_profile(
             r#"
 default_policy_class: tight
@@ -4035,31 +4412,36 @@ policy_classes:
         };
         let (queue, slots) = make_queue_with_profile_and_selector(1, 16, 64, profile, selector);
 
-        let mut leases = Vec::new();
-        let mut receivers = HashMap::new();
-        for request_id in ["bypass-active", "ready-runnable", "defer-parked"] {
-            let (mut request, response_rx) = make_request(request_id, 64);
-            request.mode = ScheduleMode::TrackedWithLifecycle {
-                request_id: request_id.to_owned(),
-            };
-            let lease = queue.new_request_lifecycle_lease(Some(request_id));
-            leases.push(
-                queue
-                    .enqueue_with_block_hashes_and_lease(request, None, lease)
-                    .await,
-            );
-            receivers.insert(request_id, response_rx);
-        }
+        let (leases, mut receivers) = enqueue_lifecycle_batch(
+            &queue,
+            ["bypass-active", "ready-runnable", "defer-parked"],
+            64,
+        )
+        .await;
 
-        // `bypass-active` dispatched and made the worker busy, so the other two
-        // are parked: one runnable, one deferred, both under the same 1s SLO.
+        // `bypass-active` found an idle worker and was admitted directly, and it
+        // now makes the worker busy. `ready-runnable` is queued behind it under
+        // the same 1s SLO; `defer-parked` never reached a class at all.
         receivers
             .remove("bypass-active")
             .unwrap()
             .await
             .unwrap()
-            .expect("the bypassed request dispatches immediately");
-        assert_eq!(queue.pending_count(), 2);
+            .expect("the bypassed request reaches the router's scheduling decision");
+        assert_eq!(
+            queue.pending_count(),
+            1,
+            "deferred work is absent from pending accounting until it is woken"
+        );
+        assert_eq!(
+            queue.class_queue_stats(0),
+            Some(ClassQueueStats {
+                pending_count: 1,
+                pending_isl_tokens: 64,
+                pending_cached_tokens: 0,
+            }),
+            "deferred work is absent from class statistics until it is woken"
+        );
 
         tokio::time::advance(Duration::from_millis(1_500)).await;
         slots
@@ -4085,24 +4467,448 @@ policy_classes:
             "the runnable head expired at a dispatch poll"
         );
 
-        let parked = receivers
+        // Shedding that head emptied the class and the worker was freed, so the
+        // router repeats its ordinary decision for the request the abort
+        // released and finds the direct route open. It is dispatched on the same
+        // terms as an equally stale fresh arrival would be: queue gates bind
+        // only work the router decides has to wait.
+        receivers
             .remove("defer-parked")
             .unwrap()
             .await
             .unwrap()
-            .unwrap_err();
-        let KvSchedulerError::QueueDeadlineExceeded(parked) = &parked else {
-            panic!("expected a deadline rejection, got {parked:?}");
-        };
-        assert_eq!(
-            parked.stage,
-            DeadlineStage::DeferredWake,
-            "work released by the abort expired while it was parked, not at dispatch"
-        );
-        assert_eq!(parked.policy_class, "tight");
-        assert_eq!(parked.slo_ms, 1_000);
+            .expect("released work takes the direct route when the router is idle");
         assert_eq!(queue.pending_count(), 0);
         drop(leases);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bypass_ready_and_woken_defer_share_one_router_scheduling_decision() {
+        // Two classes with equal quanta. `prefill_busy_threshold: 0` makes any
+        // active work busy, so the worker's state alone decides whether the
+        // router admits directly or stores the request.
+        let profile = policy_profile(
+            r#"
+default_policy_class: first
+policy_classes:
+  - name: first
+    slo_ms: 600000
+    quantum: 1
+    prefill_busy_threshold: 0
+  - name: second
+    slo_ms: 600000
+    quantum: 1
+    prefill_busy_threshold: 0
+"#,
+        );
+        let selector = AdmissionPolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(WakeDeferredOnAbort::default())),
+        };
+        let (queue, slots) = make_queue_with_profile_and_selector(1, 16, 64, profile, selector);
+
+        // Ready, idle worker: the router admits it directly, so it never enters
+        // class `first`'s queue. It then occupies the only worker.
+        let (_blocker_lease, blocker_rx) =
+            enqueue_lifecycle(&queue, "ready-blocker", 64, Some("first")).await;
+        let blocker_worker = blocker_rx
+            .await
+            .unwrap()
+            .expect("a ready request reaches the router's scheduling decision")
+            .best_worker;
+        assert_eq!(queue.pending_count(), 0, "direct admission uses no storage");
+
+        // Bypass and Ready with the worker busy: the same decision now stores
+        // both, each in its own class.
+        let (_bypass_lease, bypass_rx) =
+            enqueue_lifecycle(&queue, "bypass-second", 64, Some("second")).await;
+        let (_ready_lease, ready_rx) =
+            enqueue_lifecycle(&queue, "ready-first", 64, Some("first")).await;
+        let (_deferred_lease, deferred_rx) =
+            enqueue_lifecycle(&queue, "defer-first", 64, Some("first")).await;
+
+        assert_eq!(
+            queue.class_queue_stats(0).unwrap().pending_count,
+            1,
+            "only the ready request reached class `first`; the deferred one has \
+             not selected a class"
+        );
+        assert_eq!(
+            queue.class_queue_stats(1).unwrap().pending_count,
+            1,
+            "the bypassed request reached class `second` like any other arrival"
+        );
+        assert_eq!(queue.pending_count(), 2);
+
+        // Aborting the running request releases the deferred one. The worker is
+        // still occupied in the slot tracker and class `first` already holds a
+        // backlog, so the same decision stores the woken request too.
+        assert!(
+            queue
+                .abort_request("ready-blocker", None, Some(blocker_worker))
+                .await
+        );
+        assert_eq!(
+            queue.class_queue_stats(0).unwrap().pending_count,
+            2,
+            "the released request selected class `first` and joined its queue"
+        );
+        assert_eq!(queue.class_queue_stats(1).unwrap().pending_count, 1);
+        assert_eq!(queue.pending_count(), 3);
+
+        // Release whatever is booked and re-poll, until the backlog drains. All
+        // three go through the same ring, so the bypassed, ready, and woken
+        // requests are served the same way.
+        for _ in 0..4 {
+            for request_id in [
+                "ready-blocker",
+                "bypass-second",
+                "ready-first",
+                "defer-first",
+            ] {
+                let _ = slots.mark_prefill_completed(&request_id.to_string(), decay_now());
+                let _ = slots.free(&request_id.to_string(), decay_now());
+            }
+            queue.update().await;
+        }
+        bypass_rx
+            .await
+            .unwrap()
+            .expect("the bypassed request dispatches from its class queue");
+        ready_rx
+            .await
+            .unwrap()
+            .expect("the ready request dispatches from its class queue");
+        deferred_rx
+            .await
+            .unwrap()
+            .expect("the woken request dispatches from its class queue");
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bypass_ready_and_woken_defer_all_admit_directly_when_the_router_is_idle() {
+        // No class here ever stores work for capacity, so every arrival that
+        // reaches the router's decision takes the direct route — whichever of
+        // the three admission outcomes brought it there.
+        let profile = policy_profile(
+            r#"
+default_policy_class: only
+policy_classes:
+  - name: only
+    slo_ms: 600000
+    quantum: 1
+"#,
+        );
+        let selector = AdmissionPolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(WakeDeferredOnAbort::default())),
+        };
+        let (queue, slots) = make_queue_with_profile_and_selector(2, 16, 64, profile, selector);
+
+        let (_bypass_lease, bypass_rx) = enqueue_lifecycle(&queue, "bypass-one", 64, None).await;
+        bypass_rx
+            .await
+            .unwrap()
+            .expect("a bypassed request admits directly");
+
+        let (_ready_lease, ready_rx) = enqueue_lifecycle(&queue, "ready-one", 64, None).await;
+        let ready_worker = ready_rx
+            .await
+            .unwrap()
+            .expect("a ready request admits directly")
+            .best_worker;
+        assert_eq!(queue.pending_count(), 0);
+
+        // Park one, then release it. The router repeats the same decision at
+        // wake time and finds the direct route open, so the woken request is
+        // dispatched without ever entering a class queue.
+        let (_deferred_lease, deferred_rx) = enqueue_lifecycle(&queue, "defer-one", 64, None).await;
+        assert_eq!(queue.pending_count(), 0);
+
+        assert!(
+            queue
+                .abort_request("ready-one", None, Some(ready_worker))
+                .await
+        );
+        deferred_rx
+            .await
+            .unwrap()
+            .expect("a woken request admits directly when the router is idle");
+        assert_eq!(
+            queue.pending_count(),
+            0,
+            "no arrival here ever needed queue storage"
+        );
+
+        for request_id in ["bypass-one", "ready-one", "defer-one"] {
+            let _ = slots.free(&request_id.to_string(), decay_now());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deferred_work_is_absent_from_class_limits_until_it_is_woken() {
+        // One class that accepts at most two queued requests per worker.
+        let profile = policy_profile(
+            r#"
+default_policy_class: capped
+policy_classes:
+  - name: capped
+    slo_ms: 600000
+    quantum: 1
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 2
+"#,
+        );
+        let selector = AdmissionPolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(WakeDeferredOnAbort::default())),
+        };
+        let (queue, _slots) = make_queue_with_profile_and_selector(1, 16, 64, profile, selector);
+
+        let (_active_lease, active_rx) = enqueue_lifecycle(&queue, "ready-active", 64, None).await;
+        let active_worker = active_rx.await.unwrap().unwrap().best_worker;
+
+        let (_parked_lease, parked_rx) = enqueue_lifecycle(&queue, "defer-parked", 64, None).await;
+        assert_eq!(
+            queue.class_queue_stats(0),
+            Some(ClassQueueStats {
+                pending_count: 0,
+                pending_isl_tokens: 0,
+                pending_cached_tokens: 0,
+            }),
+            "deferred work is absent from class statistics"
+        );
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.pending_isl_tokens(), 0);
+
+        // Both queue slots remain available, so the deferred request consumed
+        // none of the class's limit.
+        let (_first_lease, _first_rx) = enqueue_lifecycle(&queue, "ready-first", 64, None).await;
+        let (_second_lease, _second_rx) = enqueue_lifecycle(&queue, "ready-second", 64, None).await;
+        assert_eq!(queue.class_queue_stats(0).unwrap().pending_count, 2);
+
+        let (_third_lease, third_rx) = enqueue_lifecycle(&queue, "ready-third", 64, None).await;
+        let error = third_rx.await.unwrap().unwrap_err();
+        assert!(
+            matches!(&error, KvSchedulerError::QueueRejected(rejection)
+                if rejection.policy_class == "capped" && rejection.current == 2),
+            "the class limit still counts the two queued requests, got {error:?}"
+        );
+
+        // Waking the deferred request puts it through the same class-local
+        // limit, which the queued pair has already reached.
+        assert!(
+            queue
+                .abort_request("ready-active", None, Some(active_worker))
+                .await
+        );
+        let parked = parked_rx.await.unwrap().unwrap_err();
+        assert!(
+            matches!(&parked, KvSchedulerError::QueueRejected(rejection)
+                if rejection.policy_class == "capped" && rejection.current == 2),
+            "a woken request takes the same class limit as any other arrival, got {parked:?}"
+        );
+        assert_eq!(queue.pending_count(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_a_queued_request_frees_class_room_for_the_work_it_wakes() {
+        // One class that accepts a single queued request per worker, so the
+        // cancelled request and the deferred one cannot both be counted.
+        let profile = policy_profile(
+            r#"
+default_policy_class: capped
+policy_classes:
+  - name: capped
+    slo_ms: 600000
+    quantum: 1
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 1
+"#,
+        );
+        let selector = AdmissionPolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(WakeDeferredOnAbort::default())),
+        };
+        let (queue, slots) = make_queue_with_profile_and_selector(1, 16, 64, profile, selector);
+
+        let (_active_lease, active_rx) = enqueue_lifecycle(&queue, "ready-active", 64, None).await;
+        active_rx.await.unwrap().expect("the worker is idle");
+
+        // The class's one queue slot is taken, and the deferred request is held
+        // above the classes where it consumes nothing.
+        let (cancelled_lease, cancelled_rx) =
+            enqueue_lifecycle(&queue, "ready-cancelled", 64, None).await;
+        let (_parked_lease, mut parked_rx) =
+            enqueue_lifecycle(&queue, "defer-parked", 64, None).await;
+        assert_eq!(queue.class_queue_stats(0).unwrap().pending_count, 1);
+
+        // Cancelling the queued request retracts it and its class accounting
+        // before its abort reaches the policy, so the request that abort
+        // releases is measured against the room the cancellation just made.
+        drop(cancelled_rx);
+        drop(cancelled_lease);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while queue.class_queue_stats(0).unwrap().pending_count == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the woken request must take the retracted request's class slot");
+        assert!(
+            parked_rx.try_recv().is_err(),
+            "the woken request was admitted, not rejected against stale accounting"
+        );
+        assert_eq!(queue.pending_count(), 1);
+
+        // It then dispatches from that class queue like any other admitted work.
+        slots
+            .mark_prefill_completed(&"ready-active".to_string(), decay_now())
+            .unwrap();
+        slots
+            .free(&"ready-active".to_string(), decay_now())
+            .unwrap();
+        queue.update().await;
+        parked_rx
+            .await
+            .unwrap()
+            .expect("the woken request dispatches from its class queue");
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_direct_dispatch_leaves_no_lease_armed_for_a_retry_to_inherit() {
+        // The worker is idle and the class has no backlog, so this request is
+        // admitted directly and never enters a class queue; nothing here drains
+        // one. Its response receiver is closed before it arrives, so that direct
+        // dispatch books, fails delivery, rolls the booking back, and releases
+        // the request's lifecycle inside the same command. The lease handed back
+        // must not be armed: a same-ID retry would otherwise be killed by the
+        // cleanup that stale lease eventually fires.
+        let profile = policy_profile(
+            r#"
+default_policy_class: only
+policy_classes:
+  - name: only
+    slo_ms: 600000
+    quantum: 1
+    prefill_busy_threshold: 0
+"#,
+        );
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let selector = AdmissionPolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(CountingSlowPolicy {
+                admits: Arc::new(AtomicUsize::new(0)),
+                aborts: Arc::clone(&aborts),
+                stall: Duration::ZERO,
+            })),
+        };
+        let (queue, slots) = make_queue_with_profile_and_selector(1, 16, 64, profile, selector);
+
+        let (mut abandoned, abandoned_rx) = make_request("retried", 64);
+        abandoned.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "retried".to_owned(),
+        };
+        let abandoned_lease = queue.new_request_lifecycle_lease(Some("retried"));
+        drop(abandoned_rx);
+        let abandoned_lease = queue
+            .enqueue_with_block_hashes_and_lease(abandoned, None, abandoned_lease)
+            .await
+            .expect("a lifecycle request receives a lease");
+
+        assert!(
+            abandoned_lease.request_id.is_none(),
+            "the actor released this request while scheduling it, so the lease \
+             it hands back must not be armed"
+        );
+        assert_eq!(aborts.load(Ordering::Relaxed), 1);
+        assert_eq!(slots.request_worker(&"retried".to_string()), None);
+
+        // The same ID is accepted again, which is only sound because the actor
+        // released the first attempt.
+        let (mut retry_lease, retry_rx) = enqueue_lifecycle(&queue, "retried", 64, None).await;
+        let retry = retry_rx
+            .await
+            .unwrap()
+            .expect("the retry is admitted once the first attempt was released");
+
+        // Dropping the stale lease must not retract the retry.
+        drop(abandoned_lease);
+        queue.update().await;
+        assert_eq!(
+            slots.request_worker(&"retried".to_string()),
+            Some(retry.best_worker),
+            "a stale lease must not free the retry's booking"
+        );
+        assert_eq!(
+            aborts.load(Ordering::Relaxed),
+            1,
+            "a stale lease must not abort the retry"
+        );
+        retry_lease.as_mut().unwrap().disarm();
+        slots.free(&"retried".to_string(), decay_now()).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_wake_callback_expires_the_work_it_releases_at_the_admission_gate() {
+        // `tight` is still inside its deadline when the abort callback starts
+        // and past it when the callback returns, so the Admission gate can only
+        // catch it if it reads the clock after the callback rather than before.
+        let profile = policy_profile(
+            r#"
+default_policy_class: roomy
+policy_classes:
+  - name: roomy
+    slo_ms: 600000
+    quantum: 1000000
+    prefill_busy_threshold: 0
+  - name: tight
+    slo_ms: 100
+    quantum: 1000000
+    prefill_busy_threshold: 0
+"#,
+        );
+        let selector = AdmissionPolicySelector {
+            selector: MinDecodeSelector { rendezvous: None },
+            policy: Some(Box::new(SlowWakeOnAbort {
+                deferred: Vec::new(),
+                stall: Duration::from_millis(400),
+            })),
+        };
+        let (queue, _slots) = make_queue_with_profile_and_selector(1, 16, 64, profile, selector);
+
+        let (_active_lease, active_rx) =
+            enqueue_lifecycle(&queue, "ready-active", 64, Some("roomy")).await;
+        let active_worker = active_rx
+            .await
+            .unwrap()
+            .expect("the worker is idle")
+            .best_worker;
+
+        let (_parked_lease, parked_rx) =
+            enqueue_lifecycle(&queue, "defer-parked", 64, Some("tight")).await;
+        assert_eq!(queue.pending_count(), 0);
+
+        assert!(
+            queue
+                .abort_request("ready-active", None, Some(active_worker))
+                .await
+        );
+        let error = parked_rx.await.unwrap().unwrap_err();
+        let KvSchedulerError::QueueDeadlineExceeded(expiry) = &error else {
+            panic!("expected a deadline rejection, got {error:?}");
+        };
+        assert_eq!(
+            expiry.stage,
+            DeadlineStage::Admission,
+            "the gate must read the clock after the policy callback returned"
+        );
+        assert_eq!(expiry.policy_class, "tight");
+        assert!(expiry.overdue_ms > 0);
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -4126,10 +4932,14 @@ policy_classes:
         let (doomed, doomed_rx) = make_request("doomed", 64);
         queue.enqueue(doomed).await;
 
-        tokio::time::advance(Duration::from_millis(1_500)).await;
+        // `live` arrives while `doomed` is still inside its deadline, so both
+        // sit in the class queue and only the later poll sheds the first one.
+        tokio::time::advance(Duration::from_millis(500)).await;
         let (live, live_rx) = make_request("live", 64);
         queue.enqueue(live).await;
         assert_eq!(queue.pending_count(), 2);
+
+        tokio::time::advance(Duration::from_millis(600)).await;
 
         slots
             .mark_prefill_completed(&"active".to_string(), Instant::now())
@@ -4454,6 +5264,8 @@ policy_classes:
         let (mut allowed, mut allowed_rx) = make_request("allowed", isl);
         allowed.allowed_worker_ids = Some(HashSet::from([active_a_worker]));
         queue.enqueue(allowed).await;
+        // The class already holds a runnable backlog, so this request is queued
+        // behind it rather than taking the worker that just freed.
         assert_eq!(
             queue.pending_count(),
             2,

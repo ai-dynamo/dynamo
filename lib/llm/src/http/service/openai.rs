@@ -5183,7 +5183,7 @@ mod tests {
         let error = crate::kv_router::map_scheduler_error(KvSchedulerError::QueueDeadlineExceeded(
             QueueDeadlineExceeded {
                 policy_class: "batch".to_string(),
-                stage: DeadlineStage::DeferredWake,
+                stage: DeadlineStage::Admission,
                 slo_ms: 5_000,
                 overdue_ms: 12,
             },
@@ -5195,7 +5195,7 @@ mod tests {
             response.1.details.as_deref(),
             Some(&serde_json::json!({
                 "policy_class": "batch",
-                "stage": "deferred_wake",
+                "stage": "admission",
                 "slo_ms": 5_000,
                 "overdue_ms": 12,
             })),

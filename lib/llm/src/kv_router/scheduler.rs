@@ -353,9 +353,6 @@ where
                         dynamo_kv_router::scheduling::DeadlineStage::Admission => {
                             metrics.admission_deadline_expiries.inc();
                         }
-                        dynamo_kv_router::scheduling::DeadlineStage::DeferredWake => {
-                            metrics.deferred_wake_deadline_expiries.inc();
-                        }
                         dynamo_kv_router::scheduling::DeadlineStage::Dispatch => {
                             metrics.dispatch_deadline_expiries.inc();
                         }

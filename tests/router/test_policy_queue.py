@@ -233,7 +233,6 @@ class SloRejectionRun:
     pending_after: float
     dispatch_expiries: float
     admission_expiries: float
-    deferred_wake_expiries: float
 
 
 async def _run_slo_rejection(frontend_port: int) -> SloRejectionRun:
@@ -330,7 +329,7 @@ async def _run_slo_rejection(frontend_port: int) -> SloRejectionRun:
                 DEADLINE_EXPIRED_METRIC,
                 {"policy_class": CANDIDATE_POLICY_CLASS, "stage": stage},
             )
-            for stage in ("dispatch", "admission", "deferred_wake")
+            for stage in ("dispatch", "admission")
         }
 
     return SloRejectionRun(
@@ -340,7 +339,6 @@ async def _run_slo_rejection(frontend_port: int) -> SloRejectionRun:
         pending_after=pending_after,
         dispatch_expiries=expiries["dispatch"],
         admission_expiries=expiries["admission"],
-        deferred_wake_expiries=expiries["deferred_wake"],
     )
 
 
@@ -401,7 +399,7 @@ def test_class_slo_rejects_queued_request_at_dispatch_gate(
     logger.info(
         "SLO arm: blocker status=%d in %.2fs, candidate status=%d in %.2fs; "
         "outstanding at half SLO=%s, pending after=%g, expiries dispatch=%g "
-        "admission=%g deferred_wake=%g; candidate body=%s",
+        "admission=%g; candidate body=%s",
         run.blocker.status,
         run.blocker.latency_s,
         run.candidate.status,
@@ -410,7 +408,6 @@ def test_class_slo_rejects_queued_request_at_dispatch_gate(
         run.pending_after,
         run.dispatch_expiries,
         run.admission_expiries,
-        run.deferred_wake_expiries,
         run.candidate.error_body,
     )
 
@@ -455,4 +452,3 @@ def test_class_slo_rejects_queued_request_at_dispatch_gate(
     # Exactly one expiry, at the dispatch gate and nowhere else.
     assert run.dispatch_expiries == 1, run.dispatch_expiries
     assert run.admission_expiries == 0, run.admission_expiries
-    assert run.deferred_wake_expiries == 0, run.deferred_wake_expiries

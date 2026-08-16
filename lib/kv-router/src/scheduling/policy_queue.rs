@@ -2,22 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::{Ordering, Reverse};
-use std::collections::HashSet;
 
 use ordered_float::OrderedFloat;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use super::config::RouterQueuePolicy;
 use super::min_max_heap::MinMaxHeap;
 use super::policy_config::{PolicyClassConfig, PolicyClassOrdering, PolicyProfile};
-use super::queue_admission::{
-    QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionPolicy,
-    QueueAdmissionRequest, QueueAdmissionWorkerSnapshot, WorkerPlacement,
-};
-use super::types::SessionContext;
-use crate::protocols::{WorkerId, WorkerWithDpRank};
+use super::types::WorkerPlacement;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueSnapshot {
@@ -76,10 +70,8 @@ pub struct QueueRejection {
 #[serde(rename_all = "snake_case")]
 pub enum DeadlineStage {
     /// Immediately before the request would have entered class queue storage.
-    /// Requests dispatched without queueing never reach this check.
+    /// Requests admitted directly, without queueing, never reach this check.
     Admission,
-    /// When a custom admission policy released deferred work back to its class.
-    DeferredWake,
     /// At a class queue head during a deficit-round-robin poll.
     Dispatch,
 }
@@ -88,7 +80,6 @@ impl std::fmt::Display for DeadlineStage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Admission => formatter.write_str("admission"),
-            Self::DeferredWake => formatter.write_str("deferred_wake"),
             Self::Dispatch => formatter.write_str("dispatch"),
         }
     }
@@ -223,11 +214,11 @@ impl<T> PartialOrd for PolicyQueueEntry<T> {
 
 /// This request's scheduling key inputs, resolved against its policy class.
 ///
-/// The class deadline is derived here, exactly once, from the single monotonic
-/// router-arrival observation. Every later check — class-queue admission,
-/// deferred wake-up, dispatch, and the queue entry itself — reads that same
-/// value rather than recomputing it. The remaining fields exist only for the
-/// no-SLO fallback ordering, which keeps the pre-existing
+/// The class deadline is derived here, exactly once, when the request selects
+/// its class, from the single monotonic router-arrival observation. Every later
+/// check — the class Admission gate, dispatch, and the queue entry itself —
+/// reads that same value rather than recomputing it. The remaining fields exist
+/// only for the no-SLO fallback ordering, which keeps the pre-existing
 /// `--router-queue-policy` behavior.
 #[derive(Debug, Clone, Copy)]
 pub struct QueueArrival {
@@ -321,12 +312,15 @@ impl<T> PolicyClassQueue<T> {
     }
 }
 
+/// The Policy Class and Queue layer: every configured class, its one runnable
+/// queue, and the cross-class deficit-round-robin state.
+///
+/// Requests reach this layer only through [`Self::enqueue`], which is the
+/// scheduler's single handoff point. This layer has no upstream concepts: it
+/// cannot tell where a request waited before the handoff, and nothing above it
+/// may reach into a class queue or the round-robin state.
 pub struct PolicyQueue<T> {
     classes: Vec<PolicyClassQueue<T>>,
-    deferred: FxHashMap<QueueAdmissionId, PolicyQueueEntry<T>>,
-    admission_policy: Option<Box<dyn QueueAdmissionPolicy>>,
-    admission_ready: Vec<QueueAdmissionId>,
-    next_admission_id: u64,
     round_cursor: usize,
     carry_class: Option<usize>,
     next_enqueue_seq: u64,
@@ -349,96 +343,12 @@ impl<T> PolicyQueue<T> {
                     deficit: 0,
                 })
                 .collect(),
-            deferred: FxHashMap::default(),
-            admission_policy: None,
-            admission_ready: Vec::new(),
-            next_admission_id: 0,
             round_cursor: 0,
             carry_class: None,
             next_enqueue_seq: 0,
             pending_count: 0,
             candidates: vec![None; class_count],
         }
-    }
-
-    pub(crate) fn with_admission_policy(mut self, policy: Box<dyn QueueAdmissionPolicy>) -> Self {
-        self.admission_policy = Some(policy);
-        self
-    }
-
-    pub(crate) fn has_admission_policy(&self) -> bool {
-        self.admission_policy.is_some()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn admit_with_admission_policy(
-        &mut self,
-        request_id: &str,
-        context_tokens: usize,
-        session_context: Option<&SessionContext>,
-        worker_snapshot: &QueueAdmissionWorkerSnapshot,
-        pinned_worker: Option<WorkerWithDpRank>,
-        allowed_worker_ids: Option<&HashSet<WorkerId>>,
-        has_hard_constraints: bool,
-        eligibility: &dyn Fn(WorkerWithDpRank) -> bool,
-    ) -> Option<(QueueAdmissionId, QueueAdmissionDecision)> {
-        let policy = self.admission_policy.as_mut()?;
-        let id = QueueAdmissionId::new(self.next_admission_id);
-        self.next_admission_id = self.next_admission_id.wrapping_add(1);
-        let decision = policy.admit(QueueAdmissionRequest::new_with_eligibility(
-            id,
-            request_id,
-            context_tokens,
-            session_context,
-            worker_snapshot,
-            pinned_worker,
-            allowed_worker_ids,
-            has_hard_constraints,
-            eligibility,
-        ));
-        (!matches!(decision, QueueAdmissionDecision::Bypass)).then_some((id, decision))
-    }
-
-    /// Deliver one lifecycle event and move any woken work back into its class.
-    ///
-    /// Deferred work that outlived its class deadline while parked is appended
-    /// to `expired` instead of becoming runnable; the caller rejects it and
-    /// reports the terminal event exactly once. Returns whether any request
-    /// became runnable.
-    pub(crate) fn admission_event(
-        &mut self,
-        event: QueueAdmissionEvent<'_>,
-        now: Instant,
-        expired: &mut Vec<PolicyQueueEntry<T>>,
-    ) -> bool {
-        let Some(policy) = self.admission_policy.as_mut() else {
-            return false;
-        };
-        let mut ready = std::mem::take(&mut self.admission_ready);
-        ready.clear();
-        policy.on_event(event, &mut ready);
-
-        let mut made_ready = false;
-        for id in ready.drain(..) {
-            let Some(entry) = self.deferred.remove(&id) else {
-                tracing::debug!(
-                    queue_admission_id = id.get(),
-                    "Ignoring unknown queue wake-up"
-                );
-                continue;
-            };
-            let class = &mut self.classes[entry.class_index];
-            if entry.is_expired(now) {
-                subtract_stats(&mut class.stats, entry.snapshot);
-                self.pending_count -= 1;
-                expired.push(entry);
-                continue;
-            }
-            class.ready.push(entry);
-            made_ready = true;
-        }
-        self.admission_ready = ready;
-        made_ready
     }
 
     pub fn pending_count(&self) -> usize {
@@ -478,10 +388,7 @@ impl<T> PolicyQueue<T> {
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
-        self.classes
-            .iter()
-            .flat_map(PolicyClassQueue::entries)
-            .chain(self.deferred.values())
+        self.classes.iter().flat_map(PolicyClassQueue::entries)
     }
 
     /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
@@ -527,42 +434,6 @@ impl<T> PolicyQueue<T> {
         Ok(())
     }
 
-    /// Park a request in unordered, non-runnable holding storage until the
-    /// custom admission policy wakes it. It keeps the class, deadline, cost, and
-    /// accounting it was given here.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn enqueue_deferred(
-        &mut self,
-        class_index: usize,
-        worker_count: usize,
-        snapshot: QueueSnapshot,
-        arrival: QueueArrival,
-        placement: WorkerPlacement,
-        id: QueueAdmissionId,
-        payload: T,
-    ) -> Result<(), (QueueRejection, T)> {
-        let class = &mut self.classes[class_index];
-        if let Some(rejection) = queue_rejection(class, worker_count) {
-            return Err((rejection, payload));
-        }
-
-        let entry = make_entry(
-            class_index,
-            snapshot,
-            arrival,
-            &class.config,
-            self.next_enqueue_seq,
-            placement,
-            payload,
-        );
-        self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
-        add_stats(&mut class.stats, snapshot);
-        let replaced = self.deferred.insert(id, entry);
-        debug_assert!(replaced.is_none(), "duplicate queue admission ID");
-        self.pending_count += 1;
-        Ok(())
-    }
-
     pub(crate) fn take_if_in_class(
         &mut self,
         class_index: usize,
@@ -574,41 +445,24 @@ impl<T> PolicyQueue<T> {
             .filter(|entry| predicate(entry.payload()))
             .map(PolicyQueueEntry::enqueue_seq)
             .collect();
-        let remove_deferred: Vec<QueueAdmissionId> = self
-            .deferred
-            .iter()
-            .filter(|(_, entry)| entry.class_index == class_index && predicate(entry.payload()))
-            .map(|(id, _)| *id)
-            .collect();
-        if remove_sequences.is_empty() && remove_deferred.is_empty() {
+        if remove_sequences.is_empty() {
             return (Vec::new(), false);
         }
 
         let mut removed = Vec::new();
-        let removed_ready_head = if remove_sequences.is_empty() {
-            false
-        } else {
-            let removed_ready_head = class
-                .ready
-                .peek_min()
-                .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq()));
-            let mut retained = Vec::with_capacity(class.ready.len());
-            for entry in class.ready.drain() {
-                if remove_sequences.contains(&entry.enqueue_seq()) {
-                    removed.push(entry);
-                } else {
-                    retained.push(entry);
-                }
-            }
-            class.ready = MinMaxHeap::from(retained);
-            removed_ready_head
-        };
-
-        for id in remove_deferred {
-            if let Some(entry) = self.deferred.remove(&id) {
+        let removed_ready_head = class
+            .ready
+            .peek_min()
+            .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq()));
+        let mut retained = Vec::with_capacity(class.ready.len());
+        for entry in class.ready.drain() {
+            if remove_sequences.contains(&entry.enqueue_seq()) {
                 removed.push(entry);
+            } else {
+                retained.push(entry);
             }
         }
+        class.ready = MinMaxHeap::from(retained);
 
         for entry in &removed {
             subtract_stats(&mut class.stats, entry.snapshot);
@@ -756,7 +610,6 @@ impl<T> PolicyQueue<T> {
         self.classes
             .into_iter()
             .flat_map(|class| class.ready.into_iter())
-            .chain(self.deferred.into_values())
     }
 
     fn pop_candidate(&mut self, class_index: usize) -> PolicyQueueEntry<T> {
@@ -884,31 +737,8 @@ mod tests {
 
     use super::*;
     use crate::config::RouterQueuePolicy;
-    use crate::scheduling::{QueueAdmissionWorker, RouterPolicyConfig};
-
-    #[derive(Default)]
-    struct WakeOnReconcile {
-        deferred: Option<QueueAdmissionId>,
-    }
-
-    impl QueueAdmissionPolicy for WakeOnReconcile {
-        fn admit(&mut self, request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
-            assert_eq!(request.request_id(), "request-1");
-            assert_eq!(request.context_tokens(), 32);
-            assert!(request.session_context().is_none());
-            assert_eq!(request.workers().len(), 1);
-            self.deferred = Some(request.id());
-            QueueAdmissionDecision::Defer
-        }
-
-        fn on_event(&mut self, event: QueueAdmissionEvent<'_>, ready: &mut Vec<QueueAdmissionId>) {
-            if matches!(event, QueueAdmissionEvent::Reconcile { .. })
-                && let Some(id) = self.deferred.take()
-            {
-                ready.push(id);
-            }
-        }
-    }
+    use crate::protocols::WorkerWithDpRank;
+    use crate::scheduling::RouterPolicyConfig;
 
     fn profile(yaml: &str) -> PolicyProfile {
         RouterPolicyConfig::from_yaml(yaml)
@@ -927,37 +757,6 @@ policy_classes:
     slo_ms: 600000
     quantum: 10
 "#,
-        )
-    }
-
-    fn worker_snapshot() -> QueueAdmissionWorkerSnapshot {
-        QueueAdmissionWorkerSnapshot::new(
-            1,
-            vec![QueueAdmissionWorker::new(
-                WorkerWithDpRank::new(7, 0),
-                Some(1_024),
-                true,
-            )],
-        )
-    }
-
-    /// Host-side admission call with no pin, allowlist, or hard constraint, as
-    /// the scheduler issues it for an unconstrained request.
-    fn admit_unconstrained<T>(
-        queue: &mut PolicyQueue<T>,
-        request_id: &str,
-        context_tokens: usize,
-        snapshot: &QueueAdmissionWorkerSnapshot,
-    ) -> Option<(QueueAdmissionId, QueueAdmissionDecision)> {
-        queue.admit_with_admission_policy(
-            request_id,
-            context_tokens,
-            None,
-            snapshot,
-            None,
-            None,
-            false,
-            &|_| true,
         )
     }
 
@@ -987,169 +786,11 @@ policy_classes:
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn enqueue_deferred_at<T>(
-        queue: &mut PolicyQueue<T>,
-        class_index: usize,
-        worker_count: usize,
-        snapshot: QueueSnapshot,
-        at: Instant,
-        placement: WorkerPlacement,
-        id: QueueAdmissionId,
-        payload: T,
-    ) -> Result<(), (QueueRejection, T)> {
-        let arrival = arrival_for(queue, class_index, at);
-        queue.enqueue_deferred(
-            class_index,
-            worker_count,
-            snapshot,
-            arrival,
-            placement,
-            id,
-            payload,
-        )
-    }
-
     fn pop(queue: &mut PolicyQueue<&'static str>) -> Option<&'static str> {
         let mut expired = Vec::new();
         let entry = queue.pop_next(Instant::now(), &mut expired, |_, _, _| true);
         assert!(expired.is_empty(), "unexpected expiry");
         entry.map(PolicyQueueEntry::into_payload)
-    }
-
-    #[test]
-    fn admission_policy_defers_host_owned_request_until_wake() {
-        let mut queue = PolicyQueue::new(long_slo_profile())
-            .with_admission_policy(Box::new(WakeOnReconcile::default()));
-        let snapshot = worker_snapshot();
-        let (id, decision) = admit_unconstrained(&mut queue, "request-1", 32, &snapshot).unwrap();
-        assert_eq!(decision, QueueAdmissionDecision::Defer);
-
-        enqueue_deferred_at(
-            &mut queue,
-            0,
-            1,
-            QueueSnapshot::new(32, 0),
-            Instant::now(),
-            WorkerPlacement::Any,
-            id,
-            "payload",
-        )
-        .unwrap();
-        assert_eq!(queue.pending_count(), 1);
-        assert_eq!(pop(&mut queue), None);
-
-        let mut expired = Vec::new();
-        assert!(queue.admission_event(
-            QueueAdmissionEvent::Reconcile {
-                snapshot: &snapshot,
-            },
-            Instant::now(),
-            &mut expired,
-        ));
-        assert!(expired.is_empty());
-        assert_eq!(pop(&mut queue), Some("payload"));
-        assert_eq!(queue.pending_count(), 0);
-    }
-
-    #[test]
-    fn deferred_wake_rejects_work_whose_deadline_passed_while_parked() {
-        let mut queue = PolicyQueue::new(profile(
-            r#"
-default_policy_class: agents
-policy_classes:
-  - name: agents
-    slo_ms: 1000
-    quantum: 10
-"#,
-        ))
-        .with_admission_policy(Box::new(WakeOnReconcile::default()));
-        let snapshot = worker_snapshot();
-        let arrived = Instant::now();
-        let (id, _) = admit_unconstrained(&mut queue, "request-1", 32, &snapshot).unwrap();
-        enqueue_deferred_at(
-            &mut queue,
-            0,
-            1,
-            QueueSnapshot::new(32, 16),
-            arrived,
-            WorkerPlacement::Any,
-            id,
-            "payload",
-        )
-        .unwrap();
-        assert_eq!(queue.class_stats(0).requests, 1);
-
-        let mut expired = Vec::new();
-        let made_ready = queue.admission_event(
-            QueueAdmissionEvent::Reconcile {
-                snapshot: &snapshot,
-            },
-            arrived + Duration::from_millis(1_001),
-            &mut expired,
-        );
-
-        assert!(!made_ready, "expired work must not become runnable");
-        assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0].payload(), &"payload");
-        assert_eq!(
-            expired[0].deadline(),
-            Some(arrived + Duration::from_millis(1_000))
-        );
-        assert_eq!(queue.pending_count(), 0);
-        assert_eq!(queue.class_stats(0).requests, 0);
-        assert_eq!(queue.class_stats(0).raw_isl_tokens, 0);
-        assert_eq!(queue.class_stats(0).cached_tokens, 0);
-        assert_eq!(pop(&mut queue), None);
-    }
-
-    #[test]
-    fn deferred_wake_admits_work_still_inside_its_deadline() {
-        let mut queue = PolicyQueue::new(profile(
-            r#"
-default_policy_class: agents
-policy_classes:
-  - name: agents
-    slo_ms: 1000
-    quantum: 10
-"#,
-        ))
-        .with_admission_policy(Box::new(WakeOnReconcile::default()));
-        let snapshot = worker_snapshot();
-        let arrived = Instant::now();
-        let (id, _) = admit_unconstrained(&mut queue, "request-1", 32, &snapshot).unwrap();
-        enqueue_deferred_at(
-            &mut queue,
-            0,
-            1,
-            QueueSnapshot::new(32, 0),
-            arrived,
-            WorkerPlacement::Any,
-            id,
-            "payload",
-        )
-        .unwrap();
-
-        let mut expired = Vec::new();
-        let woke_at = arrived + Duration::from_millis(999);
-        assert!(queue.admission_event(
-            QueueAdmissionEvent::Reconcile {
-                snapshot: &snapshot,
-            },
-            woke_at,
-            &mut expired,
-        ));
-        assert!(expired.is_empty());
-
-        let entry = queue
-            .pop_next(woke_at, &mut expired, |_, _, _| true)
-            .expect("live deferred work must dispatch after wake");
-        assert_eq!(
-            entry.deadline(),
-            Some(arrived + Duration::from_millis(1_000)),
-            "the deadline must survive defer and wake unchanged"
-        );
-        assert_eq!(entry.into_payload(), "payload");
     }
 
     #[test]
@@ -1642,20 +1283,17 @@ policy_classes:
     }
 
     #[test]
-    fn retain_removes_deferred_entries_and_reports_the_lost_head() {
-        let mut queue = PolicyQueue::new(long_slo_profile())
-            .with_admission_policy(Box::new(WakeOnReconcile::default()));
-        let snapshot = worker_snapshot();
-        let (id, _) = admit_unconstrained(&mut queue, "request-1", 32, &snapshot).unwrap();
-        enqueue_deferred_at(
+    fn taking_the_class_head_reports_that_the_head_was_lost() {
+        let mut queue = PolicyQueue::new(long_slo_profile());
+        let base = Instant::now();
+        enqueue_at(
             &mut queue,
             0,
             1,
             QueueSnapshot::new(32, 0),
-            Instant::now(),
+            base,
             WorkerPlacement::Any,
-            id,
-            "deferred",
+            "head",
         )
         .unwrap();
         enqueue_at(
@@ -1663,17 +1301,23 @@ policy_classes:
             0,
             1,
             QueueSnapshot::new(8, 0),
-            Instant::now(),
+            base + Duration::from_millis(1),
             WorkerPlacement::Any,
-            "runnable",
+            "behind-head",
         )
         .unwrap();
 
-        let (removed, removed_ready_head) = queue.take_if_in_class(0, |payload| *payload != "keep");
-        assert_eq!(removed.len(), 2);
-        assert!(removed_ready_head);
-        assert_eq!(queue.pending_count(), 0);
-        assert_eq!(queue.class_stats(0).requests, 0);
+        let (removed, removed_ready_head) = queue.take_if_in_class(0, |payload| *payload == "head");
+        assert_eq!(removed.len(), 1);
+        assert!(removed_ready_head, "the class head itself was removed");
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.class_stats(0).requests, 1);
+
+        let (removed, removed_ready_head) =
+            queue.take_if_in_class(0, |payload| *payload == "absent");
+        assert!(removed.is_empty());
+        assert!(!removed_ready_head);
+        assert_eq!(pop(&mut queue), Some("behind-head"));
     }
 
     #[test]

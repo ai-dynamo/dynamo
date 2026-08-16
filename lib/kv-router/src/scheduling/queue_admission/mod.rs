@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod host;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+pub(crate) use host::{AdmissionHandoff, AdmissionRequestOutcome, QueueAdmissionLayer};
 
 use crate::protocols::{WorkerId, WorkerWithDpRank};
 use crate::scheduling::types::SessionContext;
@@ -317,13 +321,14 @@ pub enum QueueAdmissionEvent<'a> {
     },
 }
 
-/// Optional programmatic admission policy hosted by [`super::policy_queue::PolicyQueue`].
+/// Optional programmatic admission policy hosted by the scheduler's queue-admission layer.
 ///
 /// Dynamo keeps ownership of requests and deferred storage. Implementations retain only
 /// policy state and append IDs of previously deferred requests that should become ready.
 /// A policy can implement session or program fairness by controlling which requests become
-/// runnable. It does not reorder or pop runnable requests: policy-class ordering and cross-class
-/// deficit round robin remain owned by Dynamo.
+/// runnable. It does not reorder or pop runnable requests: policy-class selection, class
+/// ordering, and cross-class deficit round robin all sit below this layer and remain owned
+/// by Dynamo.
 pub trait QueueAdmissionPolicy: Send {
     fn admit(&mut self, request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision;
 
@@ -375,16 +380,6 @@ impl RequestProgressUpdater {
         self.context_tokens
             .fetch_max(context_tokens, Ordering::Relaxed);
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum WorkerPlacement {
-    /// Preserve the request's existing routing constraints.
-    Any,
-    /// Add an exact-worker constraint. The router validates it against the
-    /// request's existing constraints before dispatch.
-    Exact(WorkerWithDpRank),
 }
 
 #[cfg(test)]

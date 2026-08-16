@@ -339,6 +339,20 @@ impl SessionContext {
     }
 }
 
+/// The worker constraint a queued request carries.
+///
+/// It never affects queue order: the scheduler validates it when it tests a
+/// class head for dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WorkerPlacement {
+    /// Preserve the request's existing routing constraints.
+    Any,
+    /// Add an exact-worker constraint. The router validates it against the
+    /// request's existing constraints before dispatch.
+    Exact(WorkerWithDpRank),
+}
+
 /// Validated request accepted by [`LocalScheduler`](super::LocalScheduler).
 pub struct ScheduleRequest {
     pub mode: ScheduleMode,
