@@ -1596,7 +1596,7 @@ mod tests {
             move |config: &crate::config::KvRouterConfig, worker_type, _partition| {
                 WorkerSelectionPolicy::new(
                     config.clone(),
-                    worker_type,
+                    worker_type.as_str(),
                     Vec::new(),
                     Box::new(CatalogRemovingPicker {
                         core: factory_core_ref

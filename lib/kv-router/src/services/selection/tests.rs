@@ -438,7 +438,7 @@ async fn admission_policy_supports_atomic_reservations_and_rejects_two_step_book
     let app = native_policy_app(move |config, worker_type, _partition| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            worker_type,
+            worker_type.as_str(),
             vec![Box::new(WorkerIdScorer)],
             Box::new(LowestCostPicker),
         )
@@ -485,7 +485,7 @@ async fn admission_completion_survives_worker_removal() {
     let app = native_policy_app(move |config, worker_type, _partition| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            worker_type,
+            worker_type.as_str(),
             vec![Box::new(WorkerIdScorer)],
             Box::new(LowestCostPicker),
         )
@@ -525,7 +525,7 @@ async fn reservation_abort_reports_aborted_instead_of_completed() {
     let app = native_policy_app(move |config, worker_type, _partition| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            worker_type,
+            worker_type.as_str(),
             vec![Box::new(WorkerIdScorer)],
             Box::new(LowestCostPicker),
         )
@@ -559,7 +559,7 @@ async fn reservation_release_skips_partitions_that_do_not_own_the_id() {
     let app = native_policy_app(move |config, worker_type, _partition| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            worker_type,
+            worker_type.as_str(),
             vec![Box::new(WorkerIdScorer)],
             Box::new(LowestCostPicker),
         )
