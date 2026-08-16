@@ -545,7 +545,8 @@ type Request struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Snapshot assigns an ID to each request.
 	RequestId *string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3,oneof" json:"request_id,omitempty"`
-	// Snapshot assigns a unique transaction ID before the first request and does not reuse it while live.
+	// Snapshot assigns a unique transaction ID before the first request and does not reuse it while live. PageBroker
+	// expires an uncommitted transaction one hour after staging begins.
 	TransactionId *string `protobuf:"bytes,2,opt,name=transaction_id,json=transactionId,proto3,oneof" json:"transaction_id,omitempty"`
 	// Types that are valid to be assigned to Command:
 	//

@@ -54,7 +54,8 @@ message Request
 {
   // Snapshot assigns an ID to each request.
   optional string request_id = 1;
-  // Snapshot assigns a unique transaction ID before the first request and does not reuse it while live.
+  // Snapshot assigns a unique transaction ID before the first request and does not reuse it while live. PageBroker
+  // expires an uncommitted transaction one hour after staging begins.
   optional string transaction_id = 2;
   oneof command
   {
