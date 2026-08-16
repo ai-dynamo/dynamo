@@ -41,7 +41,7 @@ Aggregated no-MTP fallback manifests are also included under `vllm/agg-*-256k-no
 
 ### Refresh Profiles
 
-Refresh profiles add 256K and 1M aggregated agentic configurations for B200, GB200, and H200. They use the following runtime image:
+Refresh profiles add 256K and 1M aggregated agentic configurations and 1M disaggregated 1P1D configurations for B200, GB200, and H200. They use the following runtime image:
 
 ```text
 nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
@@ -55,8 +55,13 @@ nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81
 | GB200 | 1M | 2 × TP4 | disabled | 32 | 49152 | 48 | `vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml` |
 | H200 | 256K | 2 × TP8 | 5 tokens | 48 | 24576 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
 | H200 | 1M | 2 × TP8 | disabled | 32 | 24576 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
+| B200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 24 (validation) | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
+| GB200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 24 (validation) | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
+| H200 | 1M | 1P TP8 + 1D TP8 | disabled | 32 | 24576 | 16 (validation) | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
 
 The Refresh manifests enable KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and hybrid KV cache management. Expert Parallelism is disabled.
+
+The H200 and B200 1P1D profiles use UCX/RDMA and request one `rdma/ib` resource per GPU. The GB200 1P1D profile uses UCX/TCP and does not require an RDMA device resource.
 
 ## Supported Features
 
@@ -139,7 +144,18 @@ PROFILE=agg-${GPU}-agentic-${CONTEXT}-2w-kv
 kubectl apply -f vllm/${PROFILE}/deploy.yaml -n ${NAMESPACE}
 ```
 
-The DGD name is `nemotron-ultra-refresh-<gpu>-<context>-agg-2w-kv`.
+The aggregated DGD name is `ultra-agg-<gpu>-<context>-2w-kv`.
+
+For a Refresh 1M disaggregated deployment, use the corresponding 1P1D profile:
+
+```bash
+GPU=h200       # b200, gb200, or h200
+PROFILE=disagg-${GPU}-agentic-1m-1p1d
+
+kubectl apply -f vllm/${PROFILE}/deploy.yaml -n ${NAMESPACE}
+```
+
+The disaggregated DGD name is `ultra-disagg-<gpu>-1m-1p1d`.
 
 ### 3. Smoke Test
 
@@ -159,7 +175,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### 4. Benchmark
 
-See [`perf/README.md`](perf/README.md) for the full benchmark workflow. Day-0 profiles use [`perf/perf.yaml`](perf/perf.yaml); all six Refresh profiles share [`perf/refresh-perf.yaml`](perf/refresh-perf.yaml) and [`perf/refresh-runner.configmap.yaml`](perf/refresh-runner.configmap.yaml).
+See [`perf/README.md`](perf/README.md) for the full benchmark workflow. Day-0 profiles use [`perf/perf.yaml`](perf/perf.yaml); the aggregated Refresh profiles share [`perf/refresh-perf.yaml`](perf/refresh-perf.yaml) and [`perf/refresh-runner.configmap.yaml`](perf/refresh-runner.configmap.yaml).
 
 ## Benchmark Results
 
@@ -238,6 +254,9 @@ recipes/nemotron-3-ultra/
     agg-gb200-agentic-1m-2w-kv/deploy.yaml
     agg-h200-agentic-256k-2w-kv/deploy.yaml
     agg-h200-agentic-1m-2w-kv/deploy.yaml
+    disagg-b200-agentic-1m-1p1d/deploy.yaml
+    disagg-gb200-agentic-1m-1p1d/deploy.yaml
+    disagg-h200-agentic-1m-1p1d/deploy.yaml
   perf/
     README.md                 # benchmark workflow
     perf.yaml                 # Day-0 AIPerf trace-replay Job
