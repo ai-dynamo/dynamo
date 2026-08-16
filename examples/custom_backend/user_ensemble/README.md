@@ -6,15 +6,17 @@ the stock aggregated `dynamo.vllm` worker:
 ```text
                          original GenerateRequest
                     ┌──────────────────────────────> stock vLLM ──┐
-request -> orchestrator                                             ├─> inline response
+request -> orchestrator                                             ├─> response stage
                     └──────────────────────────> dummy classifier ──┘
 ```
 
 The orchestrator fans the frontend-preprocessed request out unchanged. The
 stock vLLM worker runs the configured custom encoder in process and folds its
 token stream into one workflow completion. A replaceable remote CPU classifier
-also consumes the request. The application-owned response stage runs inline in
-the frontend process and attaches classifier scores to `engine_data`.
+also consumes the request. The application-owned response stage attaches
+classifier scores to `engine_data`. It runs inline in the frontend process by
+default, or as a separately discovered CPU worker when
+`DYN_USER_ENSEMBLE_RESPONSE_PLACEMENT=remote`.
 
 There is no external encoder stage, NIXL tensor, or decoder-specific workflow
 worker. Dynamo supplies `DynamoVllmStage`, `GenerateEndpointBinding`, the
@@ -25,6 +27,13 @@ selection.
 From the repository root, run:
 
 ```bash
+examples/custom_backend/user_ensemble/remote/launch.sh
+```
+
+To place the response stage in its own process, run:
+
+```bash
+DYN_USER_ENSEMBLE_RESPONSE_PLACEMENT=remote \
 examples/custom_backend/user_ensemble/remote/launch.sh
 ```
 

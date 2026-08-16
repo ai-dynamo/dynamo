@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Mapping
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -22,9 +23,14 @@ from dynamo.workflow.remote import StageResponseEnvelope  # noqa: E402
 from examples.custom_backend.user_ensemble.remote import (  # noqa: E402
     classifier_worker as classifier_worker_module,
 )
+from examples.custom_backend.user_ensemble.remote import (  # noqa: E402
+    response_worker as response_worker_module,
+)
 from examples.custom_backend.user_ensemble.remote.bindings import (  # noqa: E402
     CLASSIFIER_ENDPOINT,
     GENERATOR_ENDPOINT,
+    RESPONSE_ENDPOINT,
+    RESPONSE_PLACEMENT_ENV,
     compile_remote_workflow,
 )
 from examples.custom_backend.user_ensemble.remote.provider import (  # noqa: E402
@@ -92,18 +98,27 @@ class _Client:
         del context
         assert annotated is False
         self.request = request
-        await self.barrier.arrive(self.name)
+        if self.name in {"classifier", "generator"}:
+            await self.barrier.arrive(self.name)
 
         async def stream():
             if self.name == "generator":
                 yield {"token_ids": [4, 2], "index": 0, "finish_reason": "stop"}
                 return
+            if self.name == "response":
+                completion = dict(request["inputs"]["completion"])
+                completion["engine_data"] = {
+                    "ensemble": {"classifier_scores": dict(request["inputs"]["scores"])}
+                }
+                outputs = {"chunk": completion}
+            else:
+                outputs = {"scores": {"relevant": 0.75, "not_relevant": 0.25}}
             yield StageResponseEnvelope(
                 stage_id=request["stage"],
                 contract_id=request["contract"],
                 attempt_id=request["attempt"],
                 invocation_id=request["invocation"],
-                outputs={"scores": {"relevant": 0.75, "not_relevant": 0.25}},
+                outputs=outputs,
             ).to_dict()
 
         return stream()
@@ -142,12 +157,29 @@ def test_remote_plan_uses_only_inline_json_edges() -> None:
     }
 
 
+def test_response_stage_can_bind_to_remote_endpoint() -> None:
+    plan = compile_remote_workflow(response_placement="remote")
+
+    assert plan.bindings["response"] == RemoteBinding(RESPONSE_ENDPOINT)
+    assert {edge.transfer_id: edge.carrier for edge in plan.edges} == {
+        "classifier.request": "inline",
+        "generator.request": "inline",
+        "response.completion": "inline",
+        "response.scores": "inline",
+    }
+
+
+def test_response_placement_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="response_placement"):
+        compile_remote_workflow(response_placement="elsewhere")  # type: ignore[arg-type]
+
+
 async def test_frontend_provider_binds_remote_plan_and_inline_response() -> None:
     orchestrator = object.__new__(WorkflowOrchestrator)
     bind = AsyncMock(return_value=orchestrator)
     runtime = object()
 
-    with patch(
+    with patch.dict(os.environ, {RESPONSE_PLACEMENT_ENV: "inline"}), patch(
         "examples.custom_backend.user_ensemble.remote.provider.WorkflowOrchestrator.bind",
         bind,
     ):
@@ -160,12 +192,42 @@ async def test_frontend_provider_binds_remote_plan_and_inline_response() -> None
     assert provided is orchestrator
 
 
+async def test_frontend_provider_binds_remote_response_without_inline_runner() -> None:
+    orchestrator = object.__new__(WorkflowOrchestrator)
+    bind = AsyncMock(return_value=orchestrator)
+    runtime = object()
+
+    with patch.dict(os.environ, {RESPONSE_PLACEMENT_ENV: "remote"}), patch(
+        "examples.custom_backend.user_ensemble.remote.provider.WorkflowOrchestrator.bind",
+        bind,
+    ):
+        provided = await provide_workflow(runtime)
+
+    assert bind.await_args.args == (
+        compile_remote_workflow(response_placement="remote"),
+    )
+    assert bind.await_args.kwargs == {
+        "runtime": runtime,
+        "inline_runners": {},
+    }
+    assert provided is orchestrator
+
+
 async def test_classifier_worker_uses_json_remote_stage_protocol() -> None:
     runtime = _FakeRuntime()
 
     await classifier_worker_module.classifier_worker.__wrapped__(runtime)
 
     assert runtime.endpoint_ids == [CLASSIFIER_ENDPOINT]
+    assert runtime.created_endpoint.handler is not None
+
+
+async def test_response_worker_uses_json_remote_stage_protocol() -> None:
+    runtime = _FakeRuntime()
+
+    await response_worker_module.response_worker.__wrapped__(runtime)
+
+    assert runtime.endpoint_ids == [RESPONSE_ENDPOINT]
     assert runtime.created_endpoint.handler is not None
 
 
@@ -196,6 +258,42 @@ async def test_orchestrator_fans_out_request_concurrently_and_joins() -> None:
     assert classifier.request is not None
     assert classifier.request["inputs"]["request"] == request
     assert result["chunk"]["token_ids"] == [4, 2]
+    assert result["chunk"]["engine_data"]["ensemble"]["classifier_scores"] == {
+        "relevant": 0.75,
+        "not_relevant": 0.25,
+    }
+
+
+async def test_orchestrator_can_join_through_remote_response() -> None:
+    barrier = _Barrier()
+    classifier = _Client("classifier", barrier)
+    generator = _Client("generator", barrier)
+    response = _Client("response", barrier)
+    orchestrator = await WorkflowOrchestrator.bind(
+        compile_remote_workflow(response_placement="remote"),
+        runtime=_ClientRuntime(
+            {
+                CLASSIFIER_ENDPOINT: classifier,
+                GENERATOR_ENDPOINT: generator,
+                RESPONSE_ENDPOINT: response,
+            }
+        ),
+    )
+    request = {
+        "token_ids": [1, 2],
+        "output_options": {},
+        "multi_modal_data": {"image_url": [{"Url": "image"}]},
+    }
+
+    result = await orchestrator.run({"request": request})
+
+    assert barrier.arrivals == {"classifier", "generator"}
+    assert response.request is not None
+    assert response.request["inputs"]["completion"]["token_ids"] == [4, 2]
+    assert response.request["inputs"]["scores"] == {
+        "relevant": 0.75,
+        "not_relevant": 0.25,
+    }
     assert result["chunk"]["engine_data"]["ensemble"]["classifier_scores"] == {
         "relevant": 0.75,
         "not_relevant": 0.25,

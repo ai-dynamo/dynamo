@@ -18,14 +18,24 @@ CUSTOM_JINJA_TEMPLATE="${DYN_CUSTOM_JINJA_TEMPLATE:-$REPO_ROOT/examples/custom_e
 DECODER_GPU="${DYN_DECODER_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 MAX_MODEL_LEN="${DYN_MAX_MODEL_LEN:-4096}"
+RESPONSE_PLACEMENT="${DYN_USER_ENSEMBLE_RESPONSE_PLACEMENT:-inline}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 [[ -n "$GPU_MEM_ARGS" ]] || \
     GPU_MEM_ARGS="--gpu-memory-utilization ${DYN_VLLM_GPU_MEMORY_UTILIZATION:-0.8}"
 
+case "$RESPONSE_PLACEMENT" in
+    inline|remote) ;;
+    *)
+        echo >&2 "DYN_USER_ENSEMBLE_RESPONSE_PLACEMENT must be inline or remote"
+        exit 2
+        ;;
+esac
+
 print_launch_banner --no-curl "Integrated-Encoder User Ensemble" "$MODEL" "$HTTP_PORT" \
     "Encoder:       $ENCODER_CLASS" \
     "Encoder model: $ENCODER_MODEL" \
-    "Generator GPU: $DECODER_GPU"
+    "Generator GPU: $DECODER_GPU" \
+    "Response:      $RESPONSE_PLACEMENT"
 
 export DYN_DISCOVERY_BACKEND="${DYN_DISCOVERY_BACKEND:-file}"
 export DYN_EVENT_PLANE="${DYN_EVENT_PLANE:-zmq}"
@@ -47,6 +57,12 @@ python3 -m dynamo.frontend \
 CUDA_VISIBLE_DEVICES= \
 DYN_SYSTEM_PORT="${DYN_CLASSIFIER_SYSTEM_PORT:-8082}" \
 python3 -m examples.custom_backend.user_ensemble.remote.classifier_worker &
+
+if [[ "$RESPONSE_PLACEMENT" == remote ]]; then
+    CUDA_VISIBLE_DEVICES= \
+    DYN_SYSTEM_PORT="${DYN_RESPONSE_SYSTEM_PORT:-8084}" \
+    python3 -m examples.custom_backend.user_ensemble.remote.response_worker &
+fi
 
 CUDA_VISIBLE_DEVICES="$DECODER_GPU" \
 DYN_SYSTEM_PORT="${DYN_GENERATOR_SYSTEM_PORT:-8083}" \
