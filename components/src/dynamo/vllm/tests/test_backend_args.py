@@ -78,7 +78,12 @@ class TestExplicitBenchmarkPoints:
         config._load_explicit_benchmark_points()
 
         assert config._benchmark_points is not None
-        assert config._benchmark_points.model_dump(mode="json") == points
+        # exclude_none: the v3 optional fields (partition, rows) are absent
+        # from a v1 file and must not appear in what it round-trips to.
+        assert (
+            config._benchmark_points.model_dump(mode="json", exclude_none=True)
+            == points
+        )
 
     def test_file_requires_benchmark_mode(self, tmp_path):
         path, _ = write_benchmark_points(tmp_path)
@@ -102,7 +107,12 @@ class TestExplicitBenchmarkPoints:
         config._validate_benchmark_sampling()
 
         assert config._benchmark_points is not None
-        assert config._benchmark_points.model_dump(mode="json") == points
+        # exclude_none: the v3 optional fields (partition, rows) are absent
+        # from a v1 file and must not appear in what it round-trips to.
+        assert (
+            config._benchmark_points.model_dump(mode="json", exclude_none=True)
+            == points
+        )
 
 
 @pytest.mark.parametrize(

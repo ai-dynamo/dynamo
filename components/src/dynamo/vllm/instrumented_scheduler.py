@@ -2137,9 +2137,9 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         imbalanced_override = os.environ.get(ENV_FPM_BENCH_COLLECT_IMBALANCED)
         if imbalanced_override is not None:
-            value = imbalanced_override.strip().lower()
+            flag = imbalanced_override.strip().lower()
             truthy, falsy = {"1", "true", "yes", "on"}, {"0", "false", "no", "off"}
-            if value not in truthy | falsy:
+            if flag not in truthy | falsy:
                 # Silently reading a typo as "off" would turn a deliberately
                 # enabled run back into an ordinary sweep, and the results file
                 # looks the same either way.
@@ -2147,7 +2147,7 @@ class InstrumentedScheduler(AsyncScheduler):
                     f"{ENV_FPM_BENCH_COLLECT_IMBALANCED}={imbalanced_override!r} "
                     f"is not a boolean"
                 )
-            self._bench_config.collect_imbalanced = value in truthy
+            self._bench_config.collect_imbalanced = flag in truthy
 
         if (
             self._bench_config.mode in {"decode", "agg"}
