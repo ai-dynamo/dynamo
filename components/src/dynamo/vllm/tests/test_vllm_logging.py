@@ -22,6 +22,7 @@ that VLLM_LOGGING_LEVEL controls the vllm logger level (not DYN_LOG),
 and that no config file is written (subprocesses use vLLM's built-in default).
 """
 
+import json
 import logging
 import os
 
@@ -32,6 +33,8 @@ from dynamo.runtime.logging import (
     VllmColorFormatter,
     configure_dynamo_logging,
     configure_vllm_logging,
+    filter_level_mapping,
+    log_level_mapping,
     python_log_level_mapping,
 )
 
@@ -154,6 +157,41 @@ def test_scoped_dyn_log_debug_keeps_python_debug_available(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("level", "expected"),
+    [
+        ("debug", logging.DEBUG),
+        ("DEBUG", logging.DEBUG),
+        (" Debug ", logging.DEBUG),
+        ("trace", logging.DEBUG),
+        ("info", logging.INFO),
+        ("warn", logging.WARNING),
+        ("warning", logging.WARNING),
+        ("error", logging.ERROR),
+        ("critical", logging.CRITICAL),
+        ("bogus", logging.INFO),
+    ],
+)
+def test_log_level_mapping(level, expected):
+    assert log_level_mapping(level) == expected
+
+
+@pytest.mark.parametrize(
+    ("filters", "expected"),
+    [
+        ("debug", logging.DEBUG),
+        ("DEBUG", logging.DEBUG),
+        ("trace", logging.DEBUG),
+        ("info", logging.INFO),
+        ("debug,dynamo_llm=trace", logging.DEBUG),
+        ("dynamo_runtime=debug", logging.DEBUG),
+        ("warn,dynamo_llm=error", logging.WARNING),
+    ],
+)
+def test_filter_level_mapping(filters, expected):
+    assert filter_level_mapping(filters) == expected
+
+
+@pytest.mark.parametrize(
     ("filters", "expected"),
     [
         ("info", logging.INFO),
@@ -164,6 +202,31 @@ def test_scoped_dyn_log_debug_keeps_python_debug_available(monkeypatch):
 )
 def test_python_log_level_mapping(filters, expected):
     assert python_log_level_mapping(filters) == expected
+
+
+def test_default_dyn_log_configures_sglang_info():
+    """Unset DYN_LOG must leave the sglang engine logger at INFO."""
+    configure_dynamo_logging()
+
+    with open(os.environ["SGLANG_LOGGING_CONFIG_PATH"]) as f:
+        sglang_config = json.load(f)
+    assert sglang_config["loggers"]["sglang"]["level"] == "INFO"
+
+
+@pytest.mark.parametrize("dyn_log", ["debug", "DEBUG", "trace", "debug,dynamo=debug"])
+def test_verbose_dyn_log_configures_sglang_debug(monkeypatch, dyn_log):
+    """
+    Regression: directive-style ("debug,dynamo=debug"), uppercase ("DEBUG") and
+    "trace" DYN_LOG values silently degraded the engine loggers to INFO because
+    the raw filter string was matched exactly against lowercase level names.
+    """
+    monkeypatch.setenv("DYN_LOG", dyn_log)
+
+    configure_dynamo_logging()
+
+    with open(os.environ["SGLANG_LOGGING_CONFIG_PATH"]) as f:
+        sglang_config = json.load(f)
+    assert sglang_config["loggers"]["sglang"]["level"] == "DEBUG"
 
 
 def test_toml_logging_config_keeps_python_debug_available(monkeypatch, tmp_path):
