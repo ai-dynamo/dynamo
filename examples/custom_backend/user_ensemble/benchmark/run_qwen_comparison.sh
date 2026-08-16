@@ -20,15 +20,35 @@ MEASURED_INPUT="$WORKLOAD_ROOT/measured/image_custom_1000_textisl644.jsonl"
 WARMUP_INPUT="$WORKLOAD_ROOT/warmup/image_custom_20_textisl644.jsonl"
 SERVER_PID=""
 SAMPLER_PID=""
-CONCURRENCY_CAP="${DYN_BENCH_CONCURRENCY_CAP:-512}"
-DEFAULT_CELL_PLAN="40:1:direct 40:1:workflow 40:2:workflow 40:2:direct 40:3:direct 40:3:workflow 50:1:direct 50:1:workflow 50:2:workflow 50:2:direct 50:3:direct 50:3:workflow"
+LOAD_MODE="${DYN_BENCH_LOAD_MODE:-constant}"
+if [[ "$LOAD_MODE" == closed_loop ]]; then
+    CONCURRENCY="${DYN_BENCH_CONCURRENCY:-64}"
+    DEFAULT_CELL_PLAN="1:direct 1:workflow 2:workflow 2:direct 3:direct 3:workflow"
+else
+    CONCURRENCY="${DYN_BENCH_CONCURRENCY_CAP:-512}"
+    DEFAULT_CELL_PLAN="40:1:direct 40:1:workflow 40:2:workflow 40:2:direct 40:3:direct 40:3:workflow 50:1:direct 50:1:workflow 50:2:workflow 50:2:direct 50:3:direct 50:3:workflow"
+fi
 CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
 RUN_ID="$(printf '%s' "$OUTPUT_ROOT" | sha256sum | cut -c1-12)"
 
-if [[ ! "$CONCURRENCY_CAP" =~ ^(64|512)$ ]]; then
-    echo >&2 "DYN_BENCH_CONCURRENCY_CAP must be 64 or 512, got: $CONCURRENCY_CAP"
-    exit 2
-fi
+case "$LOAD_MODE" in
+    constant)
+        if [[ ! "$CONCURRENCY" =~ ^(64|512)$ ]]; then
+            echo >&2 "DYN_BENCH_CONCURRENCY_CAP must be 64 or 512, got: $CONCURRENCY"
+            exit 2
+        fi
+        ;;
+    closed_loop)
+        if [[ "$CONCURRENCY" != 64 ]]; then
+            echo >&2 "DYN_BENCH_CONCURRENCY must be 64 in closed-loop mode, got: $CONCURRENCY"
+            exit 2
+        fi
+        ;;
+    *)
+        echo >&2 "DYN_BENCH_LOAD_MODE must be constant or closed_loop, got: $LOAD_MODE"
+        exit 2
+        ;;
+esac
 
 if [[ -e "$OUTPUT_ROOT" ]]; then
     echo >&2 "DYN_BENCH_OUTPUT_ROOT already exists: $OUTPUT_ROOT"
@@ -108,7 +128,8 @@ python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark 
     --cuda-visible-devices "$CUDA_VISIBLE_DEVICES" \
     --gpu-info "$GPU_INFO" \
     --torch-gpu-count "$TORCH_GPU_COUNT" \
-    --concurrency-cap "$CONCURRENCY_CAP" \
+    --load-mode "$LOAD_MODE" \
+    --concurrency "$CONCURRENCY" \
     --aiperf-version "$AIPERF_VERSION"
 
 sha256sum \
@@ -241,11 +262,26 @@ raise SystemExit(
 }
 
 run_cell() {
-    local request_rate="$1"
-    local repetition="$2"
-    local topology="$3"
-    local output_dir="$OUTPUT_ROOT/rate-$request_rate/rep-$repetition/$topology"
-    local zmq_prefix="/tmp/aiperf-${RUN_ID}-r${request_rate}-p${repetition}-${topology}"
+    local repetition="$1"
+    local topology="$2"
+    local request_rate="${3:-}"
+    local output_dir
+    local zmq_prefix
+    local measured_load_args
+
+    if [[ "$LOAD_MODE" == closed_loop ]]; then
+        output_dir="$OUTPUT_ROOT/closed-loop/rep-$repetition/$topology"
+        zmq_prefix="/tmp/aiperf-${RUN_ID}-closed-p${repetition}-${topology}"
+        measured_load_args=(--concurrency "$CONCURRENCY")
+    else
+        output_dir="$OUTPUT_ROOT/rate-$request_rate/rep-$repetition/$topology"
+        zmq_prefix="/tmp/aiperf-${RUN_ID}-r${request_rate}-p${repetition}-${topology}"
+        measured_load_args=(
+            --request-rate "$request_rate"
+            --request-rate-mode constant
+            --concurrency "$CONCURRENCY"
+        )
+    fi
 
     mkdir -p "$output_dir/warmup" "$output_dir/measured"
     cleanup_cell
@@ -278,9 +314,7 @@ run_cell() {
     TIMEFORMAT='%R'
     { time "$AIPERF_BIN" profile "${common_aiperf_args[@]}" \
         --input-file "$MEASURED_INPUT" \
-        --request-rate "$request_rate" \
-        --request-rate-mode constant \
-        --concurrency "$CONCURRENCY_CAP" \
+        "${measured_load_args[@]}" \
         --conversation-num 1000 \
         --artifact-dir "$output_dir/measured" \
         --zmq-ipc-path "${zmq_prefix}-measured" \
@@ -312,19 +346,32 @@ run_cell() {
     cleanup_cell
 }
 
-for cell in $CELL_PLAN; do
-    request_rate="${cell%%:*}"
-    remainder="${cell#*:}"
-    repetition="${remainder%%:*}"
-    topology="${remainder#*:}"
-    if [[ ! "$request_rate" =~ ^(40|50)$ \
-        || ! "$repetition" =~ ^[1-3]$ \
-        || ! "$topology" =~ ^(direct|workflow)$ ]]; then
-        echo >&2 "invalid DYN_BENCH_CELL_PLAN entry: $cell"
-        exit 2
-    fi
-    run_cell "$request_rate" "$repetition" "$topology"
-done
+if [[ "$LOAD_MODE" == closed_loop ]]; then
+    for cell in $CELL_PLAN; do
+        repetition="${cell%%:*}"
+        topology="${cell#*:}"
+        if [[ ! "$repetition" =~ ^[1-3]$ \
+            || ! "$topology" =~ ^(direct|workflow)$ ]]; then
+            echo >&2 "invalid closed-loop DYN_BENCH_CELL_PLAN entry: $cell"
+            exit 2
+        fi
+        run_cell "$repetition" "$topology"
+    done
+else
+    for cell in $CELL_PLAN; do
+        request_rate="${cell%%:*}"
+        remainder="${cell#*:}"
+        repetition="${remainder%%:*}"
+        topology="${remainder#*:}"
+        if [[ ! "$request_rate" =~ ^(40|50)$ \
+            || ! "$repetition" =~ ^[1-3]$ \
+            || ! "$topology" =~ ^(direct|workflow)$ ]]; then
+            echo >&2 "invalid constant-rate DYN_BENCH_CELL_PLAN entry: $cell"
+            exit 2
+        fi
+        run_cell "$repetition" "$topology" "$request_rate"
+    done
+fi
 
 if [[ "$CELL_PLAN" == "$DEFAULT_CELL_PLAN" ]]; then
     python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \

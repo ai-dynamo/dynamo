@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark import (
     BenchmarkAuditError,
     audit_encoder_log,
+    capture_metadata,
     summarize,
     validate_profile,
 )
@@ -113,6 +115,38 @@ def test_runner_waits_for_real_generation_without_touching_encoder_counts() -> N
     assert "image_url" not in readiness
     assert 'RUN_ID="$(printf' in runner
     assert 'rm -f "${zmq_prefix}' not in runner
+    assert 'LOAD_MODE="${DYN_BENCH_LOAD_MODE:-constant}"' in runner
+    assert 'measured_load_args=(--concurrency "$CONCURRENCY")' in runner
+    assert "--request-rate-mode constant" in runner
+
+
+def _metadata_args(load_mode: str, concurrency: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        load_mode=load_mode,
+        concurrency=concurrency,
+        source_commit="abc123",
+        source_branch="test-branch",
+        working_diff_sha256="clean",
+        container_image="example/runtime:test",
+        cuda_visible_devices="0",
+        gpu_info="NVIDIA H100 80GB HBM3, 700, 1980, 81559",
+        torch_gpu_count=1,
+        aiperf_version="0.8.0",
+    )
+
+
+def test_metadata_accepts_closed_loop_concurrency_64() -> None:
+    result = capture_metadata(_metadata_args("closed_loop", 64))
+
+    assert result["benchmark"]["load_mode"] == "closed_loop"
+    assert result["benchmark"]["concurrency"] == 64
+    assert "request_rates" not in result["benchmark"]
+    assert "concurrency_cap" not in result["benchmark"]
+
+
+def test_metadata_rejects_other_closed_loop_concurrency() -> None:
+    with pytest.raises(BenchmarkAuditError, match="expected 64"):
+        capture_metadata(_metadata_args("closed_loop", 512))
 
 
 def _cell(wall_seconds: float, request_throughput: float) -> dict:
@@ -146,7 +180,9 @@ def test_summary_reports_each_rate_and_workflow_gate(
             "container_image": "example/runtime:test",
             "gpu": {"name": "NVIDIA H100 80GB HBM3"},
             "benchmark": {
+                "load_mode": "constant",
                 "request_rates": [40, 50],
+                "concurrency": 64,
                 "concurrency_cap": 64,
             },
         },
@@ -184,6 +220,8 @@ def test_summary_reports_each_rate_and_workflow_gate(
     assert result["rates"]["40"]["comparison"] == {
         "workflow_to_direct_request_window_ratio": 0.95,
         "workflow_request_window_delta_percent": pytest.approx(-5.0),
+        "workflow_to_direct_full_process_ratio": pytest.approx(10 / 10.5),
+        "workflow_full_process_delta_percent": pytest.approx((10 / 10.5 - 1) * 100),
         "minimum_ratio": 0.9,
         "passed": True,
     }
@@ -197,3 +235,57 @@ def test_summary_reports_each_rate_and_workflow_gate(
     report = (tmp_path / "report.md").read_text()
     assert "rates: 40/50 req/s; concurrency cap: 64" in report
     assert "Overall >=90% gate: **True**" in report
+
+
+def test_closed_loop_summary_compares_topologies(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "benchmark_metadata.json",
+        {
+            "dynamo_commit": "abc123",
+            "container_image": "example/runtime:test",
+            "gpu": {"name": "NVIDIA H100 80GB HBM3"},
+            "benchmark": {
+                "load_mode": "closed_loop",
+                "concurrency": 64,
+            },
+        },
+    )
+    _write_json(
+        tmp_path / "workload_audit.json",
+        {"measured_sha256": "audited-workload"},
+    )
+    for repetition in range(1, 4):
+        _write_json(
+            tmp_path / f"closed-loop/rep-{repetition}/direct/cell_audit.json",
+            _cell(10.0, 100.0),
+        )
+        _write_json(
+            tmp_path / f"closed-loop/rep-{repetition}/workflow/cell_audit.json",
+            _cell(10.5, 95.0),
+        )
+        _write_json(
+            tmp_path / f"closed-loop/rep-{repetition}/workflow/joined_smoke.json",
+            {
+                "classifier_scores": {
+                    "relevant": 0.75,
+                    "not_relevant": 0.25,
+                },
+                "classifier_score_sum": 1.0,
+            },
+        )
+
+    result = summarize(tmp_path)
+
+    assert result["comparison"] == {
+        "workflow_to_direct_request_window_ratio": 0.95,
+        "workflow_request_window_delta_percent": pytest.approx(-5.0),
+        "workflow_to_direct_full_process_ratio": pytest.approx(10 / 10.5),
+        "workflow_full_process_delta_percent": pytest.approx((10 / 10.5 - 1) * 100),
+        "minimum_ratio": 0.9,
+        "passed": True,
+    }
+    assert result["gate"]["passed"] is True
+    assert len(result["joined_response_smokes"]) == 3
+    report = (tmp_path / "report.md").read_text()
+    assert "load: closed-loop; concurrency: 64" in report
+    assert "Closed-loop workflow/direct full-process ratio" in report

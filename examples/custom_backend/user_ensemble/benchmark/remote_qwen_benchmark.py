@@ -22,6 +22,7 @@ from typing import Any
 MEASURED_REQUESTS = 1000
 WARMUP_REQUESTS = 20
 SUPPORTED_CONCURRENCY_CAPS = frozenset({64, 512})
+SUPPORTED_LOAD_MODES = frozenset({"closed_loop", "constant"})
 REQUEST_RATES = (40, 50)
 OUTPUT_TOKENS = 7
 TEXT_TOKENS = 644
@@ -353,9 +354,21 @@ def _parse_gpu_info(gpu_info: str, torch_gpu_count: int) -> dict[str, Any]:
 
 
 def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
-    if args.concurrency_cap not in SUPPORTED_CONCURRENCY_CAPS:
+    if args.load_mode not in SUPPORTED_LOAD_MODES:
         raise BenchmarkAuditError(
-            f"unsupported concurrency cap {args.concurrency_cap}; expected one of "
+            f"unsupported load mode {args.load_mode!r}; expected one of "
+            f"{sorted(SUPPORTED_LOAD_MODES)}"
+        )
+    if args.load_mode == "closed_loop" and args.concurrency != 64:
+        raise BenchmarkAuditError(
+            f"closed-loop concurrency is {args.concurrency}; expected 64"
+        )
+    if (
+        args.load_mode == "constant"
+        and args.concurrency not in SUPPORTED_CONCURRENCY_CAPS
+    ):
+        raise BenchmarkAuditError(
+            f"unsupported concurrency cap {args.concurrency}; expected one of "
             f"{sorted(SUPPORTED_CONCURRENCY_CAPS)}"
         )
     packages: dict[str, str] = {}
@@ -365,6 +378,32 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         except importlib.metadata.PackageNotFoundError:
             packages[package] = "not-installed"
     packages["aiperf"] = args.aiperf_version
+    benchmark: dict[str, Any] = {
+        "load_mode": args.load_mode,
+        "repetitions": REPETITIONS,
+        "warmup_requests": WARMUP_REQUESTS,
+        "measured_requests": MEASURED_REQUESTS,
+        "request_rate_mode": args.load_mode,
+        "concurrency": args.concurrency,
+        "streaming": False,
+        "max_tokens": OUTPUT_TOKENS,
+        "min_tokens": OUTPUT_TOKENS,
+        "ignore_eos": True,
+        "max_num_seqs": 64,
+        "max_model_len": 2048,
+        "gpu_memory_utilization": 0.4,
+        "max_batch_patches": 41_472,
+        "max_batch_items": 64,
+        "batching_policy": "block for first item, then eager-drain queued work",
+        "preprocess_concurrency": 64,
+        "preprocess_cache_size": 0,
+        "graph_batch_buckets": [1, 2, 4, 8, 16, 32, 64],
+        "graph_image_sizes": ["300x300", "500x500"],
+    }
+    if args.load_mode == "constant":
+        benchmark["request_rates"] = list(REQUEST_RATES)
+        benchmark["concurrency_cap"] = args.concurrency
+
     return {
         "dynamo_commit": args.source_commit,
         "dynamo_branch": args.source_branch,
@@ -378,28 +417,7 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
             ["workflow", "direct"],
             ["direct", "workflow"],
         ],
-        "benchmark": {
-            "repetitions": REPETITIONS,
-            "warmup_requests": WARMUP_REQUESTS,
-            "measured_requests": MEASURED_REQUESTS,
-            "request_rates": list(REQUEST_RATES),
-            "request_rate_mode": "constant",
-            "concurrency_cap": args.concurrency_cap,
-            "streaming": False,
-            "max_tokens": OUTPUT_TOKENS,
-            "min_tokens": OUTPUT_TOKENS,
-            "ignore_eos": True,
-            "max_num_seqs": 64,
-            "max_model_len": 2048,
-            "gpu_memory_utilization": 0.4,
-            "max_batch_patches": 41_472,
-            "max_batch_items": 64,
-            "batching_policy": "block for first item, then eager-drain queued work",
-            "preprocess_concurrency": 64,
-            "preprocess_cache_size": 0,
-            "graph_batch_buckets": [1, 2, 4, 8, 16, 32, 64],
-            "graph_image_sizes": ["300x300", "500x500"],
-        },
+        "benchmark": benchmark,
     }
 
 
@@ -475,15 +493,17 @@ def _sample_stdev(values: list[float]) -> float:
     return statistics.stdev(values) if len(values) > 1 else 0.0
 
 
-def _summarize_topology(root: Path, request_rate: int, topology: str) -> dict[str, Any]:
+def _summarize_topology(
+    root: Path,
+    topology: str,
+    *,
+    request_rate: int | None = None,
+) -> dict[str, Any]:
+    cell_root = (
+        root / "closed-loop" if request_rate is None else root / f"rate-{request_rate}"
+    )
     cells = [
-        _read_json(
-            root
-            / f"rate-{request_rate}"
-            / f"rep-{repetition}"
-            / topology
-            / "cell_audit.json"
-        )
+        _read_json(cell_root / f"rep-{repetition}" / topology / "cell_audit.json")
         for repetition in range(1, REPETITIONS + 1)
     ]
     walls = [float(cell["full_client_process_wall_s"]) for cell in cells]
@@ -526,32 +546,82 @@ def _summarize_topology(root: Path, request_rate: int, topology: str) -> dict[st
     }
 
 
+def _compare_topologies(topologies: Mapping[str, Any]) -> dict[str, Any]:
+    direct_window = topologies["direct"]["request_window_throughput_req_s"]["mean"]
+    workflow_window = topologies["workflow"]["request_window_throughput_req_s"]["mean"]
+    direct_full = topologies["direct"]["full_client_process_throughput_req_s"][
+        "from_mean_wall"
+    ]
+    workflow_full = topologies["workflow"]["full_client_process_throughput_req_s"][
+        "from_mean_wall"
+    ]
+    window_ratio = workflow_window / direct_window
+    full_ratio = workflow_full / direct_full
+    return {
+        "workflow_to_direct_request_window_ratio": window_ratio,
+        "workflow_request_window_delta_percent": (window_ratio - 1.0) * 100,
+        "workflow_to_direct_full_process_ratio": full_ratio,
+        "workflow_full_process_delta_percent": (full_ratio - 1.0) * 100,
+        "minimum_ratio": MIN_WORKFLOW_TO_DIRECT_RATIO,
+        "passed": window_ratio >= MIN_WORKFLOW_TO_DIRECT_RATIO,
+    }
+
+
 def summarize(root: Path) -> dict[str, Any]:
     metadata = _read_json(root / "benchmark_metadata.json")
     workload = _read_json(root / "workload_audit.json")
+    benchmark = metadata.get("benchmark")
+    if not isinstance(benchmark, Mapping):
+        raise BenchmarkAuditError("benchmark metadata is missing benchmark settings")
+    load_mode = str(benchmark.get("load_mode", "constant"))
+    if load_mode == "closed_loop":
+        topologies = {
+            topology: _summarize_topology(root, topology) for topology in TOPOLOGIES
+        }
+        comparison = _compare_topologies(topologies)
+        summary = {
+            "metadata": metadata,
+            "workload": workload,
+            "topologies": topologies,
+            "comparison": comparison,
+            "gate": {
+                "minimum_workflow_to_direct_ratio": MIN_WORKFLOW_TO_DIRECT_RATIO,
+                "passed": comparison["passed"],
+            },
+            "joined_response_smokes": [
+                _read_json(
+                    root
+                    / "closed-loop"
+                    / f"rep-{repetition}"
+                    / "workflow"
+                    / "joined_smoke.json"
+                )
+                for repetition in range(1, REPETITIONS + 1)
+            ],
+        }
+        _write_json(root / "summary.json", summary)
+        _write_report(root / "report.md", summary)
+        return summary
+    if load_mode != "constant":
+        raise BenchmarkAuditError(f"unsupported summary load mode: {load_mode!r}")
+
     rates: dict[str, Any] = {}
     joined_smokes: list[dict[str, Any]] = []
     gate_results = []
     for request_rate in REQUEST_RATES:
         topologies = {
-            topology: _summarize_topology(root, request_rate, topology)
+            topology: _summarize_topology(
+                root,
+                topology,
+                request_rate=request_rate,
+            )
             for topology in TOPOLOGIES
         }
-        direct_window = topologies["direct"]["request_window_throughput_req_s"]["mean"]
-        workflow_window = topologies["workflow"]["request_window_throughput_req_s"][
-            "mean"
-        ]
-        ratio = workflow_window / direct_window
-        gate_passed = ratio >= MIN_WORKFLOW_TO_DIRECT_RATIO
-        gate_results.append(gate_passed)
+        comparison = _compare_topologies(topologies)
+        gate_results.append(comparison["passed"])
         rates[str(request_rate)] = {
             "topologies": topologies,
-            "comparison": {
-                "workflow_to_direct_request_window_ratio": ratio,
-                "workflow_request_window_delta_percent": (ratio - 1.0) * 100,
-                "minimum_ratio": MIN_WORKFLOW_TO_DIRECT_RATIO,
-                "passed": gate_passed,
-            },
+            "comparison": comparison,
         }
         joined_smokes.extend(
             _read_json(
@@ -585,7 +655,8 @@ def _format_runs(values: list[Any]) -> str:
 def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
     metadata = summary["metadata"]
     workload = summary["workload"]
-    rates = summary["rates"]
+    benchmark = metadata["benchmark"]
+    load_mode = benchmark.get("load_mode", "constant")
     lines = [
         "# Direct versus integrated-encoder workflow",
         "",
@@ -596,37 +667,83 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         f"- GPU: {metadata['gpu']}",
         f"- Workload SHA-256: `{workload['measured_sha256']}`",
         "- Raw text: 644 tokens plus one image; decoder ISL 773/976",
-        "- OSL: 7; rates: 40/50 req/s; concurrency cap: "
-        f"{metadata['benchmark']['concurrency_cap']}",
-        "- 1,000 measured requests; 20 warmups per cell",
-        "- Non-streaming; TTFT and ITL are intentionally not compared",
-        "",
-        "## Throughput",
-        "",
-        "| Rate | Topology | Full-process runs (req/s) | From mean wall | "
-        "Request-window runs (req/s) | Window mean |",
-        "| ---: | --- | --- | ---: | --- | ---: |",
     ]
-    for request_rate in REQUEST_RATES:
-        rate = rates[str(request_rate)]
+    if load_mode == "closed_loop":
+        lines.append(
+            f"- OSL: 7; load: closed-loop; concurrency: {benchmark['concurrency']}"
+        )
+    else:
+        lines.append(
+            "- OSL: 7; rates: 40/50 req/s; concurrency cap: "
+            f"{benchmark['concurrency_cap']}"
+        )
+    lines.extend(
+        [
+            "- 1,000 measured requests; 20 warmups per cell",
+            "- Non-streaming; TTFT and ITL are intentionally not compared",
+            "",
+            "## Throughput",
+            "",
+        ]
+    )
+    if load_mode == "closed_loop":
+        lines.extend(
+            [
+                "| Topology | Full-process runs (req/s) | From mean wall | "
+                "Request-window runs (req/s) | Window mean |",
+                "| --- | --- | ---: | --- | ---: |",
+            ]
+        )
         for topology in TOPOLOGIES:
-            topology_summary = rate["topologies"][topology]
+            topology_summary = summary["topologies"][topology]
             full = topology_summary["full_client_process_throughput_req_s"]
             window = topology_summary["request_window_throughput_req_s"]
             lines.append(
-                f"| {request_rate} | {topology} | {_format_runs(full['runs'])} | "
+                f"| {topology} | {_format_runs(full['runs'])} | "
                 f"{full['from_mean_wall']:.3f} | {_format_runs(window['runs'])} | "
                 f"{window['mean']:.3f} |"
             )
-        comparison = rate["comparison"]
+        comparison = summary["comparison"]
         lines.extend(
             [
                 "",
-                f"Rate {request_rate} workflow/direct request-window ratio: "
+                "Closed-loop workflow/direct request-window ratio: "
                 f"**{comparison['workflow_to_direct_request_window_ratio']:.3f}** "
                 f"({comparison['workflow_request_window_delta_percent']:+.2f}%).",
+                "Closed-loop workflow/direct full-process ratio: "
+                f"**{comparison['workflow_to_direct_full_process_ratio']:.3f}** "
+                f"({comparison['workflow_full_process_delta_percent']:+.2f}%).",
             ]
         )
+    else:
+        rates = summary["rates"]
+        lines.extend(
+            [
+                "| Rate | Topology | Full-process runs (req/s) | From mean wall | "
+                "Request-window runs (req/s) | Window mean |",
+                "| ---: | --- | --- | ---: | --- | ---: |",
+            ]
+        )
+        for request_rate in REQUEST_RATES:
+            rate = rates[str(request_rate)]
+            for topology in TOPOLOGIES:
+                topology_summary = rate["topologies"][topology]
+                full = topology_summary["full_client_process_throughput_req_s"]
+                window = topology_summary["request_window_throughput_req_s"]
+                lines.append(
+                    f"| {request_rate} | {topology} | {_format_runs(full['runs'])} | "
+                    f"{full['from_mean_wall']:.3f} | "
+                    f"{_format_runs(window['runs'])} | {window['mean']:.3f} |"
+                )
+            comparison = rate["comparison"]
+            lines.extend(
+                [
+                    "",
+                    f"Rate {request_rate} workflow/direct request-window ratio: "
+                    f"**{comparison['workflow_to_direct_request_window_ratio']:.3f}** "
+                    f"({comparison['workflow_request_window_delta_percent']:+.2f}%).",
+                ]
+            )
     lines.extend(
         [
             "",
@@ -661,7 +778,10 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--cuda-visible-devices", required=True)
     metadata.add_argument("--gpu-info", required=True)
     metadata.add_argument("--torch-gpu-count", type=int, required=True)
-    metadata.add_argument("--concurrency-cap", type=int, required=True)
+    metadata.add_argument(
+        "--load-mode", choices=sorted(SUPPORTED_LOAD_MODES), required=True
+    )
+    metadata.add_argument("--concurrency", type=int, required=True)
     metadata.add_argument("--aiperf-version", required=True)
 
     cell = subparsers.add_parser("validate-cell")
