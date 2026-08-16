@@ -12,12 +12,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use dynamo_tokens::SequenceHash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent, StorageTier,
-    WorkerId, WorkerWithDpRank,
+    WorkerId, WorkerWithDpRank, compute_next_seq_hash,
 };
 
 use super::addressing::CkfAddressing;
@@ -340,6 +341,9 @@ impl PublicationWindow {
 #[derive(Debug, Default)]
 struct DcCkfTelemetry {
     unknown_removals: u64,
+    /// Latches once an unchainable batch has been reported, so a live-only source cannot turn
+    /// every event into a log line.
+    unchainable_batch_reported: bool,
     capacity_failures: u64,
     physical_touches: u64,
     distinct_touched_buckets: u64,
@@ -347,11 +351,41 @@ struct DcCkfTelemetry {
     net_reverted_buckets: u64,
 }
 
+/// One block as a caller supplies it, carrying both identities the pool needs.
+///
+/// These are separate values and neither substitutes for the other. `external` is the engine's
+/// own block hash: the only identity a `Removed` event carries, so it is what ownership and
+/// refcounts are keyed by. `sequence` is Dynamo's rolling chain over the block's token hash, and
+/// it is the only thing the cuckoo table can be addressed by, because that is what a prefix query
+/// probes with (see [`GlobalCkfIndexer::find_prefix_matches`]).
+///
+/// [`GlobalCkfIndexer::find_prefix_matches`]: super::GlobalCkfIndexer::find_prefix_matches
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DcBlockKey {
+    pub external: ExternalSequenceBlockHash,
+    pub sequence: SequenceHash,
+}
+
+impl DcBlockKey {
+    pub const fn new(external: ExternalSequenceBlockHash, sequence: SequenceHash) -> Self {
+        Self { external, sequence }
+    }
+}
+
+/// What the pool tracks per distinct block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DcBlockEntry {
+    refcount: u32,
+    /// Retained because removal arrives keyed by the engine's hash, and clearing the block's
+    /// fingerprint requires the address it was inserted under.
+    sequence: SequenceHash,
+}
+
 /// Exact and physical CKF state for one DC-local indexer pool.
 #[derive(Debug)]
 pub struct DcCkfState {
     member_blocks: FxHashMap<WorkerWithDpRank, FxHashSet<ExternalSequenceBlockHash>>,
-    dc_refcounts: FxHashMap<ExternalSequenceBlockHash, u32>,
+    dc_refcounts: FxHashMap<ExternalSequenceBlockHash, DcBlockEntry>,
     filter: OwnedPackedCkfLane,
     addressing: CkfAddressing,
     config: CkfConfig,
@@ -407,17 +441,25 @@ impl DcCkfState {
         let mut first_error = None;
         let mut unknown_removals = 0usize;
         match event.event.data {
-            KvCacheEventData::Stored(store) => {
-                for block in store.blocks {
-                    if let Err(error) = self.store(worker, block.block_hash) {
-                        if matches!(error, KvCacheEventError::CapacityExhausted) {
-                            self.telemetry.capacity_failures =
-                                self.telemetry.capacity_failures.saturating_add(1);
-                        }
-                        retain_first_error(&mut first_error, error);
+            KvCacheEventData::Stored(store) => match self.batch_root(store.parent_hash) {
+                Some(root) => self.store_chain(worker, root, store.blocks, &mut first_error),
+                None => {
+                    // Inserting anyway would place blocks at addresses no query can reach, which
+                    // buys nothing over dropping them but does spend capacity and add false
+                    // positives.
+                    if !self.telemetry.unchainable_batch_reported {
+                        self.telemetry.unchainable_batch_reported = true;
+                        tracing::warn!(
+                            worker_id = worker.worker_id,
+                            dp_rank = worker.dp_rank,
+                            "dropped a stored batch whose parent block this pool does not track; \
+                             its prefixes are absent from the published filter. Expected while a \
+                             source is live-only, since no tree dump seeds the chain. Further \
+                             occurrences on this pool are not logged."
+                        );
                     }
                 }
-            }
+            },
             KvCacheEventData::Removed(remove) => {
                 for hash in remove.block_hashes {
                     match self.remove(worker, hash) {
@@ -478,17 +520,21 @@ impl DcCkfState {
     pub fn replace_rank(
         &mut self,
         worker: WorkerWithDpRank,
-        hashes: HashSet<ExternalSequenceBlockHash>,
+        keys: HashSet<DcBlockKey>,
     ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
         let mut replacements = HashMap::new();
-        replacements.insert(worker, hashes);
+        replacements.insert(worker, keys);
         self.replace_ranks(replacements)
     }
 
     /// Transactionally replace several ranks through one off-side pool rebuild.
+    ///
+    /// Replacement blocks carry their own sequence hashes because the caller is the only party
+    /// that can derive them: a rank's authoritative block set arrives as a tree dump whose order
+    /// supplies the parent chain, and that structure is gone by the time it reaches this pool.
     pub fn replace_ranks(
         &mut self,
-        replacements: HashMap<WorkerWithDpRank, HashSet<ExternalSequenceBlockHash>>,
+        replacements: HashMap<WorkerWithDpRank, HashSet<DcBlockKey>>,
     ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
         let mut replacement = Self::new(self.config).map_err(|error| match error {
             CkfBuildError::AllocationFailed => KvCacheEventError::AllocationFailed,
@@ -499,12 +545,18 @@ impl DcCkfState {
                 continue;
             }
             for &hash in blocks {
-                replacement.store(member, hash)?;
+                // Retained ranks are rebuilt from this pool's own entries, so their addresses
+                // come back unchanged rather than being recomputed.
+                let entry = self
+                    .dc_refcounts
+                    .get(&hash)
+                    .ok_or(KvCacheEventError::IndexerInvariantViolation)?;
+                replacement.store(member, DcBlockKey::new(hash, entry.sequence))?;
             }
         }
-        for (member, hashes) in replacements {
-            for hash in hashes {
-                replacement.store(member, hash)?;
+        for (member, keys) in replacements {
+            for key in keys {
+                replacement.store(member, key)?;
             }
         }
 
@@ -630,8 +682,15 @@ impl DcCkfState {
         counts
     }
 
+    /// Whether the filter carries a fingerprint for a block, named by the engine's hash.
+    ///
+    /// The address is resolved through the block's entry rather than derived from `hash`, so an
+    /// untracked block is reported absent without probing: there is nothing to probe with.
     pub fn contains(&self, hash: ExternalSequenceBlockHash) -> bool {
-        let probe = self.addressing.prepare(hash.0);
+        let Some(entry) = self.dc_refcounts.get(&hash) else {
+            return false;
+        };
+        let probe = self.addressing.prepare(entry.sequence);
         self.filter
             .load_bucket(probe.bucket_a)
             .contains(probe.fingerprint)
@@ -645,11 +704,61 @@ impl DcCkfState {
         self.publication.pending_events >= self.config.publish_every_n_events
     }
 
+    /// The sequence hash a stored batch extends.
+    ///
+    /// `Some(None)` roots the batch at the start of a sequence, `Some(Some(_))` extends a block
+    /// this pool holds, and `None` means the parent is untracked — which makes every block in the
+    /// batch unaddressable, because the chain has no value to fold them into.
+    ///
+    /// An untracked parent is expected while a pool is live-only (no recovery target, so no tree
+    /// dump seeds the chain) and after event loss. It is not expected on a normal attach: the
+    /// recovery tree dump replays parents before children.
+    fn batch_root(
+        &self,
+        parent_hash: Option<ExternalSequenceBlockHash>,
+    ) -> Option<Option<SequenceHash>> {
+        match parent_hash {
+            None => Some(None),
+            Some(parent) => self
+                .dc_refcounts
+                .get(&parent)
+                .map(|entry| Some(entry.sequence)),
+        }
+    }
+
+    /// Store one batch, extending `root` block by block.
+    fn store_chain(
+        &mut self,
+        worker: WorkerWithDpRank,
+        root: Option<SequenceHash>,
+        blocks: Vec<crate::protocols::KvCacheStoredBlockData>,
+        first_error: &mut Option<KvCacheEventError>,
+    ) {
+        let mut parent = root;
+        for block in blocks {
+            // Mirrors `compute_seq_hash_for_block`, which a prefix query applies to the same
+            // token hashes: the first block's sequence hash is its token hash, and every
+            // subsequent one folds in its parent.
+            let sequence = parent.map_or(block.tokens_hash.0, |parent_sequence| {
+                compute_next_seq_hash(parent_sequence, block.tokens_hash)
+            });
+            parent = Some(sequence);
+            if let Err(error) = self.store(worker, DcBlockKey::new(block.block_hash, sequence)) {
+                if matches!(error, KvCacheEventError::CapacityExhausted) {
+                    self.telemetry.capacity_failures =
+                        self.telemetry.capacity_failures.saturating_add(1);
+                }
+                retain_first_error(first_error, error);
+            }
+        }
+    }
+
     fn store(
         &mut self,
         worker: WorkerWithDpRank,
-        hash: ExternalSequenceBlockHash,
+        key: DcBlockKey,
     ) -> Result<bool, KvCacheEventError> {
+        let hash = key.external;
         if self
             .member_blocks
             .get(&worker)
@@ -675,7 +784,10 @@ impl DcCkfState {
             Some(member)
         };
 
-        let current = self.dc_refcounts.get(&hash).copied().unwrap_or(0);
+        let current = self
+            .dc_refcounts
+            .get(&hash)
+            .map_or(0, |entry| entry.refcount);
         if current == u32::MAX {
             return Err(KvCacheEventError::OwnershipDegreeOverflow);
         }
@@ -688,7 +800,7 @@ impl DcCkfState {
             let physical_touches = &mut self.telemetry.physical_touches;
             CuckooMutator::new(&self.filter, &self.addressing, self.config.max_kicks)
                 .insert_with_originals(
-                    hash,
+                    key.sequence,
                     &mut self.rng,
                     &mut self.insertion_scratch,
                     |bucket, original| {
@@ -698,12 +810,22 @@ impl DcCkfState {
                 )?;
             // NOTE: Capacity failure returns above before any exact-state write. The omitted edge
             // is intentionally untracked, so a later Remove is an idempotent unknown removal.
-            self.dc_refcounts.insert(hash, 1);
+            self.dc_refcounts.insert(
+                hash,
+                DcBlockEntry {
+                    refcount: 1,
+                    sequence: key.sequence,
+                },
+            );
         } else {
-            *self
-                .dc_refcounts
+            // The first sequence hash recorded for a block wins. A second owner reaching the same
+            // block by a different path would chain to a different address, and the entry has to
+            // keep naming the one the fingerprint was actually inserted under or the eventual
+            // removal clears the wrong bucket.
+            self.dc_refcounts
                 .get_mut(&hash)
-                .ok_or(KvCacheEventError::IndexerInvariantViolation)? = current + 1;
+                .ok_or(KvCacheEventError::IndexerInvariantViolation)?
+                .refcount = current + 1;
         }
         let inserted = if let Some(mut member) = new_member {
             let inserted = member.insert(hash);
@@ -730,17 +852,20 @@ impl DcCkfState {
         if !member.contains(&hash) {
             return Ok(false);
         }
-        let current = self
+        // Removal names the block by the engine's hash, so the address its fingerprint occupies
+        // has to come back out of the entry — it cannot be derived from `hash`.
+        let entry = self
             .dc_refcounts
             .get(&hash)
             .copied()
             .ok_or(KvCacheEventError::IndexerInvariantViolation)?;
+        let current = entry.refcount;
         if current == 1 {
             self.reserve_publication_scratch(1)?;
             let dirty = &mut self.publication.dirty;
             let physical_touches = &mut self.telemetry.physical_touches;
             CuckooMutator::new(&self.filter, &self.addressing, self.config.max_kicks)
-                .remove_with_original(hash, |bucket, original| {
+                .remove_with_original(entry.sequence, |bucket, original| {
                     *physical_touches = physical_touches.saturating_add(1);
                     dirty.mark(bucket, original);
                 })?;
@@ -755,11 +880,10 @@ impl DcCkfState {
         if current == 1 {
             self.dc_refcounts.remove(&hash);
         } else {
-            *self
-                .dc_refcounts
+            self.dc_refcounts
                 .get_mut(&hash)
-                .expect("validated refcount must remain present through actor-owned commit") =
-                current - 1;
+                .expect("validated refcount must remain present through actor-owned commit")
+                .refcount = current - 1;
         }
         if member_is_empty {
             self.member_blocks.remove(&worker);
@@ -865,13 +989,30 @@ mod tests {
 
     use super::*;
 
+    /// Replacement keys for blocks that are all sequence roots, matching what [`stored`] builds.
+    fn keys(hashes: impl IntoIterator<Item = u64>) -> HashSet<DcBlockKey> {
+        hashes
+            .into_iter()
+            .map(|hash| DcBlockKey::new(ExternalSequenceBlockHash(hash), hash))
+            .collect()
+    }
+
     fn stored(worker: WorkerWithDpRank, event_id: u64, hashes: &[u64]) -> RouterEvent {
+        stored_under(worker, event_id, None, hashes)
+    }
+
+    fn stored_under(
+        worker: WorkerWithDpRank,
+        event_id: u64,
+        parent: Option<u64>,
+        hashes: &[u64],
+    ) -> RouterEvent {
         RouterEvent::new(
             worker.worker_id,
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
+                    parent_hash: parent.map(ExternalSequenceBlockHash),
                     start_position: None,
                     blocks: hashes
                         .iter()
@@ -993,7 +1134,11 @@ mod tests {
         assert!(!member.is_empty());
         assert!(member.len() < hashes.len());
         assert_eq!(member.len(), state.dc_refcounts.len());
-        assert!(member.iter().all(|hash| state.dc_refcounts[hash] == 1));
+        assert!(
+            member
+                .iter()
+                .all(|hash| state.dc_refcounts[hash].refcount == 1)
+        );
         assert!(member.iter().copied().all(|hash| state.contains(hash)));
     }
 
@@ -1018,7 +1163,7 @@ mod tests {
         let mut state = DcCkfState::new(CkfConfig::new(1)).unwrap();
         state.apply_event(stored(worker, 1, &[original.0]));
         let before_counts = state.member_counts();
-        let replacement = (100..200).map(ExternalSequenceBlockHash).collect();
+        let replacement = keys(100..200);
 
         assert!(state.replace_rank(worker, replacement).is_err());
         assert_eq!(state.member_counts(), before_counts);
@@ -1050,6 +1195,39 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_extends_its_parents_chain_rather_than_restarting_it() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
+        state.apply_event(stored(worker, 1, &[1, 2]));
+
+        // Same token hash, reached under a parent: it must land at the chained address, not at the
+        // one it would occupy as a sequence root.
+        state.apply_event(stored_under(worker, 2, Some(1), &[3]));
+
+        let rooted = DcBlockKey::new(ExternalSequenceBlockHash(3), 3);
+        let chained = compute_next_seq_hash(1, LocalBlockHash(3));
+        assert_eq!(
+            state.dc_refcounts[&ExternalSequenceBlockHash(3)].sequence,
+            chained
+        );
+        assert_ne!(chained, rooted.sequence);
+    }
+
+    #[test]
+    fn a_batch_whose_parent_is_untracked_is_dropped() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
+
+        state.apply_event(stored_under(worker, 1, Some(999), &[1, 2]));
+
+        // Storing at an unchained address would be worse than dropping: the blocks are
+        // unreachable either way, but they would occupy capacity and answer false positives.
+        assert_eq!(state.stats().aggregation().unique_block_count(), 0);
+        assert!(!state.contains(ExternalSequenceBlockHash(2)));
+        assert!(!state.contains(ExternalSequenceBlockHash(1)));
+    }
+
+    #[test]
     fn replacement_diff_includes_the_pending_publication_window() {
         let worker = WorkerWithDpRank::new(1, 0);
         let hash = ExternalSequenceBlockHash(7);
@@ -1065,7 +1243,7 @@ mod tests {
                 .is_none()
         );
         let publication = state
-            .replace_rank(worker, [hash].into_iter().collect())
+            .replace_rank(worker, keys([hash.0]))
             .unwrap()
             .expect("replacement must publish the pending state");
         let mut reconstructed = base.to_vec();
@@ -1110,21 +1288,9 @@ mod tests {
         state.apply_event(stored(second, 1, &[2]));
         state.apply_event(stored(retained, 1, &[3]));
 
-        let replacements = [
-            (
-                first,
-                [10, 11]
-                    .into_iter()
-                    .map(ExternalSequenceBlockHash)
-                    .collect(),
-            ),
-            (
-                second,
-                [20].into_iter().map(ExternalSequenceBlockHash).collect(),
-            ),
-        ]
-        .into_iter()
-        .collect();
+        let replacements = [(first, keys([10, 11])), (second, keys([20]))]
+            .into_iter()
+            .collect();
         state.replace_ranks(replacements).unwrap();
 
         assert!(!state.contains(ExternalSequenceBlockHash(1)));
@@ -1190,7 +1356,9 @@ mod tests {
 
         replay.apply_event(stored(worker, 1, &[1, 2, 3]));
         replay.apply_event(removed(worker, 2, &[2]));
-        replay.apply_event(stored(worker, 3, &[2]));
+        // Re-store carries the parent it did originally, or the block chains to a different
+        // address than the one the removal cleared and replay stops converging.
+        replay.apply_event(stored_under(worker, 3, Some(1), &[2]));
 
         assert_eq!(direct.member_blocks, replay.member_blocks);
         assert_eq!(direct.dc_refcounts, replay.dc_refcounts);

@@ -4,9 +4,11 @@
 #[cfg(test)]
 use rustc_hash::FxHashSet;
 
+use dynamo_tokens::SequenceHash;
+
 use super::addressing::CkfAddressing;
 use super::bucket::{CuckooBucketStore, PackedBucket};
-use crate::protocols::{ExternalSequenceBlockHash, KvCacheEventError};
+use crate::protocols::KvCacheEventError;
 
 const SPLITMIX_INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -54,7 +56,7 @@ impl CuckooInsertionScratch {
 
 #[cfg(test)]
 pub(super) struct DcWriterState {
-    pub(super) resident: FxHashSet<ExternalSequenceBlockHash>,
+    pub(super) resident: FxHashSet<SequenceHash>,
     pub(super) rng: u64,
     pub(super) scratch: CuckooInsertionScratch,
 }
@@ -96,28 +98,32 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
     #[cfg(test)]
     pub(super) fn insert(
         &self,
-        hash: ExternalSequenceBlockHash,
+        sequence: SequenceHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
         mut on_dirty: impl FnMut(DirtyBucket),
     ) -> Result<(), KvCacheEventError> {
-        self.insert_inner(hash, rng, scratch)?;
+        self.insert_inner(sequence, rng, scratch)?;
         self.emit_final_dirty(scratch, &mut on_dirty);
         Ok(())
     }
 
-    /// Insert one logical hash and report every physical bucket's value before
+    /// Insert one addressing key and report every physical bucket's value before
     /// the successful mutation. A bucket written more than once is reported in
     /// write order, allowing publication-window tracking to retain its first
     /// pre-mutation image without observing rolled-back insertions.
+    ///
+    /// The key is a [`SequenceHash`], not a block identity: the table is addressed by the rolling
+    /// chain a prefix query probes with, and a caller holding only an engine-assigned block hash
+    /// has nothing this table can be searched by.
     pub(super) fn insert_with_originals(
         &self,
-        hash: ExternalSequenceBlockHash,
+        sequence: SequenceHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
         mut on_touched: impl FnMut(usize, PackedBucket),
     ) -> Result<(), KvCacheEventError> {
-        self.insert_inner(hash, rng, scratch)?;
+        self.insert_inner(sequence, rng, scratch)?;
         for &(bucket, before) in &scratch.touched {
             on_touched(bucket, before);
         }
@@ -127,13 +133,13 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
 
     fn insert_inner(
         &self,
-        hash: ExternalSequenceBlockHash,
+        sequence: SequenceHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
     ) -> Result<(), KvCacheEventError> {
         debug_assert!(self.store.bucket_count().is_power_of_two());
         scratch.clear();
-        let probe = self.addressing.prepare(hash.0);
+        let probe = self.addressing.prepare(sequence);
 
         if self.insert_into_empty(probe.bucket_a, probe.fingerprint, scratch)
             || self.insert_into_empty(probe.bucket_b, probe.fingerprint, scratch)
@@ -170,10 +176,10 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
     #[cfg(test)]
     pub(super) fn remove(
         &self,
-        hash: ExternalSequenceBlockHash,
+        sequence: SequenceHash,
         mut on_dirty: impl FnMut(DirtyBucket),
     ) -> Result<(), KvCacheEventError> {
-        let probe = self.addressing.prepare(hash.0);
+        let probe = self.addressing.prepare(sequence);
         for bucket in [probe.bucket_a, probe.bucket_b] {
             let before = self.store.load_bucket(bucket);
             let Some(slot) = before.first(probe.fingerprint) else {
@@ -193,10 +199,10 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
 
     pub(super) fn remove_with_original(
         &self,
-        hash: ExternalSequenceBlockHash,
+        sequence: SequenceHash,
         mut on_touched: impl FnMut(usize, PackedBucket),
     ) -> Result<(), KvCacheEventError> {
-        let probe = self.addressing.prepare(hash.0);
+        let probe = self.addressing.prepare(sequence);
         for bucket in [probe.bucket_a, probe.bucket_b] {
             let before = self.store.load_bucket(bucket);
             let Some(slot) = before.first(probe.fingerprint) else {

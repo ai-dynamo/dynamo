@@ -19,13 +19,14 @@ use dynamo_kv_router::indexer::cuckoo::DcCkfStats;
 #[cfg(feature = "ckf-diagnostics")]
 use dynamo_kv_router::indexer::cuckoo::PublisherEmitOutcome;
 use dynamo_kv_router::indexer::cuckoo::{
-    CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcCkfDelta, DcCkfDeltaSink,
-    DcCkfPublisher, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
+    CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcBlockKey, DcCkfDelta,
+    DcCkfDeltaSink, DcCkfPublisher, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
 };
 use dynamo_kv_router::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent,
-    StorageTier, WorkerId, WorkerWithDpRank,
+    StorageTier, WorkerId, WorkerWithDpRank, compute_next_seq_hash,
 };
+use dynamo_tokens::SequenceHash;
 #[cfg(feature = "ckf-diagnostics")]
 use parking_lot::Mutex;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
@@ -1057,7 +1058,7 @@ async fn run_actor(
             } => {
                 #[cfg(feature = "ckf-diagnostics")]
                 let rebuild_started = Instant::now();
-                let result = replacement_batch_hashes(replacements)
+                let result = replacement_batch_keys(replacements)
                     .and_then(|hashes| state.replace_ranks(hashes).map_err(Into::into))
                     .and_then(|publication| {
                         if let Some(batch) = publication {
@@ -1178,43 +1179,68 @@ async fn run_actor(
     }
 }
 
-fn replacement_hashes(
+/// Rebuild a rank's block set from a tree dump, deriving each block's sequence hash.
+///
+/// A dump is a breadth-first walk from the tree root, so a block's parent has always been seen by
+/// the time the block itself arrives. That ordering is the only reason the chain is reconstructible
+/// here: the pool these keys are handed to holds a flat filter with no tree to walk, and the
+/// engine's own block hash carries no relationship to the chain a prefix query probes with.
+fn replacement_keys(
     worker_id: WorkerId,
     dp_rank: DpRank,
     events: Vec<RouterEvent>,
-) -> Result<HashSet<ExternalSequenceBlockHash>, KvDcRelayError> {
-    let mut hashes = HashSet::new();
+) -> Result<HashSet<DcBlockKey>, KvDcRelayError> {
+    let invalid = |message: &str| KvDcRelayError::InvalidTreeDump {
+        worker_id,
+        dp_rank,
+        message: message.to_string(),
+    };
+    let allocation_failed = || {
+        KvDcRelayError::Build(dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed)
+    };
+    let mut sequences: HashMap<ExternalSequenceBlockHash, SequenceHash> = HashMap::new();
+    let mut keys = HashSet::new();
     for event in events {
         if event.worker_id != worker_id || event.event.dp_rank != dp_rank {
-            return Err(KvDcRelayError::InvalidTreeDump {
-                worker_id,
-                dp_rank,
-                message: "event identity does not match replacement rank".to_string(),
-            });
+            return Err(invalid("event identity does not match replacement rank"));
         }
         if event.storage_tier != StorageTier::Device {
             continue;
         }
         let KvCacheEventData::Stored(store) = event.event.data else {
-            return Err(KvDcRelayError::InvalidTreeDump {
-                worker_id,
-                dp_rank,
-                message: "tree dump contains a non-Stored event".to_string(),
-            });
+            return Err(invalid("tree dump contains a non-Stored event"));
         };
-        hashes.try_reserve(store.blocks.len()).map_err(|_| {
-            KvDcRelayError::Build(
-                dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
-            )
-        })?;
-        hashes.extend(store.blocks.into_iter().map(|block| block.block_hash));
+        // Fail the whole dump rather than drop the subtree. A rank that cannot be rebuilt stays
+        // fenced and unrouted, which is recoverable; one silently missing its deepest prefixes
+        // looks healthy and quietly scores short.
+        let mut parent = match store.parent_hash {
+            None => None,
+            Some(parent_hash) => Some(
+                *sequences
+                    .get(&parent_hash)
+                    .ok_or_else(|| invalid("tree dump block precedes its parent"))?,
+            ),
+        };
+        keys.try_reserve(store.blocks.len())
+            .map_err(|_| allocation_failed())?;
+        sequences
+            .try_reserve(store.blocks.len())
+            .map_err(|_| allocation_failed())?;
+        for block in store.blocks {
+            let sequence = parent.map_or(block.tokens_hash.0, |parent_sequence| {
+                compute_next_seq_hash(parent_sequence, block.tokens_hash)
+            });
+            parent = Some(sequence);
+            sequences.insert(block.block_hash, sequence);
+            keys.insert(DcBlockKey::new(block.block_hash, sequence));
+        }
     }
-    Ok(hashes)
+    Ok(keys)
 }
 
-fn replacement_batch_hashes(
+fn replacement_batch_keys(
     replacements: Vec<RankReplacement>,
-) -> Result<HashMap<WorkerWithDpRank, HashSet<ExternalSequenceBlockHash>>, KvDcRelayError> {
+) -> Result<HashMap<WorkerWithDpRank, HashSet<DcBlockKey>>, KvDcRelayError> {
     let mut hashes_by_rank = HashMap::new();
     for replacement in replacements {
         let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
@@ -1228,7 +1254,7 @@ fn replacement_batch_hashes(
                 ),
             });
         }
-        let hashes = replacement_hashes(
+        let hashes = replacement_keys(
             replacement.worker_id,
             replacement.dp_rank,
             replacement.events,

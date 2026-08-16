@@ -17,7 +17,7 @@ mod tests;
 
 pub use adapter::*;
 pub use dc::{
-    DcCkfAggregationStats, DcCkfEventOutcome, DcCkfFormatIdentity, DcCkfMemoryStats,
+    DcBlockKey, DcCkfAggregationStats, DcCkfEventOutcome, DcCkfFormatIdentity, DcCkfMemoryStats,
     DcCkfPublicationBatch, DcCkfPublicationStats, DcCkfState, DcCkfStats,
 };
 pub use failure::{
