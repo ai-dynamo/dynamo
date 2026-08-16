@@ -107,7 +107,7 @@ func (c Client) request(ctx context.Context, transactionID string, command isReq
 		return nil, fmt.Errorf("PageBroker response identifiers do not match request")
 	}
 	if failure := response.GetFailure(); failure != nil {
-		return nil, failureError{code: failure.GetCode(), message: failure.GetMessage()}
+		return nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
 	}
 	return response, nil
 }
@@ -115,6 +115,16 @@ func (c Client) request(ctx context.Context, transactionID string, command isReq
 type failureError struct {
 	code    Failure_Code
 	message string
+}
+
+func failureCode(code Failure_Code) Failure_Code {
+	switch code {
+	case Failure_UNSPECIFIED, Failure_INVALID_REQUEST, Failure_TRANSACTION_NOT_FOUND, Failure_TRANSACTION_CONFLICT,
+		Failure_INSUFFICIENT_STORAGE, Failure_STORAGE_ERROR, Failure_INTERNAL_ERROR:
+		return code
+	default:
+		return Failure_UNSPECIFIED
+	}
 }
 
 type transportError struct {

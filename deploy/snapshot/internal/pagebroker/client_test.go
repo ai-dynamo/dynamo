@@ -12,6 +12,12 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func TestFailureCodeMapsUnknownValuesToUnspecified(t *testing.T) {
+	if got := failureCode(Failure_Code(99)); got != Failure_UNSPECIFIED {
+		t.Fatalf("failureCode(99) = %v, want %v", got, Failure_UNSPECIFIED)
+	}
+}
+
 func TestRequestStopsWhenContextIsCanceled(t *testing.T) {
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 	if err != nil {
