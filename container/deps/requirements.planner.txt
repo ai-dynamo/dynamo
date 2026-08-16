@@ -13,7 +13,7 @@ filterpy==1.4.5
 # gRPC + protobuf are runtime deps for the plugin-orchestrator transport.
 # Pin in sync with requirements.common.txt.
 grpcio>=1.63.0
-kubernetes==32.0.1
+kubernetes @ https://github.com/kubernetes-client/python/archive/5d5e3ed698940a5e403f2f95ccf4a1f42d1a5c6c.tar.gz
 kubernetes_asyncio==32.0.0
 plotly>=6.0.1
 pmdarima==2.1.1

@@ -43,11 +43,22 @@ def mock_config():
         yield mock
 
 
+@pytest.fixture(autouse=True)
+def mock_api_client():
+    with patch(
+        "dynamo.planner.connectors.clients.kubernetes_api.client_go_api_client"
+    ) as mock:
+        yield mock.return_value
+
+
 @pytest.fixture
 def mock_custom_api():
     with patch(
         "dynamo.planner.connectors.clients.kubernetes_api.client.CustomObjectsApi"
     ) as mock:
+        mock.return_value.get_namespaced_custom_object_scale.return_value = {
+            "metadata": {"resourceVersion": "scale-rv-1"}
+        }
         yield mock.return_value
 
 
@@ -123,20 +134,45 @@ def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
         namespace=k8s_api.current_namespace,
         plural="dynamographdeploymentscalingadapters",
         name="test-deployment-frontend",  # lowercase service name
-        body={"spec": {"replicas": 3}},
+        body={
+            "metadata": {"resourceVersion": "scale-rv-1"},
+            "spec": {"replicas": 3},
+        },
     )
     # Should NOT fall back to DGD patch
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()
 
 
+def test_update_service_replicas_rereads_scale_on_conflict(k8s_api, mock_custom_api):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = [
+        {"metadata": {"resourceVersion": "scale-rv-1"}},
+        {"metadata": {"resourceVersion": "scale-rv-2"}},
+    ]
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = [
+        client.ApiException(status=409),
+        None,
+    ]
+
+    k8s_api.update_service_replicas("test-deployment", "Frontend", 3)
+
+    assert mock_custom_api.get_namespaced_custom_object_scale.call_count == 2
+    assert [
+        call.kwargs["body"]["metadata"]["resourceVersion"]
+        for call in mock_custom_api.patch_namespaced_custom_object_scale.call_args_list
+    ] == ["scale-rv-1", "scale-rv-2"]
+
+
 def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
     """Test that update_service_replicas falls back to DGD when DGDSA not found"""
     # DGDSA doesn't exist (404)
-    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = (
         client.ApiException(status=404)
     )
     mock_custom_api.get_namespaced_custom_object.return_value = {
-        "metadata": {"name": "test-deployment"},
+        "metadata": {
+            "name": "test-deployment",
+            "resourceVersion": "dgd-rv-1",
+        },
         "spec": {
             "components": [
                 {"name": "test-component", "type": "decode", "replicas": 0},
@@ -148,8 +184,9 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
 
     k8s_api.update_service_replicas("test-deployment", "test-component", 1)
 
-    # Should have tried DGDSA first
-    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once()
+    # Should have tried DGDSA first, but the GET failed before the Scale patch.
+    mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_not_called()
 
     # Should fall back to a narrow DGD JSON Patch.
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()
@@ -170,6 +207,11 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
         },
         body=[
             {
+                "op": "replace",
+                "path": "/metadata/resourceVersion",
+                "value": "dgd-rv-1",
+            },
+            {
                 "op": "test",
                 "path": "/spec/components/0/name",
                 "value": "test-component",
@@ -187,16 +229,71 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
     )
 
 
-def test_update_service_replicas_propagates_other_errors(k8s_api, mock_custom_api):
-    """Test that update_service_replicas propagates non-404 errors"""
+def test_update_service_replicas_rereads_dgd_on_conflict(k8s_api, mock_custom_api):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
+    mock_custom_api.get_namespaced_custom_object.side_effect = [
+        {
+            "metadata": {"resourceVersion": "dgd-rv-1"},
+            "spec": {"components": [{"name": "target", "replicas": 0}]},
+        },
+        {
+            "metadata": {"resourceVersion": "dgd-rv-2"},
+            "spec": {
+                "components": [
+                    {"name": "other", "replicas": 1},
+                    {"name": "target", "replicas": 0},
+                ]
+            },
+        },
+    ]
+    mock_custom_api.api_client.call_api.side_effect = [
+        client.ApiException(status=409),
+        None,
+    ]
+
+    k8s_api.update_service_replicas("test-deployment", "target", 2)
+
+    assert mock_custom_api.get_namespaced_custom_object.call_count == 2
+    patches = [
+        call.kwargs["body"]
+        for call in mock_custom_api.api_client.call_api.call_args_list
+    ]
+    assert patches[0][0]["value"] == "dgd-rv-1"
+    assert patches[0][2]["path"] == "/spec/components/0/replicas"
+    assert patches[1][0]["value"] == "dgd-rv-2"
+    assert patches[1][2]["path"] == "/spec/components/1/replicas"
+
+
+def test_update_service_replicas_preserves_dgd_not_found_error(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.get_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
+    mock_custom_api.get_namespaced_custom_object.side_effect = client.ApiException(
+        status=404
+    )
+
+    with pytest.raises(DynamoGraphDeploymentNotFoundError):
+        k8s_api.update_service_replicas("missing-deployment", "target", 2)
+
+
+def test_update_service_replicas_propagates_non_retryable_errors(
+    k8s_api, mock_custom_api
+):
+    """Test that update_service_replicas propagates non-retryable errors."""
     mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
-        client.ApiException(status=500, reason="Internal Server Error")
+        client.ApiException(status=422, reason="Invalid")
     )
 
     with pytest.raises(client.ApiException) as exc_info:
         k8s_api.update_service_replicas("test-deployment", "test-component", 1)
 
-    assert exc_info.value.status == 500
+    assert exc_info.value.status == 422
+    mock_custom_api.get_namespaced_custom_object_scale.assert_called_once()
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once()
     # Should NOT fall back to DGD
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()
 
@@ -215,14 +312,20 @@ def test_update_graph_replicas_calls_update_service_replicas(k8s_api, mock_custo
         namespace=k8s_api.current_namespace,
         plural="dynamographdeploymentscalingadapters",
         name="test-deployment-test-component",
-        body={"spec": {"replicas": 1}},
+        body={
+            "metadata": {"resourceVersion": "scale-rv-1"},
+            "spec": {"replicas": 1},
+        },
     )
 
 
 def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
     """Test the internal _update_dgd_replicas method"""
     mock_custom_api.get_namespaced_custom_object.return_value = {
-        "metadata": {"name": "test-deployment"},
+        "metadata": {
+            "name": "test-deployment",
+            "resourceVersion": "dgd-rv-1",
+        },
         "spec": {
             "components": [
                 {"name": "test-component", "type": "prefill", "replicas": 0},
@@ -250,6 +353,11 @@ def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
             "Content-Type": "application/json-patch+json",
         },
         body=[
+            {
+                "op": "replace",
+                "path": "/metadata/resourceVersion",
+                "value": "dgd-rv-1",
+            },
             {
                 "op": "test",
                 "path": "/spec/components/0/name",

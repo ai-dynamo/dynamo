@@ -129,6 +129,22 @@ pre-commit run --all-files            # all hooks (run `pre-commit install` firs
 cargo fmt --all && cargo clippy --workspace
 ```
 
+## Python Kubernetes Clients
+
+- Use `dynamo.common.kubernetes.client_go_api_client()` for synchronous API
+  clients. It enables the generated client's client-go-compatible retry policy
+  for reads. Standalone images that cannot import Dynamo must enable
+  `Configuration.client_go_retries` directly.
+- Wrap every synchronous patch, update, or replace in
+  `retry_kubernetes_write()`. Its
+  closure must re-read the object on every attempt and send that read's
+  `metadata.resourceVersion`; never retry a stale write body unchanged.
+- Do not add ad hoc Kubernetes retry loops. The shared write helper retries
+  conflicts, honors `Retry-After` for throttling and server errors, and uses
+  the client-go default exponential backoff when no valid header is present.
+- A deadline-bound client may opt out on a dedicated configuration copy. Set
+  `Configuration.retries = 0` and document why retries violate its deadline.
+
 ## PR and Commit Conventions
 
 - Keep changes focused and reviewable.
