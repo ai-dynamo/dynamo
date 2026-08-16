@@ -19,6 +19,11 @@ pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id"
 pub(crate) const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
 pub(crate) const HEADER_DYNAMO_PARENT_SESSION_ID: &str = "x-dynamo-parent-session-id";
 pub(crate) const HEADER_DYNAMO_SESSION_FINAL: &str = "x-dynamo-session-final";
+/// Harness-neutral purpose for the current request. Currently `compaction` is
+/// the only recognized value.
+pub(crate) const HEADER_DYNAMO_AGENT_REQUEST_KIND: &str = "x-dynamo-agent-request-kind";
+/// Optional JSON metadata for a recognized canonical agent request kind.
+pub(crate) const HEADER_DYNAMO_AGENT_COMPACTION: &str = "x-dynamo-agent-compaction";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AgentHeaderMapping {
@@ -70,8 +75,12 @@ fn borrowed_header_value<'a>(headers: &'a HeaderMap, header_name: &str) -> Optio
 
 pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentContextHeaderValues> {
     let session_final = header_bool(headers, HEADER_DYNAMO_SESSION_FINAL);
-    let compaction = borrowed_header_value(headers, HEADER_CODEX_THREAD_ID)
-        .and_then(|_| codex_compaction_header_value(headers));
+    // Prefer the canonical contract so non-Codex harnesses never need to
+    // impersonate a Codex header merely to express the same lifecycle event.
+    let compaction = canonical_compaction_header_value(headers).or_else(|| {
+        borrowed_header_value(headers, HEADER_CODEX_THREAD_ID)
+            .and_then(|_| codex_compaction_header_value(headers))
+    });
 
     if let Some(session_id) = borrowed_header_value(headers, HEADER_DYNAMO_SESSION_ID) {
         return Some(AgentContextHeaderValues {
@@ -120,6 +129,16 @@ fn codex_compaction_header_value(headers: &HeaderMap) -> Option<AgentCompaction>
     let metadata: CodexTurnMetadata = serde_json::from_str(raw).ok()?;
     (metadata.request_kind.as_deref() == Some("compaction"))
         .then(|| metadata.compaction.unwrap_or_default())
+}
+
+fn canonical_compaction_header_value(headers: &HeaderMap) -> Option<AgentCompaction> {
+    (borrowed_header_value(headers, HEADER_DYNAMO_AGENT_REQUEST_KIND) == Some("compaction")).then(
+        || {
+            borrowed_header_value(headers, HEADER_DYNAMO_AGENT_COMPACTION)
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or_default()
+        },
+    )
 }
 
 pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {

@@ -749,8 +749,10 @@ mod tests {
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
-        HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL,
-        HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_AGENT_COMPACTION,
+        HEADER_DYNAMO_AGENT_REQUEST_KIND, HEADER_DYNAMO_PARENT_SESSION_ID,
+        HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID,
+        HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -1162,6 +1164,60 @@ mod tests {
                 .compaction
                 .and_then(|compaction| compaction.strategy),
             Some("memento".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_context_from_canonical_compaction_headers_preserves_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "harness-session".parse().unwrap());
+        headers.insert(
+            HEADER_DYNAMO_AGENT_REQUEST_KIND,
+            "compaction".parse().unwrap(),
+        );
+        headers.insert(
+            HEADER_DYNAMO_AGENT_COMPACTION,
+            r#"{"trigger":"automatic","implementation":"deepseek_harness","phase":"summary"}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "harness-session");
+        assert_eq!(
+            agent_context.compaction,
+            Some(AgentCompaction {
+                trigger: Some("automatic".to_string()),
+                reason: None,
+                implementation: Some("deepseek_harness".to_string()),
+                phase: Some("summary".to_string()),
+                strategy: None,
+            })
+        );
+    }
+
+    #[test]
+    fn canonical_compaction_requires_the_recognized_request_kind() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "harness-session".parse().unwrap());
+        headers.insert(
+            HEADER_DYNAMO_AGENT_COMPACTION,
+            r#"{"trigger":"automatic"}"#.parse().unwrap(),
+        );
+
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            None
+        );
+
+        headers.insert(
+            HEADER_DYNAMO_AGENT_REQUEST_KIND,
+            "compaction".parse().unwrap(),
+        );
+        headers.insert(HEADER_DYNAMO_AGENT_COMPACTION, "{".parse().unwrap());
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            Some(AgentCompaction::default())
         );
     }
 
