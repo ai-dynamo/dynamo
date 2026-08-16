@@ -6,7 +6,7 @@
 use axum::http::HeaderMap;
 use serde::Deserialize;
 
-use crate::protocols::common::extensions::AgentCompaction;
+use crate::protocols::common::extensions::{AgentCompaction, InputTrigger};
 
 pub(crate) const HEADER_CLAUDE_CODE_SESSION_ID: &str = "x-claude-code-session-id";
 pub(crate) const HEADER_CLAUDE_CODE_AGENT_ID: &str = "x-claude-code-agent-id";
@@ -24,6 +24,9 @@ pub(crate) const HEADER_DYNAMO_SESSION_FINAL: &str = "x-dynamo-session-final";
 pub(crate) const HEADER_DYNAMO_AGENT_REQUEST_KIND: &str = "x-dynamo-agent-request-kind";
 /// Optional JSON metadata for a recognized canonical agent request kind.
 pub(crate) const HEADER_DYNAMO_AGENT_COMPACTION: &str = "x-dynamo-agent-compaction";
+/// Optional harness-supplied causal trigger. Accepted values are
+/// `user_message`, `tool_result`, and `other`.
+pub(crate) const HEADER_DYNAMO_AGENT_INPUT_TRIGGER: &str = "x-dynamo-agent-input-trigger";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AgentHeaderMapping {
@@ -60,6 +63,7 @@ pub(crate) struct AgentContextHeaderValues {
     pub(crate) parent_session_id: Option<String>,
     pub(crate) session_final: Option<bool>,
     pub(crate) compaction: Option<AgentCompaction>,
+    pub(crate) input_trigger: Option<InputTrigger>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +85,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
         borrowed_header_value(headers, HEADER_CODEX_THREAD_ID)
             .and_then(|_| codex_compaction_header_value(headers))
     });
+    let input_trigger = canonical_input_trigger_header_value(headers);
 
     if let Some(session_id) = borrowed_header_value(headers, HEADER_DYNAMO_SESSION_ID) {
         return Some(AgentContextHeaderValues {
@@ -90,6 +95,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             session_id: session_id.to_owned(),
             session_final,
             compaction,
+            input_trigger,
         });
     }
 
@@ -119,6 +125,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             parent_session_id,
             session_final,
             compaction,
+            input_trigger,
         });
     }
     None
@@ -139,6 +146,15 @@ fn canonical_compaction_header_value(headers: &HeaderMap) -> Option<AgentCompact
                 .unwrap_or_default()
         },
     )
+}
+
+fn canonical_input_trigger_header_value(headers: &HeaderMap) -> Option<InputTrigger> {
+    match borrowed_header_value(headers, HEADER_DYNAMO_AGENT_INPUT_TRIGGER) {
+        Some("user_message") => Some(InputTrigger::UserMessage),
+        Some("tool_result") => Some(InputTrigger::ToolResult),
+        Some("other") => Some(InputTrigger::Other),
+        _ => None,
+    }
 }
 
 pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {

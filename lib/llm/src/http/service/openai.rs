@@ -626,7 +626,12 @@ where
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
     if let Some(mut agent_context) = agent_context_from_headers(headers) {
-        agent_context.input_trigger = classify_input_trigger(request.content());
+        // A harness has more causal context than can be recovered from one
+        // provider-shaped request. Keep the header optional so ordinary API
+        // callers preserve the existing content-derived classification.
+        agent_context.input_trigger = agent_context
+            .input_trigger
+            .or_else(|| classify_input_trigger(request.content()));
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
     if let Some(session_affinity) = session_affinity_from_headers(headers) {
@@ -4939,6 +4944,23 @@ mod tests {
                 .unwrap()
                 .input_trigger,
             Some(InputTrigger::Other)
+        );
+
+        headers.insert(
+            "x-dynamo-agent-input-trigger",
+            "tool_result".parse().unwrap(),
+        );
+        let source =
+            context_from_headers_with_input_trigger((), "request-3".to_string(), &headers, |_| {
+                Some(InputTrigger::UserMessage)
+            })
+            .unwrap();
+        assert_eq!(
+            source
+                .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+                .unwrap()
+                .input_trigger,
+            Some(InputTrigger::ToolResult)
         );
     }
 

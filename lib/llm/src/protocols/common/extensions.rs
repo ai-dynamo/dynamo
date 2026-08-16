@@ -315,7 +315,7 @@ impl From<AgentContextHeaderValues> for AgentContext {
             session_final: values.session_final,
             compaction: values.compaction,
             kv_hints,
-            input_trigger: None,
+            input_trigger: values.input_trigger,
         }
     }
 }
@@ -750,9 +750,9 @@ mod tests {
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
         HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_AGENT_COMPACTION,
-        HEADER_DYNAMO_AGENT_REQUEST_KIND, HEADER_DYNAMO_PARENT_SESSION_ID,
-        HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID,
-        HEADER_OPENCODE_SESSION_ID,
+        HEADER_DYNAMO_AGENT_INPUT_TRIGGER, HEADER_DYNAMO_AGENT_REQUEST_KIND,
+        HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID,
+        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -1218,6 +1218,30 @@ mod tests {
         assert_eq!(
             agent_context_from_headers(&headers).unwrap().compaction,
             Some(AgentCompaction::default())
+        );
+    }
+
+    #[test]
+    fn agent_context_accepts_a_valid_harness_input_trigger_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "harness-session".parse().unwrap());
+        headers.insert(
+            HEADER_DYNAMO_AGENT_INPUT_TRIGGER,
+            "tool_result".parse().unwrap(),
+        );
+
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().input_trigger,
+            Some(InputTrigger::ToolResult)
+        );
+
+        headers.insert(
+            HEADER_DYNAMO_AGENT_INPUT_TRIGGER,
+            "unknown".parse().unwrap(),
+        );
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().input_trigger,
+            None
         );
     }
 

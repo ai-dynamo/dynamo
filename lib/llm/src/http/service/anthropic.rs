@@ -305,7 +305,9 @@ async fn handler_anthropic_messages(
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, &headers);
     if let Some(mut agent_context) = agent_context_from_headers(&headers) {
-        agent_context.input_trigger = Some(classify_anthropic_request(request.content()));
+        agent_context.input_trigger = agent_context
+            .input_trigger
+            .or(Some(classify_anthropic_request(request.content())));
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
     if let Some(session_affinity) = session_affinity_from_headers(&headers) {
