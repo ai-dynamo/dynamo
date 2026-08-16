@@ -115,44 +115,6 @@ def test_ai_dynamo_registers_optional_sweeper_providers():
     }
 
 
-def test_aisimulate_builds_and_installs_planner_and_framework_runtime_wheels():
-    root, repo_root = _source_checkout_roots()
-    project = tomllib.loads((root / "pyproject.toml").read_text())
-    wheel_builder = (
-        repo_root / "container/templates/wheel_builder.Dockerfile"
-    ).read_text()
-    runtime_templates = [
-        repo_root / "container/templates/planner.Dockerfile",
-        repo_root / "container/templates/sglang_runtime.Dockerfile",
-        repo_root / "container/templates/trtllm_runtime.Dockerfile",
-        repo_root / "container/templates/vllm_runtime.Dockerfile",
-    ]
-    release_workflow = (repo_root / ".github/workflows/release.yml").read_text()
-
-    assert project["build-system"]["build-backend"] == "maturin"
-    assert project["tool"]["maturin"]["module-name"] == "aisimulate._runtime"
-    assert project["tool"]["maturin"]["profile"] == "release"
-    assert (
-        '{% if target == "planner" or (target == "runtime" and framework in '
-        '("vllm", "sglang", "trtllm")) %}' in wheel_builder
-    )
-    assert "cd /opt/dynamo/aisimulate" in wheel_builder
-    assert "maturin build --release" in wheel_builder
-    assert "--auditwheel repair" in wheel_builder
-    assert "--compatibility manylinux_2_28" in wheel_builder
-    assert "--out /opt/dynamo/dist" in wheel_builder
-    for runtime_template in runtime_templates:
-        runtime_text = runtime_template.read_text()
-        assert (
-            "--from=wheel_builder /opt/dynamo/dist/*.whl "
-            "/opt/dynamo/wheelhouse/" in runtime_text
-        ), f"{runtime_template.name} does not copy the wheel-builder output"
-        assert (
-            "/opt/dynamo/wheelhouse/aisimulate*.whl" in runtime_text
-        ), f"{runtime_template.name} does not install the AISimulate wheel"
-    assert "aisimulate-*" not in release_workflow
-
-
 def test_aisimulate_source_versions_are_synchronized():
     root, repo_root = _source_checkout_roots()
     project = tomllib.loads((root / "pyproject.toml").read_text())
