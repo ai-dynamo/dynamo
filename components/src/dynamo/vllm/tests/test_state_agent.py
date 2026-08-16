@@ -92,6 +92,20 @@ async def test_closed_lifecycle_rejects_and_closes_late_owner():
 
 
 @pytest.mark.asyncio
+async def test_closed_lifecycle_bounds_late_owner_cleanup(monkeypatch):
+    never_finishes = asyncio.Event()
+    lifecycle = state_agent.StateAgentLifecycle()
+    owner = SimpleNamespace(close=AsyncMock(side_effect=never_finishes.wait))
+    monkeypatch.setattr(state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
+
+    await lifecycle.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        await lifecycle.install(owner)
+
+    owner.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_close_has_a_bounded_wait(monkeypatch):
     never_finishes = asyncio.Event()
     lifecycle = state_agent.StateAgentLifecycle()

@@ -197,6 +197,15 @@ fn reconcile_worker(
         return missing_source(worker_id, missing_ranks, previous, now);
     }
 
+    if statuses
+        .iter()
+        .any(|(_, status)| matches!(status, KvSourceStatus::Suppressed))
+    {
+        // Suppression hands this worker to the V2 controller. Clear any legacy
+        // warning state without claiming that the replacement source recovered.
+        return (None, None);
+    }
+
     let previous_warning = match previous {
         Some(WorkerIssue::Warned(warning)) => Some(warning),
         Some(WorkerIssue::MissingSince {
@@ -579,6 +588,26 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].code, DiagnosticCode::SourceRecovered);
         assert!(state.reconcile(&active, now + SOURCE_JOIN_GRACE).is_empty());
+    }
+
+    #[test]
+    fn suppressing_a_missing_legacy_source_does_not_report_recovery() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let missing = view([(7, Some(true))], [missing(7, 0)]);
+        let suppressed = view([(7, Some(true))], [(worker, KvSourceStatus::Suppressed)]);
+        let now = Instant::now();
+        let mut state = required_state();
+
+        assert!(state.reconcile(&missing, now).is_empty());
+        let warning = state.reconcile(&missing, now + SOURCE_JOIN_GRACE);
+        assert_eq!(warning[0].code, DiagnosticCode::SourceNotObserved);
+
+        assert!(
+            state
+                .reconcile(&suppressed, now + SOURCE_JOIN_GRACE)
+                .is_empty()
+        );
+        assert!(state.next_deadline().is_none());
     }
 
     #[test]

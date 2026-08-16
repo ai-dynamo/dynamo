@@ -38,7 +38,10 @@ use dynamo_runtime::{
     transports::event_plane::EventSubscriber,
 };
 use futures::StreamExt;
-use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tokio::{
+    sync::{Mutex, mpsc, oneshot, watch},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::kv_state_agent::{
@@ -56,6 +59,8 @@ use super::{
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const RECONCILE_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+const RECONCILE_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 struct OwnerRuntime {
@@ -86,6 +91,50 @@ struct OwnerRecoveryPlan {
     recovery_required: bool,
     observation_revision: u64,
     schedule_generation: u64,
+}
+
+#[derive(Clone, PartialEq)]
+struct RecoveryRetryFence {
+    source: KvStateSourceAdvertisement,
+    attachment: Option<KvStateAttachmentAdvertisement>,
+    observation_revision: u64,
+    activation_expected: bool,
+}
+
+struct RecoveryRetry {
+    fence: Option<RecoveryRetryFence>,
+    deadline: Option<Instant>,
+    next_delay: Duration,
+}
+
+impl RecoveryRetry {
+    fn new() -> Self {
+        Self {
+            fence: None,
+            deadline: None,
+            next_delay: RECONCILE_RETRY_INITIAL_BACKOFF,
+        }
+    }
+
+    fn schedule(&mut self, fence: RecoveryRetryFence) {
+        if self.deadline.is_some() {
+            return;
+        }
+        self.fence = Some(fence);
+        self.deadline = Some(Instant::now() + self.next_delay);
+        self.next_delay = (self.next_delay * 2).min(RECONCILE_RETRY_MAX_BACKOFF);
+    }
+
+    fn take_due(&mut self) -> Option<RecoveryRetryFence> {
+        self.deadline = None;
+        self.fence.take()
+    }
+
+    fn reset(&mut self) {
+        self.fence = None;
+        self.deadline = None;
+        self.next_delay = RECONCILE_RETRY_INITIAL_BACKOFF;
+    }
 }
 
 enum OwnerRecoveryResult {
@@ -345,6 +394,7 @@ async fn run_state_agent_router(
     let mut recovering_publishers: HashMap<u64, CacheOwnerId> = HashMap::new();
     let mut next_recovery_schedule = 0u64;
     let mut committed_revision = None;
+    let mut recovery_retry = RecoveryRetry::new();
 
     loop {
         enum Input {
@@ -361,6 +411,7 @@ async fn run_state_agent_router(
             ),
             Recovery(Option<Box<OwnerRecoveryResult>>),
             Observation,
+            Retry,
             Cancelled,
         }
         let input = tokio::select! {
@@ -386,11 +437,13 @@ async fn run_state_agent_router(
             changed = observation_rx.changed() => {
                 if changed.is_err() { Input::Cancelled } else { Input::Observation }
             },
+            _ = wait_for_retry_deadline(recovery_retry.deadline) => Input::Retry,
         };
         let mut reconcile = false;
         match input {
             Input::Cancelled => break,
             Input::Membership => {
+                recovery_retry.reset();
                 membership.borrow_and_update();
                 let snapshot = membership.borrow();
                 let mut recognized = source_mode_suppressed_workers(&snapshot);
@@ -405,6 +458,7 @@ async fn run_state_agent_router(
                 reconcile = true;
             }
             Input::Observation => {
+                recovery_retry.reset();
                 observation_rx.borrow_and_update();
                 reconcile = true;
             }
@@ -414,7 +468,12 @@ async fn run_state_agent_router(
                 KV_STATE_SOURCE_TOPIC_V2,
                 &mut sources,
             ) {
-                Ok(changed) => reconcile = changed,
+                Ok(changed) => {
+                    if changed {
+                        recovery_retry.reset();
+                    }
+                    reconcile = changed;
+                }
                 Err(error) => tracing::warn!(%error, "Ignoring invalid V2 KV state source"),
             },
             Input::Attachment(Some(event)) => match update_advertisements(
@@ -423,7 +482,12 @@ async fn run_state_agent_router(
                 KV_STATE_ATTACHMENT_TOPIC_V2,
                 &mut attachments,
             ) {
-                Ok(changed) => reconcile = changed,
+                Ok(changed) => {
+                    if changed {
+                        recovery_retry.reset();
+                    }
+                    reconcile = changed;
+                }
                 Err(error) => tracing::warn!(%error, "Ignoring invalid V2 KV state attachment"),
             },
             Input::Source(None) | Input::Attachment(None) => {
@@ -473,6 +537,7 @@ async fn run_state_agent_router(
             Input::Recovery(Some(result)) => {
                 let owner = result.owner();
                 let publisher_id = result.publisher_id();
+                let retry_fence = result.retry_fence();
                 recovery_lane.finish((owner, result.schedule_generation()));
                 if let Err(error) = finish_owner_recovery(
                     *result,
@@ -500,8 +565,26 @@ async fn run_state_agent_router(
                     );
                     tracing::warn!(%owner, %error, "KV state-source recovery completion failed closed");
                 }
+                if runtime.get(&owner).is_some_and(|state| {
+                    state.publisher_id == Some(publisher_id)
+                        && (state.recovery_required
+                            || (retry_fence.activation_expected && !state.ready))
+                }) {
+                    recovery_retry.schedule(retry_fence);
+                }
             }
             Input::Recovery(None) => break,
+            Input::Retry => {
+                let Some(fence) = recovery_retry.take_due() else {
+                    continue;
+                };
+                if recovery_retry_is_current(&fence, &sources, &attachments, &observation_revision)
+                {
+                    reconcile = true;
+                } else {
+                    recovery_retry.reset();
+                }
+            }
         }
         if reconcile {
             if !sources.is_empty() && transport.is_none() {
@@ -511,12 +594,19 @@ async fn run_state_agent_router(
                         attachment_stream = Some(attachment_watch);
                         event_stream = Some(events);
                         transport = Some(Arc::new(state_transport));
+                        recovery_retry.reset();
                     }
                     Err(error) => {
                         tracing::warn!(%error, %endpoint, "Failed to activate V2 KV state consumers");
                         indexer.set_residency_projection(ResidencyProjection::default());
                         recognized_tx
                             .send_replace(membership.borrow().sources.keys().copied().collect());
+                        if let Some(fence) = source_retry_fence(
+                            &sources,
+                            observation_revision.load(Ordering::Acquire),
+                        ) {
+                            recovery_retry.schedule(fence);
+                        }
                         continue;
                     }
                 }
@@ -555,6 +645,9 @@ async fn run_state_agent_router(
             {
                 tracing::warn!(%error, %endpoint, "KV state-source reconciliation failed closed");
                 committed_revision = None;
+                if let Some(fence) = source_retry_fence(&sources, revision) {
+                    recovery_retry.schedule(fence);
+                }
             } else {
                 committed_revision = Some(revision);
             }
@@ -562,6 +655,47 @@ async fn run_state_agent_router(
     }
     recovery_lane.cancel_all().await;
     indexer.set_residency_projection(ResidencyProjection::default());
+}
+
+async fn wait_for_retry_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn source_retry_fence(
+    sources: &HashMap<u64, KvStateSourceAdvertisement>,
+    observation_revision: u64,
+) -> Option<RecoveryRetryFence> {
+    sources
+        .iter()
+        .min_by_key(|(publisher_id, _)| *publisher_id)
+        .map(|(_, source)| RecoveryRetryFence {
+            source: source.clone(),
+            attachment: None,
+            observation_revision,
+            activation_expected: false,
+        })
+}
+
+fn recovery_retry_is_current(
+    fence: &RecoveryRetryFence,
+    sources: &HashMap<u64, KvStateSourceAdvertisement>,
+    attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
+    observation_revision: &AtomicU64,
+) -> bool {
+    if observation_revision.load(Ordering::Acquire) != fence.observation_revision
+        || sources.get(&fence.source.publisher_id) != Some(&fence.source)
+    {
+        return false;
+    }
+    fence.attachment.as_ref().is_none_or(|attachment| {
+        attachments.get(&attachment_record_id(
+            attachment.publisher_id,
+            attachment.attachment_generation,
+        )) == Some(attachment)
+    })
 }
 
 async fn start_state_agent_consumers(
@@ -997,6 +1131,22 @@ impl OwnerRecoveryResult {
     fn schedule_generation(&self) -> u64 {
         match self {
             Self::Initial { plan, .. } | Self::PostStatus { plan, .. } => plan.schedule_generation,
+        }
+    }
+
+    fn retry_fence(&self) -> RecoveryRetryFence {
+        let plan = match self {
+            Self::Initial { plan, .. } | Self::PostStatus { plan, .. } => plan,
+        };
+        RecoveryRetryFence {
+            source: plan.source.clone(),
+            attachment: plan.attachment.clone(),
+            observation_revision: plan.observation_revision,
+            activation_expected: plan
+                .attachment
+                .as_ref()
+                .is_some_and(|attachment| attachment.cache_readable)
+                && plan.recognized_worker.is_some(),
         }
     }
 }
@@ -1632,11 +1782,14 @@ mod tests {
         ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
         LocalBlockHash, WorkerWithDpRank,
     };
-    use dynamo_runtime::protocols::EndpointId;
+    use dynamo_runtime::{component::TransportType, protocols::EndpointId};
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::discovery::{KvEventSource, KvSourceMembershipView, KvStateEndpointResolution};
+    use crate::discovery::{
+        KvEventSource, KvSourceMembershipView, KvStateEndpointResolution,
+        kv_state_agent::KvStateIngressProtocol,
+    };
 
     fn owner(slot: u8) -> CacheOwnerId {
         CacheOwnerId::new(
@@ -1666,6 +1819,100 @@ mod tests {
                 primary_records_routing_decisions: false,
             },
         )
+    }
+
+    fn instance(instance_id: u64) -> dynamo_runtime::component::Instance {
+        dynamo_runtime::component::Instance {
+            component: "worker".to_string(),
+            endpoint: "state-agent".to_string(),
+            namespace: "ns".to_string(),
+            instance_id,
+            transport: TransportType::Tcp("tcp://127.0.0.1:1234".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        }
+    }
+
+    fn source_advertisement(owner: CacheOwnerId) -> KvStateSourceAdvertisement {
+        KvStateSourceAdvertisement {
+            cache_owner_id: owner,
+            global_dp_rank: 3,
+            kv_state_endpoint: "ns.worker.generate".into(),
+            indexer_domain_id: owner.pool().indexer_domain(),
+            kv_block_size: 4,
+            ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
+            publisher_id: 41,
+            protocol_version: KvStateProtocolVersion::V2,
+            event_topic: KV_STATE_EVENT_TOPIC_V2.to_string(),
+            recovery_control_target: instance(17),
+        }
+    }
+
+    fn attachment_advertisement(
+        owner: CacheOwnerId,
+        generation: u64,
+    ) -> KvStateAttachmentAdvertisement {
+        KvStateAttachmentAdvertisement {
+            cache_owner_id: owner,
+            publisher_id: 41,
+            protocol_version: KvStateProtocolVersion::V2,
+            recovery_control_target: instance(17),
+            attachment_generation: generation,
+            producer_instance: instance(18),
+            intent_incarnation: 71,
+            worker: WorkerWithDpRank::new(17, 3),
+            ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
+            raw_zmq_endpoint: "tcp://worker:5557".to_string(),
+            raw_topic: String::new(),
+            cache_readable: true,
+            ready_at_outbound_cursor: 9,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_retry_runs_without_discovery_and_fences_replacement() {
+        let owner = owner(4);
+        let source = source_advertisement(owner);
+        let attachment = attachment_advertisement(owner, 7);
+        let sources = HashMap::from([(source.publisher_id, source.clone())]);
+        let mut attachments = HashMap::from([(
+            attachment_record_id(attachment.publisher_id, attachment.attachment_generation),
+            attachment.clone(),
+        )]);
+        let revision = AtomicU64::new(3);
+        let fence = RecoveryRetryFence {
+            source,
+            attachment: Some(attachment),
+            observation_revision: 3,
+            activation_expected: true,
+        };
+        let mut retry = RecoveryRetry::new();
+
+        retry.schedule(fence.clone());
+        tokio::time::advance(RECONCILE_RETRY_INITIAL_BACKOFF).await;
+        wait_for_retry_deadline(retry.deadline).await;
+        let due = retry
+            .take_due()
+            .expect("retry should fire without discovery");
+        assert!(recovery_retry_is_current(
+            &due,
+            &sources,
+            &attachments,
+            &revision,
+        ));
+
+        attachments.clear();
+        let replacement = attachment_advertisement(owner, 8);
+        attachments.insert(
+            attachment_record_id(replacement.publisher_id, replacement.attachment_generation),
+            replacement,
+        );
+        assert!(!recovery_retry_is_current(
+            &due,
+            &sources,
+            &attachments,
+            &revision,
+        ));
     }
 
     #[test]

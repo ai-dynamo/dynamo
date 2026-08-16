@@ -52,7 +52,7 @@ class StateAgentLifecycle:
         except BaseException:
             # A started owner already holds discovery registrations. Its Rust
             # cleanup task survives cancellation of this Python await.
-            await asyncio.shield(owner.close())
+            await asyncio.shield(_close_attachment_owner(owner))
             raise
 
     async def close(self) -> None:
@@ -60,16 +60,17 @@ class StateAgentLifecycle:
             self._closed = True
             owner, self._owner = self._owner, None
         if owner is not None:
-            try:
-                await asyncio.wait_for(
-                    owner.close(), timeout=_STATE_AGENT_CLOSE_TIMEOUT_SECS
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "KV state attachment cleanup timed out after %.0fs; "
-                    "continuing worker shutdown",
-                    _STATE_AGENT_CLOSE_TIMEOUT_SECS,
-                )
+            await _close_attachment_owner(owner)
+
+
+async def _close_attachment_owner(owner: KvStateAttachmentOwner) -> None:
+    try:
+        await asyncio.wait_for(owner.close(), timeout=_STATE_AGENT_CLOSE_TIMEOUT_SECS)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "KV state attachment cleanup timed out after %.0fs; continuing worker shutdown",
+            _STATE_AGENT_CLOSE_TIMEOUT_SECS,
+        )
 
 
 def state_agent_settings(config: Any) -> StateAgentSettings | None:
