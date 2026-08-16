@@ -313,6 +313,7 @@ def _preprocess_worker(
     eos_token_ids: list[int] | None,
 ) -> SglangPreprocessWorkerResult:
     """Preprocess a request in a worker process and return a picklable result."""
+    _reject_token_data(request)
     pre = preprocess_chat_request(
         request,
         tokenizer=_w_tokenizer,
@@ -351,6 +352,15 @@ def _preprocess_worker(
         force_reasoning=pre.force_reasoning,
         effective_reasoning_parser_name=effective_reasoning_parser_name,
     )
+
+
+def _reject_token_data(request: dict[str, Any]) -> None:
+    nvext = request.get("nvext")
+    if isinstance(nvext, dict) and nvext.get("token_data") is not None:
+        raise PreprocessError(
+            "nvext.token_data requires the Rust preprocessor; start the frontend "
+            "with --dyn-chat-processor dynamo"
+        )
 
 
 def _build_dynamo_preproc(
@@ -543,6 +553,7 @@ class SglangProcessor:
             if self.debug_perf:
                 t0 = time.monotonic()
 
+            _reject_token_data(request)
             pre = preprocess_chat_request(
                 request,
                 tokenizer=self.tokenizer,
