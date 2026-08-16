@@ -1342,7 +1342,8 @@ def main(argv: list[str]) -> int:
         if args.check:
             print(f"{name}: STALE (regeneration would change it)")
         else:
-            path.write_text(new_text, encoding="utf-8")
+            with path.open("w", encoding="utf-8", newline="\n") as output:
+                output.write(new_text)
             print(f"{name}: wrote {len(new_text.encode('utf-8'))} bytes")
 
     if args.check and stale:

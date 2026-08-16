@@ -107,6 +107,44 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Check generated release docs determinism
+        run: |
+          set -euo pipefail
+
+          python3 docs/fern/scripts/gen_llms_tables.py --check
+
+          tmp_dir=$(mktemp -d)
+          trap 'rm -rf "$tmp_dir"' EXIT
+          mkdir -p "$tmp_dir/first" "$tmp_dir/second"
+          cp -R docs "$tmp_dir/first/docs"
+          cp -R docs "$tmp_dir/second/docs"
+
+          TZ=UTC LC_ALL=C PYTHONHASHSEED=1 SOURCE_DATE_EPOCH=0 \
+            python3 "$tmp_dir/first/docs/fern/scripts/gen_llms_tables.py"
+          TZ=Pacific/Honolulu LC_ALL=C.UTF-8 PYTHONHASHSEED=2 SOURCE_DATE_EPOCH=4102444800 \
+            python3 "$tmp_dir/second/docs/fern/scripts/gen_llms_tables.py"
+
+          outputs=(
+            docs/fern/pages/reference/general/compatibility.mdx
+            docs/fern/pages/reference/general/release-artifacts.mdx
+            docs/fern/pages/reference/general/model-early-access-builds.mdx
+            docs/fern/pages/reference/general/releases-machine-readable.mdx
+            docs/fern/pages/reference/general/releases/release-history.mdx
+            docs/fern/assets/releases.json
+            docs/fern/assets/releases-atom.xml
+          )
+          failed=0
+          for output in "${outputs[@]}"; do
+            if ! cmp -s "$tmp_dir/first/$output" "$tmp_dir/second/$output"; then
+              echo "::error file=$output::Generator output is not byte-identical across runs"
+              diff -u "$tmp_dir/first/$output" "$tmp_dir/second/$output" || true
+              failed=1
+            fi
+          done
+          if (( failed )); then
+            exit 1
+          fi
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
