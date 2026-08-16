@@ -1683,7 +1683,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-backend-common"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "dynamo-kv-hashing",
@@ -1718,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1772,7 +1772,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -1869,7 +1869,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "aiconfigurator-core",
  "anyhow",
@@ -2035,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2049,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-sidecar"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sidecar-common"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "clap",
  "dynamo-backend-common",
@@ -2180,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2195,14 +2195,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-worker-selection-policy-catalog"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "dynamo-kv-router",
 ]
@@ -4047,6 +4047,119 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "kvbm-common"
+version = "1.5.0"
+dependencies = [
+ "dynamo-tokens",
+ "serde",
+]
+
+[[package]]
+name = "kvbm-config"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "dynamo-memory",
+ "figment",
+ "nix 0.30.1",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "validator",
+ "velo",
+]
+
+[[package]]
+name = "kvbm-engine"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "bytes",
+ "chrono",
+ "crossbeam-queue",
+ "dashmap",
+ "derive_builder",
+ "dynamo-memory",
+ "futures",
+ "kvbm-common",
+ "kvbm-config",
+ "kvbm-logical",
+ "kvbm-physical",
+ "oneshot",
+ "parking_lot",
+ "rayon",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rayon",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+ "velo",
+]
+
+[[package]]
+name = "kvbm-kernels"
+version = "1.5.0"
+dependencies = [
+ "cudarc",
+]
+
+[[package]]
+name = "kvbm-logical"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "bincode 2.0.1",
+ "bytes",
+ "derive_builder",
+ "dynamo-tokens",
+ "futures",
+ "indexmap 2.14.0",
+ "lru 0.16.4",
+ "parking_lot",
+ "prometheus",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "kvbm-physical"
+version = "1.5.0"
+dependencies = [
+ "aligned-vec",
+ "anyhow",
+ "bincode 2.0.1",
+ "blake3",
+ "cudarc",
+ "derive-getters",
+ "derive_builder",
+ "dynamo-memory",
+ "futures",
+ "kvbm-common",
+ "kvbm-kernels",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "validator",
+ "velo",
 ]
 
 [[package]]

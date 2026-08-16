@@ -7,6 +7,10 @@ import os
 import tempfile
 from pathlib import Path
 
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    add_worker_router_arguments,
+)
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
@@ -608,7 +612,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "for etcd/kubernetes).",
     )
 
+    # Same flags the frontend and engine backends expose, so a mocker can stand
+    # in for a real worker set when exercising per-role routing.
+    add_worker_router_arguments(parser)
+
     args = parser.parse_args(argv)
+    # Collect them into their own config object, matching the backends.
+    args.router_advertisement = WorkerRouterConfig.from_cli_args(args)
 
     validate_worker_type_args(args)
 
