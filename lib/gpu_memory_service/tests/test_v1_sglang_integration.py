@@ -35,12 +35,15 @@ def test_sglang_hooks_capture_models_and_delegate_memory_control(monkeypatch):
     adapter._models = []
     monkeypatch.setattr(plugin, "_adapter", lambda: adapter)
     monkeypatch.setenv("DYN_SGL_ENABLE_GMS_V1", "true")
+    barrier = Mock()
+    monkeypatch.setattr(plugin.torch.distributed, "barrier", barrier)
 
     plugin.register_gms_v1_plugin()
 
     assert hooks.keys() == {
         plugin._INITIAL_MODEL_LOAD_TARGET,
         plugin._FACTORY_TARGET,
+        plugin._RELEASE_MEMORY_OCCUPATION_TARGET,
     }
     target, draft = object(), object()
     observe_model = hooks[plugin._INITIAL_MODEL_LOAD_TARGET]
@@ -49,6 +52,10 @@ def test_sglang_hooks_capture_models_and_delegate_memory_control(monkeypatch):
 
     original_factory = Mock()
     assert hooks[plugin._FACTORY_TARGET](original_factory, enable=True) is adapter
+    release = hooks[plugin._RELEASE_MEMORY_OCCUPATION_TARGET]
+    manager, release_result = Mock(tp_cpu_group=object()), object()
+    assert release(release_result, manager, Mock()) is release_result
+    barrier.assert_called_once_with(group=manager.tp_cpu_group)
     with (
         adapter.region("weights", enable_cpu_backup=True),
         adapter.region("kv_cache", enable_cpu_backup=False),
