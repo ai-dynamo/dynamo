@@ -137,6 +137,18 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
     return routing or None
 
 
+def _cache_namespace_from_nvext(nvext: dict[str, Any]) -> str | None:
+    """Return a valid cache namespace for SGLang's radix-cache key.
+
+    SGLang calls this field ``cache_salt``. Dynamo's canonical wire protocol
+    carries the same opaque value as ``routing.cache_namespace`` so the KV
+    router and engine publish the same namespace without exposing any prompt
+    content.
+    """
+    cache_salt = nvext.get("cache_salt")
+    return cache_salt if isinstance(cache_salt, str) and cache_salt else None
+
+
 def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
     eos_token_ids = _normalize_eos_token_ids(getattr(tokenizer, "eos_token_ids", None))
     if eos_token_ids:
@@ -394,11 +406,16 @@ def _build_dynamo_preproc(
     nvext_routing = (
         _routing_from_agent_hints(nvext) if isinstance(nvext, dict) else None
     )
+    cache_namespace = (
+        _cache_namespace_from_nvext(nvext) if isinstance(nvext, dict) else None
+    )
     if isinstance(routing, dict):
         if nvext_routing:
             routing = {**nvext_routing, **routing}
     else:
         routing = nvext_routing
+    if cache_namespace is not None:
+        routing = {"cache_namespace": cache_namespace, **(routing or {})}
 
     preproc = {
         "model": model_name,

@@ -19,7 +19,10 @@ from dynamo.sglang.engine_generate import (
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
-from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
+from dynamo.sglang.request_handlers.llm.decode_handler import (
+    _cache_salt_kwargs,
+    _sampling_option_params,
+)
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
     raise_if_unextracted_multimodal,
@@ -166,6 +169,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
 
         priority_kwargs = self._priority_kwargs(priority)
+        cache_salt_kwargs = _cache_salt_kwargs(inner_request, self.engine)
         if native_payload is not None:
             input_ids = input_param.get("input_ids")
             if not isinstance(input_ids, list):
@@ -182,6 +186,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 routed_dp_rank=dp_rank,
                 lora_path=lora_path,
+                cache_salt=cache_salt_kwargs.get("cache_salt"),
             )
             results = native_generate_stream(self.engine, native_request)
         else:
@@ -198,6 +203,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
                 lora_path=lora_path,
+                **cache_salt_kwargs,
                 **priority_kwargs,
             )
         if inner_request.get(HEALTH_CHECK_KEY):

@@ -50,6 +50,7 @@ from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
     SglangProcessor,
     _build_dynamo_preproc,
+    _cache_namespace_from_nvext,
     _init_worker,
     _load_chat_template,
     _map_finish_reason,
@@ -118,6 +119,22 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["frequency_penalty"] == 0.0
         assert sampling["repetition_penalty"] == 1.0
         assert sampling["seed"] is None
+
+    def test_maps_nvext_cache_salt_to_routing_namespace(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "messages": [],
+                "nvext": {"cache_salt": "tenant-a"},
+            },
+            prompt_token_ids=[1, 2, 3],
+            model_name="test",
+            eos_token_ids=2,
+        )
+
+        assert result["routing"] == {"cache_namespace": "tenant-a"}
+        assert _cache_namespace_from_nvext({"cache_salt": ""}) is None
+        assert _cache_namespace_from_nvext({"cache_salt": 7}) is None
 
     @pytest.mark.multimodal
     def test_rejects_multimodal_cache_uuid(self):

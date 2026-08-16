@@ -15,6 +15,7 @@ from dynamo.sglang.engine_generate import (
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
+    _cache_salt_kwargs,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
     _user_stop_token_ids,
@@ -206,6 +207,34 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
     assert _openai_stop_sampling_params({"stop_token_ids": [32, 34]}) == {
         "stop_token_ids": [32, 34]
     }
+
+
+def test_cache_namespace_is_forwarded_to_sglang_cache_salt():
+    class NewEngine:
+        async def async_generate(self, *, cache_salt=None):
+            return cache_salt
+
+    request = {"routing": {"cache_namespace": "tenant-a"}}
+    assert _cache_salt_kwargs(request, NewEngine()) == {"cache_salt": "tenant-a"}
+
+    class OldEngine:
+        async def async_generate(self):
+            return None
+
+    assert _cache_salt_kwargs(request, OldEngine()) == {}
+    assert _cache_salt_kwargs({"routing": {"cache_namespace": ""}}, NewEngine()) == {}
+
+
+def test_engine_generate_overrides_native_cache_salt_from_routing():
+    native = build_native_generate_request(
+        {"cache_salt": "untrusted"},
+        input_ids=[1],
+        fallback_rid="request",
+        priority=None,
+        cache_salt="tenant-a",
+    )
+
+    assert native.cache_salt == "tenant-a"
 
 
 def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool = False):

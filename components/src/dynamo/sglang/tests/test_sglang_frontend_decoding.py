@@ -488,6 +488,29 @@ async def test_aggregated_fd_off_passes_media_url_strings():
 
 
 @pytest.mark.asyncio
+async def test_aggregated_forwards_cache_namespace_to_sglang():
+    handler = _new_decode_handler(enable_frontend_decoding=False)
+    captured: Dict[str, Any] = {}
+
+    async def fake_async_generate(**kwargs):
+        captured.update(kwargs)
+        return _empty_stream()
+
+    handler.engine = SimpleNamespace(async_generate=fake_async_generate)
+
+    async for _ in handler.generate(
+        {
+            "token_ids": [1, 2, 3],
+            "routing": {"cache_namespace": "tenant-a"},
+        },
+        _Context(),
+    ):
+        pass
+
+    assert captured["cache_salt"] == "tenant-a"
+
+
+@pytest.mark.asyncio
 async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
     """With --frontend-decoding, Decoded items are loaded via ImageLoader and
     forwarded as PIL Images (not strings) to engine.async_generate."""

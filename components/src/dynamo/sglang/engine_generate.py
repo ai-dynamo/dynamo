@@ -42,6 +42,7 @@ def build_native_generate_request(
     external_trace_header: dict[str, str] | None = None,
     routed_dp_rank: int | None = None,
     lora_path: str | None = None,
+    cache_salt: str | None = None,
 ) -> GenerateReqInput:
     """Reconstruct the installed SGLang version native request.
 
@@ -77,6 +78,7 @@ def build_native_generate_request(
         ("external_trace_header", external_trace_header),
         ("routed_dp_rank", routed_dp_rank),
         ("lora_path", lora_path),
+        ("cache_salt", cache_salt),
     ):
         if value is not None:
             payload[name] = value

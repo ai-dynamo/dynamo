@@ -74,6 +74,25 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     return False
 
 
+def _cache_salt_kwargs(request: Dict[str, Any], engine: Any) -> Dict[str, str]:
+    """Map Dynamo's canonical cache namespace into SGLang's cache key.
+
+    SGLang includes ``cache_salt`` in both its radix-cache lookup key and KV
+    cache events. Passing the namespace through therefore keeps local reuse,
+    remote KV routing, and tenant isolation in agreement. Older SGLang builds
+    safely omit the optional keyword through the compatibility filter.
+    """
+    routing = request.get("routing")
+    if not isinstance(routing, dict):
+        return {}
+    cache_namespace = routing.get("cache_namespace")
+    if not isinstance(cache_namespace, str) or not cache_namespace:
+        return {}
+    return filter_supported_async_generate_kwargs(
+        engine, {"cache_salt": cache_namespace}
+    )
+
+
 def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
     """Extract sampling options that SGLang accepts as sampling params."""
     params = {field: values.get(field) for field in _SAMPLING_OPTION_FIELDS}
@@ -380,6 +399,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             else None,
             routed_dp_rank=routing.get("dp_rank"),
             lora_path=self._resolve_lora(request),
+            cache_salt=_cache_salt_kwargs(request, self.engine).get("cache_salt"),
         )
         return native_generate_stream(self.engine, native_request)
 
@@ -417,6 +437,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return
 
         priority_kwargs = self._priority_kwargs(priority)
+        cache_salt_kwargs = _cache_salt_kwargs(request, self.engine)
         sampling_params = self._build_sampling_params(request)
         logprob_kwargs = self._build_logprob_kwargs(request)
         metadata_uploader = self._metadata_uploader_from_request(request)
@@ -473,6 +494,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
                 lora_path=lora_path,
+                **cache_salt_kwargs,
                 **logprob_kwargs,
                 **priority_kwargs,
             )
@@ -543,6 +565,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
                 lora_path=lora_path,
+                **cache_salt_kwargs,
                 **logprob_kwargs,
                 **priority_kwargs,
             )
