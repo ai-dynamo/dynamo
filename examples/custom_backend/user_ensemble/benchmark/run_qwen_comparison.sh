@@ -21,22 +21,42 @@ WARMUP_INPUT="$WORKLOAD_ROOT/warmup/image_custom_20_textisl644.jsonl"
 SERVER_PID=""
 SAMPLER_PID=""
 LOAD_MODE="${DYN_BENCH_LOAD_MODE:-constant}"
+read -r -a SELECTED_TOPOLOGIES \
+    <<< "${DYN_BENCH_TOPOLOGIES:-direct workflow}"
 if [[ "$LOAD_MODE" == closed_loop ]]; then
     CONCURRENCY="${DYN_BENCH_CONCURRENCY:-64}"
-    DEFAULT_CELL_PLAN="1:direct 1:workflow 2:workflow 2:direct 3:direct 3:workflow"
+    SELECTED_REQUEST_RATES=()
 else
-    CONCURRENCY="${DYN_BENCH_CONCURRENCY_CAP:-512}"
-    DEFAULT_CELL_PLAN="40:1:direct 40:1:workflow 40:2:workflow 40:2:direct 40:3:direct 40:3:workflow 50:1:direct 50:1:workflow 50:2:workflow 50:2:direct 50:3:direct 50:3:workflow"
+    CONCURRENCY=""
+    read -r -a SELECTED_REQUEST_RATES \
+        <<< "${DYN_BENCH_REQUEST_RATES:-40 50}"
 fi
+DEFAULT_CELL_PLAN=""
+for repetition in 1 2 3; do
+    topology_order=("${SELECTED_TOPOLOGIES[@]}")
+    if (( repetition % 2 == 0 )); then
+        topology_order=()
+        for ((index=${#SELECTED_TOPOLOGIES[@]} - 1; index >= 0; index--)); do
+            topology_order+=("${SELECTED_TOPOLOGIES[index]}")
+        done
+    fi
+    if [[ "$LOAD_MODE" == closed_loop ]]; then
+        for topology in "${topology_order[@]}"; do
+            DEFAULT_CELL_PLAN+="${DEFAULT_CELL_PLAN:+ }$repetition:$topology"
+        done
+    else
+        for request_rate in "${SELECTED_REQUEST_RATES[@]}"; do
+            for topology in "${topology_order[@]}"; do
+                DEFAULT_CELL_PLAN+="${DEFAULT_CELL_PLAN:+ }$request_rate:$repetition:$topology"
+            done
+        done
+    fi
+done
 CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
 RUN_ID="$(printf '%s' "$OUTPUT_ROOT" | sha256sum | cut -c1-12)"
 
 case "$LOAD_MODE" in
     constant)
-        if [[ ! "$CONCURRENCY" =~ ^(64|512)$ ]]; then
-            echo >&2 "DYN_BENCH_CONCURRENCY_CAP must be 64 or 512, got: $CONCURRENCY"
-            exit 2
-        fi
         ;;
     closed_loop)
         if [[ "$CONCURRENCY" != 64 ]]; then
@@ -49,6 +69,29 @@ case "$LOAD_MODE" in
         exit 2
         ;;
 esac
+
+if (( ${#SELECTED_TOPOLOGIES[@]} == 0 )); then
+    echo >&2 "DYN_BENCH_TOPOLOGIES must select at least one topology"
+    exit 2
+fi
+for topology in "${SELECTED_TOPOLOGIES[@]}"; do
+    if [[ ! "$topology" =~ ^(direct|workflow)$ ]]; then
+        echo >&2 "unsupported DYN_BENCH_TOPOLOGIES value: $topology"
+        exit 2
+    fi
+done
+if [[ "$LOAD_MODE" == constant ]]; then
+    if (( ${#SELECTED_REQUEST_RATES[@]} == 0 )); then
+        echo >&2 "DYN_BENCH_REQUEST_RATES must select at least one rate"
+        exit 2
+    fi
+    for request_rate in "${SELECTED_REQUEST_RATES[@]}"; do
+        if [[ ! "$request_rate" =~ ^(40|50)$ ]]; then
+            echo >&2 "unsupported DYN_BENCH_REQUEST_RATES value: $request_rate"
+            exit 2
+        fi
+    done
+fi
 
 if [[ -e "$OUTPUT_ROOT" ]]; then
     echo >&2 "DYN_BENCH_OUTPUT_ROOT already exists: $OUTPUT_ROOT"
@@ -81,6 +124,7 @@ export DYN_ENCODER_GPU=0
 export DYN_DECODER_GPU=0
 export DYN_TCP_MAX_MESSAGE_SIZE=209715200
 export DYN_HTTP_BODY_LIMIT_MB=200
+export DYN_USER_ENSEMBLE_RESPONSE_PLACEMENT="${DYN_USER_ENSEMBLE_RESPONSE_PLACEMENT:-inline}"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$REPO_ROOT/components/src:$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -102,6 +146,17 @@ cleanup_cell() {
     fi
 }
 trap cleanup_cell EXIT
+
+metadata_load_args=()
+if [[ -n "$CONCURRENCY" ]]; then
+    metadata_load_args+=(--concurrency "$CONCURRENCY")
+fi
+for topology in "${SELECTED_TOPOLOGIES[@]}"; do
+    metadata_load_args+=(--topology "$topology")
+done
+for request_rate in "${SELECTED_REQUEST_RATES[@]}"; do
+    metadata_load_args+=(--request-rate "$request_rate")
+done
 
 python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
     validate-workload "$WORKLOAD_ROOT" \
@@ -129,7 +184,8 @@ python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark 
     --gpu-info "$GPU_INFO" \
     --torch-gpu-count "$TORCH_GPU_COUNT" \
     --load-mode "$LOAD_MODE" \
-    --concurrency "$CONCURRENCY" \
+    --response-placement "$DYN_USER_ENSEMBLE_RESPONSE_PLACEMENT" \
+    "${metadata_load_args[@]}" \
     --aiperf-version "$AIPERF_VERSION"
 
 sha256sum \
@@ -279,7 +335,6 @@ run_cell() {
         measured_load_args=(
             --request-rate "$request_rate"
             --request-rate-mode constant
-            --concurrency "$CONCURRENCY"
         )
     fi
 

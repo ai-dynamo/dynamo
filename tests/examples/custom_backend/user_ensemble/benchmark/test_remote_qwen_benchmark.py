@@ -116,14 +116,28 @@ def test_runner_waits_for_real_generation_without_touching_encoder_counts() -> N
     assert 'RUN_ID="$(printf' in runner
     assert 'rm -f "${zmq_prefix}' not in runner
     assert 'LOAD_MODE="${DYN_BENCH_LOAD_MODE:-constant}"' in runner
-    assert 'measured_load_args=(--concurrency "$CONCURRENCY")' in runner
+    run_cell = runner.split("run_cell()", maxsplit=1)[1]
+    constant_load_args = run_cell.split("else", maxsplit=1)[1].split("fi", maxsplit=1)[
+        0
+    ]
+    assert '--concurrency "$CONCURRENCY"' not in constant_load_args
     assert "--request-rate-mode constant" in runner
 
 
-def _metadata_args(load_mode: str, concurrency: int) -> SimpleNamespace:
+def _metadata_args(
+    load_mode: str,
+    concurrency: int | None,
+    *,
+    topology: list[str] | None = None,
+    request_rate: list[int] | None = None,
+    response_placement: str = "inline",
+) -> SimpleNamespace:
     return SimpleNamespace(
         load_mode=load_mode,
         concurrency=concurrency,
+        topology=topology,
+        request_rate=request_rate,
+        response_placement=response_placement,
         source_commit="abc123",
         source_branch="test-branch",
         working_diff_sha256="clean",
@@ -147,6 +161,28 @@ def test_metadata_accepts_closed_loop_concurrency_64() -> None:
 def test_metadata_rejects_other_closed_loop_concurrency() -> None:
     with pytest.raises(BenchmarkAuditError, match="expected 64"):
         capture_metadata(_metadata_args("closed_loop", 512))
+
+
+def test_metadata_accepts_unlimited_single_topology_constant_rate() -> None:
+    result = capture_metadata(
+        _metadata_args(
+            "constant",
+            None,
+            topology=["workflow"],
+            request_rate=[50],
+            response_placement="remote",
+        )
+    )
+
+    assert result["benchmark"]["concurrency"] is None
+    assert result["benchmark"]["topologies"] == ["workflow"]
+    assert result["benchmark"]["request_rates"] == [50]
+    assert result["benchmark"]["response_placement"] == "remote"
+
+
+def test_metadata_rejects_constant_rate_concurrency_limit() -> None:
+    with pytest.raises(BenchmarkAuditError, match="must not set"):
+        capture_metadata(_metadata_args("constant", 64))
 
 
 def _cell(wall_seconds: float, request_throughput: float) -> dict:
@@ -182,8 +218,9 @@ def test_summary_reports_each_rate_and_workflow_gate(
             "benchmark": {
                 "load_mode": "constant",
                 "request_rates": [40, 50],
-                "concurrency": 64,
-                "concurrency_cap": 64,
+                "concurrency": None,
+                "topologies": ["direct", "workflow"],
+                "response_placement": "inline",
             },
         },
     )
@@ -233,8 +270,68 @@ def test_summary_reports_each_rate_and_workflow_gate(
     assert (tmp_path / "summary.json").is_file()
     assert (tmp_path / "report.md").is_file()
     report = (tmp_path / "report.md").read_text()
-    assert "rates: 40/50 req/s; concurrency cap: 64" in report
-    assert "Overall >=90% gate: **True**" in report
+    assert "rates: 40/50 req/s; concurrency: unlimited" in report
+    assert "Overall >=90% workflow/direct gate: **True**" in report
+
+
+def test_single_workflow_summary_reports_achieved_to_offered_gate(
+    tmp_path: Path,
+) -> None:
+    _write_json(
+        tmp_path / "benchmark_metadata.json",
+        {
+            "dynamo_commit": "abc123",
+            "container_image": "example/runtime:test",
+            "gpu": {"name": "NVIDIA H100 80GB HBM3"},
+            "benchmark": {
+                "load_mode": "constant",
+                "request_rates": [50],
+                "concurrency": None,
+                "topologies": ["workflow"],
+                "response_placement": "remote",
+            },
+        },
+    )
+    _write_json(
+        tmp_path / "workload_audit.json",
+        {"measured_sha256": "audited-workload"},
+    )
+    for repetition, achieved_rate in enumerate((49.0, 49.5, 50.0), 1):
+        _write_json(
+            tmp_path / f"rate-50/rep-{repetition}/workflow/cell_audit.json",
+            _cell(20.0, achieved_rate),
+        )
+        _write_json(
+            tmp_path / f"rate-50/rep-{repetition}/workflow/joined_smoke.json",
+            {
+                "classifier_scores": {
+                    "relevant": 0.75,
+                    "not_relevant": 0.25,
+                },
+                "classifier_score_sum": 1.0,
+            },
+        )
+
+    result = summarize(tmp_path)
+
+    assert result["rates"]["50"]["comparison"] == {
+        "topology": "workflow",
+        "offered_request_rate_req_s": 50,
+        "achieved_request_window_req_s": 49.5,
+        "achieved_to_offered_ratio": 0.99,
+        "minimum_ratio": 0.98,
+        "minimum_rate_req_s": 49.0,
+        "passed": True,
+    }
+    assert result["gate"] == {
+        "minimum_achieved_to_offered_ratio": 0.98,
+        "passed": True,
+    }
+    report = (tmp_path / "report.md").read_text()
+    assert "rates: 50 req/s; concurrency: unlimited" in report
+    assert "response placement: remote" in report
+    assert "every run >= 49.000 req/s: **True**" in report
+    assert "Overall >=98% achieved/offered in every run gate: **True**" in report
 
 
 def test_closed_loop_summary_compares_topologies(tmp_path: Path) -> None:

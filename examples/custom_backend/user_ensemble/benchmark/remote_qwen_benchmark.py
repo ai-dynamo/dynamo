@@ -21,7 +21,6 @@ from typing import Any
 
 MEASURED_REQUESTS = 1000
 WARMUP_REQUESTS = 20
-SUPPORTED_CONCURRENCY_CAPS = frozenset({64, 512})
 SUPPORTED_LOAD_MODES = frozenset({"closed_loop", "constant"})
 REQUEST_RATES = (40, 50)
 OUTPUT_TOKENS = 7
@@ -39,6 +38,7 @@ EXPECTED_GRAPH_CAPTURES = 14
 REPETITIONS = 3
 TOPOLOGIES = ("direct", "workflow")
 MIN_WORKFLOW_TO_DIRECT_RATIO = 0.9
+MIN_ACHIEVED_TO_OFFERED_RATIO = 0.98
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 _DISPATCH_RE = re.compile(
@@ -363,14 +363,23 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         raise BenchmarkAuditError(
             f"closed-loop concurrency is {args.concurrency}; expected 64"
         )
-    if (
-        args.load_mode == "constant"
-        and args.concurrency not in SUPPORTED_CONCURRENCY_CAPS
-    ):
+    if args.load_mode == "constant" and args.concurrency is not None:
         raise BenchmarkAuditError(
-            f"unsupported concurrency cap {args.concurrency}; expected one of "
-            f"{sorted(SUPPORTED_CONCURRENCY_CAPS)}"
+            "constant-rate qualification must not set a concurrency limit"
         )
+    topologies = tuple(args.topology or TOPOLOGIES)
+    if not topologies or len(set(topologies)) != len(topologies):
+        raise BenchmarkAuditError("benchmark topologies must be unique and non-empty")
+    unsupported_topologies = sorted(set(topologies) - set(TOPOLOGIES))
+    if unsupported_topologies:
+        raise BenchmarkAuditError(
+            f"unsupported benchmark topologies: {unsupported_topologies}"
+        )
+    request_rates = tuple(args.request_rate or REQUEST_RATES)
+    if args.load_mode == "constant" and (
+        not request_rates or any(rate <= 0 for rate in request_rates)
+    ):
+        raise BenchmarkAuditError("constant-rate qualification requires positive rates")
     packages: dict[str, str] = {}
     for package in ("ai-dynamo", "aiperf", "torch", "transformers", "vllm"):
         try:
@@ -385,6 +394,8 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "measured_requests": MEASURED_REQUESTS,
         "request_rate_mode": args.load_mode,
         "concurrency": args.concurrency,
+        "topologies": list(topologies),
+        "response_placement": args.response_placement,
         "streaming": False,
         "max_tokens": OUTPUT_TOKENS,
         "min_tokens": OUTPUT_TOKENS,
@@ -401,8 +412,7 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "graph_image_sizes": ["300x300", "500x500"],
     }
     if args.load_mode == "constant":
-        benchmark["request_rates"] = list(REQUEST_RATES)
-        benchmark["concurrency_cap"] = args.concurrency
+        benchmark["request_rates"] = list(request_rates)
 
     return {
         "dynamo_commit": args.source_commit,
@@ -413,9 +423,9 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "gpu": _parse_gpu_info(args.gpu_info, args.torch_gpu_count),
         "versions": packages,
         "topology_order_by_repetition": [
-            ["direct", "workflow"],
-            ["workflow", "direct"],
-            ["direct", "workflow"],
+            list(topologies),
+            list(reversed(topologies)),
+            list(topologies),
         ],
         "benchmark": benchmark,
     }
@@ -567,6 +577,51 @@ def _compare_topologies(topologies: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compare_offered_rate(
+    topologies: Mapping[str, Any], request_rate: float
+) -> dict[str, Any]:
+    if len(topologies) != 1:
+        raise BenchmarkAuditError(
+            "offered-rate comparison requires exactly one selected topology"
+        )
+    topology, topology_summary = next(iter(topologies.items()))
+    window = topology_summary["request_window_throughput_req_s"]
+    runs = [float(value) for value in window["runs"]]
+    ratio = float(window["mean"]) / request_rate
+    minimum_rate = request_rate * MIN_ACHIEVED_TO_OFFERED_RATIO
+    return {
+        "topology": topology,
+        "offered_request_rate_req_s": request_rate,
+        "achieved_request_window_req_s": float(window["mean"]),
+        "achieved_to_offered_ratio": ratio,
+        "minimum_ratio": MIN_ACHIEVED_TO_OFFERED_RATIO,
+        "minimum_rate_req_s": minimum_rate,
+        "passed": all(value >= minimum_rate for value in runs),
+    }
+
+
+def _benchmark_topologies(benchmark: Mapping[str, Any]) -> tuple[str, ...]:
+    values = benchmark.get("topologies", TOPOLOGIES)
+    if not isinstance(values, (list, tuple)) or not values:
+        raise BenchmarkAuditError("benchmark metadata has no selected topologies")
+    topologies = tuple(str(value) for value in values)
+    if len(set(topologies)) != len(topologies) or set(topologies) - set(TOPOLOGIES):
+        raise BenchmarkAuditError(
+            f"benchmark metadata has invalid topologies: {topologies}"
+        )
+    return topologies
+
+
+def _benchmark_request_rates(benchmark: Mapping[str, Any]) -> tuple[int, ...]:
+    values = benchmark.get("request_rates", REQUEST_RATES)
+    if not isinstance(values, (list, tuple)) or not values:
+        raise BenchmarkAuditError("benchmark metadata has no request rates")
+    rates = tuple(int(value) for value in values)
+    if any(rate <= 0 for rate in rates):
+        raise BenchmarkAuditError(f"benchmark metadata has invalid rates: {rates}")
+    return rates
+
+
 def summarize(root: Path) -> dict[str, Any]:
     metadata = _read_json(root / "benchmark_metadata.json")
     workload = _read_json(root / "workload_audit.json")
@@ -574,9 +629,15 @@ def summarize(root: Path) -> dict[str, Any]:
     if not isinstance(benchmark, Mapping):
         raise BenchmarkAuditError("benchmark metadata is missing benchmark settings")
     load_mode = str(benchmark.get("load_mode", "constant"))
+    selected_topologies = _benchmark_topologies(benchmark)
     if load_mode == "closed_loop":
+        if set(selected_topologies) != set(TOPOLOGIES):
+            raise BenchmarkAuditError(
+                "closed-loop summary requires direct and workflow topologies"
+            )
         topologies = {
-            topology: _summarize_topology(root, topology) for topology in TOPOLOGIES
+            topology: _summarize_topology(root, topology)
+            for topology in selected_topologies
         }
         comparison = _compare_topologies(topologies)
         summary = {
@@ -608,37 +669,52 @@ def summarize(root: Path) -> dict[str, Any]:
     rates: dict[str, Any] = {}
     joined_smokes: list[dict[str, Any]] = []
     gate_results = []
-    for request_rate in REQUEST_RATES:
+    request_rates = _benchmark_request_rates(benchmark)
+    for request_rate in request_rates:
         topologies = {
             topology: _summarize_topology(
                 root,
                 topology,
                 request_rate=request_rate,
             )
-            for topology in TOPOLOGIES
+            for topology in selected_topologies
         }
-        comparison = _compare_topologies(topologies)
+        comparison = (
+            _compare_topologies(topologies)
+            if set(selected_topologies) == set(TOPOLOGIES)
+            else _compare_offered_rate(topologies, request_rate)
+        )
         gate_results.append(comparison["passed"])
         rates[str(request_rate)] = {
             "topologies": topologies,
             "comparison": comparison,
         }
-        joined_smokes.extend(
-            _read_json(
-                root
-                / f"rate-{request_rate}"
-                / f"rep-{repetition}"
-                / "workflow"
-                / "joined_smoke.json"
+        if "workflow" in selected_topologies:
+            joined_smokes.extend(
+                _read_json(
+                    root
+                    / f"rate-{request_rate}"
+                    / f"rep-{repetition}"
+                    / "workflow"
+                    / "joined_smoke.json"
+                )
+                for repetition in range(1, REPETITIONS + 1)
             )
-            for repetition in range(1, REPETITIONS + 1)
-        )
+    ratio_gate = set(selected_topologies) == set(TOPOLOGIES)
     summary = {
         "metadata": metadata,
         "workload": workload,
         "rates": rates,
         "gate": {
-            "minimum_workflow_to_direct_ratio": MIN_WORKFLOW_TO_DIRECT_RATIO,
+            (
+                "minimum_workflow_to_direct_ratio"
+                if ratio_gate
+                else "minimum_achieved_to_offered_ratio"
+            ): (
+                MIN_WORKFLOW_TO_DIRECT_RATIO
+                if ratio_gate
+                else MIN_ACHIEVED_TO_OFFERED_RATIO
+            ),
             "passed": all(gate_results),
         },
         "joined_response_smokes": joined_smokes,
@@ -658,7 +734,7 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
     benchmark = metadata["benchmark"]
     load_mode = benchmark.get("load_mode", "constant")
     lines = [
-        "# Direct versus integrated-encoder workflow",
+        "# Integrated-encoder workflow benchmark",
         "",
         "## Audited configuration",
         "",
@@ -673,9 +749,14 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
             f"- OSL: 7; load: closed-loop; concurrency: {benchmark['concurrency']}"
         )
     else:
+        selected_topologies = _benchmark_topologies(benchmark)
+        request_rates = _benchmark_request_rates(benchmark)
+        concurrency = benchmark.get("concurrency")
         lines.append(
-            "- OSL: 7; rates: 40/50 req/s; concurrency cap: "
-            f"{benchmark['concurrency_cap']}"
+            "- OSL: 7; rates: "
+            f"{'/'.join(str(rate) for rate in request_rates)} req/s; "
+            f"concurrency: {'unlimited' if concurrency is None else concurrency}; "
+            f"response placement: {benchmark.get('response_placement', 'inline')}"
         )
     lines.extend(
         [
@@ -724,9 +805,11 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
                 "| ---: | --- | --- | ---: | --- | ---: |",
             ]
         )
-        for request_rate in REQUEST_RATES:
+        selected_topologies = _benchmark_topologies(benchmark)
+        request_rates = _benchmark_request_rates(benchmark)
+        for request_rate in request_rates:
             rate = rates[str(request_rate)]
-            for topology in TOPOLOGIES:
+            for topology in selected_topologies:
                 topology_summary = rate["topologies"][topology]
                 full = topology_summary["full_client_process_throughput_req_s"]
                 window = topology_summary["request_window_throughput_req_s"]
@@ -736,18 +819,34 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
                     f"{_format_runs(window['runs'])} | {window['mean']:.3f} |"
                 )
             comparison = rate["comparison"]
-            lines.extend(
-                [
-                    "",
-                    f"Rate {request_rate} workflow/direct request-window ratio: "
-                    f"**{comparison['workflow_to_direct_request_window_ratio']:.3f}** "
-                    f"({comparison['workflow_request_window_delta_percent']:+.2f}%).",
-                ]
-            )
+            if "workflow_to_direct_request_window_ratio" in comparison:
+                lines.extend(
+                    [
+                        "",
+                        f"Rate {request_rate} workflow/direct request-window ratio: "
+                        f"**{comparison['workflow_to_direct_request_window_ratio']:.3f}** "
+                        f"({comparison['workflow_request_window_delta_percent']:+.2f}%).",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "",
+                        f"Rate {request_rate} achieved/offered ratio: "
+                        f"**{comparison['achieved_to_offered_ratio']:.3f}**; "
+                        f"every run >= {comparison['minimum_rate_req_s']:.3f} req/s: "
+                        f"**{comparison['passed']}**.",
+                    ]
+                )
+    gate_name = (
+        ">=90% workflow/direct"
+        if "minimum_workflow_to_direct_ratio" in summary["gate"]
+        else ">=98% achieved/offered in every run"
+    )
     lines.extend(
         [
             "",
-            f"Overall >=90% gate: **{summary['gate']['passed']}**.",
+            f"Overall {gate_name} gate: **{summary['gate']['passed']}**.",
             "",
             "## Correctness",
             "",
@@ -781,7 +880,12 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument(
         "--load-mode", choices=sorted(SUPPORTED_LOAD_MODES), required=True
     )
-    metadata.add_argument("--concurrency", type=int, required=True)
+    metadata.add_argument("--concurrency", type=int)
+    metadata.add_argument("--topology", action="append")
+    metadata.add_argument("--request-rate", action="append", type=int)
+    metadata.add_argument(
+        "--response-placement", choices=("inline", "remote"), default="inline"
+    )
     metadata.add_argument("--aiperf-version", required=True)
 
     cell = subparsers.add_parser("validate-cell")
