@@ -437,9 +437,6 @@ jobs:
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
-  # Dynamo no longer builds a snapshot-agent image -- the operator and agent
-  # come from github.com/ai-dynamo/snapshot's published images.
-
   vllm-efa-build:
     name: vllm-runtime-efa
     needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]

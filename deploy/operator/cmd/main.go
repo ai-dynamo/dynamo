@@ -671,8 +671,7 @@ func registerControllers(
 		return err
 	}
 	// PodSnapshot/PodSnapshotContent reconciliation is owned by the external
-	// Snapshot operator (github.com/ai-dynamo/snapshot); Dynamo no longer runs
-	// its own PodSnapshotReconciler for it.
+	// Snapshot operator (github.com/ai-dynamo/snapshot).
 
 	if runtimeConfig.Gate.Enabled(features.Grove) {
 		if err := controller.SetupFailoverCascade(mgr); err != nil {

@@ -366,8 +366,8 @@ func PrepareRestorePodSpecForCheckpoint(
 }
 
 // InjectCheckpointVolume adds the checkpoint PVC volume to the pod spec if
-// not already present. Used by both the snapshot protocol and the operator's
-// GMS checkpoint wiring.
+// not already present. Used by both this package's restore-pod shaping and
+// the operator's GMS checkpoint wiring.
 func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
 	for _, volume := range podSpec.Volumes {
 		if volume.Name == CheckpointVolumeName {

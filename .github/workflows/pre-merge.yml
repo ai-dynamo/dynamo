@@ -315,9 +315,6 @@ jobs:
       working-directory: deploy/operator
       run: make envtest
 
-  # Dynamo no longer builds a snapshot-agent image -- the operator and agent
-  # come from github.com/ai-dynamo/snapshot's published images.
-
   rust-tests:
     needs: changed-files
     if: needs.changed-files.outputs.rust == 'true'

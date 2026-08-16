@@ -116,8 +116,8 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, pod.Name, snapshot.Spec.Source.PodRef.Name)
 		assert.Equal(t, pod.UID, snapshot.Spec.Source.PodRef.UID)
-		// Source-pod validation (scheduled, UID match) now lives in the external
-		// Snapshot operator's PodSnapshot reconciler, not here.
+		// Source-pod validation (scheduled, UID match) is the external
+		// Snapshot operator's PodSnapshot reconciler's responsibility, not this controller's.
 	})
 
 	t.Run("model", func(t *testing.T) {

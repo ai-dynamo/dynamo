@@ -103,14 +103,6 @@ jobs:
           gh_token: ${{ secrets.GITHUB_TOKEN }}
 
 # ============================================================================
-# Snapshot Agent
-#
-# Dynamo no longer builds a snapshot-agent image -- the operator and agent
-# come from github.com/ai-dynamo/snapshot's published images, installed by
-# ./.github/actions/setup-snapshot-agent directly from the pinned OCI chart.
-# ============================================================================
-
-# ============================================================================
 # Power Agent
 # ============================================================================
 

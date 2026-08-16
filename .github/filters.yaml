@@ -205,9 +205,6 @@ operator:
   - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
-# github.com/ai-dynamo/snapshot is external now; these paths are Dynamo's own
-# integration surface (checkpoint-placeholder image, DynamoCheckpoint glue,
-# Python lifecycle helpers, deploy tests), not deploy/snapshot/ (deleted).
 snapshot:
   - 'deploy/checkpoint-placeholder/**'
   - 'components/src/dynamo/common/snapshot/**'
@@ -246,10 +243,8 @@ deploy:
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/checkpoint-placeholder/**'
-  # deploy/snapshot/ was removed entirely (Dynamo no longer owns the
-  # snapshot agent). Nothing will ever exist under this path again, but the
-  # PR that deletes it still needs its diff classified by the
-  # changed-files coverage check, so the pattern stays.
+  # Nothing exists here anymore; kept so the coverage check below still
+  # classifies deletions under this now-defunct path.
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and

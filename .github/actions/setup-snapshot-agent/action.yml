@@ -66,9 +66,9 @@ runs:
         echo "::group::Install snapshot-agent"
         set -euo pipefail
 
-        # Dynamo no longer builds the agent/operator images -- install the
-        # externally published github.com/ai-dynamo/snapshot chart at a pinned
-        # version, using its own default (pinned-to-chart-appVersion) images.
+        # Install the externally published github.com/ai-dynamo/snapshot chart
+        # at a pinned version, using its own default (pinned-to-chart-appVersion)
+        # images.
         helm upgrade --install "${RELEASE_NAME}" oci://ghcr.io/ai-dynamo/snapshot/snapshot \
           --version "${CHART_VERSION}" \
           --namespace "${NAMESPACE}" \

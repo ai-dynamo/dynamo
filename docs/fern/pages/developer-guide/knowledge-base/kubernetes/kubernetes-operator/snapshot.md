@@ -101,8 +101,7 @@ Verify that the rendered config includes `enabled: true`.
 
 ### 3. Install the Snapshot chart
 
-Dynamo no longer builds or owns a snapshot chart: install
-[github.com/ai-dynamo/snapshot](https://github.com/ai-dynamo/snapshot)'s
+Install [github.com/ai-dynamo/snapshot](https://github.com/ai-dynamo/snapshot)'s
 published chart directly (this is the same OCI dependency
 `deploy/helm/charts/platform` installs via `global.snapshot.install`, if you'd
 rather let the platform chart manage it instead of installing standalone).

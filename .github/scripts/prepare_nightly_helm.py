@@ -31,9 +31,9 @@ import sys
 from pathlib import Path
 
 # token -> Chart.yaml files; the operator subchart rides the platform token.
-# Snapshot is no longer a Dynamo-owned chart -- it's consumed as an external
-# OCI dependency of the platform chart (github.com/ai-dynamo/snapshot),
-# pinned in deploy/helm/charts/platform/Chart.yaml, not rewritten here.
+# Snapshot is an external OCI dependency of the platform chart
+# (github.com/ai-dynamo/snapshot), pinned in
+# deploy/helm/charts/platform/Chart.yaml, not rewritten here.
 CHART_TARGETS: dict[str, list[str]] = {
     "platform": [
         "deploy/helm/charts/platform/Chart.yaml",

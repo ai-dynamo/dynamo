@@ -5,13 +5,6 @@
 # from a Dynamo framework runtime image (BASE_IMAGE), with no snapshot/CRIU
 # tooling baked in.
 #
-# Extracted from the "placeholder" stage that used to live in
-# deploy/snapshot/Dockerfile: that repo (github.com/ai-dynamo/snapshot) never
-# actually depended on this stage's content -- it's pure Dynamo image shaping
-# for the restore-target contract, with no build dependency on the agent's Go
-# source or CRIU/CUDA build stages. Keeping it here avoids Dynamo depending on
-# deploy/snapshot/ (now removed) for something the external repo never owned.
-#
 # Usage:
 #   docker build --build-arg BASE_IMAGE=<framework-runtime-image> -t placeholder:latest .
 #

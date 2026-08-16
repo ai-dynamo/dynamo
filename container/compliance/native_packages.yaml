@@ -155,8 +155,3 @@ packages:
     source: http://gondor.apana.org.au/~herbert/dash/
     images:
       - dynamo-planner
-
-  # CRIU, cuda-checkpoint, cuda-checkpoint-helper used to be listed here for
-  # the snapshot-agent image Dynamo built from deploy/snapshot/. Dynamo no
-  # longer builds a snapshot-agent image at all -- github.com/ai-dynamo/snapshot
-  # builds and publishes it (and owns its own compliance/attribution now).
