@@ -5,18 +5,23 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Mapping
 from typing import Any, cast
 
 import torch
 
 from dynamo.common.backend import GenerateRequest
-from dynamo.experimental.workflow import StageContext, StageContract
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     VisionEncoderBackend,
 )
+from dynamo.experimental.workflow import StageContext, StageContract, StreamSpec, ValueSpec
+from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
+
+logger = logging.getLogger(__name__)
 
 _IMAGE_URL_PORT = "image_url"
 _URL_VARIANT = "Url"
@@ -83,19 +88,33 @@ class EncoderStage:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        del context
+        started_ns = time.perf_counter_ns()
+        context.raise_if_cancelled()
         request_value = inputs["request"]
         if not isinstance(request_value, Mapping):
             raise InvalidArgument("encoder stage request must be an object")
         request = cast(GenerateRequest, request_value)
-        artifacts = await self._encoder.encode(self._image_urls(request))
+        artifacts = await self._encoder.encode(
+            self._image_urls(request), trace_id=context.attempt_id
+        )
+        context.raise_if_cancelled()
         tensors = self._validate_artifacts(artifacts)
 
         row_splits = [0]
         for tensor in tensors:
             row_splits.append(row_splits[-1] + tensor.shape[0])
+        features = torch.cat(tensors, dim=0).contiguous()
+        WORKFLOW_PERF_TRACE.emit(
+            logger,
+            "encoder.stage",
+            context.attempt_id,
+            bytes=features.numel() * features.element_size(),
+            elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+            feature_rows=features.shape[0],
+            images=len(tensors),
+        )
         return {
-            "encoder_features": torch.cat(tensors, dim=0).contiguous(),
+            "encoder_features": features,
             "encoder_metadata": {
                 "row_splits": row_splits,
                 "image_token_id": self._image_token_id,

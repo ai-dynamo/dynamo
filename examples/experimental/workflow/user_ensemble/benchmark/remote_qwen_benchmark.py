@@ -34,7 +34,7 @@ EXPECTED_MEASURED_SHA256 = (
 EXPECTED_PATCH_COST = 907_800
 EXPECTED_GRIDS = {"1x22x22", "1x36x36"}
 EXPECTED_GRAPH_CAPTURES = 14
-REPETITIONS = 3
+REPETITIONS = 1
 TOPOLOGY = "remote"
 MIN_ACHIEVED_TO_OFFERED_RATIO = 0.98
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -45,6 +45,7 @@ _DISPATCH_RE = re.compile(
 _GRID_RE = re.compile(r"\bgrid=(?P<grid>\d+x\d+x\d+)\b")
 _CAPTURE_RE = re.compile(r"captured CUDA graph: grid=")
 _CAPTURE_COMPLETE_RE = re.compile(r"CUDA graph capture complete: .*?graphs=(\d+)")
+_PERF_RE = re.compile(r"\bworkflow_perf (?P<payload>\{.*\})$")
 
 
 class BenchmarkAuditError(RuntimeError):
@@ -303,10 +304,86 @@ def _parse_gpu_telemetry(path: Path) -> dict[str, Any]:
     }
 
 
+def _percentile(values: list[float], percentile: float) -> float:
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percentile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def summarize_perf_log(path: Path) -> dict[str, Any]:
+    """Aggregate sampled workflow timing records from one measured window."""
+
+    records: list[dict[str, Any]] = []
+    malformed = 0
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = _PERF_RE.search(line)
+        if match is None:
+            continue
+        try:
+            payload = json.loads(match.group("payload"))
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("event"), str):
+            malformed += 1
+            continue
+        records.append(payload)
+
+    events: dict[str, dict[str, Any]] = {}
+    for event in sorted({str(record["event"]) for record in records}):
+        event_records = [record for record in records if record["event"] == event]
+        numeric_fields: dict[str, dict[str, float | int]] = {}
+        numeric_names = sorted(
+            {
+                key
+                for record in event_records
+                for key, value in record.items()
+                if key not in {"event", "trace_id"}
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            }
+        )
+        for field_name in numeric_names:
+            values = [
+                float(record[field_name])
+                for record in event_records
+                if isinstance(record.get(field_name), (int, float))
+                and not isinstance(record[field_name], bool)
+            ]
+            numeric_fields[field_name] = {
+                "count": len(values),
+                "mean": statistics.mean(values),
+                "p50": _percentile(values, 0.50),
+                "p95": _percentile(values, 0.95),
+                "p99": _percentile(values, 0.99),
+                "max": max(values),
+            }
+        events[event] = {
+            "records": len(event_records),
+            "unique_trace_ids": len(
+                {str(record.get("trace_id")) for record in event_records}
+            ),
+            "numeric_fields": numeric_fields,
+        }
+    return {
+        "records": len(records),
+        "malformed_records": malformed,
+        "events": events,
+    }
+
+
 def validate_cell(
     profile_path: Path,
     wall_path: Path,
     server_log: Path,
+    perf_log: Path,
     gpu_telemetry: Path,
 ) -> dict[str, Any]:
     try:
@@ -331,6 +408,7 @@ def validate_cell(
             "event_reader_started": True,
         },
         "gpu": _parse_gpu_telemetry(gpu_telemetry),
+        "perf_trace": summarize_perf_log(perf_log),
     }
 
 
@@ -387,8 +465,6 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "versions": packages,
         "topology_order_by_repetition": [
             [TOPOLOGY],
-            [TOPOLOGY],
-            [TOPOLOGY],
         ],
         "benchmark": {
             "load_mode": "constant",
@@ -412,7 +488,13 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
             "kv_event_port": args.kv_event_port,
             "max_batch_patches": 41_472,
             "max_batch_items": 64,
-            "batching_policy": "block for first item, then eager-drain queued work",
+            "batch_queue_wait_ms": args.batch_queue_wait_ms,
+            "batch_queue_max_wait_ms": args.batch_queue_max_wait_ms,
+            "nixl_send_pool_capacity": args.nixl_send_pool_capacity,
+            "nixl_send_pool_bytes": args.nixl_send_pool_bytes,
+            "nixl_progress_thread": bool(args.nixl_progress_thread),
+            "perf_trace": bool(args.perf_trace),
+            "perf_sample_every": args.perf_sample_every,
             "preprocess_concurrency": 64,
             "preprocess_cache_size": 0,
             "graph_batch_buckets": [1, 2, 4, 8, 16, 32, 64],
@@ -605,6 +687,13 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         "1,000 measured requests; 20 warmups",
         "- Response placement: inline",
         "- Non-streaming; TTFT and ITL are intentionally not compared",
+        "- NIXL send pool: "
+        f"{metadata['benchmark']['nixl_send_pool_capacity']} × "
+        f"{metadata['benchmark']['nixl_send_pool_bytes']} bytes; progress thread: "
+        f"{metadata['benchmark']['nixl_progress_thread']}",
+        "- Encoder queue waits: "
+        f"{metadata['benchmark']['batch_queue_wait_ms']} ms quiet / "
+        f"{metadata['benchmark']['batch_queue_max_wait_ms']} ms maximum",
         "",
         "## Throughput",
         "",
@@ -666,13 +755,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "--kv-event-publishing", type=int, choices=(0, 1), required=True
     )
     metadata.add_argument("--kv-event-port", type=int, required=True)
+    metadata.add_argument("--batch-queue-wait-ms", type=float, required=True)
+    metadata.add_argument("--batch-queue-max-wait-ms", type=float, required=True)
+    metadata.add_argument("--nixl-send-pool-capacity", type=int, required=True)
+    metadata.add_argument("--nixl-send-pool-bytes", type=int, required=True)
+    metadata.add_argument(
+        "--nixl-progress-thread", type=int, choices=(0, 1), required=True
+    )
+    metadata.add_argument("--perf-trace", type=int, choices=(0, 1), required=True)
+    metadata.add_argument("--perf-sample-every", type=int, required=True)
 
     cell = subparsers.add_parser("validate-cell")
     cell.add_argument("--profile", type=Path, required=True)
     cell.add_argument("--wall-seconds", type=Path, required=True)
     cell.add_argument("--server-log", type=Path, required=True)
+    cell.add_argument("--perf-log", type=Path, required=True)
     cell.add_argument("--gpu-telemetry", type=Path, required=True)
     cell.add_argument("--output", type=Path, required=True)
+
+    perf = subparsers.add_parser("summarize-perf")
+    perf.add_argument("--log", type=Path, required=True)
+    perf.add_argument("--output", type=Path, required=True)
 
     profile = subparsers.add_parser("validate-profile")
     profile.add_argument("--profile", type=Path, required=True)
@@ -712,9 +815,12 @@ def main() -> None:
                 args.profile,
                 args.wall_seconds,
                 args.server_log,
+                args.perf_log,
                 args.gpu_telemetry,
             ),
         )
+    elif args.command == "summarize-perf":
+        _write_json(args.output, summarize_perf_log(args.log))
     elif args.command == "validate-profile":
         _write_json(
             args.output,

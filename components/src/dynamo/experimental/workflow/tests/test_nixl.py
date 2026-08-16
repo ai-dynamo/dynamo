@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
+import logging
 
 import pytest
 import torch
@@ -21,7 +23,7 @@ from dynamo.experimental.workflow import (
     compile_workflow,
 )
 from dynamo.experimental.workflow.dispatcher import StageDispatcher
-from dynamo.experimental.workflow.remote import NixlCarriedValue
+from dynamo.experimental.workflow.perf import WorkflowPerfTracer
 
 pytestmark = [
     pytest.mark.unit,
@@ -246,6 +248,21 @@ async def test_default_carrier_isolates_each_exported_edge() -> None:
     await _wait_for_no_leases(carrier)
 
 
+def test_progress_thread_can_be_enabled_for_every_carrier_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _IsolatedNixlModule.connectors = []
+    _IsolatedNixlModule.connector_options = []
+    monkeypatch.setenv("DYN_NIXL_PROGRESS_THREAD", "1")
+
+    NixlTensorCarrier(
+        nixl_module=_IsolatedNixlModule,
+        torch_module=torch,
+    )
+
+    assert _IsolatedNixlModule.connector_options == [{"enable_progress_thread": True}]
+
+
 async def test_send_pool_reuses_slot_after_all_fanout_reads() -> None:
     connector = _Connector()
     carrier = NixlTensorCarrier(
@@ -278,6 +295,47 @@ async def test_send_pool_reuses_slot_after_all_fanout_reads() -> None:
     next_readable.completed.set()
     await _wait_for_no_leases(carrier)
     await carrier.close()
+
+
+async def test_send_pool_trace_correlates_export_import_and_release(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        "dynamo.experimental.workflow.nixl.WORKFLOW_PERF_TRACE",
+        WorkflowPerfTracer(enabled=True, sample_every=1),
+    )
+    connector = _Connector()
+    carrier = NixlTensorCarrier(
+        connector=connector,
+        nixl_module=_NixlModule,
+        torch_module=torch,
+        send_pool_capacity=1,
+        send_pool_bytes=64,
+    )
+
+    with caplog.at_level(logging.INFO):
+        reference = await carrier.export_tensor(
+            torch.ones((2, 8), dtype=torch.float16), "decoder.embedding"
+        )
+        await carrier.import_tensor(reference)
+        await _wait_for_no_leases(carrier)
+
+    payloads = [
+        json.loads(record.getMessage().removeprefix("workflow_perf "))
+        for record in caplog.records
+        if record.getMessage().startswith("workflow_perf ")
+    ]
+    lease_id = reference["lease_id"]
+    lease_events = {
+        payload["event"] for payload in payloads if payload["trace_id"] == lease_id
+    }
+    assert lease_events == {
+        "nixl.export",
+        "nixl.import",
+        "nixl.lease_release",
+        "nixl.producer_wait",
+    }
 
 
 async def test_lease_registry_retains_unread_operation_after_timeout() -> None:
@@ -360,17 +418,7 @@ class _RemoteTensorInvoker:
         self.role = role
         self.calls: list[tuple[dict, dict]] = []
 
-    async def run(
-        self,
-        stage_id,
-        contract,
-        inputs,
-        context,
-        output_transfers,
-        *,
-        request_context=None,
-    ):
-        del request_context
+    async def run(self, stage_id, contract, inputs, context, output_transfers):
         self.calls.append((dict(inputs), dict(output_transfers)))
         assert stage_id == self.role
         if self.role == "encoder":

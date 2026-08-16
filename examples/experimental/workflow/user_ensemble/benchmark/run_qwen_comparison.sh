@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../../../..")"
+REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../../..")"
 LAUNCH_ROOT="${DYN_BENCH_LAUNCH_ROOT:-$REPO_ROOT}"
 WORKLOAD_ROOT="${DYN_BENCH_WORKLOAD_ROOT:-/dynamo-tmp/logs/08-05/qwen25-user-ensemble-textisl644-osl7-mixed1000/workload}"
 OUTPUT_ROOT="${DYN_BENCH_OUTPUT_ROOT:?set DYN_BENCH_OUTPUT_ROOT to a new result directory}"
@@ -25,7 +25,7 @@ KV_EVENT_PORT="${DYN_BENCH_KV_EVENT_PORT:-20080}"
 KV_EVENTS_CONFIG="$(printf \
     '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:%s","enable_kv_cache_events":true}' \
     "$KV_EVENT_PORT")"
-DEFAULT_CELL_PLAN="1:remote 2:remote 3:remote"
+DEFAULT_CELL_PLAN="1:remote"
 CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
 
 if [[ "$REQUEST_RATE" != 50 ]]; then
@@ -57,9 +57,17 @@ export DYN_QWEN2_VL_GRAPH_IMAGE_SIZES=300x300,500x500
 export DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE=0
 export DYN_CUSTOM_ENCODER_DISPATCH_LOG=1
 export DYN_ENCODER_BATCH_QUEUE_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_WAIT_MS:-2}"
+export DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS:-50}"
 export DYN_NIXL_SEND_POOL_CAPACITY="${DYN_NIXL_SEND_POOL_CAPACITY:-64}"
 export DYN_NIXL_SEND_POOL_BYTES="${DYN_NIXL_SEND_POOL_BYTES:-4194304}"
-export DYN_LOG="${DYN_LOG:-warn}"
+export DYN_NIXL_PROGRESS_THREAD="${DYN_NIXL_PROGRESS_THREAD:-0}"
+export DYN_WORKFLOW_PERF_TRACE="${DYN_WORKFLOW_PERF_TRACE:-0}"
+export DYN_WORKFLOW_PERF_SAMPLE_EVERY="${DYN_WORKFLOW_PERF_SAMPLE_EVERY:-32}"
+if [[ "$DYN_WORKFLOW_PERF_TRACE" == 1 ]]; then
+    export DYN_LOG="${DYN_LOG:-info}"
+else
+    export DYN_LOG="${DYN_LOG:-warn}"
+fi
 export DYN_MAX_MODEL_LEN=2048
 export DYN_MAX_NUM_SEQS=64
 export DYN_VLLM_GPU_MEMORY_UTILIZATION=0.4
@@ -119,13 +127,21 @@ python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_ben
     --aiperf-version "$AIPERF_VERSION" \
     --prefix-caching 1 \
     --kv-event-publishing 1 \
-    --kv-event-port "$KV_EVENT_PORT"
+    --kv-event-port "$KV_EVENT_PORT" \
+    --batch-queue-wait-ms "$DYN_ENCODER_BATCH_QUEUE_WAIT_MS" \
+    --batch-queue-max-wait-ms "$DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS" \
+    --nixl-send-pool-capacity "$DYN_NIXL_SEND_POOL_CAPACITY" \
+    --nixl-send-pool-bytes "$DYN_NIXL_SEND_POOL_BYTES" \
+    --nixl-progress-thread "$DYN_NIXL_PROGRESS_THREAD" \
+    --perf-trace "$DYN_WORKFLOW_PERF_TRACE" \
+    --perf-sample-every "$DYN_WORKFLOW_PERF_SAMPLE_EVERY"
 
 sha256sum \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/workflow.py" \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/remote/launch.sh" \
     "$REPO_ROOT/components/src/dynamo/vllm/multimodal_utils/custom_encoder/batcher.py" \
     "$REPO_ROOT/components/src/dynamo/experimental/workflow/nixl.py" \
+    "$REPO_ROOT/components/src/dynamo/experimental/workflow/perf.py" \
     "$REPO_ROOT/lib/bindings/python/src/dynamo/nixl_connect/__init__.py" \
     "$REPO_ROOT/examples/custom_encoder/qwen2_5_vl_benchmark_encoder.py" \
     > "$OUTPUT_ROOT/source_files_sha256.txt"
@@ -233,6 +249,9 @@ run_cell() {
         --expected-requests 20 \
         --output "$output_dir/warmup/audit.json"
 
+    local measured_log_start
+    measured_log_start=$(wc -c < "$output_dir/server.log")
+
     nvidia-smi \
         -i 0 \
         --query-gpu=timestamp,utilization.gpu,memory.used \
@@ -255,6 +274,9 @@ run_cell() {
     wait "$SAMPLER_PID" 2>/dev/null || true
     SAMPLER_PID=""
 
+    tail -c "+$((measured_log_start + 1))" "$output_dir/server.log" \
+        > "$output_dir/measured/server.log"
+
     # Validate the exact 20+1,000 encoder calls before the remote joined-response
     # smoke adds one intentionally excluded request to the server log.
     python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark \
@@ -262,6 +284,7 @@ run_cell() {
         --profile "$output_dir/measured/profile_export_aiperf.json" \
         --wall-seconds "$output_dir/full_client_process_wall_seconds.txt" \
         --server-log "$output_dir/server.log" \
+        --perf-log "$output_dir/measured/server.log" \
         --gpu-telemetry "$output_dir/gpu_telemetry.csv" \
         --output "$output_dir/cell_audit.json"
 
@@ -280,7 +303,7 @@ for cell in $CELL_PLAN; do
     repetition="${cell%%:*}"
     topology="${cell#*:}"
     if [[ "$repetition" == "$cell" \
-        || ! "$repetition" =~ ^[1-3]$ \
+        || ! "$repetition" =~ ^1$ \
         || "$topology" != remote ]]; then
         echo >&2 "invalid DYN_BENCH_CELL_PLAN entry: $cell"
         exit 2

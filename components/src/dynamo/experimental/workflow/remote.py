@@ -6,28 +6,29 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
+import logging
+import math
+import time
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, AsyncIterator, Mapping, Optional, Protocol
 
 from dynamo.experimental.workflow.nixl import NixlTensorFanout, NixlTensorRef
-from dynamo.experimental.workflow.plan import NIXL_CARRIER
+from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
+from dynamo.experimental.workflow.plan import INLINE_VALUE_TYPES
 from dynamo.experimental.workflow.runtime import (
     StageContext,
     StageRunner,
     TensorCarrier,
     WorkflowExecutionError,
 )
-from dynamo.experimental.workflow.types import (
-    StageContract,
-    WorkflowValidationError,
-    validate_name,
-)
+from dynamo.experimental.workflow.types import StageContract, WorkflowValidationError, validate_name
 
 STAGE_REQUEST_SCHEMA = "dynamo.experimental.workflow.carrier_request"
 STAGE_RESPONSE_SCHEMA = "dynamo.experimental.workflow.carrier_response"
 STAGE_WIRE_VERSION = 1
+
+logger = logging.getLogger(__name__)
 
 
 def _check_keys(data: Mapping[str, Any], required: set[str]) -> None:
@@ -227,9 +228,9 @@ class RemoteStageClient:
         inputs: Mapping[str, Any],
         context: StageContext,
         output_transfers: Mapping[str, tuple[str, ...]],
-        *,
-        request_context: Any = None,
     ) -> Mapping[str, Any]:
+        started_ns = time.perf_counter_ns()
+        context.raise_if_cancelled()
         stage_label = f"remote stage {stage_id!r} with contract {contract.id!r}"
         wire_inputs: dict[str, Any] = {}
         input_carriers: dict[str, str] = {}
@@ -246,13 +247,13 @@ class RemoteStageClient:
         )
 
         transport_context = None
-        if request_context is not None:
-            detach = getattr(request_context, "detached", None)
+        if context.request_context is not None:
+            detach = getattr(context.request_context, "detached", None)
             if not callable(detach):
                 raise WorkflowExecutionError(
                     "request context cannot create a detached child context"
                 )
-            transport_context = detach(f"{context.attempt_id}:{context.stage_id}")
+            transport_context = detach(context.invocation_id)
 
         try:
             stream = await self._client.round_robin(
@@ -294,12 +295,28 @@ class RemoteStageClient:
                     f"{stage_label} response failed at the transport boundary"
                 ) from error
             raise
-
-        outputs: dict[str, Any] = dict(envelope.outputs)
-        for name, carrier in envelope.output_carriers.items():
-            if carrier == NIXL_CARRIER:
-                outputs[name] = NixlCarriedValue(envelope.outputs[name])
-        return outputs
+        if not responses:
+            raise WorkflowExecutionError(
+                f"remote stage {stage_id!r} returned no terminal response"
+            )
+        envelope = StageResponseEnvelope.from_dict(responses[0])
+        if (
+            envelope.stage_id != stage_id
+            or envelope.contract_id != contract.id
+            or envelope.attempt_id != context.attempt_id
+            or envelope.invocation_id != context.invocation_id
+        ):
+            raise WorkflowExecutionError(
+                f"remote stage {stage_id!r} response identity does not match request"
+            )
+        WORKFLOW_PERF_TRACE.emit(
+            logger,
+            "workflow.remote_call",
+            context.attempt_id,
+            elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+            stage=stage_id,
+        )
+        return envelope.outputs
 
 
 class RemoteStageServer:
@@ -350,13 +367,28 @@ class RemoteStageServer:
                 candidate = get_request_id()
                 if isinstance(candidate, str) and candidate:
                     request_id = candidate
+        cancelled = asyncio.Event()
         stage_context = StageContext(
             workflow_name=None,
             stage_id=self._stage_id,
             attempt_id=request_id,
+            invocation_id=request_id,
+            deadline=None,
+            _cancelled=cancelled,
+            request_context=context,
         )
 
-        async def invoke() -> tuple[dict[str, Any], dict[str, str]]:
+        async def invoke() -> dict[str, Any]:
+            started_ns = time.perf_counter_ns()
+            expected_inputs = set(self._runner.contract.inputs)
+            actual_inputs = set(envelope.inputs)
+            if actual_inputs != expected_inputs:
+                raise WorkflowExecutionError(
+                    f"remote stage {self._stage_id!r} inputs differ from its contract; "
+                    f"missing={sorted(expected_inputs - actual_inputs)}, "
+                    f"extra={sorted(actual_inputs - expected_inputs)}"
+                )
+
             runner_inputs = dict(envelope.inputs)
             for name in envelope.input_carriers:
                 if self._tensor_carrier is None:
@@ -366,10 +398,19 @@ class RemoteStageServer:
                 runner_inputs[name] = await self._tensor_carrier.import_tensor(
                     envelope.inputs[name]
                 )
+            inputs_ready_ns = time.perf_counter_ns()
 
             result = await self._runner.run(
                 MappingProxyType(runner_inputs), stage_context
             )
+            if unknown_transfer_outputs:
+                raise WorkflowExecutionError(
+                    f"remote stage {self._stage_id!r} has transfer requests for "
+                    f"unknown outputs {sorted(unknown_transfer_outputs)}"
+                )
+
+            result = await self._runner.run(MappingProxyType(runner_inputs), context)
+            runner_finished_ns = time.perf_counter_ns()
             if not isinstance(result, Mapping):
                 raise WorkflowExecutionError(
                     f"remote stage {self._stage_id!r} returned a non-mapping result"
@@ -403,14 +444,20 @@ class RemoteStageServer:
                         f"remote tensor output {name!r} NIXL references differ "
                         "from requested consumer transfers"
                     )
-                wire_outputs[name] = NixlTensorFanout(
-                    {
-                        transfer_id: NixlTensorRef.from_dict(reference)
-                        for transfer_id, reference in references.items()
-                    }
-                ).to_dict()
-                output_carriers[name] = NIXL_CARRIER
-            return wire_outputs, output_carriers
+                for transfer_id, reference in references.items():
+                    transfers[transfer_id] = NixlTensorRef.from_dict(reference)
+                wire_outputs[name] = NixlTensorFanout(transfers).to_dict()
+            WORKFLOW_PERF_TRACE.emit(
+                logger,
+                "workflow.remote_server",
+                envelope.attempt_id,
+                elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+                export_ms=(time.perf_counter_ns() - runner_finished_ns) / 1_000_000,
+                import_ms=(inputs_ready_ns - started_ns) / 1_000_000,
+                runner_ms=(runner_finished_ns - inputs_ready_ns) / 1_000_000,
+                stage=self._stage_id,
+            )
+            return wire_outputs
 
         invocation = asyncio.create_task(invoke(), name=f"workflow-remote:{request_id}")
         transport_task: asyncio.Future[Any] | None = None
@@ -431,6 +478,7 @@ class RemoteStageServer:
                 else:
                     raise asyncio.CancelledError()
         except BaseException:
+            cancelled.set()
             if not invocation.done():
                 invocation.cancel()
             await asyncio.gather(invocation, return_exceptions=True)
@@ -444,6 +492,7 @@ class RemoteStageServer:
             bool(getattr(context, "is_stopped", lambda: False)())
             or bool(getattr(context, "is_killed", lambda: False)())
         ):
+            cancelled.set()
             raise asyncio.CancelledError()
         yield StageResponseEnvelope(
             outputs=wire_outputs,

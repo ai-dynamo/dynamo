@@ -45,6 +45,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable, Deque, Generic, Hashable, List, Optional, TypeVar
 
+from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -73,6 +75,7 @@ class _Request(Generic[R]):
     completion: "concurrent.futures.Future[List[R]]"
     results: List[Optional[R]]
     remaining: int
+    trace_id: str | None
     error: Optional[BaseException] = None
     done: bool = False
 
@@ -86,6 +89,7 @@ class _Work(Generic[T]):
     bucket_key: Hashable | None
     request: _Request
     index: int
+    enqueued_ns: int | None
 
 
 class ThreadedMicroBatcher(Generic[T, R]):
@@ -218,6 +222,8 @@ class ThreadedMicroBatcher(Generic[T, R]):
         items: List[T],
         costs: Optional[List[int]] = None,
         bucket_keys: Optional[List[Hashable | None]] = None,
+        *,
+        trace_id: str | None = None,
     ) -> List[R]:
         """Submit a group of items; await one result per item, in order.
 
@@ -233,6 +239,8 @@ class ThreadedMicroBatcher(Generic[T, R]):
             raise RuntimeError("ThreadedMicroBatcher.submit() called before start()")
         if not items:
             return []
+        if trace_id is not None and (not isinstance(trace_id, str) or not trace_id):
+            raise ValueError("trace_id must be a non-empty string when set")
         if costs is None:
             costs = [1] * len(items)
         elif len(costs) != len(items):
@@ -260,9 +268,15 @@ class ThreadedMicroBatcher(Generic[T, R]):
             completion=concurrent.futures.Future(),
             results=[None] * len(items),
             remaining=len(items),
+            trace_id=trace_id,
+        )
+        enqueued_ns = (
+            time.perf_counter_ns()
+            if trace_id is not None and WORKFLOW_PERF_TRACE.enabled
+            else None
         )
         works = [
-            _Work(item, c, key, request, i)
+            _Work(item, c, key, request, i, enqueued_ns)
             for i, (item, c, key) in enumerate(zip(items, costs, bucket_keys))
         ]
         # State check + admission + queue-commit under one lock so a concurrent
@@ -464,14 +478,33 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 )
             return
         items = [w.item for w in runnable]
+        trace_requests = {
+            work.request
+            for work in runnable
+            if work.request.trace_id is not None
+            and WORKFLOW_PERF_TRACE.samples(work.request.trace_id)
+        }
+        forward_started_ns = time.perf_counter_ns() if trace_requests else None
         try:
             results = self._fn(items)
         except (
             BaseException
         ) as exc:  # noqa: BLE001 — a bad batch must not hang awaiters
+            self._trace_batch(
+                runnable,
+                trace_requests,
+                forward_started_ns,
+                status="error",
+            )
             for work in runnable:
                 self._consume(work, error=exc)
             return
+        self._trace_batch(
+            runnable,
+            trace_requests,
+            forward_started_ns,
+            status="complete",
+        )
         if len(results) != len(items):
             err = RuntimeError(
                 f"batch fn returned {len(results)} results for {len(items)} items; "
@@ -482,6 +515,39 @@ class ThreadedMicroBatcher(Generic[T, R]):
             return
         for work, result in zip(runnable, results):
             self._consume(work, result=result)
+
+    def _trace_batch(
+        self,
+        works: List[_Work],
+        trace_requests: set[_Request],
+        forward_started_ns: int | None,
+        *,
+        status: str,
+    ) -> None:
+        if not trace_requests or forward_started_ns is None:
+            return
+        finished_ns = time.perf_counter_ns()
+        for request in trace_requests:
+            request_works = [work for work in works if work.request is request]
+            queue_wait_values = [
+                (forward_started_ns - work.enqueued_ns) / 1_000_000
+                for work in request_works
+                if work.enqueued_ns is not None
+            ]
+            trace_id = request.trace_id
+            assert trace_id is not None
+            WORKFLOW_PERF_TRACE.emit(
+                logger,
+                "encoder.batch",
+                trace_id,
+                batch_cost=sum(work.cost for work in works),
+                batch_size=len(works),
+                forward_ms=(finished_ns - forward_started_ns) / 1_000_000,
+                queue_wait_ms=(max(queue_wait_values) if queue_wait_values else None),
+                request_items=len(request_works),
+                requests=len({work.request for work in works}),
+                status=status,
+            )
 
     def _is_tombstoned(self, req: _Request) -> bool:
         """True once the request must not send further items to ``fn``."""

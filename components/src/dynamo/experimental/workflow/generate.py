@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, Protocol
 
 from dynamo.common.external_encoder import ExternalEncoderResult
 from dynamo.experimental.workflow.nixl import NixlTensorRef
-from dynamo.experimental.workflow.remote import NixlCarriedValue
+from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.experimental.workflow.runtime import StageContext, WorkflowExecutionError
 from dynamo.experimental.workflow.types import StageContract
 
@@ -18,6 +20,8 @@ GENERATE_REQUEST_PORT = "request"
 GENERATE_FEATURES_PORT = "encoder_features"
 GENERATE_METADATA_PORT = "encoder_metadata"
 GENERATE_OUTPUT_PORT = "completion"
+
+logger = logging.getLogger(__name__)
 
 
 class _DynamoClient(Protocol):
@@ -67,11 +71,10 @@ class GenerateEndpointInvoker:
         stage_id: str,
         inputs: Mapping[str, Any],
         context: StageContext,
-        *,
-        request_context: Any = None,
     ) -> GenerateEndpointStream:
         """Prepare the Generate request and return its owned token stream."""
 
+        context.raise_if_cancelled()
         request_value = inputs[GENERATE_REQUEST_PORT]
         if not isinstance(request_value, Mapping):
             raise WorkflowExecutionError("Generate endpoint request must be an object")
@@ -113,13 +116,13 @@ class GenerateEndpointInvoker:
                 request.pop(field_name, None)
 
         transport_context = None
-        if request_context is not None:
-            detach = getattr(request_context, "detached", None)
+        if context.request_context is not None:
+            detach = getattr(context.request_context, "detached", None)
             if not callable(detach):
                 raise WorkflowExecutionError(
                     "request context cannot create a detached child context"
                 )
-            transport_context = detach(f"{context.attempt_id}:{stage_id}")
+            transport_context = detach(context.invocation_id)
 
         try:
             stream = await self._client.round_robin(
@@ -137,22 +140,31 @@ class GenerateEndpointInvoker:
         contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
-        *,
-        request_context: Any = None,
     ) -> Mapping[str, Any]:
         del contract
-        stream = await self.open(
-            stage_id,
-            inputs,
-            context,
-            request_context=request_context,
-        )
+        if output_transfers:
+            raise WorkflowExecutionError(
+                f"Generate endpoint stage {stage_id!r} cannot export tensor outputs"
+            )
+
+        started_ns = time.perf_counter_ns()
+        stream = await self.open(stage_id, inputs, context)
+        opened_ns = time.perf_counter_ns()
         try:
             completion = await collect_generation(stream, stage_id)
         except BaseException:
             await stream.aclose(cancel=True)
             raise
         await stream.aclose()
+        WORKFLOW_PERF_TRACE.emit(
+            logger,
+            "workflow.generate",
+            context.attempt_id,
+            collect_ms=(time.perf_counter_ns() - opened_ns) / 1_000_000,
+            elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+            open_ms=(opened_ns - started_ns) / 1_000_000,
+            stage=stage_id,
+        )
         return {GENERATE_OUTPUT_PORT: completion}
 
 
