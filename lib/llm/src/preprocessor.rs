@@ -3117,6 +3117,38 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        // Muse serves through ONE unified parser (ordered reasoning + content +
+        // tool calls), default-on. Bypass the v1 reasoning stage — its muse parser
+        // is gone, so it falls back to `Basic`, which cannot read the
+        // `to=self<|message|>` grammar — and the tool jail. auto/none only; a forced
+        // tool_choice keeps the guided-decode + jail path (that emits guided JSON,
+        // not the native markup the unified parser reads). Runs regardless of
+        // has_tools: muse owns reasoning and strips its markers even with zero tools.
+        // (`tool_parser_v2` is imported below; a `use` is in scope for the whole body.)
+        if let Some(family) = tool_parser_v2::unified_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) && matches!(
+            request.inner.tool_choice.as_ref(),
+            None | Some(ChatCompletionToolChoiceOption::Auto)
+                | Some(ChatCompletionToolChoiceOption::None)
+        ) {
+            let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+                tools
+                    .iter()
+                    .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                        name: tool.function.name.clone(),
+                        parameters: tool.function.parameters.clone(),
+                        strict: tool.function.strict,
+                    })
+                    .collect()
+            });
+            let unified: Pin<Box<dyn Stream<Item = _> + Send>> = Box::pin(
+                tool_parser_v2::apply_unified_stream(stream, tool_definitions, family),
+            );
+            return Ok(unified);
+        }
+
         // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
         // parsers inspect the stream shape before deciding whether to parse it.
         let is_guided_tool_choice = matches!(
@@ -4118,6 +4150,10 @@ impl OpenAIPreprocessor {
         // - inkling: `<|message_model|>` / `<|content_thinking|>` /
         //   `<|content_text|>` / `<|content_invoke_tool_json|>` / `<|end_message|>`
         //   channel markers, consumed by both the tool-call and reasoning parsers.
+        // - muse_glimmer: `<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>`
+        //   channel markers, consumed by the unified parser (reasoning + content +
+        //   tool calls); matched on either parser name since the card may set only
+        //   the reasoning name.
         matches!(
             tool_call_parser,
             Some("gemma4")
@@ -4131,6 +4167,8 @@ impl OpenAIPreprocessor {
                 | Some("minimax_m3_nom")
                 | Some("minimax-m3-nom")
                 | Some("inkling")
+                | Some("muse_glimmer")
+                | Some("muse-glimmer")
         ) || matches!(
             reasoning_parser,
             Some("gemma4")
@@ -4143,6 +4181,8 @@ impl OpenAIPreprocessor {
                 | Some("minimax_m3")
                 | Some("minimax-m3")
                 | Some("inkling")
+                | Some("muse_glimmer")
+                | Some("muse-glimmer")
         )
     }
 
@@ -6003,6 +6043,25 @@ mod tests {
                 Some("minimax-m3"),
                 true,
                 "MiniMax M3 SGLang aliases → required",
+            ),
+            (
+                Some("muse_glimmer"),
+                None,
+                true,
+                "muse_glimmer tool-call only → required \
+                 (`<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>` are special)",
+            ),
+            (
+                None,
+                Some("muse_glimmer"),
+                true,
+                "muse_glimmer reasoning-name only → required",
+            ),
+            (
+                Some("muse-glimmer"),
+                None,
+                true,
+                "muse-glimmer hyphen alias (tool) → required",
             ),
             (None, None, false, "no parsers → not required"),
         ];

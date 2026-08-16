@@ -4502,3 +4502,98 @@ async fn postprocessor_parsing_stream_force_nonempty_whitespace_only_turn_surviv
         "whitespace-only output must not vanish for a force_nonempty_content request"
     );
 }
+
+// ── Muse unified parser routing (default-on) ──────────────────────────────────
+
+/// One muse turn: a `to=self` thought, one `get_weather` call, then the visible
+/// `to=user` answer. Raw model markup, one channel per streamed chunk.
+const MUSE_MARKUP_SHAPE: [&str; 3] = [
+    "<|start|>assistant to=self<|message|>Look it up.<|eom|>",
+    "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>",
+    "<|start|>assistant to=user<|message|>It's 18C.<|eot|>",
+];
+
+/// Default-on routing: `tool_call_parser=muse_glimmer`, NO reasoning parser. The
+/// guard routes the whole turn through the v2 UNIFIED parser, which owns
+/// reasoning + content + tool calls in one pass — all three surface cleanly with
+/// no marker leak, and neither the v1 reasoning stage nor the jail runs.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_routes_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(
+        out.reasoning, "Look it up.",
+        "reasoning_content must come from the unified parser"
+    );
+    assert_eq!(
+        out.content, "It's 18C.",
+        "content must be the stripped answer"
+    );
+    assert_eq!(
+        out.tool_calls.len(),
+        1,
+        "expected one tool call: {:?}",
+        out.tool_calls
+    );
+    assert_eq!(out.tool_calls[0].0.as_deref(), Some("get_weather"));
+    let args: Value = serde_json::from_str(&out.tool_calls[0].1).unwrap();
+    assert_eq!(args, serde_json::json!({"location": "Paris"}));
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !out.content.contains(marker) && !out.reasoning.contains(marker),
+            "marker {marker:?} leaked: content={:?} reasoning={:?}",
+            out.content,
+            out.reasoning
+        );
+    }
+}
+
+/// `tool_choice=Required` is excluded by the guard (auto/none only), so the turn
+/// falls through to the guided-decode + jail path. No reasoning parser is
+/// configured there, so `reasoning_content` can never be produced — proof the
+/// unified parser (which would yield "Look it up.") did NOT engage.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_required_does_not_route_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert!(
+        out.reasoning.is_empty(),
+        "Required must NOT route to unified; reasoning_content must stay empty, got {:?}",
+        out.reasoning
+    );
+}
+
+/// Explicit `tool_choice=None` must route to unified like auto — the guard's
+/// "auto/none only" contract. A stream guard that matched only unset+auto let None fall
+/// through to the Basic reasoning fallback, which leaked raw markers into content and
+/// dropped reasoning; the batch path always routed it, so only streaming regressed.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_none_routes_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::None);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(
+        out.reasoning, "Look it up.",
+        "tool_choice=None must route to unified; reasoning_content must come from it"
+    );
+    assert_eq!(
+        out.content, "It's 18C.",
+        "content must be the stripped answer"
+    );
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !out.content.contains(marker) && !out.reasoning.contains(marker),
+            "marker {marker:?} leaked under tool_choice=None: content={:?} reasoning={:?}",
+            out.content,
+            out.reasoning
+        );
+    }
+}
