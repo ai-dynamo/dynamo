@@ -1,6 +1,6 @@
-PROTO := pagebroker.proto
+PROTO := v1/pagebroker.proto
 
 .PHONY: generate
 
 generate:
-	protoc --cpp_out=. $(PROTO)
+	protoc --proto_path=. --cpp_out=. $(PROTO)

@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-syntax = "proto2";
-package snapshot.pagebroker;
+syntax = "proto3";
+package snapshot.pagebroker.v1;
 option go_package = "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/pagebroker";
 
 message FilesystemStorage
 {
-  required string directory = 1;
+  optional string directory = 1;
 }
 message StorageBackend
 {
@@ -27,19 +27,19 @@ message IOEngine
 
 message StagedRestoreRequest
 {
-  required StorageBackend source = 1;
-  required IOEngine io_engine = 2;
+  StorageBackend source = 1;
+  IOEngine io_engine = 2;
 }
 // Allows a future GPU engine to read source data without a staging directory.
 message DirectRestoreRequest
 {
-  required StorageBackend source = 1;
-  required IOEngine io_engine = 2;
+  StorageBackend source = 1;
+  IOEngine io_engine = 2;
 }
 message PrepareStagedCheckpointRequest
 {
-  required StorageBackend destination = 1;
-  required IOEngine io_engine = 2;
+  StorageBackend destination = 1;
+  IOEngine io_engine = 2;
 }
 // Completes a live transaction. Repeating Commit for a committed transaction returns CommitComplete;
 // Commit for an aborted or unknown transaction returns TRANSACTION_NOT_FOUND.
@@ -51,9 +51,9 @@ message AbortRequest {}
 message Request
 {
   // Snapshot assigns an ID to each request.
-  required string request_id = 1;
+  optional string request_id = 1;
   // Snapshot assigns a unique transaction ID before the first request and does not reuse it while live.
-  required string transaction_id = 2;
+  optional string transaction_id = 2;
   oneof command
   {
     StagedRestoreRequest staged_restore = 3;
@@ -66,12 +66,12 @@ message Request
 
 message StagedRestoreDirectory
 {
-  required string image_directory = 1;
+  optional string image_directory = 1;
 }
 message DirectRestoreReady {}
 message StagedCheckpointDirectory
 {
-  required string image_directory = 1;
+  optional string image_directory = 1;
 }
 message CommitComplete {}
 // Confirms only that PageBroker transaction state/content was released; it says nothing about the target
@@ -95,13 +95,13 @@ message Failure
     // An unexpected broker failure occurred. The caller may Abort the transaction before retrying.
     INTERNAL_ERROR = 6;
   }
-  required Code code = 1;
-  required string message = 2;
+  optional Code code = 1;
+  optional string message = 2;
 }
 message Response
 {
-  required string request_id = 1;
-  required string transaction_id = 2;
+  optional string request_id = 1;
+  optional string transaction_id = 2;
   oneof result
   {
     StagedRestoreDirectory staged_restore_directory = 3;

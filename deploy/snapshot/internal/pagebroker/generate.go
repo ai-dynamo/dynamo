@@ -3,4 +3,4 @@
 
 package pagebroker
 
-//go:generate protoc --proto_path=../../pagebroker --go_out=. --go_opt=paths=source_relative ../../pagebroker/pagebroker.proto
+//go:generate protoc --proto_path=../../pagebroker --go_out=.. --go_opt=module=github.com/ai-dynamo/dynamo/deploy/snapshot/internal ../../pagebroker/v1/pagebroker.proto
