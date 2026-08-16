@@ -26,12 +26,16 @@ on:
         description: 'Build and push vLLM snapshot placeholder image (required by Dynamo Snapshot checkpoint/restore). Set build_vllm=true to build a fresh runtime first, or supply placeholder_base_image to reuse an existing one.'
         type: boolean
         default: false
+      build_sglang_placeholder:
+        description: 'Build and push an SGLang snapshot placeholder FROM the SGLang runtime built by this workflow. Set build_sglang=true and select only one placeholder backend.'
+        type: boolean
+        default: false
       placeholder_base_image:
         description: 'Optional existing ACR vllm-runtime image URI to build the placeholder FROM. When set, the vllm runtime is not rebuilt. Example: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-<sha>-vllm-runtime'
         type: string
         default: ''
       build_snapshot_agent:
-        description: 'Build and push the snapshot-agent image (CRIU + cuda-checkpoint DaemonSet). Pair this with build_vllm_placeholder so the agent and the workload image come from the same tree.'
+        description: 'Build and push the snapshot-agent image (CRIU + cuda-checkpoint DaemonSet). Pair this with a placeholder build so the agent and workload image come from the same tree.'
         type: boolean
         default: false
 
@@ -159,25 +163,32 @@ jobs:
   # SNAPSHOT PLACEHOLDER (build-only)
   # ============================================================================
 
-  # The placeholder is a thin overlay ON TOP OF a vllm-runtime image: the
+  # The placeholder is a thin overlay ON TOP OF a framework runtime image: the
   # `placeholder` stage in deploy/snapshot/Dockerfile is `FROM ${BASE_IMAGE}`
   # and adds CRIU, cuda-checkpoint and nsrestore. Dynamo Snapshot needs those
   # in the workload image, so checkpoint/restore pods must run the placeholder,
   # not the plain runtime.
   #
-  # Two modes:
+  # Modes:
   #   (a) build_vllm=true + build_vllm_placeholder=true
   #       -> chains vllm-build -> here and uses the freshly built ACR tag.
   #   (b) placeholder_base_image=<existing ACR vllm-runtime URI>
   #       -> skips the runtime build entirely and builds straight from that tag.
-  snapshot-placeholder-vllm:
-    name: vLLM Snapshot Placeholder
-    needs: [init, vllm-build]
+  #   (c) build_sglang=true + build_sglang_placeholder=true
+  #       -> chains sglang-build -> sglang-copy-to-acr -> here.
+  snapshot-placeholder:
+    name: Snapshot Placeholder
+    needs: [init, vllm-build, sglang-copy-to-acr]
     # `always()` lets mode (b) run while vllm-build is skipped.
     if: |
-      always() && !cancelled() && inputs.build_vllm_placeholder &&
-      (inputs.placeholder_base_image != '' ||
-       needs.vllm-build.result == 'success')
+      always() && !cancelled() &&
+      ((inputs.build_vllm_placeholder &&
+        !inputs.build_sglang_placeholder &&
+        (inputs.placeholder_base_image != '' ||
+         needs.vllm-build.result == 'success')) ||
+       (inputs.build_sglang_placeholder &&
+        !inputs.build_vllm_placeholder &&
+        needs.sglang-copy-to-acr.result == 'success'))
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -186,12 +197,14 @@ jobs:
           persist-credentials: false
 
       # Resolve BASE_IMAGE and the output tags. An explicit placeholder_base_image
-      # wins; otherwise use the ACR tag just produced by vllm-build.
+      # wins for vLLM; SGLang uses the ACR tag just published by shared-copy.
       - name: Resolve placeholder image references
         id: refs
         shell: bash
         env:
+          BUILD_SGLANG_PLACEHOLDER: ${{ inputs.build_sglang_placeholder }}
           EXPLICIT_BASE: ${{ inputs.placeholder_base_image }}
+          SGLANG_BASE_TAG: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
           ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
           SANITIZED_REF: ${{ needs.init.outputs.sanitized_ref_name }}
           GIT_SHA: ${{ github.sha }}
@@ -201,20 +214,29 @@ jobs:
           VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' pyproject.toml | head -1)
           VERSION="${VERSION%%[-+]*}"
 
-          if [[ -n "${EXPLICIT_BASE}" ]]; then
+          if [[ "${BUILD_SGLANG_PLACEHOLDER}" == "true" ]]; then
+            FRAMEWORK=sglang
+            FRAMEWORK_NAME=SGLang
+            BASE_IMAGE="${ACR_IMAGE_BASE}:${SGLANG_BASE_TAG}"
+          elif [[ -n "${EXPLICIT_BASE}" ]]; then
+            FRAMEWORK=vllm
+            FRAMEWORK_NAME=vLLM
             BASE_IMAGE="${EXPLICIT_BASE}"
           else
+            FRAMEWORK=vllm
+            FRAMEWORK_NAME=vLLM
             BASE_IMAGE="${ACR_IMAGE_BASE}:${GIT_SHA}-vllm-runtime"
           fi
 
-          # <sha>-vllm-placeholder is the primary (ECR) tag, matching pr.yaml's
-          # image_tag. The ACR extra tags add the versioned CI tag and a
+          # <sha>-<framework>-placeholder is the primary image tag. The ACR
+          # extra tags add the versioned CI tag and a
           # branch-name tag for convenience, like the operator job does.
+          echo "framework_name=${FRAMEWORK_NAME}" >> "$GITHUB_OUTPUT"
           echo "base_image=${BASE_IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${GIT_SHA}-vllm-placeholder" >> "$GITHUB_OUTPUT"
-          echo "acr_ci_image=${ACR_IMAGE_BASE}:${VERSION}-ci-${GIT_SHA}-vllm-placeholder" >> "$GITHUB_OUTPUT"
-          echo "acr_sha_image=${ACR_IMAGE_BASE}:${GIT_SHA}-vllm-placeholder" >> "$GITHUB_OUTPUT"
-          echo "acr_branch_image=${ACR_IMAGE_BASE}:${SANITIZED_REF}-vllm-placeholder" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${GIT_SHA}-${FRAMEWORK}-placeholder" >> "$GITHUB_OUTPUT"
+          echo "acr_ci_image=${ACR_IMAGE_BASE}:${VERSION}-ci-${GIT_SHA}-${FRAMEWORK}-placeholder" >> "$GITHUB_OUTPUT"
+          echo "acr_sha_image=${ACR_IMAGE_BASE}:${GIT_SHA}-${FRAMEWORK}-placeholder" >> "$GITHUB_OUTPUT"
+          echo "acr_branch_image=${ACR_IMAGE_BASE}:${SANITIZED_REF}-${FRAMEWORK}-placeholder" >> "$GITHUB_OUTPUT"
 
       # deploy/snapshot/Dockerfile's placeholder stage hard-errors on non-amd64
       # (cuda-checkpoint ships no arm64 binary), and build-deploy-component
@@ -256,7 +278,7 @@ jobs:
           ACR_BRANCH_IMAGE: ${{ steps.refs.outputs.acr_branch_image }}
         run: |
           {
-            echo "### vLLM Snapshot Placeholder"
+            echo "### ${{ steps.refs.outputs.framework_name }} Snapshot Placeholder"
             echo ""
             echo "Built FROM: \`${BASE_IMAGE}\`"
             echo ""
@@ -351,7 +373,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-placeholder-vllm, snapshot-agent]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-placeholder, snapshot-agent]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
