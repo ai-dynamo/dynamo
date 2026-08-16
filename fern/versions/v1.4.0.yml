@@ -964,6 +964,9 @@ navigation:
       - page: Examples
         path: ../pages-dev/reference/general/examples.md
         slug: examples
+      - page: Glossary
+        path: ../pages-dev/reference/general/glossary.md
+        slug: glossary
       # ==================== API Reference ====================
       # docs/fern/scripts/gen_python_api.py generates the Python landing page
       # and one deterministic MDX per curated module. Each per-module page is a
@@ -1117,9 +1120,6 @@ navigation:
         contents:
           - page: Overview
             path: ../pages-v1.4.0/reference/nixl-connect/overview.mdx
-      - page: Glossary
-        path: ../pages-dev/reference/general/glossary.md
-        slug: glossary
   - tab: blog
     layout:
       # Three siblings at the top of the tab: the partner list, the papers, and
