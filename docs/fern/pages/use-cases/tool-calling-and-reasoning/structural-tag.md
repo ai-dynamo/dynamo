@@ -5,7 +5,7 @@ title: Structural Tag (Guided Decoding for Tool Calls)
 subtitle: Constrain model output to valid tool call format using xgrammar structural tags
 ---
 
-Structural tags use [xgrammar](https://xgrammar.mlc.ai/docs/structural_tag/structural_tag_api.html)
+Structural tags use [xgrammar](https://xgrammar.mlc.ai/docs/latest/api/python/structural_tag.html)
 guided decoding to constrain model output to a valid tool call format at the
 token level. Instead of hoping the model produces well-formed tool calls,
 structural tags enforce the expected format by restricting the decoding
@@ -205,4 +205,4 @@ To pin the scope and schema, add `--dyn-structural-tag-scope` and `--dyn-structu
 
 - [Tool Call Parsing (Dynamo)](tool-call-parsing.mdx) — parser names and basic tool calling setup
 - [Chat Processors](chat-processors.mdx) — chat processor and engine-fallback parsers
-- [xgrammar Structural Tag Documentation](https://xgrammar.mlc.ai/docs/structural_tag/structural_tag_api.html) — xgrammar format specification
+- [xgrammar Structural Tag Documentation](https://xgrammar.mlc.ai/docs/latest/api/python/structural_tag.html) — xgrammar format specification

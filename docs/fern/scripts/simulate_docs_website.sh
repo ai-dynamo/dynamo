@@ -255,8 +255,11 @@ FAKE="$FAKE" yq -i '(.navigation[] | select(.tab == "reference") | .layout) += [
 propagate_shared_reference
 grep -q "sim-test-page" "$VERSION_FILE" && s6=ok || s6=FAIL
 assert "6. round-two propagation reaches the cut version's nav" "$s6"
-# Undo before fern check (the fake page has no backing file).
-perl -ni -e 'print unless /sim-test-page|Sim Test Page/' "$WT/fern/versions/dev.yml" "$VERSION_FILE"
+# Undo before fern check (the fake page has no backing file). propagate_shared_reference
+# writes the fake entry into every v*.yml that already carries shared entries, not just
+# $VERSION_FILE, so the cleanup must cover the same set or fern check fails on a dangling
+# reference in whichever other version file picked it up (e.g. v1.4.0.yml).
+perl -ni -e 'print unless /sim-test-page|Sim Test Page/' "$WT/fern/versions/dev.yml" "$WT"/fern/versions/v*.yml
 
 [ -f "$WT/fern/scripts/convert_callouts.py" ] && \
   [ ! -e "$WT/fern/convert_callouts.py" ] && s8=ok || s8=FAIL
