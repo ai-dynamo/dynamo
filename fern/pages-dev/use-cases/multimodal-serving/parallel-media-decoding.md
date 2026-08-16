@@ -70,7 +70,7 @@ registers the model.
 
 ## Requirements and Limitations
 
-- The published `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0` image installs
+- The published `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0` image installs
   NIXL wheels but does not expose the native NIXL and UCX libraries and plugins
   required by the Rust frontend. It cannot run parallel media decoding as
   shipped. Run the frontend in a backend runtime image or environment where
