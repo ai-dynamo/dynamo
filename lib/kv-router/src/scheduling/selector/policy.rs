@@ -9,6 +9,7 @@ use super::{
     DefaultWorkerPicker, LogitWeights, WorkerSelectionInput, WorkerSelector,
     select_worker_with_policy,
 };
+use crate::kv_hints::KvHintAction;
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
@@ -161,6 +162,19 @@ pub trait WorkerPicker: Send {
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError>;
+
+    /// Return advisory KV actions for the selected worker.
+    ///
+    /// This runs exactly once after the host-owned selection completes. It is
+    /// intentionally synchronous: picker implementations must not issue I/O
+    /// or call engines from the scheduler actor.
+    fn kv_hint_actions(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _selected_worker: WorkerWithDpRank,
+    ) -> Result<Vec<KvHintAction>, WorkerSelectionPolicyError> {
+        Ok(Vec::new())
+    }
 }
 
 impl WorkerSelectionContext<'_> {
@@ -768,6 +782,52 @@ mod tests {
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
         assert_eq!(selected.worker, worker1);
+    }
+
+    #[test]
+    fn picker_emits_actions_only_after_selecting_worker() {
+        struct EmittingPicker;
+
+        impl WorkerPicker for EmittingPicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                _input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(0)
+            }
+
+            fn kv_hint_actions(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                selected_worker: WorkerWithDpRank,
+            ) -> Result<Vec<KvHintAction>, WorkerSelectionPolicyError> {
+                Ok(vec![KvHintAction::prefetch(format!(
+                    "prefetch-{}",
+                    selected_worker.worker_id
+                ))])
+            }
+        }
+
+        let worker = WorkerWithDpRank::from_worker_id(7);
+        let workers = HashMap::from([(7, TaintedWorkerConfig::default())]);
+        let request = base_request(16);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(EmittingPicker),
+        );
+
+        let result = policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+
+        assert_eq!(result.worker, worker);
+        assert_eq!(
+            result.kv_hint_actions,
+            vec![KvHintAction::prefetch("prefetch-7")]
+        );
     }
 
     #[test]

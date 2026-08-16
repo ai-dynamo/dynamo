@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
-    StopReason, TopLogprob, usage,
+    DisaggregationMode, DynamoError, KvHintAction, KvHintProtocolVersion, LLMEngineOutput,
+    LLMEngineOutputExt, PreprocessedRequest, StopReason, TopLogprob, usage,
 };
 use serde_json::{Map, Value};
 
@@ -119,6 +119,12 @@ pub(crate) fn build_generate_request(
         .routing
         .as_ref()
         .and_then(|routing| routing.lora_name.clone());
+    let session_id = request
+        .agent_context
+        .as_ref()
+        .map(|context| context.session_id.clone())
+        .filter(|session_id| !session_id.is_empty());
+    let kv_hints = kv_hints_to_proto(request);
 
     let mut trace_headers = HashMap::new();
     dynamo_runtime::logging::inject_trace_headers_into_map(&mut trace_headers);
@@ -135,13 +141,72 @@ pub(crate) fn build_generate_request(
         routing_key: request.mdc_sum.clone(),
         routed_dp_rank,
         trace_headers,
-        session_id: None,
+        session_id,
         disaggregated_params: resolve_disaggregated_params(
             request,
             mode,
             bootstrap_host,
             bootstrap_port,
         )?,
+        kv_hints,
+    })
+}
+
+fn kv_hints_to_proto(request: &PreprocessedRequest) -> Option<pb::KvHints> {
+    let hints = request.kv_hints.as_ref()?;
+    let protocol_version = match hints.protocol_version {
+        KvHintProtocolVersion::V0_1 => "0.1",
+    };
+    let actions = hints
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            KvHintAction::Demote {
+                action_id,
+                action_version,
+                payload,
+            } if !action_id.is_empty()
+                && action_id.len() <= 512
+                && !payload.session_id.is_empty()
+                && payload.session_id.len() <= 512 =>
+            {
+                Some(pb::KvHintAction {
+                    action_id: action_id.clone(),
+                    action_type: "kv.demote".to_string(),
+                    action_version: match action_version {
+                        dynamo_backend_common::KvDemoteActionVersion::V1_0 => "1.0",
+                    }
+                    .to_string(),
+                    payload: Some(pb::kv_hint_action::Payload::Demote(pb::KvDemotePayload {
+                        session_id: payload.session_id.clone(),
+                        session_generation: payload.session_generation,
+                    })),
+                })
+            }
+            KvHintAction::Prefetch {
+                action_id,
+                action_version,
+                ..
+            } if !action_id.is_empty() && action_id.len() <= 512 => Some(pb::KvHintAction {
+                action_id: action_id.clone(),
+                action_type: "kv.prefetch".to_string(),
+                action_version: match action_version {
+                    dynamo_backend_common::KvPrefetchActionVersion::V1_0 => "1.0",
+                }
+                .to_string(),
+                payload: Some(pb::kv_hint_action::Payload::Prefetch(
+                    pb::KvPrefetchPayload {},
+                )),
+            }),
+            // This bridge does not implement P2P transfer yet. Dynamo filters
+            // it through the selected worker capability before it reaches here.
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!actions.is_empty()).then(|| pb::KvHints {
+        protocol_version: protocol_version.to_string(),
+        message_id: hints.message_id.clone(),
+        actions,
     })
 }
 
@@ -578,8 +643,8 @@ mod tests {
     use std::collections::HashMap;
 
     use dynamo_backend_common::{
-        BootstrapInfo, DisaggregationMode, FinishReason, OutputOptions, PrefillResult,
-        PreprocessedRequest, SamplingOptions, StopConditions,
+        BootstrapInfo, DisaggregationMode, FinishReason, KvDemotePayload, KvHintAction, KvHints,
+        OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
     };
     use serde_json::json;
 
@@ -621,6 +686,43 @@ mod tests {
             mapped.disaggregated_params.unwrap().bootstrap_room,
             i64::MAX
         );
+    }
+
+    #[test]
+    fn request_maps_session_and_typed_storage_hints() {
+        let mut request = request();
+        request.agent_context =
+            Some(serde_json::from_value(json!({"session_id": "session-a"})).unwrap());
+        request.kv_hints = Some(KvHints::new(
+            "message-a",
+            vec![
+                KvHintAction::demote(
+                    "demote-a",
+                    KvDemotePayload {
+                        session_id: "session-a".to_string(),
+                        session_generation: Some(7),
+                    },
+                ),
+                KvHintAction::prefetch("prefetch-a"),
+            ],
+        ));
+
+        let mapped = build_generate_request(
+            &request,
+            "rid-storage",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(mapped.session_id.as_deref(), Some("session-a"));
+        let hints = mapped.kv_hints.unwrap();
+        assert_eq!(hints.protocol_version, "0.1");
+        assert_eq!(hints.message_id, "message-a");
+        assert_eq!(hints.actions.len(), 2);
+        assert_eq!(hints.actions[0].action_type, "kv.demote");
+        assert_eq!(hints.actions[1].action_type, "kv.prefetch");
     }
 
     #[test]

@@ -13,6 +13,7 @@ use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::identity::CacheOwnerId;
+use crate::kv_hints::KvHintAction;
 use xxhash_rust::xxh3;
 
 const fn default_track_prefill_tokens() -> bool {
@@ -285,6 +286,14 @@ pub trait WorkerConfigLike {
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
+
+    /// Whether this worker advertises support for one typed KV hint action.
+    ///
+    /// Hints are advisory, so an unavailable capability is filtered before
+    /// dispatch rather than becoming a routing failure.
+    fn supports_kv_hint(&self, _capability_key: &str) -> bool {
+        false
+    }
 
     /// TRANSFER capability and source metadata for a specific global DP rank.
     ///
@@ -970,6 +979,10 @@ pub struct WorkerSelectionResult {
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
+
+    /// Advisory actions produced by the selection policy after choosing this
+    /// worker. The router filters these against the worker's capabilities.
+    pub kv_hint_actions: Vec<KvHintAction>,
 }
 
 /// Active load metrics for a worker, used for overload detection.
