@@ -8,7 +8,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
-from gpu_memory_service.v1.client.mempool import TorchMempoolMemoryClient
+from gpu_memory_service.v1.client.mempool import (
+    _STAGING_DIAGNOSTICS,
+    TorchMempoolMemoryClient,
+)
 from vllm.device_allocator.sleep_mode_backend import (
     SleepModeBackend,
     SleepModeBackendFactory,
@@ -40,6 +43,8 @@ class GMSV1SleepModeBackend(SleepModeBackend):
         if level != 1:
             raise ValueError("GMS V1 supports only whole-engine level 1 suspend")
         self._client.suspend()
+        if _STAGING_DIAGNOSTICS:
+            self._client._emit_staging_diagnostic_once()
         self._state = "SUSPENDED"
 
     def resume(self, tags: list[str] | None = None) -> None:

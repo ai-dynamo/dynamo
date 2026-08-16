@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import gc
+import json
 import logging
+import os
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import datetime, timezone
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -22,7 +25,12 @@ from gpu_memory_service.v1.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.v1.client.parameter_storage import (
     copy_non_parameter_tensors_to_default_allocator,
 )
-from gpu_memory_service.v1.device import get_socket_path
+from gpu_memory_service.v1.device import (
+    _check_cuda,
+    cuda,
+    get_device_uuid,
+    get_socket_path,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -30,9 +38,89 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _WEIGHTS = "weights"
 _KV_CACHE = "kv_cache"
+_STAGING_DIAGNOSTICS = os.environ.get("DYN_GMS_STAGING_DIAGNOSTICS") == "1"
+_STAGING_DIAGNOSTIC_PREFIX = "DYN_GMS_VLLM_STAGING_DIAGNOSTIC_JSON "
 _allocator_owner_lock = threading.Lock()
 _allocator_owner: object | None = None
 _allocator_initializing: object | None = None
+
+
+def _graph_memory_bytes(device: int, attribute_name: str) -> int:
+    if cuda is None:
+        raise RuntimeError(
+            f"{_STAGING_DIAGNOSTIC_PREFIX}CUDA Graph memory query unavailable: "
+            "cuda-python is not installed"
+        )
+    try:
+        attribute = getattr(cuda.CUgraphMem_attribute, attribute_name)
+        query = cuda.cuDeviceGetGraphMemAttribute
+    except AttributeError as exc:
+        raise RuntimeError(
+            f"{_STAGING_DIAGNOSTIC_PREFIX}CUDA Graph memory query unavailable"
+        ) from exc
+
+    result, cuda_device = cuda.cuDeviceGet(device)
+    _check_cuda(result, "cuDeviceGet")
+    result, value = query(cuda_device, attribute)
+    _check_cuda(result, f"cuDeviceGetGraphMemAttribute({attribute_name})")
+    return int(value)
+
+
+def _allocator_pool_summaries(
+    device: int,
+    gms_pool_ids: dict[str, tuple[int, int]],
+) -> list[dict[str, object]]:
+    totals: dict[tuple[int, int], dict[str, int]] = {
+        (0, 0): {
+            "segment_count": 0,
+            "total_size": 0,
+            "allocated_size": 0,
+            "active_size": 0,
+            "active_allocated_requested_size": 0,
+            "active_block_size": 0,
+        }
+    }
+    for segment in torch.cuda.memory_snapshot():
+        if int(segment["device"]) != device:
+            continue
+        pool_id = tuple(int(part) for part in segment["segment_pool_id"])
+        pool_totals = totals.setdefault(
+            pool_id,
+            {
+                "segment_count": 0,
+                "total_size": 0,
+                "allocated_size": 0,
+                "active_size": 0,
+                "active_allocated_requested_size": 0,
+                "active_block_size": 0,
+            },
+        )
+        pool_totals["segment_count"] += 1
+        for field in ("total_size", "allocated_size", "active_size"):
+            pool_totals[field] += int(segment[field])
+        for block in segment["blocks"]:
+            if block["state"] == "active_allocated":
+                pool_totals["active_allocated_requested_size"] += int(
+                    block["requested_size"]
+                )
+            if block["state"].startswith("active_"):
+                pool_totals["active_block_size"] += int(block["size"])
+
+    summaries = []
+    for pool_id, pool_totals in sorted(totals.items()):
+        summaries.append(
+            {
+                "pool_id": list(pool_id),
+                "pool_kind": "default" if pool_id == (0, 0) else "private",
+                "gms_domains": sorted(
+                    domain
+                    for domain, gms_pool_id in gms_pool_ids.items()
+                    if gms_pool_id == pool_id
+                ),
+                **pool_totals,
+            }
+        )
+    return summaries
 
 
 def _reserve_allocator(owner: object) -> None:
@@ -111,6 +199,14 @@ class TorchMempoolMemoryClient:
                 self._kv_cache_pool = torch.cuda.MemPool(
                     allocator=self._pluggable_allocator.allocator()
                 )
+            if _STAGING_DIAGNOSTICS:
+                self._diagnostic_gms_pool_ids = {
+                    _WEIGHTS: tuple(int(part) for part in self._weights_pool.id),
+                    _KV_CACHE: tuple(int(part) for part in self._kv_cache_pool.id),
+                }
+                self._diagnostic_parameter_span_bytes = 0
+                self._diagnostic_copied_out_bytes = 0
+                self._diagnostic_records_emitted = 0
             # The native shim retains these callback pointers for process life.
             self._malloc_callback = self._malloc
             self._free_callback = self._free
@@ -170,10 +266,14 @@ class TorchMempoolMemoryClient:
                 raise RuntimeError("GMS V1 did not observe any loaded models")
             if any(model is None for model in models):
                 raise TypeError("GMS V1 model must not be None")
-            copy_non_parameter_tensors_to_default_allocator(
+            copy_accounting = copy_non_parameter_tensors_to_default_allocator(
                 models,
                 self._weights.mappings,
             )
+            if _STAGING_DIAGNOSTICS:
+                parameter_span_bytes, copied_out_bytes = copy_accounting
+                self._diagnostic_parameter_span_bytes = int(parameter_span_bytes)
+                self._diagnostic_copied_out_bytes = int(copied_out_bytes)
             torch.cuda.synchronize(self._device)
             self._destroy_weights_pool()
             self._raise_if_allocator_failed()
@@ -238,6 +338,86 @@ class TorchMempoolMemoryClient:
                 "GMS V1 resume failed; terminating the worker process",
                 exc_info=True,
             )
+
+    def _emit_staging_diagnostic_once(self) -> None:
+        if self._diagnostic_records_emitted:
+            return
+        torch.cuda.synchronize(self._device)
+        self._emit_staging_diagnostic()
+        self._diagnostic_records_emitted += 1
+
+    def _emit_staging_diagnostic(self) -> None:
+        current_device = int(torch.cuda.current_device())
+        gms_handles = {}
+        for domain, manager in (
+            (_WEIGHTS, self._weights),
+            (_KV_CACHE, self._kv_cache),
+        ):
+            installed_count = 0
+            installed_bytes = 0
+            with manager._lock:
+                mapping_count = len(manager._mappings)
+                for mapping in manager._mappings.values():
+                    if mapping.handle:
+                        installed_count += 1
+                        installed_bytes += int(mapping.aligned_size)
+            gms_handles[domain] = {
+                "mapping_count": mapping_count,
+                "installed_handle_count": installed_count,
+                "installed_handle_bytes": installed_bytes,
+                "all_installed_handles_zero": installed_count == 0,
+            }
+
+        graph_memory = {
+            name: _graph_memory_bytes(current_device, name)
+            for name in (
+                "CU_GRAPH_MEM_ATTR_USED_MEM_CURRENT",
+                "CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT",
+            )
+        }
+        allocator_pools = _allocator_pool_summaries(
+            current_device,
+            self._diagnostic_gms_pool_ids,
+        )
+        record = {
+            "event": "gms_v1_vllm_post_suspend_staging",
+            "utc_timestamp": datetime.now(timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z"),
+            "monotonic_seconds": monotonic(),
+            "pid": os.getpid(),
+            "rank_env": {
+                "RANK": os.environ.get("RANK"),
+                "LOCAL_RANK": os.environ.get("LOCAL_RANK"),
+                "WORLD_SIZE": os.environ.get("WORLD_SIZE"),
+            },
+            "cuda": {
+                "ordinal": current_device,
+                "physical_uuid": get_device_uuid(current_device),
+                "graph_memory_bytes": graph_memory,
+            },
+            "weight_publication": {
+                "parameter_span_bytes": self._diagnostic_parameter_span_bytes,
+                "copied_out_bytes": self._diagnostic_copied_out_bytes,
+            },
+            "gms": {
+                "pool_ids": {
+                    domain: list(pool_id)
+                    for domain, pool_id in self._diagnostic_gms_pool_ids.items()
+                },
+                "installed_handles": gms_handles,
+            },
+            "torch_allocator": {
+                "memory_allocated": int(torch.cuda.memory_allocated(current_device)),
+                "memory_reserved": int(torch.cuda.memory_reserved(current_device)),
+                "pools": allocator_pools,
+            },
+        }
+        logger.warning(
+            "%s%s",
+            _STAGING_DIAGNOSTIC_PREFIX,
+            json.dumps(record, separators=(",", ":"), sort_keys=True),
+        )
 
     @contextmanager
     def _use_pool(self, domain: str, pool: object) -> Iterator[None]:
