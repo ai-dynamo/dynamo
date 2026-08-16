@@ -1762,6 +1762,28 @@ mod tests {
     }
 
     #[test]
+    fn harness_input_trigger_reaches_worker_selection_context() {
+        use crate::protocols::{
+            agents::{HEADER_DYNAMO_AGENT_INPUT_TRIGGER, HEADER_DYNAMO_SESSION_ID},
+            common::extensions::agent_context_from_headers,
+        };
+        use axum::http::HeaderMap;
+        use dynamo_kv_router::WorkerSelectionInputTrigger;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "dsh-session".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_AGENT_INPUT_TRIGGER, "other".parse().unwrap());
+
+        let agent_context = agent_context_from_headers(&headers).expect("agent context");
+        let selection_context = to_worker_selection_session_context(&agent_context);
+        assert_eq!(selection_context.session_id(), "dsh-session");
+        assert_eq!(
+            selection_context.input_trigger(),
+            Some(WorkerSelectionInputTrigger::Other)
+        );
+    }
+
+    #[test]
     fn keyed_tracking_requires_nonempty_model_name() {
         assert!(resolve_tracking_model_name(TrackingHashAlgorithm::KeyedXxh3V1, None).is_err());
         assert!(resolve_tracking_model_name(TrackingHashAlgorithm::KeyedXxh3V1, Some("")).is_err());
