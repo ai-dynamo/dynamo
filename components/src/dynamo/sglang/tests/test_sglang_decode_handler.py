@@ -217,6 +217,15 @@ def test_cache_namespace_is_forwarded_to_sglang_cache_salt():
     request = {"routing": {"cache_namespace": "tenant-a"}}
     assert _cache_salt_kwargs(request, NewEngine()) == {"cache_salt": "tenant-a"}
 
+
+def test_extra_args_cache_salt_is_forwarded_to_sglang_cache_salt():
+    class NewEngine:
+        async def async_generate(self, *, cache_salt=None):
+            return cache_salt
+
+    request = {"extra_args": {"nvext": {"cache_salt": "tenant-a"}}}
+    assert _cache_salt_kwargs(request, NewEngine()) == {"cache_salt": "tenant-a"}
+
     class OldEngine:
         async def async_generate(self):
             return None

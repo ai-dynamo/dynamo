@@ -82,10 +82,22 @@ def _cache_salt_kwargs(request: Dict[str, Any], engine: Any) -> Dict[str, str]:
     remote KV routing, and tenant isolation in agreement. Older SGLang builds
     safely omit the optional keyword through the compatibility filter.
     """
-    routing = request.get("routing")
-    if not isinstance(routing, dict):
-        return {}
-    cache_namespace = routing.get("cache_namespace")
+    extra_args = request.get("extra_args")
+    extra_nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
+    cache_namespace = (
+        extra_nvext.get("cache_salt") if isinstance(extra_nvext, dict) else None
+    )
+
+    # ``routing`` is an internal hint and is consumed by the frontend before
+    # reaching an aggregated worker. Rust preserves the canonical public salt
+    # under ``extra_args.nvext`` for the backend. Keep the routing lookup as a
+    # compatibility path for direct Python handler calls and older wire paths.
+    if not isinstance(cache_namespace, str) or not cache_namespace:
+        routing = request.get("routing")
+        cache_namespace = (
+            routing.get("cache_namespace") if isinstance(routing, dict) else None
+        )
+
     if not isinstance(cache_namespace, str) or not cache_namespace:
         return {}
     return filter_supported_async_generate_kwargs(
