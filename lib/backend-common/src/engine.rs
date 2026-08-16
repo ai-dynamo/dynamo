@@ -26,7 +26,9 @@ pub use dynamo_llm::protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
-    BootstrapInfo, KV_HINT_TRANSFER_CAPABILITY_KEY, KvHintAction, KvHints,
+    BootstrapInfo, KV_HINT_DEMOTE_CAPABILITY_KEY, KV_HINT_PREFETCH_CAPABILITY_KEY,
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KvDemoteActionVersion, KvDemotePayload, KvHintAction,
+    KvHintProtocolVersion, KvHints, KvPrefetchActionVersion, KvPrefetchPayload,
     KvSourceLocationsPayload, MultimodalData, MultimodalDataMap, PrefillResult,
     PreprocessedRequest, RoutingHints,
 };

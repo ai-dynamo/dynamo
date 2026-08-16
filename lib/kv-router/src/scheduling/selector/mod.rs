@@ -228,6 +228,7 @@ fn selection_result(
         cached_tokens: request.effective_cached_tokens_for(worker),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
+        kv_hint_actions: Vec::new(),
     }
 }
 
@@ -358,6 +359,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 worker_type,
             };
             pick_default_worker(&scorer, picker, &input, workers, request, eligibility)
+                .map(|(worker, cost)| (worker, cost, Vec::new()))
         }
         WorkerSelectionPolicyStateRef::Custom(state) => {
             let mut state = state.borrow_mut();
@@ -416,11 +418,12 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     }
                     .into());
                 };
-                Some((candidate.worker, candidate.cost))
+                let hint_actions = picker.kv_hint_actions(&input.context, candidate.worker)?;
+                Some((candidate.worker, candidate.cost, hint_actions))
             }
         }
     };
-    let Some((worker, cost)) = selected else {
+    let Some((worker, cost, hint_actions)) = selected else {
         if eligibility.has_eligible_worker_ignoring_overload(
             workers
                 .iter()
@@ -430,7 +433,8 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size);
+    let mut result = selection_result(request, worker, block_size);
+    result.kv_hint_actions = hint_actions;
     log_selection(
         workers,
         request,

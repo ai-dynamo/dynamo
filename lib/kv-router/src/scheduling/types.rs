@@ -12,7 +12,7 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
-use crate::kv_hints::KvTransferCandidates;
+use crate::kv_hints::{KvHintAction, KvTransferCandidates};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
@@ -115,6 +115,7 @@ pub struct SchedulingResponse {
     pub target_cached_prefix_blocks: u32,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
+    pub kv_hint_actions: Vec<KvHintAction>,
 }
 
 /// A routing decision that selected less KV overlap than another eligible worker.

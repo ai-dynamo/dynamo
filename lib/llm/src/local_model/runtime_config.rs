@@ -412,6 +412,10 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.total_kv_blocks
     }
 
+    fn supports_kv_hint(&self, capability_key: &str) -> bool {
+        ModelRuntimeConfig::supports_kv_hint(self, capability_key)
+    }
+
     fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         dp_rank: u32,

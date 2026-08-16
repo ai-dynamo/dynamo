@@ -612,6 +612,10 @@ fn build_engine_config(
         "grpc_service".to_string(),
         Value::String("sglang.runtime.v1.SglangService".to_string()),
     );
+    // These mean the native gRPC bridge implements the typed actions. SGLang
+    // still treats an action as advisory when its runtime storage is disabled.
+    runtime_data.insert("kv_hint.demote.v1".to_string(), Value::Bool(true));
+    runtime_data.insert("kv_hint.prefetch.v1".to_string(), Value::Bool(true));
 
     Ok(EngineConfig {
         model: discovery.model_path.clone(),

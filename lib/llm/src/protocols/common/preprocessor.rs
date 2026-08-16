@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
 pub use dynamo_kv_router::kv_hints::{
-    KV_HINT_TRANSFER_CAPABILITY_KEY, KvHintAction, KvHints, KvSourceLocationsPayload,
+    KV_HINT_DEMOTE_CAPABILITY_KEY, KV_HINT_PREFETCH_CAPABILITY_KEY,
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KvDemoteActionVersion, KvDemotePayload, KvHintAction,
+    KvHintProtocolVersion, KvHints, KvPrefetchActionVersion, KvPrefetchPayload,
+    KvSourceLocationsPayload,
 };
 use dynamo_kv_router::{
     config::RouterConfigOverride,

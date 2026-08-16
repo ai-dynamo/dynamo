@@ -707,16 +707,22 @@ where
         target: WorkerWithDpRank,
         target_cached_prefix_blocks: u32,
         transfer_candidates: Option<&KvTransferCandidates>,
+        mut requested_actions: Vec<KvHintAction>,
     ) -> Option<KvHints> {
         let payload = self.transfer_hint_for_selection(
             target,
             target_cached_prefix_blocks,
             transfer_candidates,
-        )?;
-        Some(KvHints::new(
-            message_id.unwrap_or_default(),
-            vec![KvHintAction::source_locations("a1", payload)],
-        ))
+        );
+        if let Some(payload) = payload {
+            requested_actions.push(KvHintAction::source_locations("a1", payload));
+        }
+
+        let configs = self.workers_with_configs.borrow();
+        let target_config = configs.get(&target.worker_id)?;
+        requested_actions.retain(|action| target_config.supports_kv_hint(action.capability_key()));
+        (!requested_actions.is_empty())
+            .then(|| KvHints::new(message_id.unwrap_or_default(), requested_actions))
     }
 
     pub async fn record_routing_decision(
@@ -1127,6 +1133,7 @@ where
                 response.best_worker,
                 response.target_cached_prefix_blocks,
                 response.kv_transfer_candidates.as_ref(),
+                response.kv_hint_actions,
             )
         } else {
             None
@@ -1975,6 +1982,7 @@ mod tests {
                     .worker_load_for(self.selected_worker)
                     .potential_decode_blocks()
                     .saturating_add(request.isl_tokens.div_ceil(block_size as usize)),
+                kv_hint_actions: Vec::new(),
             })
         }
     }
@@ -2198,6 +2206,7 @@ mod tests {
             WorkerWithDpRank::new(7, 0),
             0,
             Some(&candidates),
+            Vec::new(),
         );
 
         assert_eq!(
