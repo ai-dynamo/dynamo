@@ -21,11 +21,11 @@ use crate::indexer::{
     KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
     ThreadPoolIndexer, WireTieredMatchDetails, record_unsupported_residency_event,
 };
+use crate::kv_hints::KvTransferCandidates;
 use crate::protocols::{
     LocalBlockHash, ResidencyProjection, RouterEvent, StorageTier, WorkerWithDpRank,
 };
 use arc_swap::ArcSwap;
-use crate::kv_hints::KvTransferCandidates;
 use rustc_hash::FxHashMap;
 
 /// Holds one per-tier [`ThreadPoolIndexer<LowerTierIndexer>`] for every
