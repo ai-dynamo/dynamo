@@ -134,7 +134,7 @@ impl LightseekMmCounter {
 /// Resolve the image-placeholder token id by delegating to a per-model
 /// `ModelProcessorSpec` from the registry. Each registered model (Qwen3-VL,
 /// Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Llama-4,
-/// Kimi-K2.5) reads the right field of `config.json` (`image_token_id`,
+/// Kimi-K2.5, Kimi-K3) reads the right field of `config.json` (`image_token_id`,
 /// `image_token_index`, `media_placeholder_token_id`) and falls back to the
 /// tokenizer's vocab when only the placeholder string is known.
 ///
@@ -151,14 +151,19 @@ impl LightseekMmCounter {
 /// or BOS token (one config-parse pass instead of two).
 pub fn resolve_image_token_id(model_id: &str, model_dir: &Path) -> Option<TokenIdType> {
     let config = read_json(model_dir, "config.json")?;
-    resolve_image_token_id_with_config(model_id, model_dir, &config)
+    resolve_model_spec_with_config(model_id, model_dir, &config).map(|resolved| resolved.token_id)
 }
 
-fn resolve_image_token_id_with_config(
+struct ResolvedModelSpec {
+    token_id: TokenIdType,
+    image_layout: RoutingImageLayout,
+}
+
+fn resolve_model_spec_with_config(
     model_id: &str,
     model_dir: &Path,
     config: &serde_json::Value,
-) -> Option<TokenIdType> {
+) -> Option<ResolvedModelSpec> {
     // Try the HuggingFace fast tokenizer first; fall back to a no-op
     // tokenizer when `tokenizer.json` is missing (Kimi-K2.5 ships only
     // `tiktoken.model`, for example). Specs that read the placeholder
@@ -212,7 +217,27 @@ fn resolve_image_token_id_with_config(
         spec = spec.name(),
         "resolved image-placeholder token id"
     );
-    Some(id as TokenIdType)
+    Some(ResolvedModelSpec {
+        token_id: id as TokenIdType,
+        image_layout: if spec.name() == "kimi_k3" {
+            RoutingImageLayout::KimiK3
+        } else {
+            RoutingImageLayout::RepeatedPad
+        },
+    })
+}
+
+/// Shape of the worker-side prompt replacement for one image.
+///
+/// Most registered families replace one placeholder with only a repeated pad
+/// run. Kimi K3 additionally wraps that run in resolution-bearing text and
+/// structural media tokens, which must be present in the routing-side view so
+/// its block hashes match the worker's KV events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RoutingImageLayout {
+    RepeatedPad,
+    KimiK3,
 }
 
 /// Bundle of routing-side token info resolved from a model's HF JSON
@@ -230,6 +255,9 @@ pub struct RoutingTokens {
     /// above. Equals `image_token_id` for most VLMs; Qwen2-VL / Qwen2.5-VL
     /// emit `<|image_pad|>` here while the per-patch id is `<|vision_pad|>`.
     pub chat_placeholder_token_id: Option<TokenIdType>,
+    /// Worker-side image prompt shape selected by the same registered model
+    /// spec that resolved `image_token_id`.
+    pub image_layout: RoutingImageLayout,
     /// `bos_token` string from `tokenizer_config.json` when
     /// `add_bos_token: true`. Caller encodes via its model tokenizer to
     /// produce the routing-side prepend id. `None` for models that don't
@@ -247,13 +275,17 @@ pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens
     let config = read_json(model_dir, "config.json");
     let tokenizer_config = read_json(model_dir, "tokenizer_config.json");
 
-    let image_token_id = config
+    let resolved_spec = config
         .as_ref()
-        .and_then(|c| resolve_image_token_id_with_config(model_id, model_dir, c));
+        .and_then(|c| resolve_model_spec_with_config(model_id, model_dir, c));
+    let image_token_id = resolved_spec.as_ref().map(|resolved| resolved.token_id);
     let chat_placeholder_token_id = config
         .as_ref()
         .and_then(extract_chat_placeholder_from_config)
         .or(image_token_id);
+    let image_layout = resolved_spec
+        .map(|resolved| resolved.image_layout)
+        .unwrap_or(RoutingImageLayout::RepeatedPad);
     let bos_token_string = tokenizer_config
         .as_ref()
         .and_then(extract_bos_token_from_tokenizer_config);
@@ -261,6 +293,7 @@ pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens
     RoutingTokens {
         image_token_id,
         chat_placeholder_token_id,
+        image_layout,
         bos_token_string,
     }
 }
@@ -387,6 +420,49 @@ mod tests {
         assert_eq!(counter.count_tokens(640, 480), 300);
     }
 
+    #[test]
+    fn counter_loads_kimi_k3_config_and_uses_k3_patch_budget() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("preprocessor_config.json"),
+            serde_json::json!({
+                "media_proc_cfg": {
+                    "patch_size": 14,
+                    "merge_kernel_size": 2,
+                    "in_patch_limit": 65_536,
+                    "patch_limit_on_one_side": 512,
+                    "fixed_output_tokens": null
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let counter =
+            LightseekMmCounter::try_new("/model", Some("kimi_k3"), model_dir.path()).unwrap();
+
+        assert_eq!(counter.count_tokens(4000, 3000), 143 * 108);
+    }
+
+    #[test]
+    fn routing_tokens_resolve_kimi_k3_media_placeholder() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("config.json"),
+            serde_json::json!({
+                "model_type": "kimi_k3",
+                "media_placeholder_token_id": 163_605
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let tokens = resolve_routing_tokens("/model", model_dir.path());
+        assert_eq!(tokens.image_token_id, Some(163_605));
+        assert_eq!(tokens.chat_placeholder_token_id, Some(163_605));
+        assert_eq!(tokens.image_layout, RoutingImageLayout::KimiK3);
+    }
+
     /// Coverage table for the VLM families we claim to support. Each row is
     /// a `(family_label, hf_id, model_type)` triple. A row "passes" when the
     /// upstream registry can match it via either the HF id substring OR the
@@ -418,6 +494,7 @@ mod tests {
             ),
             ("Kimi-K2.5", "moonshotai/Kimi-K2.5-Instruct", "kimi_k2_5"),
             ("Kimi-K2.6", "moonshotai/Kimi-K2.6-Instruct", "kimi_k2_6"),
+            ("Kimi-K3", "moonshotai/Kimi-K3", "kimi_k3"),
             ("Qwen3.5", "Qwen/Qwen3.5-0.8B", "qwen3_5"),
             ("Qwen3.6", "Qwen/Qwen3.6-35B-A3B", "qwen3_6"),
         ];
