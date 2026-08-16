@@ -431,7 +431,6 @@
 /recipes/deepseek-v4/                                                        @ai-dynamo/dynamo-performance-codeowners
 /recipes/glm-5-nvfp4/                                                        @ai-dynamo/dynamo-performance-codeowners
 /recipes/llama-3-70b/                                                        @ai-dynamo/dynamo-performance-codeowners
-/recipes/qwen3.6-35b/                                                        @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/incluster/                                                       @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/nat_trace/                                                       @ai-dynamo/dynamo-performance-codeowners
 /lib/bench/src/coding/                                                       @ai-dynamo/dynamo-performance-codeowners
@@ -455,6 +454,7 @@
 /benchmarks/burstgpt_loadgen/                                                @ai-dynamo/dynamo-performance-codeowners
 /lib/mocker/src/kvbm_offload/                                                @ai-dynamo/dynamo-performance-codeowners
 /recipes/qwen3-235b-a22b-fp8/                                                @ai-dynamo/dynamo-performance-codeowners
+/recipes/qwen3.6-35b-a3b-fp8/                                                @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/mocker/                                               @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/replay/                                               @ai-dynamo/dynamo-performance-codeowners
 /recipes/nemotron-3-nano-omni/                                               @ai-dynamo/dynamo-performance-codeowners

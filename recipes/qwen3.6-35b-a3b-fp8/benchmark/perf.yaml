@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Shared aiperf benchmark pod template for all 3 configs (vllm-serve,
@@ -6,7 +6,6 @@
 # values (${BENCH_POD}, ${BENCH_FRONTEND}, ${BENCH_RUN_LABEL}) plus
 # the per-hardware ones (${HW_NODE_SELECTOR}, ${HW_TOLERATIONS}) and
 # pipes this file through `envsubst` before `kubectl apply`.
-#
 apiVersion: v1
 kind: Pod
 metadata:
@@ -26,9 +25,14 @@ spec:
   #   * podAffinity would be a no-op anyway given the hostname pin.
   nodeSelector: ${HW_NODE_SELECTOR}
   tolerations: ${HW_TOLERATIONS}
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    fsGroup: 0
   containers:
     - name: benchmark
       image: python:3.11
+      imagePullPolicy: IfNotPresent
       command:
         - /bin/bash
         - -lc
@@ -37,7 +41,7 @@ spec:
           ulimit -n 1048576
           ulimit -u 65536
 
-          # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
+          # aiperf>=0.8.0 depends on crick, which has no Linux arm64 wheel.
           # GB200 benchmark pods need build tools to compile it from source.
           apt update && apt install -y --no-install-recommends curl jq git build-essential
 
@@ -45,8 +49,13 @@ spec:
           python -c "import aiperf; print('aiperf', aiperf.__version__, 'OK')"
 
           echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
+          MODEL_WAIT_DEADLINE=$(( $(date +%s) + ${MODEL_READY_TIMEOUT_SECONDS:-900} ))
           until curl -s "http://${FRONTEND}:8000/v1/models" \
               | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            if (( $(date +%s) >= MODEL_WAIT_DEADLINE )); then
+              echo "Timed out after ${MODEL_READY_TIMEOUT_SECONDS:-900}s waiting for model '${MODEL_NAME}'" >&2
+              exit 1
+            fi
             echo "[$(date '+%H:%M:%S')] not ready, sleeping 10s"
             sleep 10
           done
@@ -119,6 +128,10 @@ spec:
           value: "1800"
         - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
           value: "1800"
+        - name: MODEL_READY_TIMEOUT_SECONDS
+          value: "900"
+        - name: KEEP_INPUTS_JSON
+          value: "${KEEP_INPUTS_JSON}"
       resources:
         requests:
           cpu: "8"

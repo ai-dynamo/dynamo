@@ -543,7 +543,7 @@ areas:
   - recipes/qwen3-32b-fp8/
   - recipes/qwen3-32b/
   - recipes/qwen3-vl-30b/
-  - recipes/qwen3.6-35b/
+  - recipes/qwen3.6-35b-a3b-fp8/
   - tests/benchmarks/
   - tests/vllm_self_benchmark/
 - label: xpu

@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Embedding Cache Benchmark
 subtitle: Throughput and TTFT gains from caching vision-encoder embeddings on a multimodal workload
@@ -13,7 +13,7 @@ For the feature itself — what the embedding cache is, support across backends 
 
 ## Recipe
 
-The numbers below come from the [`qwen3.6-35b` recipe](../../../../../recipes/qwen3.6-35b/README.md), which runs three configurations on the same single-GPU node so the only thing that varies is the Dynamo feature set:
+The numbers below come from the [`qwen3.6-35b-a3b-fp8` recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b-a3b-fp8/README.md), which runs three configurations on the same single-GPU node so the only thing that varies is the Dynamo feature set:
 
 | Config         | Stack          | Frontend-decoding | Embedding cache |
 |----------------|----------------|-------------------|-----------------|
@@ -23,7 +23,7 @@ The numbers below come from the [`qwen3.6-35b` recipe](../../../../../recipes/qw
 
 **Workload:** `Qwen/Qwen3.6-35B-A3B-FP8`, sliding-window dataset (30 users × 8 turns, window = 5, 2400×1080 base64 images, 8000 input text tokens, `max_tokens=1024`, concurrency = 30). Each turn shares 4-of-5 images with the previous turn of the same user, so repeated images dominate — the exact shape the embedding cache is designed for.
 
-See the recipe README for the full deploy, dataset generation, and `aiperf` invocation.
+See the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b-a3b-fp8/README.md) for standalone deploy instructions, and the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b-a3b-fp8/benchmark/README.md) for dataset generation and the `aiperf` invocation.
 
 ## Results — H100
 
@@ -33,7 +33,7 @@ See the recipe README for the full deploy, dataset generation, and `aiperf` invo
 | `dynamo-fd`    | 0.811 |    28.42 |       7193.37 |  3567.13 | 10991.26 | 34900.51 |
 | `dynamo-fd-ec` | 0.933 |    24.56 |       6100.92 |  2369.01 | 22868.77 | 34582.94 |
 
-**Δ vs `vllm-serve`:**
+**Delta vs `vllm-serve`:**
 
 | Config         |    RPS |    ITL | TTFT avg | TTFT p50 | TTFT p90 | TTFT p99 |
 |----------------|-------:|-------:|---------:|---------:|---------:|---------:|
@@ -48,7 +48,7 @@ See the recipe README for the full deploy, dataset generation, and `aiperf` invo
 | `dynamo-fd`    | 1.117 |    16.82 |       9478.46 |  9060.62 | 15399.09 | 17325.61 |
 | `dynamo-fd-ec` | 1.236 |    15.22 |       8478.29 |  8323.53 | 13992.25 | 16075.06 |
 
-**Δ vs `vllm-serve`:**
+**Delta vs `vllm-serve`:**
 
 | Config         |    RPS |   ITL | TTFT avg | TTFT p50 | TTFT p90 | TTFT p99 |
 |----------------|-------:|------:|---------:|---------:|---------:|---------:|
@@ -65,7 +65,7 @@ See the recipe README for the full deploy, dataset generation, and `aiperf` invo
 ## Reproduce
 
 ```bash
-cd recipes/qwen3.6-35b
+cd recipes/qwen3.6-35b-a3b-fp8/benchmark
 HW=h100   # or gb200
 ./run-all-benchmarks.sh -n <namespace> --hw "${HW}"
 ```
@@ -74,4 +74,4 @@ Each config's `profile_export_aiperf.json` lands under
 `~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/{vllm-serve,dynamo-fd,dynamo-fd-ec}/`
 and holds the headline metrics.
 
-Full instructions and prerequisites live in [`recipes/qwen3.6-35b/README.md`](../../../../../recipes/qwen3.6-35b/README.md).
+Full instructions and prerequisites live in [`recipes/qwen3.6-35b-a3b-fp8/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b-a3b-fp8/README.md).

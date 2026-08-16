@@ -51,3 +51,8 @@
 # it 404 from CI until the PR merges. Remove this entry once agg.yaml lands on main
 # (afterwards lychee validates the URL again, catching any later rename/move).
 ^https://github\.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg\.yaml
+
+# This recipe is introduced by the same PR as its docs links. Lychee resolves
+# relative recipe links to blob/main too, so they 404 until the PR merges.
+# Remove this entry after the recipe lands so future link changes are validated.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/recipes/qwen3\.6-35b-a3b-fp8(/.*)?$

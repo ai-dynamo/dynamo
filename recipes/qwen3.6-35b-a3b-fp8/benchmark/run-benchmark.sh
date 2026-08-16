@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Unified driver for the Qwen3.6-35B-A3B-FP8 3-way benchmark.
@@ -22,6 +22,8 @@ NAMESPACE=""
 STEP="all"
 HW="h100"
 CONFIG=""
+KEEP_INPUTS_JSON="${KEEP_INPUTS_JSON:-0}"
+export KEEP_INPUTS_JSON
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,7 +39,8 @@ done
 if [[ -z "$NAMESPACE" ]]; then
   echo "ERROR: -n <namespace> required" >&2; exit 2
 fi
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd)"   # benchmark/ — holds perf.yaml + data-gen-job.yaml
+ROOT="$(cd "$HERE/.." && pwd)"          # recipe root — holds deploy/ hw/ model-cache/
 
 # Per-config metadata. Keep this list in sync with the sibling config dirs.
 #   DEPLOY_KIND branches deploy() + clean():
@@ -82,13 +85,13 @@ case "$CONFIG" in
 esac
 export BENCH_POD BENCH_FRONTEND BENCH_RUN_LABEL
 
-HW_ENV="$HERE/hw/${HW}.env"
+HW_ENV="$ROOT/hw/${HW}.env"
 if [[ ! -f "$HW_ENV" ]]; then
   echo "ERROR: hardware env file not found: $HW_ENV" >&2
-  echo "Available: $(ls "$HERE/hw/" 2>/dev/null | tr '\n' ' ')" >&2
+  echo "Available: $(ls "$ROOT/hw/" 2>/dev/null | tr '\n' ' ')" >&2
   exit 2
 fi
-DEPLOY_TPL="$HERE/deploy/${CONFIG}.yaml"
+DEPLOY_TPL="$ROOT/deploy/${CONFIG}.yaml"
 
 if ! command -v envsubst >/dev/null 2>&1; then
   echo "ERROR: envsubst missing. Install gettext-base (apt) or gettext (brew)." >&2
@@ -101,11 +104,11 @@ echo "[hw]     $HW → image=$VLLM_IMAGE node=$HW_NODE_SELECTOR"
 echo "[config] $CONFIG → kind=$DEPLOY_KIND deploy=$DEPLOY_NAME bench-pod=$BENCH_POD"
 
 K="kubectl -n $NAMESPACE"
-# Limit envsubst to our own template vars so embedded ${MODEL_NAME} /
-# ${KEEP_INPUTS_JSON:-} shell vars inside perf.yaml's inline bash stay
-# literal. $BENCH_* drive the shared perf.yaml; $VLLM_IMAGE / $HW_*
-# drive deploy.yaml + perf.yaml.
-TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL'
+# Limit envsubst to our own template vars so unrelated shell variables inside
+# perf.yaml's inline bash stay literal. $BENCH_* drive the shared perf.yaml;
+# $VLLM_IMAGE drives deploy templates, $HW_* drive deploy and benchmark
+# templates, and $KEEP_INPUTS_JSON controls request-payload retention.
+TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL $KEEP_INPUTS_JSON'
 APPLY_TPL() { envsubst "$TPL_VARS" <"$1" | $K apply -f -; }
 
 # ---------------- config-agnostic prep ----------------
@@ -113,10 +116,10 @@ APPLY_TPL() { envsubst "$TPL_VARS" <"$1" | $K apply -f -; }
 pvc() {
   # `shared-model-cache` is expected to be pre-provisioned in the namespace
   # (RWX, e.g. FSx Lustre). If your cluster doesn't pre-provision it, create
-  # the PVC out-of-band — see README.md → "Storage: shared-model-cache".
+  # the PVC out-of-band — see ../README.md → "Storage: shared-model-cache".
   if ! $K get pvc shared-model-cache >/dev/null 2>&1; then
     echo "[pvc] ERROR: PVC 'shared-model-cache' not found in namespace '$NAMESPACE'" >&2
-    echo "[pvc] See README.md → 'Storage: shared-model-cache' for provisioning guidance." >&2
+    echo "[pvc] See ../README.md → 'Storage: shared-model-cache' for provisioning guidance." >&2
     exit 1
   fi
   $K get pvc shared-model-cache
@@ -131,7 +134,7 @@ download() {
     echo "[download] previous job present but not Complete — deleting and re-applying"
     $K delete job qwen36-model-download
   fi
-  $K apply -f "$HERE/model-cache/model-download.yaml"
+  $K apply -f "$ROOT/model-cache/model-download.yaml"
   $K wait --for=condition=Complete job/qwen36-model-download --timeout=3600s
 }
 
@@ -173,8 +176,19 @@ bench() {
   $K delete pod "$BENCH_POD" --ignore-not-found
   APPLY_TPL "$HERE/perf.yaml"
   $K wait --for=condition=Ready "pod/$BENCH_POD" --timeout=300s
-  echo "[bench] streaming logs — Ctrl-C to detach (the run continues in pod)"
-  $K logs -f "$BENCH_POD" || true
+  echo "[bench] streaming logs until the benchmark completes"
+  local completed=false
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+    if [[ "$line" == *"Run complete. Artifacts in"* ]]; then
+      completed=true
+      break
+    fi
+  done < <($K logs -f "$BENCH_POD")
+  if [[ "$completed" != "true" ]]; then
+    echo "[bench] benchmark pod stopped before reporting completion" >&2
+    return 1
+  fi
 }
 
 retrieve() {
@@ -182,9 +196,13 @@ retrieve() {
   # workspace layout differs from the default.
   local base="${BENCHMARK_RESULTS_DIR:-$HOME/workspace/dynamo-tmp/logs}"
   local dest="$base/$(date +%m-%d)/qwen36-fp8-${HW}/${CONFIG}"
+  local tar_args=(-C /perf-cache artifacts)
+  if [[ "$KEEP_INPUTS_JSON" != "1" ]]; then
+    tar_args=(--exclude='inputs.json' "${tar_args[@]}")
+  fi
   mkdir -p "$dest"
   $K exec "$BENCH_POD" -- \
-      tar c --exclude='inputs.json' -C /perf-cache artifacts \
+      tar c "${tar_args[@]}" \
     | tar x -C "$dest"
   echo "[retrieve] landed at $dest"
   find "$dest" -name 'profile_export_aiperf.json' -print
@@ -213,6 +231,7 @@ all() {
   deploy
   bench
   retrieve
+  clean
 }
 
 case "$STEP" in
