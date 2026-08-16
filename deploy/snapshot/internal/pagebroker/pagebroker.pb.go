@@ -465,8 +465,9 @@ func (x *PrepareStagedCheckpointRequest) GetIoEngine() *IOEngine {
 	return nil
 }
 
-// Completes a live transaction. Repeating Commit for a committed transaction returns CommitComplete;
-// Commit for an aborted or unknown transaction returns TRANSACTION_NOT_FOUND.
+// Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
+// Repeating Commit for a retained committed transaction returns CommitComplete; Commit for an aborted, expired, or
+// unknown transaction returns TRANSACTION_NOT_FOUND.
 type CommitRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -503,8 +504,9 @@ func (*CommitRequest) Descriptor() ([]byte, []int) {
 	return file_v1_pagebroker_proto_rawDescGZIP(), []int{7}
 }
 
-// Releases PageBroker state for a live transaction. Repeating Abort for an aborted transaction returns
-// AbortComplete; Abort for a committed or unknown transaction returns TRANSACTION_NOT_FOUND.
+// Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
+// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete; Abort for a committed, expired,
+// or unknown transaction returns TRANSACTION_NOT_FOUND.
 type AbortRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -545,8 +547,8 @@ type Request struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Snapshot assigns an ID to each request.
 	RequestId *string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3,oneof" json:"request_id,omitempty"`
-	// Snapshot assigns a unique transaction ID before the first request and does not reuse it while live. PageBroker
-	// expires an uncommitted transaction one hour after staging begins.
+	// Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
+	// An uncommitted transaction expires one hour after staging begins.
 	TransactionId *string `protobuf:"bytes,2,opt,name=transaction_id,json=transactionId,proto3,oneof" json:"transaction_id,omitempty"`
 	// Types that are valid to be assigned to Command:
 	//

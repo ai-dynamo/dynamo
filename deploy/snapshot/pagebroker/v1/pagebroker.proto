@@ -43,19 +43,21 @@ message PrepareStagedCheckpointRequest
   StorageBackend destination = 1;
   IOEngine io_engine = 2;
 }
-// Completes a live transaction. Repeating Commit for a committed transaction returns CommitComplete;
-// Commit for an aborted or unknown transaction returns TRANSACTION_NOT_FOUND.
+// Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
+// Repeating Commit for a retained committed transaction returns CommitComplete; Commit for an aborted, expired, or
+// unknown transaction returns TRANSACTION_NOT_FOUND.
 message CommitRequest {}
-// Releases PageBroker state for a live transaction. Repeating Abort for an aborted transaction returns
-// AbortComplete; Abort for a committed or unknown transaction returns TRANSACTION_NOT_FOUND.
+// Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
+// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete; Abort for a committed, expired,
+// or unknown transaction returns TRANSACTION_NOT_FOUND.
 message AbortRequest {}
 
 message Request
 {
   // Snapshot assigns an ID to each request.
   optional string request_id = 1;
-  // Snapshot assigns a unique transaction ID before the first request and does not reuse it while live. PageBroker
-  // expires an uncommitted transaction one hour after staging begins.
+  // Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
+  // An uncommitted transaction expires one hour after staging begins.
   optional string transaction_id = 2;
   oneof command
   {
