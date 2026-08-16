@@ -12,6 +12,7 @@ from examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark impor
     BenchmarkAuditError,
     audit_encoder_log,
     summarize,
+    summarize_perf_log,
     validate_profile,
 )
 
@@ -135,6 +136,11 @@ def test_summary_reports_remote_achieved_to_offered_gate(
                 "concurrency": None,
                 "topologies": ["remote"],
                 "response_placement": "inline",
+                "nixl_send_pool_capacity": 256,
+                "nixl_send_pool_bytes": 1_048_576,
+                "nixl_progress_thread": True,
+                "batch_queue_wait_ms": 2,
+                "batch_queue_max_wait_ms": 2,
             },
         },
     )
@@ -142,18 +148,17 @@ def test_summary_reports_remote_achieved_to_offered_gate(
         tmp_path / "workload_audit.json",
         {"measured_sha256": "audited-workload"},
     )
-    for repetition in range(1, 4):
-        _write_json(
-            tmp_path / f"rep-{repetition}/remote/cell_audit.json",
-            _cell(20.0, 49.5),
-        )
-        _write_json(
-            tmp_path / f"rep-{repetition}/remote/joined_smoke.json",
-            {
-                "classifier_scores": {"positive-mean": 0.5, "negative-mean": 0.5},
-                "classifier_score_sum": 1.0,
-            },
-        )
+    _write_json(
+        tmp_path / "rep-1/remote/cell_audit.json",
+        _cell(20.0, 49.5),
+    )
+    _write_json(
+        tmp_path / "rep-1/remote/joined_smoke.json",
+        {
+            "classifier_scores": {"positive-mean": 0.5, "negative-mean": 0.5},
+            "classifier_score_sum": 1.0,
+        },
+    )
 
     result = summarize(tmp_path)
 
@@ -189,4 +194,29 @@ def test_runner_omits_measured_concurrency_limit() -> None:
     assert '--request-rate "$REQUEST_RATE"' in measured
     assert "--request-rate-mode constant" in measured
     assert "--concurrency" not in measured
-    assert 'DEFAULT_CELL_PLAN="1:remote 2:remote 3:remote"' in runner
+    assert 'DEFAULT_CELL_PLAN="1:remote"' in runner
+
+
+def test_perf_log_summary_groups_numeric_fields(tmp_path: Path) -> None:
+    log = tmp_path / "server.log"
+    log.write_text(
+        "\n".join(
+            [
+                'INFO workflow_perf {"event":"nixl.import","trace_id":"a",'
+                '"wait_ms":2.0,"bytes":16}',
+                'INFO workflow_perf {"event":"nixl.import","trace_id":"b",'
+                '"wait_ms":6.0,"bytes":32}',
+                "INFO workflow_perf {not-json}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = summarize_perf_log(log)
+
+    assert summary["records"] == 2
+    assert summary["malformed_records"] == 1
+    imported = summary["events"]["nixl.import"]
+    assert imported["records"] == 2
+    assert imported["unique_trace_ids"] == 2
+    assert imported["numeric_fields"]["wait_ms"]["mean"] == 4.0

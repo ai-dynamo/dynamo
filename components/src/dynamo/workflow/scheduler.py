@@ -6,13 +6,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from collections.abc import Mapping
 from typing import Any, cast
 
 from dynamo.workflow.dispatcher import StageDispatcher
 from dynamo.workflow.ir import StageIR, WorkflowIR
+from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.workflow.runtime import StageContext, WorkflowAttempt
 from dynamo.workflow.types import ValueRef
+
+logger = logging.getLogger(__name__)
 
 
 class GraphScheduler:
@@ -28,6 +33,7 @@ class GraphScheduler:
         tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
 
         async def run_stage(stage: StageIR) -> dict[str, Any]:
+            started_ns = time.perf_counter_ns()
             stage_inputs = {}
             for name, reference in stage.inputs.items():
                 value = await resolve_raw(reference)
@@ -37,7 +43,8 @@ class GraphScheduler:
                     name,
                     value,
                 )
-            return await self._dispatcher.call(
+            dependencies_ready_ns = time.perf_counter_ns()
+            result = await self._dispatcher.call(
                 stage.id,
                 stage.contract,
                 stage_inputs,
@@ -51,6 +58,15 @@ class GraphScheduler:
                     request_context=attempt.request_context,
                 ),
             )
+            WORKFLOW_PERF_TRACE.emit(
+                logger,
+                "workflow.stage",
+                attempt.attempt_id,
+                dependency_wait_ms=(dependencies_ready_ns - started_ns) / 1_000_000,
+                elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+                stage=stage.id,
+            )
+            return result
 
         async def resolve_raw(reference: ValueRef) -> Any:
             if reference.input_name is not None:

@@ -28,6 +28,8 @@ startup, not on the first request.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Generic, List
 
@@ -39,6 +41,9 @@ from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
     VisionEncoderBackend,
 )
 from dynamo.vllm.multimodal_utils.custom_encoder.batcher import ThreadedMicroBatcher
+from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
@@ -145,7 +150,12 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
 
     # ---- request path ------------------------------------------------------
 
-    async def encode(self, raws: List[RawT]) -> List[ArtifactT]:
+    async def encode(
+        self,
+        raws: List[RawT],
+        *,
+        trace_id: str | None = None,
+    ) -> List[ArtifactT]:
         """Optionally preprocess (off-loop, with a request-atomicity barrier) then
         batched-encode.
 
@@ -159,10 +169,21 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
             raise RuntimeError("AsyncVisionEncoder.encode() called before load()")
         if not raws:
             return []
+        traced = trace_id is not None and WORKFLOW_PERF_TRACE.samples(trace_id)
+        started_ns = time.perf_counter_ns() if traced else None
         if self._pool is None:
             # No preprocess phase: raw IS the item (cost defaults to 1). No
             # barrier needed — the batched forward is all-or-nothing per request.
-            return await self._batcher.submit(list(raws))  # type: ignore[arg-type]
+            results = await self._batcher.submit(  # type: ignore[arg-type]
+                list(raws), trace_id=trace_id
+            )
+            self._trace_request(
+                trace_id,
+                started_ns,
+                preprocess_ms=0.0,
+                results=len(results),
+            )
+            return results
         loop = asyncio.get_running_loop()
         # Request-atomicity barrier: preprocess all images concurrently, wait for
         # EVERY one to settle, and submit only if all succeeded. return_exceptions=True makes
@@ -173,6 +194,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
             for raw in raws
         ]
         settled = await asyncio.gather(*tasks, return_exceptions=True)
+        preprocess_finished_ns = time.perf_counter_ns() if traced else None
         for result in settled:
             if isinstance(result, BaseException):
                 # Fail the whole request atomically; no item was submitted (no GPU
@@ -184,7 +206,42 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
         items = [p.item for p in preprocessed]
         costs = [p.cost for p in preprocessed]
         bucket_keys = [p.bucket_key for p in preprocessed]
-        return await self._batcher.submit(items, costs, bucket_keys)
+        results = await self._batcher.submit(
+            items,
+            costs,
+            bucket_keys,
+            trace_id=trace_id,
+        )
+        self._trace_request(
+            trace_id,
+            started_ns,
+            preprocess_ms=(
+                0.0
+                if started_ns is None or preprocess_finished_ns is None
+                else (preprocess_finished_ns - started_ns) / 1_000_000
+            ),
+            results=len(results),
+        )
+        return results
+
+    @staticmethod
+    def _trace_request(
+        trace_id: str | None,
+        started_ns: int | None,
+        *,
+        preprocess_ms: float,
+        results: int,
+    ) -> None:
+        if trace_id is None or started_ns is None:
+            return
+        WORKFLOW_PERF_TRACE.emit(
+            logger,
+            "encoder.request",
+            trace_id,
+            elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+            preprocess_ms=preprocess_ms,
+            results=results,
+        )
 
     def shutdown(self) -> None:
         """Stop the actor thread (running ``backend.close`` on it) and the

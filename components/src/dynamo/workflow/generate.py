@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, Protocol
 
 from dynamo.common.external_encoder import ExternalEncoderResult
 from dynamo.workflow.nixl import NixlTensorRef
-from dynamo.workflow.remote import NixlCarriedValue
+from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.workflow.runtime import StageContext, WorkflowExecutionError
 from dynamo.workflow.types import StageContract
 
@@ -18,6 +20,8 @@ GENERATE_REQUEST_PORT = "request"
 GENERATE_FEATURES_PORT = "encoder_features"
 GENERATE_METADATA_PORT = "encoder_metadata"
 GENERATE_OUTPUT_PORT = "completion"
+
+logger = logging.getLogger(__name__)
 
 
 class _DynamoClient(Protocol):
@@ -138,13 +142,29 @@ class GenerateEndpointInvoker:
         context: StageContext,
     ) -> Mapping[str, Any]:
         del contract
+        if output_transfers:
+            raise WorkflowExecutionError(
+                f"Generate endpoint stage {stage_id!r} cannot export tensor outputs"
+            )
+
+        started_ns = time.perf_counter_ns()
         stream = await self.open(stage_id, inputs, context)
+        opened_ns = time.perf_counter_ns()
         try:
             completion = await collect_generation(stream, stage_id)
         except BaseException:
             await stream.aclose(cancel=True)
             raise
         await stream.aclose()
+        WORKFLOW_PERF_TRACE.emit(
+            logger,
+            "workflow.generate",
+            context.attempt_id,
+            collect_ms=(time.perf_counter_ns() - opened_ns) / 1_000_000,
+            elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+            open_ms=(opened_ns - started_ns) / 1_000_000,
+            stage=stage_id,
+        )
         return {GENERATE_OUTPUT_PORT: completion}
 
 

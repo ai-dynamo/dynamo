@@ -14,12 +14,15 @@ caller, and the shutdown lifecycle behaves.
 """
 
 import asyncio
+import json
+import logging
 import threading
 from typing import Callable
 
 import pytest
 
 from dynamo.vllm.multimodal_utils.custom_encoder.batcher import ThreadedMicroBatcher
+from dynamo.workflow.perf import WorkflowPerfTracer
 
 pytestmark = [
     pytest.mark.unit,
@@ -103,6 +106,35 @@ async def test_submit_returns_one_result_per_item():
         assert out == [("r", "a"), ("r", "b"), ("r", "c")]
     finally:
         b.shutdown()
+
+
+async def test_trace_records_queue_and_forward_timing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        "dynamo.vllm.multimodal_utils.custom_encoder.batcher.WORKFLOW_PERF_TRACE",
+        WorkflowPerfTracer(enabled=True, sample_every=1),
+    )
+    b = ThreadedMicroBatcher(_echo)
+    b.start()
+    try:
+        with caplog.at_level(logging.INFO):
+            assert await b.submit(["a"], trace_id="attempt-1") == ["a"]
+    finally:
+        b.shutdown()
+
+    payloads = [
+        json.loads(record.getMessage().removeprefix("workflow_perf "))
+        for record in caplog.records
+        if record.getMessage().startswith("workflow_perf ")
+    ]
+    assert len(payloads) == 1
+    assert payloads[0]["event"] == "encoder.batch"
+    assert payloads[0]["trace_id"] == "attempt-1"
+    assert payloads[0]["batch_size"] == 1
+    assert payloads[0]["queue_wait_ms"] >= 0
+    assert payloads[0]["forward_ms"] >= 0
 
 
 async def test_on_start_fn_and_on_stop_share_one_non_main_thread():
