@@ -71,15 +71,26 @@ func NewCRIUDumpManifest(criuOpts *criurpc.CriuOpts, settings CRIUSettings) CRIU
 
 // SourcePodManifest records the source pod identity at checkpoint time.
 type SourcePodManifest struct {
-	ContainerID  string `yaml:"containerId"`
-	PID          int    `yaml:"pid"`
-	SourceNode   string `yaml:"sourceNode"`
-	PodName      string `yaml:"podName"`
-	PodNamespace string `yaml:"podNamespace"`
-	PodIP        string `yaml:"podIP,omitempty"`
+	ContainerID  string                `yaml:"containerId"`
+	PID          int                   `yaml:"pid"`
+	SourceNode   string                `yaml:"sourceNode"`
+	PodName      string                `yaml:"podName"`
+	PodNamespace string                `yaml:"podNamespace"`
+	PodIP        string                `yaml:"podIP,omitempty"`
+	Mounts       []SourceMountManifest `yaml:"mounts,omitempty"`
+
+	RuntimeManagedMounts *int `yaml:"runtimeManagedMounts,omitempty"`
 
 	// StdioFDs holds readlink targets for FDs 0, 1, 2 (e.g. "pipe:[12345]").
 	StdioFDs []string `yaml:"stdioFDs,omitempty"`
+}
+
+type SourceMountManifest struct {
+	Path       string `yaml:"path"`
+	Volume     string `yaml:"volume"`
+	ProvidedBy string `yaml:"providedBy"`
+	ReadOnly   bool   `yaml:"readOnly,omitempty"`
+	SubPath    string `yaml:"subPath,omitempty"`
 }
 
 func NewSourcePodManifest(containerID string, pid int, sourceNode, podName, podNamespace, podIP string, stdioFDs []string) SourcePodManifest {

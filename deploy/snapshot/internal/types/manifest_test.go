@@ -33,6 +33,15 @@ func TestManifestRoundTrip(t *testing.T) {
 		},
 	)
 	original.CUDA = NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"})
+	runtimeManagedMounts := 2
+	original.K8s.Mounts = []SourceMountManifest{{
+		Path:       "/data",
+		Volume:     "model-cache",
+		ProvidedBy: "PersistentVolumeClaim/model-cache",
+		ReadOnly:   true,
+		SubPath:    "weights",
+	}}
+	original.K8s.RuntimeManagedMounts = &runtimeManagedMounts
 
 	if err := WriteManifest(dir, original); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
@@ -73,6 +82,12 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if len(loaded.K8s.StdioFDs) != 3 {
 		t.Errorf("StdioFDs count = %d, want 3", len(loaded.K8s.StdioFDs))
+	}
+	if len(loaded.K8s.Mounts) != 1 || loaded.K8s.Mounts[0] != original.K8s.Mounts[0] {
+		t.Errorf("K8s.Mounts = %v, want %v", loaded.K8s.Mounts, original.K8s.Mounts)
+	}
+	if loaded.K8s.RuntimeManagedMounts == nil || *loaded.K8s.RuntimeManagedMounts != 2 {
+		t.Errorf("K8s.RuntimeManagedMounts = %v, want 2", loaded.K8s.RuntimeManagedMounts)
 	}
 	if loaded.Overlay.UpperDir != "/var/lib/containerd/upper" {
 		t.Errorf("Overlay.UpperDir = %q", loaded.Overlay.UpperDir)
