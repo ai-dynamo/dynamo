@@ -40,7 +40,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 
 
 Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-with HPA, KEDA, or Planner for autoscaling instead. See docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md
+with HPA, KEDA, or Planner for autoscaling instead. See https://docs.nvidia.com/dynamo/latest/knowledge-base/kubernetes/kubernetes-operator/autoscaling
 for migration guidance. This field will be removed in a future API version.
 
 
@@ -430,7 +430,7 @@ _Appears in:_
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
-| `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
+| `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See https://docs.nvidia.com/dynamo/latest/knowledge-base/kubernetes/kubernetes-operator/autoscaling<br />for migration guidance. This field will be removed in a future API version. |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
@@ -475,7 +475,7 @@ _Appears in:_
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
-| `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
+| `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See https://docs.nvidia.com/dynamo/latest/knowledge-base/kubernetes/kubernetes-operator/autoscaling<br />for migration guidance. This field will be removed in a future API version. |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
