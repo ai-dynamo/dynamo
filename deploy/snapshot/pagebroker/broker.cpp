@@ -14,7 +14,7 @@ namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
 
-constexpr auto kTerminalTransactionRetention = std::chrono::seconds(60);
+constexpr auto kTerminalTransactionRetention = std::chrono::hours(1);
 constexpr size_t kMaxRetainedTerminalTransactions = 1024;
 constexpr auto kLiveTransactionLifetime = std::chrono::hours(1);
 
