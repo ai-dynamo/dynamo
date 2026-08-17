@@ -284,9 +284,7 @@ where
             .collect::<Vec<String>>()
     );
 
-    let run_result = http_service
-        .run(distributed_runtime.primary_token())
-        .await;
+    let run_result = http_service.run(distributed_runtime.primary_token()).await;
 
     // The watcher tasks spawned by `run_watcher` hold clones of the
     // distributed runtime and stay alive until the primary token is
