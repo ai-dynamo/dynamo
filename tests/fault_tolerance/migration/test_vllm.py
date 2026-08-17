@@ -151,9 +151,6 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
-        # Keep migration tests on baseline vLLM path even if host env exports FPM knobs.
-        env.pop("DYN_FORWARDPASS_METRIC_PORT", None)
-        env.pop("DYN_FPM_TRACE", None)
 
         # Disable backend shutdown grace period for all migration tests
         env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = "0"
