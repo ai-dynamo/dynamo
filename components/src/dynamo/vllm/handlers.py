@@ -2796,9 +2796,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 use_audio_in_video) forwarded to the vLLM engine.
 
         Returns:
-            Tuple of (prompt, error_dict) where:
-            - On success: (prompt, None)
-            - On failure: (None, error_dict to yield)
+            Tuple of (prompt, None). The second field preserves the existing
+            worker-handler contract.
+
+        Raises:
+            InvalidArgument: prompt embeddings are disabled or cannot be decoded.
         """
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
@@ -2806,16 +2808,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "Set `--enable-prompt-embeds` to allow `prompt_embeds` in request."
                 )
                 logger.error(
-                    f"Rejected prompt_embeds for {log_prefix.lower().strip() or 'request'} "
-                    f"{request_id}: {msg}"
+                    "Rejected prompt_embeds for %s %s: %s",
+                    log_prefix.lower().strip() or "request",
+                    request_id,
+                    msg,
                 )
-                return (
-                    None,
-                    {
-                        "finish_reason": f"error: Invalid prompt_embeds: {msg}",
-                        "token_ids": [],
-                    },
-                )
+                raise InvalidArgument(f"Invalid prompt_embeds: {msg}")
             try:
                 prompt, tensor = self._create_prompt_from_embeddings(
                     request["prompt_embeds"]
@@ -2826,18 +2824,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"request_id={request_id}"
                 )
                 return prompt, None
-            except Exception as e:
+            except Exception as exc:
                 logger.error(
-                    f"Failed to process prompt_embeds for {log_prefix.lower().strip() or 'request'} "
-                    f"{request_id}: {e}"
+                    "Failed to process prompt_embeds for %s %s: %s",
+                    log_prefix.lower().strip() or "request",
+                    request_id,
+                    exc,
                 )
-                return (
-                    None,
-                    {
-                        "finish_reason": f"error: Invalid prompt_embeds: {e}",
-                        "token_ids": [],
-                    },
-                )
+                raise InvalidArgument(f"Invalid prompt_embeds: {exc}") from exc
         # Text-only PD + encoder-worker path.
         # Normal path: use token IDs.
         # Prefer frontend-forwarded mm_hashes for hash consistency with the

@@ -924,6 +924,17 @@ class TestDecodeWorkerMultimodalBranching:
         else:
             assert prompt["mm_processor_kwargs"] is mm_processor_kwargs
 
+    async def test_handler_prompt_builder_rejects_disabled_prompt_embeds(self):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        handler.config.engine_args.enable_prompt_embeds = False
+
+        with pytest.raises(mod.InvalidArgument, match="--enable-prompt-embeds"):
+            handler._build_prompt_from_request(
+                {"prompt_embeds": "unused"},
+                "request-prompt",
+                multi_modal_data=None,
+            )
+
 
 @pytest.mark.asyncio
 async def test_prefill_delegates_mode_policy_to_shared_processor():
