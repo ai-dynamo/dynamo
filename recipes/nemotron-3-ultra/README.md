@@ -66,6 +66,17 @@ The Refresh manifests enable KV-aware routing, prefix caching, asynchronous sche
 
 The H200 and B200 1P1D profiles use UCX/RDMA and request one `rdma/ib` resource per GPU. The GB200 1P1D profile uses UCX/TCP and does not require an RDMA device resource.
 
+The B200 and GB200 256K 1P1D profiles use FlashInfer attention; the H200 256K profile uses FlashAttention. These explicit backends are part of the qualified configurations.
+
+Before deploying a B200 or H200 1P1D profile, verify that the namespace's scheduler queue can place pods on a GPU node pool that advertises the required `rdma/ib` resources:
+
+```bash
+kubectl get nodes \
+  -o custom-columns=NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu,RDMA:.status.allocatable.rdma/ib
+```
+
+If the nodes advertise RDMA but the pods remain pending, update the namespace or queue placement to admit that RDMA-capable pool. Removing the `rdma/ib` request changes the qualified UCX transport and requires a new performance qualification.
+
 The following 1P1D reference points passed the 50 output tok/s/user SLA on the complete 3,541-row agentic trace. The 256K rows and the H200/B200 1M rows are closed boundaries: each is the highest passing concurrency before the first complete SLA-failing point. GB200 1M concurrency 28 is the current passing anchor; its next boundary point remains to be rerun after an infrastructure interruption.
 
 | GPU | Context | Concurrency | Output tok/s/GPU | Output tok/s/user | TTFT p50 (ms) | ITL p50 (ms) |
@@ -239,12 +250,15 @@ Ultra reasoning budget request control:
 
 Do not send `force_nonempty_content` as a top-level request parameter.
 
+For deterministic structured-output and required or named tool-call smoke tests, use the nested no-thinking control above so the response contract contains only the requested payload.
+
 ## Known Issues
 
 1. Optional OpenAI/vLLM/NIM API fields are shared Dynamo API compatibility gaps, not Ultra recipe-specific failures.
 2. Top-level reasoning controls such as `include_reasoning`, `thinking_token_budget`, `reasoning_effort`, and `usage.reasoning_tokens` are part of that shared API compatibility work. Use the Ultra-specific `chat_template_kwargs` and `nvext` controls above as the current model-specific workaround.
 3. Do not remove `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` or `--no-enable-flashinfer-autotune` from the vLLM worker commands unless rerunning the benchmark qualification. These are part of the performance recipe.
 4. Raw Moontrace replay may contain over-context or pathological long-generation rows. Do not drop those rows silently; preserve them as HTTP/error evidence or classify the run accordingly.
+5. Strict structured output and tool-call envelopes are not yet qualified with the combination of MTP speculative decoding and prefix caching in the pinned runtime. Use a no-MTP Refresh profile for contract validation until the runtime compatibility issue is resolved; keep the MTP5 256K profiles for their qualified performance path.
 
 ## File Layout
 
