@@ -108,11 +108,11 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm trtllm" data-hardware="h100 h200 b200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
-      <div><h3>Nemotron-3.5-Lightning</h3><p>NVIDIA</p></div>
+      <div><h3>Nemotron 3.5 Lightning</h3><p>NVIDIA</p></div>
     </div>
-    <p className="dynamo-model-summary">30B hybrid Mamba/Attention/MoE recipe matrix for H100, H200, B200, and GB200, with vLLM MTP/DFlash/DSpark targets, DSpark KV-routing aggregate variants on H100/H200/B200, and experimental TensorRT-LLM MTP/no-spec aggregates.</p>
+    <p className="dynamo-model-summary">30B hybrid Mamba/Attention/MoE recipe matrix for H100, H200, B200, and GB200, with NVFP4 and BF16 variants, vLLM MTP/DFlash/DSpark targets, DSpark with KV-routing, and experimental TensorRT-LLM MTP/no-spec.</p>
     <div className="dynamo-model-tags"><span>vLLM + TRT-LLM</span><span>1-4x GPU</span><span>Agentic · 1M context</span></div>
-  <a className="dynamo-card-link" href="nemotron-3-5-lightning.mdx" aria-label="Open the Nemotron-3.5-Lightning recipe">Open recipe</a>
+  <a className="dynamo-card-link" href="nemotron-3-5-lightning.mdx" aria-label="Open the Nemotron 3.5 Lightning recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">

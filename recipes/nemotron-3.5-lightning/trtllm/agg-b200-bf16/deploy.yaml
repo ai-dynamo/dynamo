@@ -1,36 +1,40 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated vLLM deployment for Nemotron 3.5 Lightning NVFP4 on 1x B200 with built-in MTP speculative decoding.
-# The B200 recipes in this repo disable the FlashInfer FP8 ScaledMM path to
-# keep CUDA graphs enabled for this configuration.
+# Experimental aggregated TRT-LLM non-speculative deployment for Nemotron 3.5 Lightning BF16 on 1x B200.
+# Runs the checkpoint without speculative decoding.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: vllm-agg-b200-mtp-config
+  name: trtllm-agg-b200-bf16-config
 data:
-  speculative-config: |-
-    {
-      "method": "mtp",
-      "num_speculative_tokens": 3
-    }
-  speculative-config-synthetic: |-
-    {
-      "method": "mtp",
-      "num_speculative_tokens": 3,
-      "rejection_sample_method": "synthetic",
-      "synthetic_acceptance_length": 2.874
-    }
+  agg.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 1
+    max_batch_size: 512
+    max_num_tokens: 32768
+    enable_chunked_prefill: true
+    trust_remote_code: true
+    stream_interval: 10
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: true
+      use_kv_cache_manager_v2: true
+      mamba_state_config:
+        periodic_snapshot_interval: 0
+        additional_snapshot_offsets_from_start: [57600]
+    moe_config:
+      backend: CUTLASS
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-agg-b200-mtp
+  name: trtllm-agg-b200-bf16
   labels:
-    app.kubernetes.io/name: vllm-agg-b200-mtp
+    app.kubernetes.io/name: trtllm-agg-b200-bf16
     app.kubernetes.io/part-of: dynamo
 spec:
-  backendFramework: vllm
+  backendFramework: trtllm
   components:
     - name: Frontend
       type: frontend
@@ -41,14 +45,17 @@ spec:
             - name: your-image-pull-secret
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
               imagePullPolicy: IfNotPresent
               command:
                 - python3
               args:
                 - -m
                 - dynamo.frontend
-                - --trust-remote-code
+                - --router-mode
+                - round-robin
+                - --http-port
+                - "8000"
               env:
                 - name: POD_UID
                   valueFrom:
@@ -100,52 +107,34 @@ spec:
               operator: Equal
               value: "true"
               effect: NoSchedule
-          volumes:
-            - name: shared-model-cache
-              persistentVolumeClaim:
-                claimName: shared-model-cache
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 40Gi
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:
                 - python3
-                - -m
-                - dynamo.vllm
               args:
+                - -m
+                - dynamo.trtllm
                 - --model
-                - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+                - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
                 - --served-model-name
-                - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
-                - --trust-remote-code
+                - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
                 - --tensor-parallel-size
                 - "1"
-                - --max-num-seqs
+                - --max-num-tokens
+                - "32768"
+                - --max-batch-size
                 - "512"
-                - --enable-prefix-caching
-                - --async-scheduling
-                - --no-enable-flashinfer-autotune
-                - --mamba-backend
-                - flashinfer
-                - --mamba-ssm-cache-dtype
-                - float16
-                - --enable-mamba-cache-stochastic-rounding
-                - --mamba-cache-philox-rounds
-                - "5"
+                - --extra-engine-args
+                - /config/agg.yaml
+                - --disaggregation-mode
+                - agg
                 - --dyn-tool-call-parser
                 - nemotron_nano
                 - --dyn-reasoning-parser
                 - nemotron_nano
-                - --reasoning-parser
-                - nemotron_v3
-                - --speculative-config=$(SPECULATIVE_CONFIG)
-                - --disaggregation-mode
-                - agg
               env:
                 - name: POD_UID
                   valueFrom:
@@ -159,21 +148,20 @@ spec:
                   value: /tmp/hf_modules
                 - name: TRITON_CACHE_DIR
                   value: /tmp/.triton-cache
-                - name: VLLM_CONFIG_ROOT
-                  value: /tmp/vllm-config
-                - name: VLLM_CACHE_ROOT
-                  value: /tmp/vllm-cache
-                - name: SPECULATIVE_CONFIG
-                  valueFrom:
-                    configMapKeyRef:
-                      name: vllm-agg-b200-mtp-config
-                      key: speculative-config # speculative-config-synthetic for benchmarking
-                - name: VLLM_DISABLED_KERNELS
-                  value: FlashInferFP8ScaledMMLinearKernel
                 - name: NCCL_IB_DISABLE
                   value: "1"
                 - name: PYTHONHASHSEED
                   value: "0"
+                - name: TLLM_LOG_LEVEL
+                  value: INFO
+                - name: TLLM_BATCHED_GEMM_LOG_REJECTION
+                  value: "1"
+                - name: TRTLLM_ENABLE_PDL
+                  value: "1"
+                - name: TRTLLM_SERVER_DISABLE_GC
+                  value: "1"
+                - name: TRTLLM_WORKER_DISABLE_GC
+                  value: "1"
               resources:
                 requests:
                   memory: 128Gi
@@ -198,3 +186,17 @@ spec:
                   mountPath: /model-cache
                 - name: dshm
                   mountPath: /dev/shm
+                - name: trtllm-config
+                  mountPath: /config
+                  readOnly: true
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 40Gi
+            - name: trtllm-config
+              configMap:
+                name: trtllm-agg-b200-bf16-config
