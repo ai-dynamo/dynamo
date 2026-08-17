@@ -14,6 +14,28 @@ from gpu_memory_service.v1.client.mempool import TorchMempoolMemoryClient
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
+_FACTORY_TARGET = (
+    "sglang.srt.utils.torch_memory_saver_adapter.TorchMemorySaverAdapter.create"
+)
+_INITIAL_MODEL_LOAD_TARGET = (
+    "sglang.srt.model_executor.model_runner_components.load_model_utils."
+    "load_model_with_memory_saver"
+)
+_INIT_ALL_CUDA_GRAPHS_TARGET = (
+    "sglang.srt.managers.scheduler.Scheduler.init_all_cuda_graphs"
+)
+_RELEASE_MEMORY_OCCUPATION_TARGET = (
+    "sglang.srt.managers.scheduler_components.weight_updater."
+    "SchedulerWeightUpdaterManager.release_memory_occupation"
+)
+_CREATE_DSA_INDEX_BUFFERS_TARGET = (
+    "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers"
+)
+_CREATE_LAYER_SPLIT_DSA_INDEX_BUFFERS_TARGET = (
+    "sglang.srt.mem_cache.dsa_cache_layer_split."
+    "LayerSplitDSATokenToKVPool._create_index_buffers"
+)
+
 
 class GMSV1MemorySaverAdapter(TorchMemorySaverAdapter):
     """Share one GMS V1 client across SGLang's process-local adapters."""
@@ -72,41 +94,70 @@ def _adapter() -> GMSV1MemorySaverAdapter:
     return GMSV1MemorySaverAdapter()
 
 
+def _around_adapter_factory(original_factory, *args, **kwargs):
+    enable = args[0] if args else kwargs["enable"]
+    if not enable:
+        return original_factory(*args, **kwargs)
+    return _adapter()
+
+
+def _after_initial_model_load(result, *args, **kwargs) -> None:
+    _adapter().observe_model(result.model)
+
+
+def _before_init_all_cuda_graphs(_scheduler: object) -> None:
+    # Publication rebinds non-Parameter tensors, so it must precede graph capture.
+    _adapter()._publish_weights()
+
+
+def _after_release_memory_occupation(result, manager, *args, **kwargs):
+    torch.distributed.barrier(group=manager.tp_cpu_group)
+    return result
+
+
+def _around_create_dsa_index_buffers(original, *args, **kwargs):
+    with _adapter().region("kv_cache"):
+        return original(*args, **kwargs)
+
+
 def register_gms_v1_plugin() -> None:
     """Register the GMS hooks in SGLang processes where Dynamo enabled them."""
     if os.environ.get("DYN_GMS_USE_V1") != "true":
         return
 
-    def around_create_dsa_index_buffers(original, *args, **kwargs):
-        with _adapter().region("kv_cache"):
-            return original(*args, **kwargs)
-
     HookRegistry.register(
-        "sglang.srt.model_executor.model_runner_components.load_model_utils."
-        "load_model_with_memory_saver",
-        lambda result, *args, **kwargs: _adapter().observe_model(result.model),
+        _INITIAL_MODEL_LOAD_TARGET,
+        _after_initial_model_load,
         HookType.AFTER,
     )
     HookRegistry.register(
-        "sglang.srt.managers.scheduler.Scheduler.init_all_cuda_graphs",
-        lambda _scheduler: _adapter()._publish_weights(),
+        _INIT_ALL_CUDA_GRAPHS_TARGET,
+        _before_init_all_cuda_graphs,
         HookType.BEFORE,
     )
     HookRegistry.register(
-        "sglang.srt.utils.torch_memory_saver_adapter.TorchMemorySaverAdapter.create",
-        lambda _original, *_args, **_kwargs: _adapter(),
+        _FACTORY_TARGET,
+        _around_adapter_factory,
         HookType.AROUND,
     )
+    # TP release fence: SGLang can let the response-producing rank acknowledge
+    # release_memory_occupation while a peer rank still owns its KV-cache
+    # socket, which reaches CRIU with a half-external stream. Barrier on the
+    # TP CPU group so every rank has released before publication proceeds.
     HookRegistry.register(
-        "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers",
-        around_create_dsa_index_buffers,
+        _RELEASE_MEMORY_OCCUPATION_TARGET,
+        _after_release_memory_occupation,
+        HookType.AFTER,
+    )
+    HookRegistry.register(
+        _CREATE_DSA_INDEX_BUFFERS_TARGET,
+        _around_create_dsa_index_buffers,
         HookType.AROUND,
     )
     # Layer-split DSA overrides the parent method, so the parent hook does not
     # wrap index_k_with_scale_buffer or remote_index_k_with_scale_buffer.
     HookRegistry.register(
-        "sglang.srt.mem_cache.dsa_cache_layer_split."
-        "LayerSplitDSATokenToKVPool._create_index_buffers",
-        around_create_dsa_index_buffers,
+        _CREATE_LAYER_SPLIT_DSA_INDEX_BUFFERS_TARGET,
+        _around_create_dsa_index_buffers,
         HookType.AROUND,
     )
