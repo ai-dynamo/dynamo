@@ -136,10 +136,21 @@ async def prepare_snapshot_engine(
     configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
 
+    # Snapshot engines are created before the Dynamo endpoint exists, so their
+    # forward-pass metrics publisher cannot be wired to the eventual relay.
+    if getattr(server_args, "enable_forward_pass_metrics", False):
+        logger.warning(
+            "Forward pass metrics disabled in snapshot mode: the engine is "
+            "created before the endpoint exists."
+        )
+
     # Enable memory_saver so GPU memory can be released for CRIU.
     # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
     # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
-    snapshot_fields = {"enable_memory_saver": True}
+    snapshot_fields = {
+        "enable_forward_pass_metrics": False,
+        "enable_memory_saver": True,
+    }
     try:
         from gpu_memory_service.integrations.sglang import is_gms_active
 

@@ -18,6 +18,7 @@ from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang.args as sglang_args
+import dynamo.sglang.snapshot as sglang_snapshot
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
@@ -440,6 +441,41 @@ def test_set_pre_publish_server_args_falls_back_to_assignment():
     set_pre_publish_server_args(server_args, enable_memory_saver=True)
 
     assert server_args.enable_memory_saver is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_disables_forward_pass_metrics_before_engine_init(
+    monkeypatch, caplog
+):
+    class EngineCreated(Exception):
+        pass
+
+    server_args = SimpleNamespace(enable_forward_pass_metrics=True)
+    events = []
+
+    def update_server_args(args, **fields):
+        events.append(("update", fields))
+        for name, value in fields.items():
+            setattr(args, name, value)
+
+    def create_engine(*, server_args):
+        events.append(("engine", server_args.enable_forward_pass_metrics))
+        raise EngineCreated
+
+    monkeypatch.setattr(sglang_snapshot.SnapshotConfig, "from_env", lambda: object())
+    monkeypatch.setattr(sglang_snapshot, "configure_snapshot_capture_env", lambda: None)
+    monkeypatch.setattr(
+        sglang_snapshot, "set_pre_publish_server_args", update_server_args
+    )
+    monkeypatch.setattr(sglang_snapshot.sgl, "Engine", create_engine)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(EngineCreated):
+        await sglang_snapshot.prepare_snapshot_engine(server_args)
+
+    assert events[0][0] == "update"
+    assert events[0][1]["enable_forward_pass_metrics"] is False
+    assert events[1] == ("engine", False)
+    assert "Forward pass metrics disabled in snapshot mode" in caplog.text
 
 
 def test_compat_keeps_async_generate_kwargs_for_newer_engines():

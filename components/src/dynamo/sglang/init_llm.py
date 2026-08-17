@@ -65,13 +65,6 @@ async def init_decode(
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
-        if getattr(server_args, "enable_forward_pass_metrics", False):
-            logging.warning(
-                "Forward pass metrics disabled in snapshot mode: the engine was "
-                "created before the endpoint existed, so its FPM publisher bound "
-                "a different IPC path than the relay would subscribe to."
-            )
-            server_args.enable_forward_pass_metrics = False
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -221,13 +214,6 @@ async def init_prefill(
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
-        if getattr(server_args, "enable_forward_pass_metrics", False):
-            logging.warning(
-                "Forward pass metrics disabled in snapshot mode: the engine was "
-                "created before the endpoint existed, so its FPM publisher bound "
-                "a different IPC path than the relay would subscribe to."
-            )
-            server_args.enable_forward_pass_metrics = False
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
