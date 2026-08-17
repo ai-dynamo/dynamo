@@ -85,7 +85,7 @@ The CLI deliberately does not expose field-specific flags such as `--request-per
 aisimulate simulate \
   --config simulation.yaml \
   --set traffic.load.requests_per_second=16 \
-  --set deployment.engines.aggregated.replicas=4
+  --set engine.workers.aggregated.replicas=4
 ```
 
 The following rules apply:
@@ -103,11 +103,10 @@ Both commands use one strict YAML model:
 
 ```yaml
 traffic: {}
-deployment: {}
+engine: {}
 router: {}
 planner: {}
 evaluation: {}
-metadata: {}
 ```
 
 `recommend` extends that model with:
@@ -121,18 +120,17 @@ The command determines the document type. There is no top-level `kind` or stack 
 
 | Section | `simulate` | `recommend` | Purpose |
 |---|---|---|---|
-| `traffic` | Required | Required | Request source, load shape, and stopping condition. |
-| `deployment` | Required | Required | Model, hardware, backend, topology, and engine roles. |
+| `traffic` | Optional | Optional | Request source, load shape, and stopping condition. Uses the default synthetic request traffic when omitted. |
+| `engine` | Required | Required | Model, hardware, backend, topology, and worker roles. |
 | `router` | Optional | Optional | Request routing policy. Defaults to round robin. |
 | `planner` | Optional | Optional | Runtime scaling policy. Defaults to disabled. |
 | `evaluation` | Optional | Optional | Service-level objective (SLA) thresholds used for reporting and goals. |
-| `metadata` | Optional | Optional | User-owned annotations with no simulation or search semantics. |
 | `optimization` | Rejected | Required | Recommendation objective and candidate GPU constraints. |
 | `optimizer` | Rejected | Optional | Public search controls. |
 
-Unknown fields are rejected everywhere except inside `metadata`. Every semantic configuration knob is
-an explicit, typed YAML field. The selected stack, backend, policy, timing model, or capacity model
-determines which conditional fields are legal; there is no generic configuration passthrough mapping.
+Unknown fields are rejected everywhere. Every semantic configuration knob is an explicit, typed YAML
+field. The selected stack, backend, policy, timing model, or capacity model determines which
+conditional fields are legal; there is no generic configuration passthrough mapping.
 
 ## Traffic
 
@@ -147,6 +145,26 @@ traffic:
 
 `source` defines requests or sessions, `load` defines when they begin, and `stop` defines when the run
 ends. The load and stop unit follows the source type.
+
+Omitting `traffic` is equivalent to this concrete default:
+
+```yaml
+traffic:
+  source:
+    type: synthetic
+    input_tokens: 1024
+    output_tokens: 128
+  load:
+    type: concurrency
+    concurrency: 1
+  stop:
+    requests: 100
+```
+
+The default source contains independent requests with fixed input sequence length (ISL) and output
+sequence length (OSL); it does not sample token-length distributions or create sessions. A supplied
+`traffic` mapping does not merge recursively with this example. Once `traffic` is present, its normal
+source, load, and stop validation applies.
 
 ### Synthetic Request Source
 
@@ -362,22 +380,21 @@ first-session arrival timestamps, it requires `load.type: concurrency` and rejec
 > reported as incomplete. The reported duration can extend slightly past the cutoff while an already
 > running engine pass finishes.
 
-## Deployment
+## Engine
 
-`deployment` owns the engines so topology, role count, parallelism, scheduling, cache, and timing are
-described together.
+`engine` owns topology, model and runtime identity, worker pools, scheduling, KV cache, timing, and
+prefill-to-decode transfer behavior.
 
 ```yaml
-deployment:
+engine:
   mode: aggregated
   model: meta-llama/Llama-3.1-8B-Instruct
   hardware: H100-SXM-80GB
   backend: vllm
   backend_version: null
   context_length: 32768
-  engines:
+  workers:
     aggregated:
-      presets: {}
       replicas: 2
       parallelism:
         tensor: 1
@@ -388,122 +405,138 @@ deployment:
       scheduler:
         max_batched_tokens: 8192
         max_sequences: 256
-      cache:
+      kv_cache:
         block_size: 64
         prefix_caching: true
         capacity:
-          type: aic
+          type: default
           memory_fraction: 0.9
       timing:
-        type: aic
+        type: default
       startup_seconds: 0
 ```
 
-### Deployment Fields
+### Engine Fields
 
-| Path | Type | Default | Constraints |
+| Path | Type | Simulate Default | Constraints |
 |---|---|---:|---|
-| `deployment.mode` | enum | Required | `aggregated` or `disaggregated`. |
-| `deployment.model` | string | Required | Nonempty model identifier. Fixed during recommendation. |
-| `deployment.hardware` | string | Required | Nonempty hardware identifier. Fixed during recommendation. |
-| `deployment.backend` | enum | Required | `vllm`, `sglang`, or `trtllm`. |
-| `deployment.backend_version` | string or null | `null` | Fixed when set. |
-| `deployment.context_length` | integer | Required | Greater than zero. |
-| `deployment.engines` | mapping | Required | Must contain the roles required by the selected mode. |
+| `engine.mode` | enum | Required | `aggregated` or `disaggregated`. |
+| `engine.model` | string | Required | Nonempty model identifier. Fixed during recommendation. |
+| `engine.hardware` | string, role mapping, or `auto` | Required | A concrete hardware assignment; `recommend` also accepts `auto`. |
+| `engine.backend` | enum | Required | `vllm`, `sglang`, or `trtllm`. |
+| `engine.backend_version` | string or null | `null` | Fixed when set. |
+| `engine.context_length` | integer | Required | Greater than zero. |
+| `engine.workers` | mapping | Required | Must contain the roles required by the selected mode. |
+| `engine.kv_transfer` | mapping | None | Disaggregated mode only. |
 
-An aggregated deployment uses `engines.aggregated`. A disaggregated deployment uses
-`engines.prefill` and `engines.decode`:
+`engine.hardware: auto` is valid only in `recommend` and requires the hardware inventory under
+`optimization.hardware`. The recommender searches the listed hardware SKUs subject to their available
+GPU counts. Every recommended simulation YAML replaces `auto` with a concrete assignment. Aggregated
+mode resolves to one hardware identifier. Disaggregated mode resolves either to one shared identifier
+or to `{prefill: <sku>, decode: <sku>}`; each worker pool is homogeneous, but the two pools may use
+different SKUs.
+
+An aggregated configuration uses `workers.aggregated`. A disaggregated configuration uses
+`workers.prefill` and `workers.decode`:
 
 ```yaml
-deployment:
+engine:
   mode: disaggregated
   model: meta-llama/Llama-3.1-8B-Instruct
   hardware: H100-SXM-80GB
   backend: vllm
   context_length: 32768
-  engines:
+  kv_transfer:
+    bytes_per_token: auto
+    bandwidth_gb_per_second: 400
+    timing_mode: destination_missing
+  workers:
     prefill:
-      presets: {}
       replicas: 2
       parallelism: {tensor: 2, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
       scheduler: {max_batched_tokens: 8192, max_sequences: 64}
-      cache:
+      kv_cache:
         block_size: 64
         prefix_caching: true
-        capacity: {type: aic, memory_fraction: 0.9}
-      timing: {type: aic}
+        capacity: {type: default, memory_fraction: 0.9}
+      timing: {type: default}
       startup_seconds: 0
     decode:
-      presets: {}
       replicas: 4
       parallelism: {tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
       scheduler: {max_batched_tokens: 8192, max_sequences: 256}
-      cache:
+      kv_cache:
         block_size: 64
-        prefix_caching: true
-        capacity: {type: aic, memory_fraction: 0.9}
-      timing: {type: aic}
+        prefix_caching: false
+        capacity: {type: default, memory_fraction: 0.9}
+      timing: {type: default}
       startup_seconds: 0
 ```
 
-All roles share the top-level model, hardware, backend, backend version, and context length in version
-1. Role-specific model or hardware selection is rejected.
+All worker roles share the top-level model, backend, backend version, and context length in version 1.
+A disaggregated concrete hardware mapping may select different SKUs for prefill and decode; other
+role-specific model or backend selection is rejected. If `engine.mode` is a recommendation domain
+containing both modes, `workers` declares all three roles. Each concrete candidate retains only the
+role or roles active for its selected mode.
 
-If `deployment.mode` is a recommendation domain containing both modes, `engines` must declare all
-three roles. Each concrete candidate retains only the role or roles active for its selected mode.
+### Worker Fields
 
-### Engine Role Fields
+The table lists both the concrete value used by `simulate` when a field is omitted and the domain
+used by `recommend` when no preset, concrete value, or explicit domain supplies that knob.
 
-| Path Under a Role | Type | Default | Constraints |
-|---|---|---:|---|
-| `presets` | mapping | `{}` | Named Engine knob bundles, grouped by preset family. |
-| `replicas` | integer | `1` | Greater than zero. |
-| `parallelism.tensor` | integer | `1` | Greater than zero. |
-| `parallelism.pipeline` | integer | `1` | Greater than zero. |
-| `parallelism.attention_data` | integer | `1` | Greater than zero. |
-| `parallelism.moe_tensor` | integer | `1` | Greater than zero and compatible with the model/backend. |
-| `parallelism.moe_expert` | integer | `1` | Greater than zero and compatible with the model/backend. |
-| `scheduler.max_batched_tokens` | integer | Backend default | Greater than zero when set. |
-| `scheduler.max_sequences` | integer | Backend default | Greater than zero when set. |
-| `cache.block_size` | integer | Backend default | Greater than zero and supported by the backend. |
-| `cache.prefix_caching` | boolean | `false` | Must be supported by the backend. |
-| `cache.capacity.type` | enum | `aic` | `aic` or `fixed`. |
-| `cache.capacity.memory_fraction` | number | `0.9` | Greater than `0` and no greater than `1`; AIC capacity only. |
-| `timing.type` | enum | `aic` | `aic`, `fixed`, or `polynomial`. |
-| `startup_seconds` | number | `0` | Nonnegative. |
+| Path Under a Worker | Type | Simulate Default | Recommend Default Domain | Constraints |
+|---|---|---:|---|---|
+| `preset` | string or null | `null` | `null` | One backend-declared whole-worker preset; see [Preset and Default-Domain Rules](#preset-and-default-domain-rules). |
+| `replicas` | integer | `1` | Feasible positive values within the GPU budget | Greater than zero. |
+| `parallelism.tensor` | integer | `1` | `auto` | Greater than zero and feasible for the model, backend, hardware, and budget. |
+| `parallelism.pipeline` | integer | `1` | `auto` | Greater than zero and feasible for the model, backend, hardware, and budget. |
+| `parallelism.attention_data` | integer | `1` | `auto` | Greater than zero and feasible for the model, backend, hardware, and budget. |
+| `parallelism.moe_tensor` | integer | `1` | `auto` | Greater than zero and compatible with the model/backend. |
+| `parallelism.moe_expert` | integer | `1` | `auto` | Greater than zero and compatible with the model/backend. |
+| `scheduler.max_batched_tokens` | integer | `8192` | Prefill/aggregated: `{choices: [8192, 16384, 32768]}`; decode: `{choices: [8192]}` | Greater than zero. |
+| `scheduler.max_sequences` | integer | `256` | Prefill: `{choices: [1, 2, 4, 8, 16, 32, 64, 128, 256]}`; aggregated/decode: `{choices: [256, 512, 1024]}` | Greater than zero. |
+| `kv_cache.block_size` | integer | vLLM `64`; SGLang `1`; TensorRT-LLM `32` | Fixed at the backend default | Greater than zero and supported by the backend. |
+| `kv_cache.prefix_caching` | boolean | Aggregated/prefill `true`; decode `false` | Fixed at the role default | Must be supported by the backend. |
+| `kv_cache.capacity.type` | enum | `default` | `{choices: [default]}` | `default` or `fixed`. |
+| `kv_cache.capacity.memory_fraction` | number | vLLM/TensorRT-LLM `0.9`; SGLang `0.88` | Fixed at the backend default | Greater than `0` and no greater than `1`; valid only for `type: default`. |
+| `kv_cache.capacity.blocks` | integer | None | No default domain | Required and greater than zero for `type: fixed`; physical KV blocks per worker rank. |
+| `timing.type` | enum | `default` | `{choices: [default]}` | `default`, `fixed`, or `polynomial`. |
+| `timing.prefill_ms` | number | None | No default domain | Required, finite, and nonnegative for `type: fixed`. |
+| `timing.decode_ms` | number | None | No default domain | Required, finite, and nonnegative for `type: fixed`. |
+| `startup_seconds` | number | `0` | Fixed at `0` | Nonnegative. |
 
-The physical GPU count of a role is:
+`kv_cache.capacity.type: default` and `timing.type: default` replace the previous public name `aic`.
+They select the stack's default capacity estimator and timing provider. The initial default registry
+preserves current replay and Sweeper behavior, including the backend and role defaults in the table.
+Backend-version-specific defaults are deferred beyond version 1; adding them changes the registry, not
+the YAML shape.
+
+`kv_cache.capacity.type: fixed` requires `blocks`, so users can directly provide cache size. It rejects
+`memory_fraction`. Conversely, `type: default` rejects `blocks` and derives block count from model,
+hardware, parallelism, block size, backend, and memory fraction.
+
+The physical GPU count of a worker role is:
 
 ```text
 replicas * tensor * pipeline * attention_data
 ```
 
 `moe_tensor` and `moe_expert` describe partitioning within that physical shape and do not multiply
-the GPU count again. Aggregated candidate GPU count is the aggregated role count. Disaggregated
-candidate GPU count is the sum of the prefill and decode role counts.
+the GPU count again. Aggregated candidate GPU count is the aggregated worker count. Disaggregated
+candidate GPU count is the sum of the prefill and decode worker counts.
 
-Portable and backend-specific fields are written directly under the engine role, `cache.capacity`, or
-`timing`, according to ownership. Every field is typed and validated. The selected `--stack`, backend,
-capacity type, and timing type determine which conditional fields are legal.
+### Prefill-to-Decode KV Transfer
 
-Engine presets are scoped to one role. An aggregated, prefill, or decode role can independently select
-backend-defined preset families for its parallelism, scheduler, cache, timing, or other Engine knobs.
-In `recommend`, an Engine preset family can use `choices` just like Router and Planner presets:
+| Path | Type | Simulate Default | Recommend Default Domain | Constraints |
+|---|---|---:|---|---|
+| `engine.kv_transfer.bytes_per_token` | integer or `auto` | `auto` | Fixed at `auto` | Positive when concrete. `auto` derives the KV footprint from the model, KV dtype, and parallelism. |
+| `engine.kv_transfer.bandwidth_gb_per_second` | number or null | `null` | Fixed at `null` | Positive and finite when set. `null` disables modeled transfer delay. |
+| `engine.kv_transfer.timing_mode` | enum | `full_prompt` | `{choices: [full_prompt, destination_missing]}` | `full_prompt` or `destination_missing`. |
 
-```yaml
-deployment:
-  engines:
-    decode:
-      presets:
-        scheduler:
-          choices: [latency, throughput]
-      scheduler:
-        max_sequences: 256
-```
-
-Preset family names and identifiers are declared by the selected backend. The example names illustrate
-the schema and are valid only when that backend declares them. The direct
-`scheduler.max_sequences` field follows the common preset override and conflict rules below.
+`full_prompt` charges transfer for the complete prompt KV footprint. `destination_missing` charges
+only the prompt KV not already present at the selected decode worker. `kv_transfer` is rejected for
+aggregated mode. Its fields can be concrete or recommendation domains under the same rules as other
+Engine fields.
 
 ## Router
 
@@ -512,136 +545,154 @@ router:
   policy: round_robin
   prefill_load_model:
     type: none
-  presets: {}
 ```
 
-| Path | Type | Default | Constraints |
-|---|---|---:|---|
-| `router.policy` | enum | `round_robin` | `round_robin` or `kv_router`. |
-| `router.prefill_load_model.type` | enum | `none` | `none` or `aic`. |
-| `router.presets` | mapping | `{}` | Named Router knob bundles, grouped by preset family. |
+| Path | Type | Simulate Default | Recommend Default Domain | Constraints |
+|---|---|---:|---|---|
+| `router.preset` | string or null | `null` | `null` | `default` or `load_aware`, or another stack-declared whole-Router preset. |
+| `router.policy` | enum | `round_robin` | `{choices: [round_robin, kv_router]}` | `round_robin` or `kv_router`. |
+| `router.prefill_load_model.type` | enum | `none` | `{choices: [none, aic]}` for `kv_router`; fixed `none` otherwise | `none` or `aic`. |
+| `router.overlap_score_credit` | number | `1.0` | `{choices: [0.0, 0.5, 1.0]}` | Finite and nonnegative; `kv_router` only. |
+| `router.prefill_load_scale` | number | `1.0` | `{choices: [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]}` | Finite and nonnegative; `kv_router` only. |
+| `router.temperature` | number | `0.0` | `{choices: [0.0, 0.2, 0.5, 1.0]}` | Finite and nonnegative; `kv_router` only. |
 
-Router knobs are direct fields under `router`; load-model knobs are direct fields under
-`router.prefill_load_model`. The names are stable configuration keys and do not have to copy existing
-Router CLI flag spelling. Every supported key has a declared type, default, and validation rule.
-Unknown keys and keys unsupported by the selected `--stack`, policy, or load model are rejected.
+These are all Router knobs exposed by version 1 of the simulation contract. Production-only Router
+startup, indexer, cryptographic tracking, and admission-control fields are intentionally not generic
+passthroughs. Adding one requires a typed public field and support from both execution stacks.
 
-In `simulate`, every knob must be concrete. In `recommend`, a supported knob leaf can use
-`choices` or `range`:
+In `simulate`, every supplied knob is concrete. In `recommend`, a knob can use `choices` or `range`,
+or it can inherit its table-defined default domain:
 
 ```yaml
 router:
   policy: kv_router
   prefill_load_model:
     type: aic
-  presets:
-    behavior:
-      choices: [null, load_aware]
   prefill_load_scale:
     choices: [0.5, 1.0, 2.0, 4.0]
   temperature:
     range: {min: 0.0, max: 1.0, step: 0.2}
 ```
 
-The example also searches the optional `behavior` preset family; `null` means that no preset from
-that family is applied.
-
-`round_robin` requires `prefill_load_model.type: none`, empty `presets`, and no KV-router-only knobs.
-The `kv_router` policy may use either load model. When `router.policy` is itself a domain, every
-configured preset and direct knob must be legal for every policy choice. Use separate recommendation
-inputs when policy branches require different preset or field shapes.
+`round_robin` requires `prefill_load_model.type: none` and has no KV-router-only knobs. The
+`kv_router` policy may use either load model. Conditional domains apply only to the policy branch that
+owns them; a round-robin candidate drops KV-router-only fields from its concrete output.
 
 ## Planner
 
 ```yaml
 planner:
   policy: disabled
-  target: throughput
-  limits: {}
-  presets: {}
 ```
 
-| Path | Type | Default | Constraints |
-|---|---|---:|---|
-| `planner.policy` | enum | `disabled` | `disabled` or `planner`. |
-| `planner.target` | enum | `throughput` | `throughput`, `latency`, or `sla`; `recommend` also accepts `auto`. |
-| `planner.limits` | mapping | Planner defaults | Runtime scaling limits. Values must be concrete. |
-| `planner.presets` | mapping | `{}` | Named Planner knob bundles, grouped by preset family. |
+| Path | Type | Simulate Default | Recommend Default Domain | Constraints |
+|---|---|---:|---|---|
+| `planner.policy` | enum | `disabled` | `{choices: [disabled, planner]}` | `disabled` or `planner`. |
+| `planner.target` | enum | `throughput` | Derived from `optimization.target` | `throughput`, `latency`, `load`, or `sla`; Planner policy only. |
+| `planner.preset` | string or null | `null` | `null` | Whole-Planner preset; see the preset list below. |
+| `planner.enable_throughput_scaling` | boolean | `true` | `{choices: [false, true]}` | Planner policy only. |
+| `planner.enable_load_scaling` | boolean | `false` | `{choices: [false, true]}` | Planner policy only. |
+| `planner.throughput_adjustment_interval_seconds` | integer | `180` | `{choices: [180, 600]}` | Positive; used when throughput scaling is enabled. |
+| `planner.load_adjustment_interval_seconds` | integer | `5` | `{choices: [5, 10]}` | Positive and shorter than the throughput interval when throughput scaling is enabled. |
+| `planner.max_num_fpm_samples` | integer | `64` | `{choices: [32, 64, 128]}` | Positive. |
+| `planner.fpm_sample_bucket_size` | integer | `16` | `{choices: [4, 16, 64]}` | Positive perfect square. |
+| `planner.load_scaling_down_sensitivity` | integer | `80` | `{choices: [70, 80, 90]}` | From `0` through `100`; used when load scaling is enabled. |
+| `planner.load_min_observations` | integer | `5` | `{choices: [3, 5, 8]}` | Positive; used when load scaling is enabled. |
+| `planner.load_predictor` | enum | `arima` | `{choices: [constant, arima, prophet, kalman]}` | Used when throughput scaling is enabled. |
+| `planner.load_predictor_log1p` | boolean | `false` | `{choices: [false, true]}` | Used when throughput scaling is enabled. |
+| `planner.prophet_window_size` | integer | `50` | `{choices: [20, 50]}` | Positive; `load_predictor: prophet` only. |
+| `planner.kalman_q_level` | number | `1.0` | `{choices: [1.0, 10.0]}` | Positive; `load_predictor: kalman` only. |
+| `planner.kalman_q_trend` | number | `0.1` | `{choices: [0.1, 1.0]}` | Positive; `load_predictor: kalman` only. |
+| `planner.kalman_r` | number | `10.0` | `{choices: [5.0, 10.0]}` | Positive; `load_predictor: kalman` only. |
+| `planner.kalman_min_points` | integer | `5` | `{choices: [3, 5]}` | Positive; `load_predictor: kalman` only. |
+| `planner.min_workers` | integer | `1` | Fixed at `1` | Nonnegative; applies to aggregated mode and as the disaggregated fallback. |
+| `planner.prefill_min_workers` | integer or null | `null` | Fixed at `null` | Positive when set; overrides `min_workers` for prefill. |
+| `planner.decode_min_workers` | integer or null | `null` | Fixed at `null` | Positive when set; overrides `min_workers` for decode. |
 
-When the policy is `disabled`, planner-only `limits`, `presets`, and direct Planner knobs must be
-absent. `simulate` requires a concrete target when the Planner is enabled. `recommend` may use
-`target: auto`; each recommended YAML contains a concrete target.
+These are all Planner knobs exposed by version 1. `simulate` may set a concrete `planner.target` and
+otherwise uses `throughput`. In `recommend`, the target is not a search dimension: throughput targets
+and Pareto map to `throughput`, `ttft` and `e2e_latency` map to `latency`, and goodput targets map to
+`sla`. An explicitly supplied Planner target must equal that derived value.
 
-Planner-specific knobs are direct fields under `planner`, alongside the common `policy`, `target`,
-`limits`, and `presets` fields. Their names do not have to match existing CLI flags. Every key is typed
-and validated, `simulate` requires concrete values, and supported leaves can be domains in `recommend`.
+The public whole-Planner presets are `disabled`, `throughput_180_5`, `throughput_600_5`,
+`load_180_5`, `load_180_10`, `hybrid_180_5`, and `hybrid_600_5`. Each expands to a complete Planner
+configuration, including default FPM sampling, load sensitivity, and predictor settings.
 
-A Planner recommendation can search independent preset families and individual knobs together:
+A Planner recommendation can select a whole-Planner preset:
 
 ```yaml
 planner:
   policy: planner
-  target: sla
-  limits: {}
-  presets:
-    scaling_policy:
-      choices: [throughput_180_5, throughput_600_5, hybrid_180_5]
-    fpm_sampling:
-      choices: [small, default, large]
-    load_sensitivity:
-      choices: [aggressive, default, conservative]
+  preset:
+    choices: [throughput_180_5, throughput_600_5, hybrid_180_5]
+```
+
+Or, without a preset, it can provide only the domains it wants to change; every other knob receives
+the default domain from the table:
+
+```yaml
+planner:
+  policy: planner
   load_adjustment_interval_seconds:
     choices: [5, 10]
 ```
 
-Planner runtime scaling limits and recommendation candidate GPU constraints are separate controls:
+Planner runtime minimums and recommendation candidate GPU constraints are separate controls:
 
-- `planner.limits` constrains scaling during one simulated candidate run.
+- `planner.min_workers`, `prefill_min_workers`, and `decode_min_workers` constrain runtime scaling
+  during one simulated candidate run.
 - `optimization.constraints` constrains which static candidate deployments the recommender evaluates.
 
-Omitting `planner.limits` uses Planner defaults. This CLI design does not duplicate the Planner's
-internal configuration model.
+When `planner.policy: disabled`, `preset` and all Planner knobs must be absent. Invalid conditional
+combinations are rejected before search instead of being silently removed.
 
-### Preset Expansion and Conflicts
+### Preset and Default-Domain Rules
 
-Engine-role `presets`, `router.presets`, and `planner.presets` use component-defined preset families.
-Each family value is either one concrete preset identifier or a `choices` domain of preset
-identifiers. Presets do not support `range` or `auto`. A nullable preset family can include `null` in
-`choices` to mean that no preset from that family is applied.
+Each lowest-level tunable object, `engine.workers.<role>`, `router`, or `planner`, accepts at most one
+whole-object `preset`. A preset value is either one concrete identifier or a `choices` domain of
+identifiers. Presets do not support `range` or `auto`. Worker preset identifiers are declared by the
+selected backend; Router and Planner identifiers are listed in their sections above.
 
-Preset identifiers are public names validated against the selected stack, backend, Engine role,
-policy, and target. A preset expands to a documented set of concrete component fields. It is a
-convenience and search-space shorthand, not an opaque runtime mode.
+Every preset covers every public knob in its object, including knobs for which it simply selects the
+component default. It is therefore a complete baseline rather than a partial bundle or an ordered
+collection of preset families.
 
-For each candidate, values resolve in this order:
+For `simulate`, an omitted knob takes its table-defined concrete default. For `recommend`, values
+resolve as follows:
 
-1. Start with the selected component defaults.
-2. Expand the selected preset in each preset family.
-3. Apply explicitly configured direct fields, which override values supplied by presets.
-4. Validate the resulting concrete component configuration.
+1. If a preset is selected, expand it into the complete object.
+2. Apply explicitly configured concrete values after preset expansion.
+3. Reject any `choices`, `range`, or `auto` domain on a knob covered by the selected preset.
+4. If no preset is selected, use an explicit concrete value to pin a knob, an explicit domain to
+   replace its default domain, and the table-defined default domain for every omitted tunable knob.
+5. Validate each resulting concrete component configuration.
 
-This precedence permits a named baseline with one or more intentional knob overrides. It also means
-an explicit field can remove the practical difference between two presets; the input remains valid,
-but the resulting concrete candidates can be identical.
+If the entire optional `router` or `planner` section is omitted, it stays fixed at its simulation
+default (`round_robin` or `disabled`). Default recommendation domains apply only inside a tunable
+object that is explicitly present in the input.
 
-Conflicts use these rules for Engine, Router, and Planner alike:
+For example, a recommendation that supplies a range only for
+`planner.load_adjustment_interval_seconds` searches that range and the default domains of all other
+Planner knobs. A user who wants a knob fixed at its simulate default supplies that concrete value.
 
-- A direct field and a preset can set the same knob. The direct field wins.
-- Two selected presets can set the same knob to the same value. This is allowed.
-- Two selected presets that set the same knob to different values are a configuration error. Preset
-  family order and YAML declaration order never establish precedence.
-- The fully expanded and overridden configuration must still satisfy all conditional rules. An
-  invalid final combination is a configuration error even if each individual value is valid.
+The following is invalid because the selected preset already controls `max_sequences`:
 
-Errors name every preset and field participating in the conflict. In `recommend`, a preset domain
-must not admit conflicting preset combinations; the CLI rejects that search space before evaluation.
-If explicit domains produce duplicate concrete configurations after preset expansion and overrides,
-the result records one concrete candidate and emits a warning.
+```yaml
+engine:
+  workers:
+    decode:
+      preset: throughput
+      scheduler:
+        max_sequences: {choices: [256, 512]}
+```
 
-`simulation.resolved.yaml` and each YAML under `recommendations/` omit `presets` and contain the fully
-expanded concrete component fields. `trials.jsonl` records both the selected preset identifiers and
-expanded fields for audit. `recommendation.resolved.yaml` retains the original preset selectors and
-domains.
+The same field set to one concrete integer remains a permitted intentional override. Errors name the
+preset and every conflicting domain path. If domains produce duplicate concrete configurations, the
+result records one candidate and emits a warning.
+
+`simulation.resolved.yaml` and each YAML under `recommendations/` omit `preset` and contain the fully
+expanded concrete fields. `trials.jsonl` records both the selected preset identifier and expanded
+fields for audit. `recommendation.resolved.yaml` retains the original preset selector and domains.
 
 ## Evaluation
 
@@ -670,8 +721,8 @@ evaluation:
 All thresholds are positive finite numbers. `ttft_ms` and `itl_ms` must be supplied together. They
 cannot be combined with `e2e_ms` in version 1.
 
-`goodput` and `goodput_per_gpu` optimization require either SLA form. `planner.target: sla` requires
-the `ttft_ms` plus `itl_ms` form because the Planner consumes both thresholds.
+`goodput` and `goodput_per_gpu` optimization require either SLA form. Planner throughput scaling uses
+the `ttft_ms` plus `itl_ms` form when the recommendation target is SLA-based.
 
 Evaluation fields are always concrete and are not search dimensions.
 
@@ -682,7 +733,7 @@ A field in a recommendation input is either a concrete value or one explicit dom
 ### Choices
 
 ```yaml
-deployment:
+engine:
   backend:
     choices: [vllm, sglang]
 ```
@@ -693,8 +744,8 @@ means a search domain.
 ### Numeric Range
 
 ```yaml
-deployment:
-  engines:
+engine:
+  workers:
     aggregated:
       replicas:
         range:
@@ -718,37 +769,36 @@ integers, including when sampled from a log range.
 
 ```yaml
 parallelism:
-  tensor: {auto: feasible}
+  tensor: auto
   pipeline: 1
-  attention_data: {auto: feasible}
-  moe_tensor: {auto: feasible}
-  moe_expert: {auto: feasible}
+  attention_data: auto
+  moe_tensor: auto
+  moe_expert: auto
 ```
 
-`{auto: feasible}` is accepted only on engine parallelism fields in version 1. It requests all
-model-, hardware-, backend-, and budget-compatible values. It is not equivalent to omitting a field;
-an omitted parallelism field defaults to `1`.
-
-`planner.target: auto` is a separate Planner value, not a domain object.
+The scalar string `auto` is accepted only on worker parallelism fields in `recommend`. It requests all
+model-, hardware-, backend-, and budget-compatible values. An omitted parallelism field also uses
+`auto`, its default recommendation domain. In `simulate`, the field must be a concrete positive
+integer.
 
 ### Domain Validation
 
-A mapping cannot combine `choices`, `range`, and `auto`. Domains are allowed only at documented
-searchable leaves:
+A field accepts at most one domain form. `choices` and `range` use mappings; feasible parallelism uses
+the scalar `auto`. Domains are allowed only at documented searchable leaves:
 
-- Deployment mode and backend.
-- Engine preset families, replicas, parallelism, scheduler, cache, and supported backend-specific
+- Engine mode, backend, `hardware: auto`, worker preset, replicas, parallelism, scheduler, KV cache,
+  transfer, timing, and supported backend-specific
   fields.
-- Router policy, load model, preset families, and supported policy-specific fields.
-- Planner policy, target, preset families, and supported Planner-specific fields.
+- Router policy, load model, preset, and supported policy-specific fields.
+- Planner policy, preset, and supported Planner-specific fields.
 - Numeric fields under `traffic.load`.
 
 The following stay concrete in version 1:
 
-- Model, hardware, backend version, and context length.
+- Model, concrete hardware values, backend version, and context length.
 - Traffic source, token lengths, session shape, trace contents, and stopping condition.
 - Evaluation thresholds.
-- Optimization target, Pareto objective list, constraints, and optimizer controls.
+- Optimization target, hardware inventory, constraints, and optimizer controls.
 
 ## Optimization Goal
 
@@ -757,7 +807,6 @@ The following stay concrete in version 1:
 ```yaml
 optimization:
   target: goodput_per_gpu
-  pareto_objectives: null
   constraints:
     min_candidate_gpus: null
     max_candidate_gpus: 32
@@ -770,23 +819,38 @@ optimization:
 | `throughput` | Maximize | No |
 | `throughput_per_gpu` | Maximize | No |
 | `throughput_per_user` | Maximize | No |
+| `ttft` | Minimize | No |
 | `e2e_latency` | Minimize | No |
 | `goodput` | Maximize | Yes |
 | `goodput_per_gpu` | Maximize | Yes |
-| `pareto` | Per objective | If any objective is goodput-based |
+| `pareto` | Fixed two-objective frontier | No |
 
-For scalar targets, `pareto_objectives` must be null or omitted. For `target: pareto`, it is either:
+`target: pareto` always computes the nondominated frontier over exactly
+`throughput_per_gpu` and `throughput_per_user`. There is no `pareto_objectives` field and users cannot
+replace either axis.
 
-- Null or omitted, which selects `[throughput_per_gpu, throughput_per_user]`.
-- A list of at least two unique scalar targets.
+### Hardware Inventory
 
-The list cannot contain `pareto` itself.
+When `engine.hardware` is concrete, `optimization.hardware` is omitted. When
+`engine.hardware: auto`, `optimization.hardware` is a required nonempty mapping from hardware
+identifier to the number of available GPUs:
+
+```yaml
+optimization:
+  hardware:
+    H100-SXM-80GB: 16
+    H200-SXM-141GB: 8
+```
+
+Every count is a positive integer. Aggregated candidates choose one SKU. Disaggregated candidates may
+choose different prefill and decode SKUs, and their per-SKU GPU totals cannot exceed the corresponding
+inventory counts.
 
 ### Candidate GPU Constraints
 
 `min_candidate_gpus` and `max_candidate_gpus` are optional positive integers. The minimum cannot
-exceed the maximum. They constrain the concrete deployment GPU count defined under
-[Deployment](#deployment); they do not limit Planner scaling during a candidate run.
+exceed the maximum. They constrain the concrete GPU count defined under [Engine](#engine); they do not
+limit Planner scaling during a candidate run.
 
 ## Optimizer Controls
 
@@ -829,16 +893,15 @@ traffic:
   stop:
     requests: 100
 
-deployment:
+engine:
   mode: aggregated
   model: meta-llama/Llama-3.1-8B-Instruct
   hardware: H100-SXM-80GB
   backend: vllm
   backend_version: null
   context_length: 32768
-  engines:
+  workers:
     aggregated:
-      presets: {}
       replicas: 2
       parallelism:
         tensor: 1
@@ -849,34 +912,27 @@ deployment:
       scheduler:
         max_batched_tokens: 8192
         max_sequences: 256
-      cache:
+      kv_cache:
         block_size: 64
         prefix_caching: true
         capacity:
-          type: aic
+          type: default
           memory_fraction: 0.9
       timing:
-        type: aic
+        type: default
       startup_seconds: 0
 
 router:
   policy: round_robin
   prefill_load_model: {type: none}
-  presets: {}
 
 planner:
   policy: disabled
-  target: throughput
-  limits: {}
-  presets: {}
 
 evaluation:
   sla:
     ttft_ms: 500
     itl_ms: 50
-
-metadata:
-  name: baseline-8-rps
 ```
 
 ## Scalar Recommendation Example
@@ -895,58 +951,42 @@ traffic:
   stop:
     sessions_per_load_unit: 10
 
-deployment:
+engine:
   mode: {choices: [aggregated, disaggregated]}
   model: meta-llama/Llama-3.1-8B-Instruct
-  hardware: H100-SXM-80GB
+  hardware: auto
   backend: {choices: [vllm, sglang]}
   backend_version: null
   context_length: 32768
-  engines:
+  workers:
     aggregated:
-      presets: {}
       replicas: {range: {min: 1, max: 8, step: 1}}
-      parallelism: {tensor: {auto: feasible}, pipeline: 1, attention_data: {auto: feasible}, moe_tensor: 1, moe_expert: 1}
-      scheduler: {max_batched_tokens: {choices: [4096, 8192]}, max_sequences: {choices: [128, 256]}}
-      cache:
-        block_size: 64
-        prefix_caching: {choices: [false, true]}
-        capacity: {type: aic, memory_fraction: 0.9}
-      timing: {type: aic}
-      startup_seconds: 0
+      parallelism: {tensor: auto, pipeline: 1, attention_data: auto, moe_tensor: auto, moe_expert: auto}
+      scheduler: {max_batched_tokens: {choices: [8192, 16384]}, max_sequences: {choices: [256, 512]}}
     prefill:
-      presets: {}
       replicas: {range: {min: 1, max: 4, step: 1}}
-      parallelism: {tensor: {auto: feasible}, pipeline: 1, attention_data: {auto: feasible}, moe_tensor: 1, moe_expert: 1}
+      parallelism: {tensor: auto, pipeline: 1, attention_data: auto, moe_tensor: auto, moe_expert: auto}
       scheduler: {max_batched_tokens: 8192, max_sequences: 64}
-      cache: {block_size: 64, prefix_caching: true, capacity: {type: aic, memory_fraction: 0.9}}
-      timing: {type: aic}
-      startup_seconds: 0
     decode:
-      presets: {}
       replicas: {range: {min: 1, max: 8, step: 1}}
-      parallelism: {tensor: {auto: feasible}, pipeline: 1, attention_data: {auto: feasible}, moe_tensor: 1, moe_expert: 1}
+      parallelism: {tensor: auto, pipeline: 1, attention_data: auto, moe_tensor: auto, moe_expert: auto}
       scheduler: {max_batched_tokens: 8192, max_sequences: 256}
-      cache: {block_size: 64, prefix_caching: true, capacity: {type: aic, memory_fraction: 0.9}}
-      timing: {type: aic}
-      startup_seconds: 0
 
 router:
   policy: {choices: [round_robin, kv_router]}
   prefill_load_model: {type: none}
-  presets: {}
 
 planner:
   policy: disabled
-  target: throughput
-  limits: {}
-  presets: {}
 
 evaluation:
   sla: {ttft_ms: 500, itl_ms: 50}
 
 optimization:
   target: goodput_per_gpu
+  hardware:
+    H100-SXM-80GB: 16
+    H200-SXM-141GB: 32
   constraints:
     min_candidate_gpus: 1
     max_candidate_gpus: 32
@@ -957,9 +997,6 @@ optimizer:
   parallelism: 16
   candidate_timeout_seconds: 600
   seed: 42
-
-metadata:
-  name: goodput-per-gpu-search
 ```
 
 Conditional validation applies after a domain is materialized. For example, a round-robin candidate
@@ -968,15 +1005,17 @@ silently ignored.
 
 ## Pareto Recommendation Example
 
-The following replaces only the goal from the scalar example:
+The following replaces the `optimization` mapping from the scalar example. The hardware inventory is
+still required because that example uses `engine.hardware: auto`:
 
 ```yaml
 optimization:
   target: pareto
-  pareto_objectives:
-    - throughput_per_gpu
-    - throughput_per_user
+  hardware:
+    H100-SXM-80GB: 16
+    H200-SXM-141GB: 32
   constraints:
+    min_candidate_gpus: 1
     max_candidate_gpus: 32
 ```
 
@@ -1023,7 +1062,7 @@ Output controls are CLI-only. They never appear in an input or recommended YAML 
 - `recommendations/index.json` provides rank or Pareto membership, objective values, constraints,
   and the corresponding YAML file.
 - Each numbered YAML is a concrete simulation config. It excludes `optimization`, `optimizer`, and
-  `presets`, contains no domains or `auto` values, and can be passed directly to
+  `preset`, contains no domains or `auto` values, and can be passed directly to
   `aisimulate simulate`.
 
 For scalar optimization, `index.json` orders all feasible candidates from best to worst. For Pareto
@@ -1090,7 +1129,6 @@ on the remaining narrow naming and boundary decisions:
 1. Confirm `planner.policy: disabled | planner`, or choose a more descriptive enabled-policy name.
 2. Confirm `./aisimulate-output` as the default output directory rather than requiring
    `--output-dir` or generating a timestamped directory.
-3. Confirm the direct typed fields for `cache.capacity.type: fixed` and the `fixed` and `polynomial`
-   timing providers.
+
 These are CLI schema questions. Their resolution does not require specifying underlying execution or
 optimizer architecture.
