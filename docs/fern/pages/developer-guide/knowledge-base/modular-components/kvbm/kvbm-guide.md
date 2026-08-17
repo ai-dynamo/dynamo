@@ -15,7 +15,7 @@ The fastest path is the published Dynamo container, which includes KVBM:
 
 ```bash
 docker run --gpus all --rm -it \
-  nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1 \
+  nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0 \
   /bin/bash
 ```
 
@@ -49,10 +49,10 @@ Pick one of the following to get a Dynamo vLLM container with KVBM built in. The
 **Option A: Pre-built NGC container (recommended for quick start)**
 
 ```bash
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
-See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../reference/general/release-artifacts.mdx#container-images) for available versions.
+See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../reference/general/release-artifacts.mdx) for available versions.
 
 **Option B: Build from source**
 
@@ -118,10 +118,10 @@ Pick one of the following to get a Dynamo TensorRT-LLM container with KVBM built
 **Option A: Pre-built NGC container (recommended for quick start)**
 
 ```bash
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.0
 ```
 
-See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../reference/general/release-artifacts.mdx#container-images) for available versions.
+See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../reference/general/release-artifacts.mdx) for available versions.
 
 **Option B: Build from source**
 

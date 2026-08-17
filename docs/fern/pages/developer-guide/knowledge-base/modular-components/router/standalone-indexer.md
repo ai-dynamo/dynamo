@@ -21,8 +21,10 @@ For Dynamo-native remote indexing, use `--serve-indexer` on `dynamo.frontend` or
 The HTTP API follows the [Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403) conventions.
 
 `DYN_ROUTER_MIN_INITIAL_WORKERS` is also honored here. When set to a positive integer, the
-standalone indexer waits for that many workers to register before opening its startup-ready
-gate, matching the frontend/router startup behavior.
+standalone indexer registers the initial `--workers` entries, attempts `--peers` recovery, and
+then waits for that catalog count before binding its HTTP listener. Because `/register` is
+unavailable during this wait, the threshold must be met by initial workers, workers recovered
+from peers, or a combination of both.
 
 ## Model and Routing Group Support
 
@@ -99,15 +101,16 @@ The service is exposed through the Python bindings package and launched with `py
 ### Standalone build
 
 ```bash
-cd lib/bindings/python && VIRTUAL_ENV=../../.venv ../../.venv/bin/maturin develop --uv --features kv-indexer
+cd lib/bindings/python && VIRTUAL_ENV=../../../.venv ../../../.venv/bin/maturin develop --uv --features kv-indexer
 ```
 
-After installation, launch the service with `python -m dynamo.indexer`.
+After installation, launch the service from `lib/bindings/python` with
+`../../../.venv/bin/python -m dynamo.indexer`.
 
 ### Standalone build with metrics
 
 ```bash
-cd lib/bindings/python && VIRTUAL_ENV=../../.venv ../../.venv/bin/maturin develop --uv --features kv-indexer,kv-indexer-metrics
+cd lib/bindings/python && VIRTUAL_ENV=../../../.venv ../../../.venv/bin/maturin develop --uv --features kv-indexer,kv-indexer-metrics
 ```
 
 This keeps the default `kv-indexer` build lean while still allowing Prometheus metrics when needed.
@@ -135,7 +138,9 @@ python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name
 
 Set `DYN_ROUTER_MIN_INITIAL_WORKERS=<n>` to require at least `<n>` workers before the
 standalone indexer, frontend push-router path, and KV router config-ready gate all proceed.
-Leave it unset or set it to `0` to disable the startup wait.
+For the standalone indexer, the gate runs before the HTTP listener is bound, so its count can
+only be satisfied by initial `--workers` and workers recovered through `--peers`; `/register`
+cannot satisfy it. Leave the variable unset or set it to `0` to disable the startup wait.
 
 ## HTTP API
 
@@ -477,7 +482,13 @@ When a `replay_endpoint` is provided during `/register`, the indexer connects a 
 
 If no `replay_endpoint` is configured, gaps are logged as warnings but not recovered.
 
-The sequence counter (`last_seq`) persists across unregister/register cycles, so re-registering a worker after a gap will trigger replay on the first batch received by the new listener.
+Deregistration removes the listener's sequence watermark. Re-registering the same worker and
+DP rank therefore starts with a fresh watermark; it does not continue incremental replay from
+the previous listener's `last_seq`. If the first live batch starts above sequence `0`, a configured
+`replay_endpoint` triggers replay from sequence `0` before that live batch is applied. This only
+recovers history still retained by the engine. Without a replay endpoint, or when the requested
+range is no longer retained, restart with a healthy indexer in `--peers` to recover its startup
+snapshot, or perform another full resynchronization before relying on the rebuilt worker state.
 
 ## Limitations
 

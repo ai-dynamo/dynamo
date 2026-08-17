@@ -6,6 +6,7 @@
 package runtimeversion
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
 	"strings"
@@ -24,6 +25,17 @@ type Version struct {
 
 func (v Version) String() string {
 	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
+}
+
+// Compare returns -1, 0, or 1 when v's normalized compatibility core is less
+// than, equal to, or greater than other. Image-tag prerelease and build
+// suffixes are intentionally excluded by ParseImageVersion before comparison.
+func (v Version) Compare(other Version) int {
+	return cmp.Or(
+		cmp.Compare(v.Major, other.Major),
+		cmp.Compare(v.Minor, other.Minor),
+		cmp.Compare(v.Patch, other.Patch),
+	)
 }
 
 // Parse returns the compatibility version represented by an explicit override.
@@ -50,6 +62,15 @@ func ParseImageVersion(image string) (Version, error) {
 		return Version{}, fmt.Errorf("image tag %q must contain a semantic version such as \"1.1.0\"", tag)
 	}
 	return fromSemver(version), nil
+}
+
+// Resolve returns the override or the version derived from the image tag.
+func Resolve(image, override string) (Version, error) {
+	if override != "" {
+		return Parse(override)
+	}
+
+	return ParseImageVersion(image)
 }
 
 func fromSemver(version *semver.Version) Version {

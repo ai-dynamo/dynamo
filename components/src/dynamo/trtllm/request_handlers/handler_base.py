@@ -1077,6 +1077,7 @@ class HandlerBase(BaseGenerativeHandler):
         # outputs are interleaved by choice index, so maintain one cursor per
         # choice and emit only the new slice for each Dynamo chunk.
         output_tokens_per_choice: dict[int, int] = {}
+        prompt_logprobs_payload = None
 
         sampling_params = self._override_sampling_params(
             self.default_sampling_params, request
@@ -1096,7 +1097,7 @@ class HandlerBase(BaseGenerativeHandler):
 
             # Handle prompt_logprobs
             prompt_logprobs_value = output_options.get("prompt_logprobs")
-            if prompt_logprobs_value:
+            if prompt_logprobs_value is not None:
                 if hasattr(sampling_params, "prompt_logprobs"):
                     setattr(
                         sampling_params, "prompt_logprobs", int(prompt_logprobs_value)
@@ -1292,6 +1293,11 @@ class HandlerBase(BaseGenerativeHandler):
                         if top_logprobs:
                             out["top_logprobs"] = top_logprobs
 
+                        if prompt_logprobs_payload is None:
+                            prompt_logprobs_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                                output
+                            )
+
                         if output.finish_reason:
                             out["finish_reason"] = output.finish_reason
                         if output.stop_reason:
@@ -1316,6 +1322,11 @@ class HandlerBase(BaseGenerativeHandler):
                                     "Request finished with no finish reason set - "
                                     "this indicates a possible bug"
                                 )
+
+                            if prompt_logprobs_payload is not None:
+                                out.setdefault("engine_data", {})[
+                                    "prompt_logprobs"
+                                ] = prompt_logprobs_payload
 
                             num_input_tokens = len(request.get("token_ids", []))
                             total_completion_tokens = sum(
@@ -1351,6 +1362,10 @@ class HandlerBase(BaseGenerativeHandler):
 
                         # Yield the chunk to the client and update the token
                         # count for this output choice.
+                        #
+                        # Stays a yield under push egress: this hop is
+                        # pure-Python generator delegation on one thread. Only
+                        # the outermost hop into Rust pushes.
                         yield out
                         output_tokens_per_choice[output_idx] = next_total_toks
 

@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Install Gateway API Routing
-sidebar-title: Gateway API Routing
+title: Install Gateway API Inference Extension
+sidebar-title: Gateway API Inference Extension
 subtitle: Install Gateway API, the Inference Extension, and a compatible Gateway implementation for Dynamo EPP routing.
 ---
 
@@ -10,7 +10,7 @@ subtitle: Install Gateway API, the Inference Extension, and a compatible Gateway
 Complete this installation only if you plan to use the Gateway API routing topology. The default
 Dynamo Frontend topology works without Gateway API, the Gateway API Inference Extension (GAIE), or
 an Endpoint Picker Plugin (EPP). To use the default topology, continue to
-[KV-Aware Routing with the Dynamo Frontend](../kv-aware-routing/dynamo-frontend.md).
+[the Dynamo Frontend](../kv-aware-routing/dynamo-frontend.md).
 </Note>
 
 Install this integration after the [Dynamo platform](install-dynamo.md). The Dynamo operator needs
@@ -41,7 +41,7 @@ creates the Gateway in `NAMESPACE`. Keep the Dynamo version aligned with the pla
 ```bash
 export NAMESPACE=my-model
 export DYNAMO_SYSTEM_NAMESPACE=dynamo-system
-export DYNAMO_VERSION=1.3.0
+export DYNAMO_VERSION=1.4.0
 export AGW_NAMESPACE=agentgateway-system
 ```
 
@@ -190,4 +190,4 @@ kubectl get pods --all-namespaces | grep istio
 ## Next Step
 
 Add an EPP component and route an existing DGD with
-[Route Requests with Gateway API](../kv-aware-routing/gateway-api.mdx).
+[GAIE with Dynamo](../kv-aware-routing/gateway-api.mdx).

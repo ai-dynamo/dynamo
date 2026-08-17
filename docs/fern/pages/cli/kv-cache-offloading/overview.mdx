@@ -185,8 +185,8 @@ cd examples/backends/vllm
 
 The script starts the decode worker with `NixlConnector` and the prefill worker with `PdConnector`,
 which combines `FlexKVConnectorV1` for offloading with `NixlConnector` for prefill/decode transfer.
-It selects the prefill role with `--disaggregation-mode prefill`; do not use the deprecated
-`--is-prefill-worker` flag.
+It selects the prefill role with `--disaggregation-mode prefill`. The `--is-prefill-worker` flag
+it replaced was removed in v1.4.0.
 
 For SSD and distributed-cache configuration, see the
 [FlexKV documentation](https://github.com/taco-project/FlexKV/tree/main/docs).

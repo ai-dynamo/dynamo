@@ -44,7 +44,7 @@ webhooks:
     service:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
-      path: /validate-nvidia-com-v1alpha1-dynamocomponentdeployment
+      path: /validate/nvidia.com/v1beta1/dynamocomponentdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: vdynamocomponentdeployment.kb.io
   {{- if .Values.webhook.namespaceSelector }}
@@ -59,7 +59,7 @@ webhooks:
   - apiGroups:
     - nvidia.com
     apiVersions:
-    - v1alpha1
+    - v1beta1
     operations:
     - CREATE
     - UPDATE

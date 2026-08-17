@@ -224,6 +224,82 @@ class TestRunNaiveFallback:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    def test_with_pvc_absolute_path_under_mount_passes_relative_generator_path(self):
+        """Already-mounted pvcModelPath values are passed to AIC as PVC-relative."""
+        dgdr = _make_dgdr(
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath="/opt/models",
+                pvcModelPath=(
+                    "/opt/models/hub/models--Qwen--Qwen3-0.6B/"
+                    "snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
+                ),
+            )
+        )
+        captured_params = {}
+
+        def fake_generate(params, backend, use_dynamo_generator=False):
+            captured_params.update(params)
+            return {
+                "k8s_deploy.yaml": "kind: DGD\nmetadata:\n  name: test\nspec:\n  services: {}"
+            }
+
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                side_effect=fake_generate,
+            ),
+        ):
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-0.6B", 4, "a100_pcie", "vllm")
+
+        k8s = captured_params.get("K8sConfig", {})
+        assert k8s.get("k8s_pvc_mount_path") == "/opt/models"
+        assert k8s.get("k8s_model_path_in_pvc") == (
+            "hub/models--Qwen--Qwen3-0.6B/"
+            "snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
+        )
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_with_cache_only_pvc_omits_model_path_override(self):
+        """When pvcModelPath is unset, AIC receives only the cache PVC mount."""
+        dgdr = _make_dgdr(
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath="/opt/model-cache",
+            )
+        )
+        captured_params = {}
+
+        def fake_generate(params, backend, use_dynamo_generator=False):
+            captured_params.update(params)
+            return {
+                "k8s_deploy.yaml": "kind: DGD\nmetadata:\n  name: test\nspec:\n  services: {}"
+            }
+
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                side_effect=fake_generate,
+            ),
+        ):
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-0.6B", 4, "a100_pcie", "vllm")
+
+        k8s = captured_params.get("K8sConfig", {})
+        assert k8s.get("k8s_pvc_name") == "model-cache"
+        assert k8s.get("k8s_pvc_mount_path") == "/opt/model-cache"
+        assert "k8s_model_path_in_pvc" not in k8s
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
     def test_without_pvc_has_no_pvc_overrides(self):
         """When no modelCache, PVC keys are absent from generator params."""
         dgdr = _make_dgdr()
@@ -401,14 +477,14 @@ class TestRunDefaultSim:
 
 
 # ---------------------------------------------------------------------------
-# Force-disagg when interpolation data is needed
+# Force-disagg when a downstream consumer needs separate worker picks
 # ---------------------------------------------------------------------------
 
 
 class TestRunDefaultSimForceDisagg:
-    """When AIC picks an aggregated config but the DGDR requires interpolation
-    data (mocker or throughput-scaling), _run_default_sim must override the
-    selection to the best available disaggregated config."""
+    """When AIC picks an aggregated config but a downstream consumer needs
+    separate prefill/decode picks, _run_default_sim must select the best
+    available disaggregated config."""
 
     def _call_default_sim(self, dgdr, execute_return_value):
         with (
@@ -458,7 +534,7 @@ class TestRunDefaultSimForceDisagg:
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_no_profile_data_needed_agg_pick_preserved(self):
-        """When no interpolation data is needed, an agg pick is kept as-is."""
+        """When no downstream consumer needs disagg picks, agg is preserved."""
         dgdr = _make_dgdr()  # no mocker, no throughput scaling
         result = self._call_default_sim(dgdr, self._both_configs(chosen="agg"))
         assert result["chosen_exp"] == "agg"

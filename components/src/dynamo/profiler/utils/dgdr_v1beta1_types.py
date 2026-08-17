@@ -161,7 +161,7 @@ class ModelCacheSpec(BaseModel):
     )
     pvcModelPath: Optional[str] = Field(
         default=None,
-        description='PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").',
+        description='PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). It may also be a container-visible absolute path already under PVCMountPath. Such an absolute path is interpreted as container-visible; use the relative form without a leading slash to address the same path prefix within the PVC.',
     )
     pvcMountPath: str = Field(
         default="/opt/model-cache",
@@ -254,7 +254,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1". For Dynamo < 1.1.0, use dynamo-frontend.',
+        description='Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0". For Dynamo < 1.1.0, use dynamo-frontend.',
     )
     runtimeVersionOverride: Optional[str] = Field(
         default=None,

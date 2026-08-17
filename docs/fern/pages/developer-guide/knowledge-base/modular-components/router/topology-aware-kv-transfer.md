@@ -1,11 +1,11 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Topology-Aware KV Transfer
 subtitle: Runtime metadata and decode routing semantics for topology-aware prefill/decode handoff
 ---
 
-Topology-aware KV transfer constrains or biases decode worker selection after a prefill worker has been selected. The router derives standard `RoutingConstraints` from the selected prefill worker's published topology metadata, then merges those constraints into the decode request.
+**Experimental.** Topology-aware KV transfer in NVIDIA Dynamo constrains or biases decode worker selection after a prefill worker has been selected. The router derives standard `RoutingConstraints` from the selected prefill worker's published topology metadata, then merges those constraints into the decode request.
 
 Use the Kubernetes operator path when possible.
 For deployment examples, see [Kubernetes Topology-Aware KV Transfer](../../kubernetes/multinode/topology-aware-kv-transfer.md).
@@ -90,7 +90,7 @@ Decode workers without that taint are ineligible. If no eligible decode worker e
 preferred_taints = {"dynamo.topology/zone=us-east-1a": 0.85}
 ```
 
-All decode workers remain eligible, but matching workers receive a lower routing cost. `preferredWeight` controls the strength of the preference from `0` to `1`.
+Decode workers that satisfy existing required constraints remain eligible, but matching workers receive a routing-cost bias. When enforcement is `preferred`, `preferredWeight` is required, must be from `0` to `1`, and controls the strength of that bias. It is not a probability and does not guarantee same-domain selection.
 
 ## Worker Environment Contract
 
@@ -102,7 +102,7 @@ The Python backend utility reads topology from files and transfer policy from en
 | `DYN_TOPOLOGY_MOUNT_PATH` | Directory containing topology files. Defaults to `/etc/dynamo/topology`. |
 | `DYN_KV_TRANSFER_DOMAIN` | Required when topology is enabled. Names the topology file and runtime domain to use for KV transfer constraints. |
 | `DYN_KV_TRANSFER_ENFORCEMENT` | `required` or `preferred`. Defaults to `required` when a domain is set. |
-| `DYN_KV_TRANSFER_PREFERRED_WEIGHT` | Weight used when enforcement is `preferred`. |
+| `DYN_KV_TRANSFER_PREFERRED_WEIGHT` | Required when enforcement is `preferred`; must be from `0` to `1`. |
 
 Each non-hidden, non-empty file under `DYN_TOPOLOGY_MOUNT_PATH` is interpreted as one topology domain. The file name is the domain; the file content is the worker's value for that domain.
 
@@ -118,7 +118,7 @@ export DYN_KV_TRANSFER_DOMAIN=zone
 export DYN_KV_TRANSFER_ENFORCEMENT=required
 ```
 
-When topology is enabled, the worker polls until the selected transfer-domain file exists and has content. If it remains missing or empty through the timeout window, the worker exits so the bad topology source is visible during startup.
+When topology is enabled, the worker polls once per second for up to 30 seconds until the selected transfer-domain file exists and has content. If it remains missing or empty, the worker exits so the bad topology source is visible during startup.
 
 ## Backend Support
 
@@ -127,6 +127,7 @@ The integrated Python backends apply the topology config during worker registrat
 - vLLM
 - SGLang
 - TensorRT-LLM
+- Mocker, for simulation and tests
 
 The topology utility writes the fields onto `ModelRuntimeConfig`; Rust owns validation and canonical topology-taint generation.
 

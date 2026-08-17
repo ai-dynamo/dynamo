@@ -22,11 +22,12 @@ telemetry through Gateway API.
 
 | Choose | When it fits | Additional infrastructure | Where routing is configured |
 |---|---|---|---|
-| Dynamo Frontend | Clients can call one Dynamo Frontend Service directly and you want the simplest deployment. | None beyond the normal Dynamo platform. | Frontend with `--router-mode kv`. |
-| Gateway API | Traffic must enter through a Kubernetes Gateway or share platform-managed gateway policy. | Gateway API, GAIE, a compatible Gateway implementation, and a Dynamo EPP. | EPP; worker Frontend sidecars use `--router-mode direct`. |
+| Using the Dynamo Frontend | Clients can call one Dynamo Frontend Service directly and you want the simplest deployment. | None beyond the normal Dynamo platform. | Frontend with `--router-mode kv`. |
+| Using GAIE with Dynamo | Traffic must enter through a Kubernetes Gateway or share platform-managed gateway policy. | Gateway API, GAIE, a compatible Gateway implementation, and a Dynamo EPP. | EPP; worker Frontend sidecars use `--router-mode direct`. |
+| Using GAIE with vanilla vLLM | You already run upstream vLLM pods and want to add Dynamo's advanced KV-aware routing without migrating the fleet to Dynamo workers. | Gateway API, GAIE, a compatible Gateway implementation, and standalone Dynamo EPP support. | EPP with direct vLLM worker discovery and vLLM token rendering. |
 
-The two topologies are alternatives for a request path. Do not configure the Frontend to select a
-worker after the EPP has already selected one.
+The Frontend and GAIE topologies are alternatives for a request path. Do not configure the Frontend
+to select a worker after the EPP has already selected one.
 
 ## Dynamo Frontend Routing
 
@@ -42,10 +43,10 @@ Choose this topology when:
 - Dynamo should own both HTTP request handling and worker selection.
 
 This topology works out of the box with the normal Dynamo platform; no Gateway API components are
-required. Use [KV-Aware Routing with the Dynamo Frontend](dynamo-frontend.md) to enable KV-aware worker
+required. Use [the Dynamo Frontend](dynamo-frontend.md) to enable KV-aware worker
 selection in a DGD.
 
-## Gateway API Routing
+## GAIE Routing
 
 Gateway API routing separates traffic entry from worker selection. A Kubernetes `Gateway` receives
 the request and asks the Dynamo Endpoint Picker Plugin (EPP) to select an endpoint before forwarding
@@ -59,8 +60,8 @@ Choose this topology when:
 - A platform team manages the Gateway while an application team manages the DGD and `HTTPRoute`.
 
 Gateway API routing requires a separate installation. See
-[Install Gateway API Routing](../installation/gateway-api-routing.mdx), then
-[Route Requests with Gateway API](gateway-api.mdx).
+[Install Gateway API Inference Extension](../installation/gateway-api-routing.mdx), then
+[GAIE with Dynamo](gateway-api.mdx) or [GAIE with vanilla vLLM](vanilla-vllm-onramp.mdx).
 
 ## What Is the Dynamo EPP?
 
