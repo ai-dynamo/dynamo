@@ -28,7 +28,7 @@ use crate::tracker::{StoreInput, Tracker};
 use crate::wire::vllm_in::{KvEventBatch, RawKvEvent};
 use crate::zmq_util::{connect_sub_socket, multipart_message};
 use dynamo_kv_router::protocols::StorageTier;
-use dynamo_kv_router::zmq_wire::Locality;
+use dynamo_kv_router::zmq_wire::{KvEventSourceKind, Locality};
 
 /// Spawn the ZMQ listener. Returns immediately with a [`JoinHandle`] for the task.
 pub async fn spawn(
@@ -91,6 +91,13 @@ pub async fn spawn(
 }
 
 fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventSource) {
+    // Compatibility with v1.2 framework-only producers during v1.4 rolling upgrades.
+    // TODO(v1.5): Remove with the legacy consolidator subscription after v1.2
+    // leaves N-2 and residency-v2 producers use only the versioned source.
+    if event.source_kind() != Ok(KvEventSourceKind::Framework) {
+        tracing::warn!("Ignoring non-framework event on the legacy consolidator stream");
+        return;
+    }
     // G1-only ingress: this source is the engine's local device (G1) cache.
     // Non-local events (REMOTE / unknown locality), native lower-tier media
     // (CPU offload, vLLM STORAGE), and unrecognized media (fail-closed) belong
@@ -190,7 +197,7 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             }
         }
 
-        RawKvEvent::AllBlocksCleared => {
+        RawKvEvent::AllBlocksCleared { .. } => {
             tracker.handle_clear_all();
         }
 
@@ -219,6 +226,7 @@ mod tests {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality,
+            source_kind: None,
         }
     }
 

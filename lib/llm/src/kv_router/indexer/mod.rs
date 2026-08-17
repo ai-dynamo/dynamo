@@ -10,9 +10,9 @@ use dynamo_kv_router::{
     config::KvRouterConfig,
     indexer::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
-        ThreadPoolIndexer,
+        ThreadPoolIndexer, record_unsupported_residency_event,
     },
-    protocols::{DpRank, RouterEvent, WorkerId},
+    protocols::{DpRank, KvCacheEventData, ResidencyProjection, RouterEvent, WorkerId},
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -42,9 +42,15 @@ pub(crate) use recovery::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
     RecoverySupervisor, RecoveryTarget, TargetFaultDisposition, start_target_subscriber,
 };
+// The version-aware state-agent watcher will use the status transport when it
+// activates residency-v2 consumption (DEP #13044).
+#[allow(unused_imports)]
+pub(crate) use recovery::{
+    RuntimeWorkerQueryTransport, start_subscriber, start_worker_kv_query_endpoint,
+    start_worker_kv_query_endpoint_with_status,
+};
 #[cfg(test)]
 pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
-pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
 /// to this router, even when the primary indexer is served or consumed
@@ -78,6 +84,19 @@ pub enum Indexer {
 }
 
 impl Indexer {
+    /// Publish a control-plane projection snapshot for subsequent lookups.
+    ///
+    /// Discovery and attachment reconciliation stay in lib/llm; router-core
+    /// only consumes this immutable resolved view.
+    pub fn set_residency_projection(&self, projection: ResidencyProjection) {
+        match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                lower_tier.set_residency_projection(projection)
+            }
+            Self::Remote { .. } | Self::None => {}
+        }
+    }
+
     pub(crate) fn supports_overlap_refresh(&self) -> bool {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
     }
@@ -240,57 +259,70 @@ impl Indexer {
     }
 
     pub(crate) async fn try_apply_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let targets_primary = match event.targets_primary() {
+            Ok(targets_primary) => targets_primary,
+            Err(_) => {
+                match self {
+                    Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                        lower_tier.record_unsupported_residency_event(&event);
+                    }
+                    Self::Remote { .. } | Self::None => {
+                        record_unsupported_residency_event(None, &event);
+                    }
+                }
+                return Ok(());
+            }
+        };
+        let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
         match self {
             Self::KvIndexer {
                 primary,
                 lower_tier,
                 ..
-            } => match &event.event.data {
-                dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
-                    primary
-                        .event_sender()
-                        .send(event.clone())
-                        .await
-                        .map_err(|_| KvRouterError::IndexerOffline)?;
+            } => {
+                if is_clear {
+                    if targets_primary {
+                        primary
+                            .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
+                            .await?;
+                    }
 
                     for indexer in lower_tier.all() {
-                        indexer.enqueue_event(event.clone())?;
+                        indexer.apply_event_and_wait(event.clone()).await?;
                     }
-                }
-                _ if event.storage_tier.is_gpu() => {
+                } else if targets_primary {
                     primary
                         .event_sender()
                         .send(event)
                         .await
                         .map_err(|_| KvRouterError::IndexerOffline)?;
-                }
-                _ => {
+                } else {
                     lower_tier
                         .get_or_create(event.storage_tier)
                         .enqueue_event(event)?;
                 }
-            },
+            }
             Self::Concurrent {
                 primary,
                 lower_tier,
                 ..
-            } => match &event.event.data {
-                dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
-                    primary.enqueue_event(event.clone())?;
+            } => {
+                if is_clear {
+                    if targets_primary {
+                        primary.apply_event_and_wait(event.clone()).await?;
+                    }
 
                     for indexer in lower_tier.all() {
-                        indexer.enqueue_event(event.clone())?;
+                        indexer.apply_event_and_wait(event.clone()).await?;
                     }
-                }
-                _ if event.storage_tier.is_gpu() => {
+                } else if targets_primary {
                     primary.enqueue_event(event)?;
-                }
-                _ => {
+                } else {
                     lower_tier
                         .get_or_create(event.storage_tier)
                         .enqueue_event(event)?;
                 }
-            },
+            }
             Self::Remote { .. } | Self::None => {}
         }
         Ok(())

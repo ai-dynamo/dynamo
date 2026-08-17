@@ -69,7 +69,10 @@ impl PrefillRouter<DefaultWorkerSelector> {
             kv_router_config,
             decode_router,
             Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+                DefaultWorkerSelector::new(
+                    Some(config.clone()),
+                    worker_type.default_selector_label(),
+                )
             }),
             prefill_load_estimator,
             session_affinity_ttl_secs,
@@ -77,6 +80,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             namespace,
             is_eagle,
             worker_monitor,
+            None,
         )
     }
 }
@@ -108,7 +112,10 @@ where
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
             is_eagle: false,
+            task_guard: None,
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
+            #[cfg(test)]
+            activation_task_state: Arc::new(()),
         })
     }
 
@@ -127,6 +134,7 @@ where
         namespace: String,
         is_eagle: bool,
         worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+        task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Arc<Self> {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let (target_tx, target_rx) = watch::channel(None);
@@ -157,20 +165,44 @@ where
             model_name,
             namespace,
             is_eagle,
+            task_guard: task_guard.clone(),
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
+            #[cfg(test)]
+            activation_task_state: Arc::new(()),
         });
 
-        tokio::spawn(Self::drive_target(
-            Arc::downgrade(&router),
-            target_rx,
-            cancel_token.clone(),
-            kv_cache_block_size,
-            kv_router_config,
-            worker_monitor,
-        ));
+        let router_weak = Arc::downgrade(&router);
+        let drive_cancel_token = cancel_token.clone();
+        let drive_task_guard = task_guard.clone();
+        #[cfg(test)]
+        let drive_task_state = router.activation_task_state.clone();
+        tokio::spawn(async move {
+            let _drive_task_guard = drive_task_guard;
+            #[cfg(test)]
+            let _drive_task_state = drive_task_state;
+            Self::drive_target(
+                router_weak,
+                target_rx,
+                drive_cancel_token,
+                kv_cache_block_size,
+                kv_router_config,
+                worker_monitor,
+            )
+            .await;
+        });
         if let Some(activation_rx) = activation_rx {
             let router = Arc::downgrade(&router);
+            let activation_task_guard = task_guard;
+            #[cfg(test)]
+            let activation_task_state = router
+                .upgrade()
+                .expect("prefill router exists during construction")
+                .activation_task_state
+                .clone();
             tokio::spawn(async move {
+                let _activation_task_guard = activation_task_guard;
+                #[cfg(test)]
+                let _activation_task_state = activation_task_state;
                 tokio::select! {
                     result = activation_rx => {
                         if let (Ok(endpoint), Some(router)) = (result, router.upgrade()) {
@@ -190,8 +222,7 @@ where
         endpoint: Endpoint,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        worker_monitor: Option<&crate::discovery::KvWorkerMonitor>,
-    ) -> Result<PrefillBinding<Sel>> {
+    ) -> Result<(PrefillBinding<Sel>, Client)> {
         tracing::info!(
             router_mode = ?context.router_mode,
             "Activating prefill router"
@@ -232,7 +263,7 @@ where
             let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
             let selector = (context.worker_selector_factory)(
                 &effective_kv_router_config,
-                WORKER_TYPE_PREFILL,
+                crate::worker_type::WorkerType::Prefill,
                 RoutingPartitionRef::new(&context.model_name, DEFAULT_ROUTING_GROUP),
             );
             let kv_chooser = context
@@ -252,9 +283,9 @@ where
 
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
-            Self::attach_prefill_client(worker_monitor, &client);
             let affinity =
                 create_affinity_coordinator(context.session_affinity_ttl, client.clone()).await?;
+            let prefill_client = client.clone();
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -265,17 +296,20 @@ where
             .await?;
 
             // Wrap it in KvPushRouter
-            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
-                push_router,
-                kv_chooser,
-                affinity,
-            )))
+            (
+                InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
+                    push_router,
+                    kv_chooser,
+                    affinity,
+                ))),
+                prefill_client,
+            )
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
-            Self::attach_prefill_client(worker_monitor, &client);
             let affinity =
                 create_affinity_coordinator(context.session_affinity_ttl, client.clone()).await?;
+            let prefill_client = client.clone();
 
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
@@ -287,19 +321,25 @@ where
             )
             .await?;
 
-            InnerPrefillRouter::SimpleRouter(Arc::new(
-                crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
-                    push_router,
-                    affinity,
-                    context.router_mode.is_direct_routing(),
-                ),
-            ))
+            (
+                InnerPrefillRouter::SimpleRouter(Arc::new(
+                    crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
+                        push_router,
+                        affinity,
+                        context.router_mode.is_direct_routing(),
+                    ),
+                )),
+                prefill_client,
+            )
         };
 
-        Ok(PrefillBinding {
-            endpoint_id,
-            router: inner_router,
-        })
+        Ok((
+            PrefillBinding {
+                endpoint_id,
+                router: inner_router.0,
+            },
+            inner_router.1,
+        ))
     }
 
     /// Attach the freshly-created prefill `Client` to this WorkerSet's monitor (handed in
@@ -376,7 +416,6 @@ where
                 endpoint,
                 kv_cache_block_size,
                 kv_router_config.clone(),
-                worker_monitor.as_ref(),
             );
             tokio::pin!(build);
             let result = tokio::select! {
@@ -394,11 +433,12 @@ where
                 return;
             };
             match result {
-                Ok(binding) => {
+                Ok((binding, prefill_client)) => {
                     let current_target = router_ref.target.lock();
                     if current_target.as_ref() != Some(&endpoint_id) {
                         continue;
                     }
+                    Self::attach_prefill_client(worker_monitor.as_ref(), &prefill_client);
                     router_ref.binding.store(Some(Arc::new(binding)));
                     router_ref
                         .lifecycle
