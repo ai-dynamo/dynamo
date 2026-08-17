@@ -66,7 +66,7 @@ ensure_sglang_top_level_exports()
 def ensure_sglang_tensor_image_size() -> None:
     """Allow SGLang's image-token resolver to handle decoded image tensors.
 
-    SGLang 0.5.13 through 0.5.16 assume every decoded image exposes the PIL
+    SGLang 0.5.13 through 0.5.17 assume every decoded image exposes the PIL
     ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
     CHW tensor, causing multimodal requests to fall back to retokenization.
 

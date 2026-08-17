@@ -266,6 +266,10 @@ def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatc
 
         processor = object.__new__(ConcreteMultimodalProcessor)
         processor._processor = Processor()
+        # SGLang 0.5.17 resolves the processor and tokenizer together before
+        # handling raw multimodal items. This test stubs the processing path,
+        # so a tokenizer is not exercised, but the attribute must exist.
+        processor._tokenizer = None
         processor.use_cuda_ipc = False
         image_token_id = 99
         processor._process_and_collect_mm_items = lambda **kwargs: (
