@@ -98,6 +98,10 @@ type PodSnapshotStatus struct {
 	// Standard types are Ready and Failed.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Source describes the environment recorded in the checkpoint manifest.
+	// +optional
+	Source *CheckpointSource `json:"source,omitempty"`
 }
 
 // +kubebuilder:object:root=true

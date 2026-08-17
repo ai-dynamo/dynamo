@@ -85,6 +85,10 @@ type PodSnapshotContentStatus struct {
 	// Standard types are Ready and Failed.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Source describes the environment recorded in the checkpoint manifest.
+	// +optional
+	Source *CheckpointSource `json:"source,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -93,6 +97,7 @@ type PodSnapshotContentStatus struct {
 // +kubebuilder:printcolumn:name="PodSnapshot",type="string",JSONPath=".spec.snapshotRef.name",description="Bound PodSnapshot"
 // +kubebuilder:printcolumn:name="Namespace",type="string",JSONPath=".spec.snapshotRef.namespace",description="PodSnapshot namespace"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Ready condition"
+// +kubebuilder:printcolumn:name="Mounts",type="integer",JSONPath=".status.source.mountCount",description="Required source pod mounts"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || self.spec == oldSelf.spec",message="spec is immutable"
 
