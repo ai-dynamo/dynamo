@@ -157,9 +157,8 @@ repos:
       language: system
       # The hook above proves the generator works; this one proves it was
       # run. Without it, editing releases.data.ts and forgetting to
-      # regenerate leaves releases.json and every generated span stale,
-      # with nothing else in the repo checking.
-      files: ^docs/fern/(scripts/gen_llms_tables\.py|components/releases\.data\.ts|pages/reference/general/.*\.mdx|assets/releases(-atom\.xml|\.json))$
+      # regenerate leaves every committed generated span stale.
+      files: ^docs/fern/(scripts/gen_llms_tables\.py|components/releases\.data\.ts|pages/reference/general/.*\.mdx)$
       pass_filenames: false
     - id: check-component-imports
       name: Check Fern components trigger no rolldown bundling
