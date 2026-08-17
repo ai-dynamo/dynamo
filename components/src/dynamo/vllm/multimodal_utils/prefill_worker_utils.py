@@ -289,7 +289,7 @@ async def _fetch_embeddings(
             key = _image_item_cache_key(item)
             cached = cache.get(key) if key is not None else None
             if cached is not None:
-                logger.debug(f"[{request_id}] Cache hit for image index {idx}")
+                logger.debug("[%s] Cache hit for image index %d", request_id, idx)
                 results[idx] = MultiModalGroup(
                     loaded_embedding=cached.tensor,
                     image_grid_thw=cached.image_grid_thw,
