@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Host activation lands separately; preserve the internal policy state in this
-// foundation without forcing the public contract through a fake call site.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

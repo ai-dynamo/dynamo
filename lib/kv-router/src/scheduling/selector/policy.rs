@@ -12,6 +12,7 @@ use super::{
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
+use crate::scheduling::queue_admission::QueueAdmissionPolicy;
 use crate::scheduling::types::{
     KvSchedulerError, SchedulingRequest, SessionContext, WorkerSelectionPolicyError,
 };
@@ -381,6 +382,7 @@ pub struct WorkerSelectionPolicy {
     kv_router_config: KvRouterConfig,
     worker_label: &'static str,
     state: WorkerSelectionPolicyState,
+    admission_policy: Option<Box<dyn QueueAdmissionPolicy>>,
 }
 
 impl WorkerSelectionPolicy {
@@ -431,7 +433,14 @@ impl WorkerSelectionPolicy {
                 load_inputs: Vec::new(),
                 routing_inputs: Vec::new(),
             })),
+            admission_policy: None,
         }
+    }
+
+    /// Attach one queue admission policy to the same routing partition as this scorer/picker.
+    pub fn with_admission_policy(mut self, policy: Box<dyn QueueAdmissionPolicy>) -> Self {
+        self.admission_policy = Some(policy);
+        self
     }
 
     /// Wrap Dynamo's built-in selector for a host that uses the policy selector type.
@@ -444,6 +453,7 @@ impl WorkerSelectionPolicy {
             kv_router_config,
             worker_label,
             state: WorkerSelectionPolicyState::Default(picker),
+            admission_policy: None,
         }
     }
 }
@@ -655,6 +665,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
             eligibility,
             block_size,
         )
+    }
+
+    fn take_admission_policy(&mut self) -> Option<Box<dyn QueueAdmissionPolicy>> {
+        self.admission_policy.take()
     }
 }
 

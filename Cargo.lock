@@ -2990,6 +2990,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-session-aware-queue-admission-policy-example"
+version = "1.5.0"
+dependencies = [
+ "dynamo-kv-router",
+]
+
+[[package]]
 name = "dynamo-sglang-mocker"
 version = "1.5.0"
 dependencies = [

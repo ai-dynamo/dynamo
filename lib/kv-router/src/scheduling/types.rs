@@ -18,11 +18,20 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::router_hint::RouterHintRootCandidates;
-use crate::scheduling::policy_queue::QueueRejection;
+use crate::scheduling::queue_admission::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
+
+/// Supplies a shareable overload snapshot for queue-admission policies.
+///
+/// This preserves pointer identity while the overload state is unchanged, so
+/// the admission host can avoid comparing or rebuilding worker state on every
+/// request. Worker selection continues to use [`OverloadedWorkerProvider`] for
+/// backwards compatibility with existing providers.
+pub type OverloadedWorkerSnapshotProvider =
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 /// Supplies the authoritative set of workers currently available for selection.
 ///

@@ -485,11 +485,15 @@ where
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
+        let client_for_admission_overload = client.clone();
+        let admission_overloaded_worker_provider =
+            Arc::new(move || client_for_admission_overload.overloaded_instance_ids_snapshot());
+
         let client_for_availability = client.clone();
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        let scheduler = KvScheduler::start(
+        let scheduler = KvScheduler::start_with_admission_overload_provider(
             endpoint.clone(),
             block_size,
             workers_with_configs.clone(),
@@ -498,6 +502,7 @@ where
             prefill_load_estimator.clone(),
             overlap_scores_refresh,
             Some(overloaded_worker_provider),
+            Some(admission_overloaded_worker_provider),
             Some(available_worker_provider),
             model_name.as_deref(),
             metric_worker_type,

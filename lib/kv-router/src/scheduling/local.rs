@@ -19,8 +19,9 @@ use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, KvSchedulerError, NonMaxOverlapSelectionObserver,
-    OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest, SchedulingRequest,
-    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
+    OverloadedWorkerProvider, OverloadedWorkerSnapshotProvider, PotentialLoad, ScheduleMode,
+    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    WorkerAvailabilityProvider,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -36,6 +37,12 @@ enum WorkerConfigReconcileOutcome {
     Unchanged,
     Applied,
     Rejected,
+}
+
+#[derive(Clone, Copy)]
+enum RequestOutcome {
+    Completed(Option<usize>),
+    Aborted,
 }
 
 pub struct LocalScheduler<P, C, Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
@@ -198,17 +205,67 @@ where
         worker_type: &'static str,
         monitor_worker_configs: bool,
     ) -> Result<Self, KvSchedulerError> {
-        let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
-            Arc::clone(&slots),
-            workers_with_configs.clone(),
+        Self::new_with_policy_profile_and_admission_overload_provider(
+            slots,
+            workers_with_configs,
             profile,
             block_size,
             selector,
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            None,
             available_worker_provider,
-        )?);
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+    }
+
+    /// Construct a scheduler with a stable overload snapshot for queue admission.
+    ///
+    /// [`OverloadedWorkerProvider`] remains the worker-selection contract. The
+    /// optional snapshot provider is used only to avoid rebuilding the
+    /// queue-admission worker view when overload state is unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policy_profile_and_admission_overload_provider(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        profile: PolicyProfile,
+        block_size: u32,
+        selector: Sel,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        admission_overloaded_worker_provider: Option<OverloadedWorkerSnapshotProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Result<Self, KvSchedulerError> {
+        let queue = Arc::new(
+            SchedulerQueue::new_with_policy_profile_and_admission_overload_provider(
+                Arc::clone(&slots),
+                workers_with_configs.clone(),
+                profile,
+                block_size,
+                selector,
+                prefill_load_estimator,
+                overlap_scores_refresh,
+                overloaded_worker_provider,
+                admission_overloaded_worker_provider,
+                available_worker_provider,
+            )?,
+        );
+        let recheck_interval = queue
+            .admission_reconcile_interval()
+            .map_or(recheck_interval, |policy_interval| {
+                policy_interval.min(recheck_interval)
+            });
 
         let (queue_updates, _) = watch::channel(());
 
@@ -521,14 +578,48 @@ where
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
+        self.release_by_id(request_id, RequestOutcome::Completed(None))
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(feature = "standalone-selection")]
+    pub(crate) async fn free_if_present(&self, request_id: &str) -> Result<bool, SequenceError> {
+        self.release_by_id(request_id, RequestOutcome::Completed(None))
+            .await
+    }
+
+    #[cfg(feature = "standalone-selection")]
+    pub(crate) async fn abort_if_present(&self, request_id: &str) -> Result<bool, SequenceError> {
+        self.release_by_id(request_id, RequestOutcome::Aborted)
+            .await
+    }
+
+    async fn release_by_id(
+        &self,
+        request_id: &str,
+        outcome: RequestOutcome,
+    ) -> Result<bool, SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
-        self.slots.free(&request_id, Instant::now())?;
-        match worker {
-            Some(worker) => self.queue.update_worker(worker).await,
-            None => self.queue.update().await,
+        let slot_result = self.slots.free(&request_id, Instant::now());
+        if !self.queue.has_admission_policy() {
+            if let Some(worker) = worker {
+                self.queue.update_worker(worker).await;
+            }
+            slot_result?;
+            return Ok(worker.is_some());
         }
-        Ok(())
+        let admission_owned = match outcome {
+            RequestOutcome::Completed(context_tokens) => {
+                self.queue
+                    .complete_request(&request_id, worker, None, context_tokens)
+                    .await
+            }
+            RequestOutcome::Aborted => self.queue.abort_request(&request_id, worker, None).await,
+        };
+        slot_result?;
+        Ok(worker.is_some() || admission_owned)
     }
 
     /// Release a booking only if it still belongs to `worker`.
@@ -540,10 +631,70 @@ where
         request_id: &str,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
+        self.release_if_worker(request_id, worker, RequestOutcome::Completed(None))
+            .await
+    }
+
+    /// Release a completed booking with its final input-plus-output context.
+    pub async fn complete_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        context_tokens: usize,
+    ) -> Result<(), SequenceError> {
+        self.release_if_worker(
+            request_id,
+            worker,
+            RequestOutcome::Completed(Some(context_tokens)),
+        )
+        .await
+    }
+
+    /// Release a booking as an aborted request only if it still belongs to `worker`.
+    pub async fn abort_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        self.release_if_worker(request_id, worker, RequestOutcome::Aborted)
+            .await
+    }
+
+    async fn release_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        outcome: RequestOutcome,
+    ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
-        self.slots
+        let released = self
+            .slots
             .free_if_worker(&request_id, worker, Instant::now())?;
-        self.queue.update_worker(worker).await;
+        if !self.queue.has_admission_policy() {
+            if released {
+                self.queue.update_worker(worker).await;
+            }
+            return Ok(());
+        }
+        match outcome {
+            RequestOutcome::Completed(context_tokens) => {
+                let _ = self
+                    .queue
+                    .complete_request(
+                        &request_id,
+                        released.then_some(worker),
+                        Some(worker),
+                        context_tokens,
+                    )
+                    .await;
+            }
+            RequestOutcome::Aborted => {
+                let _ = self
+                    .queue
+                    .abort_request(&request_id, released.then_some(worker), Some(worker))
+                    .await;
+            }
+        }
         Ok(())
     }
 
@@ -561,6 +712,11 @@ where
 
     pub fn supports_overlap_refresh(&self) -> bool {
         self.queue.supports_overlap_refresh()
+    }
+
+    #[cfg(feature = "standalone-selection")]
+    pub(crate) fn has_admission_policy(&self) -> bool {
+        self.queue.has_admission_policy()
     }
 
     pub fn worker_type(&self) -> &'static str {
