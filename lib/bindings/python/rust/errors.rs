@@ -11,7 +11,7 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::BackendError;
+use dynamo_runtime::error::{BackendError, ErrorType};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -143,6 +143,27 @@ define_dynamo_exceptions!(
 /// internal state, file paths, traceback strings, or backend identifiers.
 /// Non-4xx codes (including 5xx) are sanitized downstream — the original
 /// message survives in server logs only.
+/// Classify a worker-supplied HTTP-like status code into a Dynamo error type.
+///
+/// 503 is how a Python worker reports that it hit its own admission limit, e.g.
+/// "Worker local total request limit reached (32/32)". Mapping it to
+/// [`ErrorType::WorkerOverloaded`] rather than `Backend(Unknown)` puts the
+/// category in the error chain, which is what
+/// `dynamo_llm::http::service::metrics::request_was_rejected` matches on, so the
+/// frontend applies its configured overload status instead of forwarding the
+/// worker's 503.
+///
+/// `WorkerOverloaded` rather than `ResourceExhausted`: the worker is stating that
+/// *it* is full, not that the eligible pool is exhausted, so the request stays
+/// eligible for migration to another worker.
+pub fn error_type_for_http_like_code(code: u16) -> ErrorType {
+    match code {
+        503 => ErrorType::WorkerOverloaded,
+        400..=499 => ErrorType::Backend(BackendError::InvalidArgument),
+        _ => ErrorType::Backend(BackendError::Unknown),
+    }
+}
+
 pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
     let value = err.value(py);
     let code = value
@@ -157,4 +178,40 @@ pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, Stri
         })?;
     let message = value.getattr("message").ok()?.extract::<String>().ok()?;
     Some((code, message))
+}
+
+#[cfg(test)]
+mod http_like_code_tests {
+    use super::error_type_for_http_like_code;
+    use dynamo_runtime::error::{BackendError, ErrorType};
+
+    #[test]
+    fn worker_capacity_rejection_is_typed_not_backend_unknown() {
+        // A Python worker rejecting on its own admission limit reports 503.
+        // Before this mapping it fell through to Backend(Unknown), which
+        // request_was_rejected does not match, so the worker's 503 reached the
+        // client instead of the frontend's configured overload status.
+        assert_eq!(
+            error_type_for_http_like_code(503),
+            ErrorType::WorkerOverloaded
+        );
+    }
+
+    #[test]
+    fn client_errors_stay_invalid_argument_and_other_server_errors_stay_unknown() {
+        for code in [400, 404, 422, 499] {
+            assert_eq!(
+                error_type_for_http_like_code(code),
+                ErrorType::Backend(BackendError::InvalidArgument),
+                "code {code}"
+            );
+        }
+        for code in [500, 502, 504] {
+            assert_eq!(
+                error_type_for_http_like_code(code),
+                ErrorType::Backend(BackendError::Unknown),
+                "code {code}"
+            );
+        }
+    }
 }

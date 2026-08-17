@@ -42,7 +42,9 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
-use crate::errors::{extract_http_like_error, py_exception_to_backend_error};
+use crate::errors::{
+    error_type_for_http_like_code, extract_http_like_error, py_exception_to_backend_error,
+};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
@@ -1636,20 +1638,15 @@ where
 /// subclasses go through the shared mapping table; built-in Python
 /// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
-    let (backend, message) = Python::with_gil(|py| {
-        if let Some(mapped) = py_exception_to_backend_error(py, &err) {
-            return mapped;
+    let (error_type, message) = Python::with_gil(|py| {
+        if let Some((backend, message)) = py_exception_to_backend_error(py, &err) {
+            return (ErrorType::Backend(backend), message);
         }
         // See engine.rs::process_item — emit JSON-shaped message so the OpenAI
         // frontend can read the status code instead of defaulting to 500.
         if let Some((code, message)) = extract_http_like_error(py, &err) {
-            let backend = if (400..500).contains(&code) {
-                BackendError::InvalidArgument
-            } else {
-                BackendError::Unknown
-            };
             let json_msg = serde_json::json!({ "message": message, "code": code }).to_string();
-            return (backend, json_msg);
+            return (error_type_for_http_like_code(code), json_msg);
         }
         let backend = if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
             || err.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
@@ -1671,10 +1668,10 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
         } else {
             BackendError::Unknown
         };
-        (backend, err.to_string())
+        (ErrorType::Backend(backend), err.to_string())
     });
     DynamoError::builder()
-        .error_type(ErrorType::Backend(backend))
+        .error_type(error_type)
         .message(message)
         .build()
 }

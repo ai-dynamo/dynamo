@@ -5216,13 +5216,14 @@ mod tests {
     }
 
     #[test]
-    fn python_worker_503_reaches_the_frontend_as_backend_unknown() {
-        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+    fn python_worker_503_is_recognised_as_a_rejection() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
 
         // Exactly what map_python_exception (bindings/python/rust/engine.rs) and
         // py_err_to_dynamo (backend.rs) build for a Python exception carrying
-        // `.code = 503`: 503 is outside 400..500, so the type is Backend(Unknown)
-        // and the message is the JSON envelope. No cause is attached.
+        // `.code = 503`. The JSON envelope is still the message, but the type is
+        // now WorkerOverloaded rather than Backend(Unknown), so the category is
+        // in the error chain instead of buried in the payload.
         let event: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
             data: None,
             id: None,
@@ -5230,7 +5231,7 @@ mod tests {
             comment: None,
             error: Some(
                 DynamoError::builder()
-                    .error_type(ErrorType::Backend(BackendError::Unknown))
+                    .error_type(ErrorType::WorkerOverloaded)
                     .message(
                         r#"{"message":"Worker local total request limit reached (32/32)","code":503}"#,
                     )
@@ -5238,15 +5239,11 @@ mod tests {
             ),
         };
 
-        // request_was_rejected keys on ErrorType::ResourceExhausted, which this
-        // shape never carries, so the overload override does not engage.
-        assert!(!super::super::metrics::request_was_rejected(
+        // request_was_rejected keys on the error chain, so the overload override
+        // now engages and the worker's 503 no longer reaches the client.
+        assert!(super::super::metrics::request_was_rejected(
             event.error.as_ref().expect("error is set")
         ));
-
-        let backend_error =
-            extract_backend_error_if_present(&event).expect("error event should be extracted");
-        assert_eq!(backend_error.status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
