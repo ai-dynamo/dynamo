@@ -34,8 +34,8 @@ EXPECTED_MEASURED_SHA256 = (
 EXPECTED_PATCH_COST = 907_800
 EXPECTED_GRIDS = {"1x22x22", "1x36x36"}
 EXPECTED_GRAPH_CAPTURES = 14
-REPETITIONS = 1
-TOPOLOGY = "remote"
+REPETITIONS = 3
+TOPOLOGIES = ("metadata", "tensor")
 MIN_ACHIEVED_TO_OFFERED_RATIO = 0.95
 MAX_LAST_TO_FIRST_QUARTER_MEDIAN_RATIO = 1.20
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -379,8 +379,25 @@ def summarize_perf_log(path: Path) -> dict[str, Any]:
         records.append(payload)
 
     events: dict[str, dict[str, Any]] = {}
-    for event in sorted({str(record["event"]) for record in records}):
-        event_records = [record for record in records if record["event"] == event]
+    series_names = {
+        (
+            f"{record['event']}:{record['stage']}"
+            if isinstance(record.get("stage"), str)
+            else str(record["event"])
+        )
+        for record in records
+    }
+    for event in sorted(series_names):
+        event_records = [
+            record
+            for record in records
+            if (
+                f"{record['event']}:{record['stage']}"
+                if isinstance(record.get("stage"), str)
+                else str(record["event"])
+            )
+            == event
+        ]
         numeric_fields: dict[str, dict[str, float | int]] = {}
         numeric_names = sorted(
             {
@@ -495,8 +512,10 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "cuda_visible_devices": args.cuda_visible_devices,
         "gpu": _parse_gpu_info(args.gpu_info, args.torch_gpu_count),
         "versions": packages,
-        "topology_order_by_repetition": [
-            [TOPOLOGY],
+        "cell_order": [
+            {"repetition": repetition, "topology": topology}
+            for topology in TOPOLOGIES
+            for repetition in range(1, REPETITIONS + 1)
         ],
         "benchmark": {
             "load_mode": "constant",
@@ -506,7 +525,7 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
             "request_rate_mode": "constant",
             "request_rates": [args.request_rate],
             "concurrency": None,
-            "topologies": [TOPOLOGY],
+            "topologies": list(TOPOLOGIES),
             "response_placement": "inline",
             "streaming": False,
             "max_tokens": OUTPUT_TOKENS,
@@ -521,6 +540,7 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
             "batch_queue_max_wait_ms": args.batch_queue_max_wait_ms,
             "embedding_transfer_mode": args.embedding_transfer_mode,
             "nixl_receive_storage": "pre-registered receiver ring buffer",
+            "classifier_nixl_buffer_bytes": args.classifier_nixl_buffer_bytes,
             "workflow_provider": args.workflow_provider,
             "perf_trace": bool(args.perf_trace),
             "perf_sample_every": args.perf_sample_every,
@@ -579,9 +599,25 @@ def smoke_joined_response(
         or usage.get("completion_tokens") != OUTPUT_TOKENS
     ):
         raise BenchmarkAuditError("joined-response smoke returned the wrong OSL")
+    nvext = result.get("nvext")
+    engine_data = nvext.get("engine_data") if isinstance(nvext, Mapping) else None
+    ensemble = engine_data.get("ensemble") if isinstance(engine_data, Mapping) else None
+    classifier_scores = (
+        ensemble.get("classifier_scores") if isinstance(ensemble, Mapping) else None
+    )
+    if not isinstance(classifier_scores, Mapping) or not classifier_scores:
+        raise BenchmarkAuditError("joined-response smoke returned no classifier scores")
+    try:
+        score_sum = sum(float(score) for score in classifier_scores.values())
+    except (TypeError, ValueError) as error:
+        raise BenchmarkAuditError("classifier scores must be numeric") from error
+    if not math.isclose(score_sum, 1.0):
+        raise BenchmarkAuditError(f"classifier scores sum to {score_sum}; expected 1.0")
     return {
         "completion_tokens": usage["completion_tokens"],
         "finish_reason": choices[0].get("finish_reason"),
+        "classifier_scores": dict(classifier_scores),
+        "classifier_score_sum": score_sum,
     }
 
 
@@ -641,35 +677,47 @@ def summarize(root: Path) -> dict[str, Any]:
     if not isinstance(benchmark, Mapping):
         raise BenchmarkAuditError("benchmark metadata is missing benchmark settings")
     request_rates = benchmark.get("request_rates")
-    if request_rates != [REQUEST_RATE] or benchmark.get("concurrency") is not None:
+    if (
+        request_rates != [REQUEST_RATE]
+        or benchmark.get("concurrency") is not None
+        or benchmark.get("topologies") != list(TOPOLOGIES)
+    ):
         raise BenchmarkAuditError(
-            "summary requires 50 req/s constant load without a concurrency limit"
+            "summary requires both classifier topologies at 50 req/s constant "
+            "load without a concurrency limit"
         )
-    topology = _summarize_topology(root, TOPOLOGY)
-    joined_smokes = [
-        _read_json(root / f"rep-{repetition}" / "remote" / "joined_smoke.json")
-        for repetition in range(1, REPETITIONS + 1)
-    ]
-    window = topology["request_window_throughput_req_s"]
     minimum_rate = REQUEST_RATE * MIN_ACHIEVED_TO_OFFERED_RATIO
-    run_rates = [float(value) for value in window["runs"]]
-    comparison = {
-        "topology": TOPOLOGY,
-        "offered_request_rate_req_s": REQUEST_RATE,
-        "achieved_request_window_req_s": float(window["mean"]),
-        "achieved_to_offered_ratio": float(window["mean"]) / REQUEST_RATE,
-        "minimum_ratio": MIN_ACHIEVED_TO_OFFERED_RATIO,
-        "minimum_rate_req_s": minimum_rate,
-        "passed": all(value >= minimum_rate for value in run_rates),
+    topologies = {
+        topology: _summarize_topology(root, topology) for topology in TOPOLOGIES
     }
+    joined_smokes = {
+        topology: [
+            _read_json(root / f"rep-{repetition}" / topology / "joined_smoke.json")
+            for repetition in range(1, REPETITIONS + 1)
+        ]
+        for topology in TOPOLOGIES
+    }
+    comparisons = {}
+    for name, topology in topologies.items():
+        window = topology["request_window_throughput_req_s"]
+        run_rates = [float(value) for value in window["runs"]]
+        comparisons[name] = {
+            "topology": name,
+            "offered_request_rate_req_s": REQUEST_RATE,
+            "achieved_request_window_req_s": float(window["mean"]),
+            "achieved_to_offered_ratio": float(window["mean"]) / REQUEST_RATE,
+            "minimum_ratio": MIN_ACHIEVED_TO_OFFERED_RATIO,
+            "minimum_rate_req_s": minimum_rate,
+            "passed": all(value >= minimum_rate for value in run_rates),
+        }
     summary = {
         "metadata": metadata,
         "workload": workload,
-        "topologies": {TOPOLOGY: topology},
-        "comparison": comparison,
+        "topologies": topologies,
+        "comparisons": comparisons,
         "gate": {
             "minimum_achieved_to_offered_ratio": MIN_ACHIEVED_TO_OFFERED_RATIO,
-            "passed": comparison["passed"],
+            "passed": all(comparison["passed"] for comparison in comparisons.values()),
         },
         "joined_response_smokes": joined_smokes,
     }
@@ -685,8 +733,6 @@ def _format_runs(values: list[Any]) -> str:
 def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
     metadata = summary["metadata"]
     workload = summary["workload"]
-    topology = summary["topologies"][TOPOLOGY]
-    comparison = summary["comparison"]
     lines = [
         "# Remote Qwen workflow open-loop qualification",
         "",
@@ -704,6 +750,8 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         "- Tensor transport: "
         f"{metadata['benchmark']['embedding_transfer_mode']}; "
         f"{metadata['benchmark']['nixl_receive_storage']}",
+        "- Classifier NIXL receive ring: "
+        f"{metadata['benchmark']['classifier_nixl_buffer_bytes']} bytes",
         "- Encoder queue waits: "
         f"{metadata['benchmark']['batch_queue_wait_ms']} ms quiet / "
         f"{metadata['benchmark']['batch_queue_max_wait_ms']} ms maximum",
@@ -714,20 +762,26 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         "Request-window runs (req/s) | Window mean |",
         "| --- | --- | ---: | --- | ---: |",
     ]
-    full = topology["full_client_process_throughput_req_s"]
-    window = topology["request_window_throughput_req_s"]
-    lines.append(
-        f"| {TOPOLOGY} | {_format_runs(full['runs'])} | "
-        f"{full['from_mean_wall']:.3f} | {_format_runs(window['runs'])} | "
-        f"{window['mean']:.3f} |"
-    )
+    for name in TOPOLOGIES:
+        topology = summary["topologies"][name]
+        full = topology["full_client_process_throughput_req_s"]
+        window = topology["request_window_throughput_req_s"]
+        lines.append(
+            f"| {name} | {_format_runs(full['runs'])} | "
+            f"{full['from_mean_wall']:.3f} | {_format_runs(window['runs'])} | "
+            f"{window['mean']:.3f} |"
+        )
+    lines.extend(["", "## Qualification gates", ""])
+    for name in TOPOLOGIES:
+        comparison = summary["comparisons"][name]
+        lines.append(
+            f"- {name}: achieved/offered "
+            f"**{comparison['achieved_to_offered_ratio']:.3f}**; every run >= "
+            f"{comparison['minimum_rate_req_s']:.3f} req/s: "
+            f"**{comparison['passed']}**."
+        )
     lines.extend(
         [
-            "",
-            "Achieved/offered request-window ratio: "
-            f"**{comparison['achieved_to_offered_ratio']:.3f}**; "
-            f"every run >= {comparison['minimum_rate_req_s']:.3f} req/s: "
-            f"**{comparison['passed']}**.",
             "",
             "Overall >=95% achieved/offered in every run gate: "
             f"**{summary['gate']['passed']}**.",
@@ -737,7 +791,8 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
             "- Every measured cell completed 1,000 requests with zero errors.",
             "- Every cell produced average decoder ISL 874.5 and exact OSL 7.",
             "- Every cell processed 907,800 patches across both audited grids.",
-            "- Every remote repetition returned the exact seven-token completion.",
+            "- Every repetition returned the exact seven-token completion and "
+            "classifier scores.",
             "- Final-quarter median latency remained within 1.2× of the first quarter.",
             "",
         ]
@@ -767,6 +822,7 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--batch-queue-wait-ms", type=float, required=True)
     metadata.add_argument("--batch-queue-max-wait-ms", type=float, required=True)
     metadata.add_argument("--embedding-transfer-mode", required=True)
+    metadata.add_argument("--classifier-nixl-buffer-bytes", type=int, required=True)
     metadata.add_argument("--workflow-provider", required=True)
     metadata.add_argument("--perf-trace", type=int, choices=(0, 1), required=True)
     metadata.add_argument("--perf-sample-every", type=int, required=True)

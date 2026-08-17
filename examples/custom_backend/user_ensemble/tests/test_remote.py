@@ -24,6 +24,9 @@ from dynamo.workflow import (  # noqa: E402
     RemoteBinding,
     WorkflowOrchestrator,
 )
+from examples.custom_backend.user_ensemble.benchmark.encoder_decoder_provider import (  # noqa: E402
+    compile_benchmark_workflow,
+)
 from examples.custom_backend.user_ensemble.remote import (  # noqa: E402
     classifier_worker as classifier_worker_module,
 )
@@ -99,6 +102,30 @@ def test_remote_plan_uses_nixl_fanout_and_stock_generate_protocol():
     assert not hasattr(plan, "edges")
 
 
+def test_benchmark_control_and_tensor_plans_isolate_classifier_transport():
+    metadata_plan = compile_benchmark_workflow("metadata")
+    tensor_plan = compile_benchmark_workflow("tensor")
+
+    assert {edge.transfer_id: edge.carrier for edge in metadata_plan.edges} == {
+        "encoder.request": "inline",
+        "classifier.encoder_metadata": "inline",
+        "generator.request": "inline",
+        "generator.encoder_features": "nixl",
+        "generator.encoder_metadata": "inline",
+        "response.completion": "inline",
+        "response.scores": "inline",
+    }
+    assert {edge.transfer_id: edge.carrier for edge in tensor_plan.edges} == {
+        "encoder.request": "inline",
+        "classifier.encoder_features": "nixl",
+        "generator.request": "inline",
+        "generator.encoder_features": "nixl",
+        "generator.encoder_metadata": "inline",
+        "response.completion": "inline",
+        "response.scores": "inline",
+    }
+
+
 async def test_frontend_provider_binds_remote_plan_and_inline_response():
     orchestrator = object.__new__(WorkflowOrchestrator)
     bind = AsyncMock(return_value=orchestrator)
@@ -123,14 +150,29 @@ async def test_classifier_worker_serves_workflow_protocol_and_closes_carrier():
 
     with patch.object(
         classifier_worker_module,
-        "NixlTensorCarrier",
+        "NixlWriteTensorReceiverCarrier",
         return_value=carrier,
     ):
-        await classifier_worker_module.classifier_worker.__wrapped__(runtime)
+        with patch.dict(
+            classifier_worker_module.os.environ,
+            {
+                "DYN_BENCH_CLASSIFIER_INPUT": "tensor",
+                "DYN_VLLM_EMBEDDING_TRANSFER_MODE": "nixl-write",
+            },
+        ):
+            await classifier_worker_module.classifier_worker.__wrapped__(runtime)
 
     assert runtime.endpoint_ids == [CLASSIFIER_ENDPOINT]
     assert runtime.created_endpoint.handler is not None
     assert carrier.close_calls == 1
 
-    def can_export(self, value: Any) -> bool:
-        return False
+
+def test_classifier_worker_metadata_mode_requires_no_tensor_carrier():
+    with patch.dict(
+        classifier_worker_module.os.environ,
+        {"DYN_BENCH_CLASSIFIER_INPUT": "metadata"},
+    ):
+        stage, carrier = classifier_worker_module._build_stage()
+
+    assert stage.contract.id == "metadata-classifier"
+    assert carrier is None
