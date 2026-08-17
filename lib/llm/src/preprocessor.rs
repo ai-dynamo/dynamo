@@ -3719,9 +3719,10 @@ impl OpenAIPreprocessor {
         tool_choice: Option<&ChatCompletionToolChoiceOption>,
         has_tools: bool,
     ) -> std::result::Result<bool, Error> {
-        // K3 wraps every assistant response in XTML, even when the request has
-        // no tools. Keep its parser active so response/message wrappers never
-        // leak into OpenAI `content`.
+        // Necessary for now because K3 needs a special parser for XTML channel
+        // parsing on all responses, regardless of tool or reasoning usage.
+        // Keep its parser active so response/message wrappers never leak into
+        // OpenAI `content`, even when the request has no tools.
         if tool_call_parser.is_some_and(|parser| matches!(parser.as_str(), "kimi_k3" | "kimi-k3")) {
             return Ok(true);
         }
