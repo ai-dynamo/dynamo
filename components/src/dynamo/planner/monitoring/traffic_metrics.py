@@ -122,7 +122,9 @@ class PrometheusAPIClient:
             url=url,
             disable_ssl=not ssl_verify,
             retry=0,
-            timeout=request_timeout_seconds,
+            # prometheus-api-client annotates this as int but forwards it unchanged
+            # to Requests, which supports floating-point timeouts.
+            timeout=request_timeout_seconds,  # type: ignore[arg-type]
         )
         if bearer_token:
             self.prom._session.headers["Authorization"] = f"Bearer {bearer_token}"
