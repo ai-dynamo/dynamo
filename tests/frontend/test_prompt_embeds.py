@@ -266,9 +266,10 @@ class TestPromptEmbedsE2E:
                 extra_body={"prompt_embeds": invalid_base64},
             )
 
-        error_msg = str(exc_info.value).lower()
-        assert any(
-            keyword in error_msg for keyword in ["pytorch", "tensor", "decode"]
+        assert exc_info.value.status_code == 400
+        error_msg = str(exc_info.value)
+        assert (
+            "Failed to decode prompt_embeds as PyTorch tensor" in error_msg
         ), f"Expected the worker's decode message, got: {error_msg}"
 
     def test_usage_prompt_tokens_not_zero(self, dynamo_client):
