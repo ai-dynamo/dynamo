@@ -142,12 +142,6 @@ def _prepare_deployment(
     if extra_env:
         merged_env.update(extra_env)
 
-    # Keep serve tests on their declared code path. If a developer shell/CI job
-    # exports FPM toggles globally, do not inherit them unless a test sets them
-    # explicitly through extra_env.
-    merged_env.pop("DYN_FORWARDPASS_METRIC_PORT", None)
-    merged_env.pop("DYN_FPM_TRACE", None)
-
     # In serial mode (no parallel scheduler), pass the marker's KV cache budget
     # so the launch script's small default doesn't starve larger models.
     # The parallel scheduler already sets this env var per-test.
