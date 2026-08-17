@@ -307,7 +307,7 @@ where
     // Eagerly register router request metrics so they appear as zeros even in
     // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
     // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
-    // OnceLock), which covers the standalone router path as well.
+    // the component-keyed cache), which covers the standalone router path as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
