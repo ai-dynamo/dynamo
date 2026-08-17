@@ -566,7 +566,7 @@ engine:
 | `engine.mode` | `aggregated` | `{choices: [aggregated, disaggregated]}` | `-` | `aggregated` or `disaggregated`. |
 | `engine.model` | Required | `x` | `-` | Nonempty and fixed during recommendation. |
 | `engine.hardware` | Required | `auto` | `-` | Concrete assignment; `recommend` also accepts `auto` with `optimization.hardware`. |
-| `engine.backend` | `vllm` | `{choices: [vllm]}` | `-` | `vllm`, `sglang`, or `trtllm`; explicit choices may include supported alternatives. |
+| `engine.backend` | `vllm` | `{choices: [vllm, sglang]}` | `-` | `vllm`, `sglang`, or `trtllm`; explicit choices may include supported alternatives. |
 | `engine.backend_version` | `null` | `x` | `-` | Fixed when set. |
 | `engine.context_length` | Required | `x` | `-` | Positive. |
 | `engine.workers` | Required | `x` | `-` | Aggregated role or prefill plus decode roles. |
