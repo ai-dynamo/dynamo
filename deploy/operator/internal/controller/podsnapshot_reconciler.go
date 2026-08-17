@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -288,24 +289,36 @@ func (sr *PodSnapshotReconciler) bindContent(ctx context.Context, snap *nvidiaco
 // Pending condition until the agent writes a result. It receives the content resolved by the bound
 // path, so it never re-Gets it, and writes status only when a condition actually changed.
 func (sr *PodSnapshotReconciler) propagateStatus(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot, content *nvidiacomv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
-	var changed bool
+	var conditionChanged bool
 	switch {
 	case nvidiacomv1alpha1.IsPodSnapshotContentSucceeded(content):
 		cond := meta.FindStatusCondition(content.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
-		changed = sr.markReady(snap, cond.Reason, cond.Message)
+		conditionChanged = sr.markReady(snap, cond.Reason, cond.Message)
 	case nvidiacomv1alpha1.IsPodSnapshotContentFailed(content):
 		cond := meta.FindStatusCondition(content.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
-		changed = sr.markFailed(snap, cond.Reason, cond.Message)
+		conditionChanged = sr.markFailed(snap, cond.Reason, cond.Message)
 	default:
-		changed = sr.markPending(snap, "Pending", "Waiting for node agent to capture the checkpoint")
+		conditionChanged = sr.markPending(snap, "Pending", "Waiting for node agent to capture the checkpoint")
 	}
 
-	if !changed {
+	// Persist lifecycle convergence before optional enrichment.
+	if conditionChanged {
+		if err := sr.Status().Update(ctx, snap); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update snapshot status: %w", err)
+		}
+	}
+
+	if content.Status.Source == nil || reflect.DeepEqual(snap.Status.Source, content.Status.Source) {
 		return ctrl.Result{}, nil
 	}
-	if err := sr.Status().Update(ctx, snap); err != nil {
-		return ctrl.Result{}, fmt.Errorf("update snapshot status: %w", err)
+
+	// Mirror source independently so failures cannot block lifecycle conditions.
+	patch := client.MergeFrom(snap.DeepCopy())
+	snap.Status.Source = content.Status.Source.DeepCopy()
+	if err := sr.Status().Patch(ctx, snap, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update snapshot source: %w", err)
 	}
+
 	return ctrl.Result{}, nil
 }
 

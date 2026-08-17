@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -195,6 +196,7 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		ckpt.Status.JobName = ""
 		ckpt.Status.CreatedAt = nil
 		ckpt.Status.Message = ""
+		ckpt.Status.Source = nil
 		needsStatusUpdate = true
 	}
 	if needsStatusUpdate {
@@ -214,7 +216,7 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	case nvidiacomv1alpha1.DynamoCheckpointPhaseCreating:
 		return r.handleCreating(ctx, ckpt)
 	case nvidiacomv1alpha1.DynamoCheckpointPhaseReady:
-		return ctrl.Result{}, nil
+		return r.syncCheckpointSource(ctx, ckpt)
 	case nvidiacomv1alpha1.DynamoCheckpointPhaseFailed:
 		return ctrl.Result{}, nil
 	default:
@@ -480,6 +482,28 @@ func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvi
 	}
 
 	return r.markCheckpointReady(ctx, ckpt, checkpointID, podSnapshotConditionMessage(snap, nvidiacomv1alpha1.PodSnapshotConditionReady))
+}
+
+func (r *CheckpointReconciler) syncCheckpointSource(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
+	// Resolve enrichment through the checkpoint's owned PodSnapshot.
+	snap, err := r.findOwnedPodSnapshot(ctx, ckpt)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if snap.Status.Source == nil || reflect.DeepEqual(ckpt.Status.Source, snap.Status.Source) {
+		return ctrl.Result{}, nil
+	}
+
+	// Patch source without coupling it to the Ready lifecycle write.
+	patch := client.MergeFrom(ckpt.DeepCopy())
+	ckpt.Status.Source = snap.Status.Source.DeepCopy()
+	if err := r.Status().Patch(ctx, ckpt, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update checkpoint source: %w", err)
+	}
+	return ctrl.Result{}, nil
 }
 
 // failCreating marks the DynamoCheckpoint Failed with a completion-condition reason.

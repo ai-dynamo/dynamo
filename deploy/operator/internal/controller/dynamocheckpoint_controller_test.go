@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -47,6 +48,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const testNamespace = "default"
@@ -728,6 +730,8 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
 		ckpt.Status.IdentityHash = testHash
 		ckpt.Status.JobName = defaultCheckpointJobName
+		mountCount := int32(1)
+		ckpt.Status.Source = &nvidiacomv1alpha1.CheckpointSource{MountCount: &mountCount}
 		ckpt.Annotations = map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: "2"}
 		r := makeCheckpointReconciler(s, ckpt)
 
@@ -740,6 +744,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
 		assert.Equal(t, "checkpoint-job-"+testHash+"-2", updated.Status.JobName)
+		assert.Nil(t, updated.Status.Source)
 	})
 
 	t.Run("duplicate identity hash is rejected even with a readable name", func(t *testing.T) {
@@ -987,9 +992,20 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
 		job := markCheckpointJobComplete(newCheckpointJob(defaultCheckpointJobName))
 		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionReady)
+		mountCount := int32(1)
+		snap.Status.Source = &nvidiacomv1alpha1.CheckpointSource{MountCount: &mountCount}
 
-		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
+		sourcePatches := 0
+		funcs := interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				sourcePatches++
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+			},
+		}
+		r := makeCheckpointReconcilerWithInterceptor(s, funcs, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
 		r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
+
+		t.Log("Persist checkpoint Ready independently from source enrichment")
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -1001,6 +1017,22 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		cond := meta.FindStatusCondition(updated.Status.Conditions, "JobCompleted")
 		require.NotNil(t, cond)
 		assert.Equal(t, "PodSnapshotAndJobReady", cond.Reason)
+		assert.Nil(t, updated.Status.Source)
+
+		t.Log("Enrich the already-Ready checkpoint from its PodSnapshot")
+		request := ctrl.Request{NamespacedName: types.NamespacedName{Name: testHash, Namespace: testNamespace}}
+		_, err = r.Reconcile(ctx, request)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		require.NotNil(t, updated.Status.Source)
+		require.NotNil(t, updated.Status.Source.MountCount)
+		assert.Equal(t, int32(1), *updated.Status.Source.MountCount)
+		assert.Equal(t, 1, sourcePatches)
+
+		t.Log("Reconcile identical source without another status patch")
+		_, err = r.Reconcile(ctx, request)
+		require.NoError(t, err)
+		assert.Equal(t, 1, sourcePatches)
 	})
 
 	t.Run("PodSnapshot Ready without JobComplete stays Creating", func(t *testing.T) {
@@ -1275,4 +1307,50 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
 	})
 
+}
+
+func TestCheckpointSourceFailurePreservesReadyAndRetries(t *testing.T) {
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+	ckpt.UID = types.UID("checkpoint-uid")
+	snap := ownedCheckpointSnapshot(ckpt, "checkpoint-snapshot")
+	mountCount := int32(2)
+	snap.Status.Source = &nvidiacomv1alpha1.CheckpointSource{MountCount: &mountCount}
+
+	sourcePatches := 0
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			sourcePatches++
+			if sourcePatches == 1 {
+				return errors.New("source status rejected")
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	}
+	r := makeCheckpointReconcilerWithInterceptor(s, funcs, ckpt, snap)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: ckpt.Namespace}}
+
+	t.Log("Reject source enrichment without changing Ready")
+	_, err := r.Reconcile(context.Background(), request)
+	require.Error(t, err)
+	assert.Equal(t, 1, sourcePatches)
+	stored := &nvidiacomv1alpha1.DynamoCheckpoint{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: ckpt.Name, Namespace: ckpt.Namespace}, stored))
+	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, stored.Status.Phase)
+	assert.Nil(t, stored.Status.Source)
+
+	t.Log("Retry source enrichment on the fresh Ready object")
+	_, err = r.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.Equal(t, 2, sourcePatches)
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: ckpt.Name, Namespace: ckpt.Namespace}, stored))
+	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, stored.Status.Phase)
+	require.NotNil(t, stored.Status.Source)
+	require.NotNil(t, stored.Status.Source.MountCount)
+	assert.Equal(t, int32(2), *stored.Status.Source.MountCount)
+
+	t.Log("Reconcile identical source without another status patch")
+	_, err = r.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.Equal(t, 2, sourcePatches)
 }
