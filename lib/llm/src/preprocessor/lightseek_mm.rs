@@ -151,14 +151,30 @@ impl LightseekMmCounter {
 /// or BOS token (one config-parse pass instead of two).
 pub fn resolve_image_token_id(model_id: &str, model_dir: &Path) -> Option<TokenIdType> {
     let config = read_json(model_dir, "config.json")?;
-    resolve_image_token_id_with_config(model_id, model_dir, &config)
+    resolve_model_routing_with_config(model_id, model_dir, &config)
+        .map(|resolved| resolved.token_id)
 }
 
-fn resolve_image_token_id_with_config(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImagePromptKind {
+    /// The rendered prompt already contains any model-specific wrapper; only
+    /// the single image pad is replaced by the per-image feature-token run.
+    RepeatedPad,
+    /// Kimi-K3's renderer emits one structural `<|media_pad|>` per image, but
+    /// the backend replaces it with a dimension-bearing media block.
+    KimiK3,
+}
+
+struct ResolvedModelRouting {
+    token_id: TokenIdType,
+    prompt_kind: ImagePromptKind,
+}
+
+fn resolve_model_routing_with_config(
     model_id: &str,
     model_dir: &Path,
     config: &serde_json::Value,
-) -> Option<TokenIdType> {
+) -> Option<ResolvedModelRouting> {
     // Try the HuggingFace fast tokenizer first; fall back to a no-op
     // tokenizer when `tokenizer.json` is missing (Kimi-K2.5 ships only
     // `tiktoken.model`, for example). Specs that read the placeholder
@@ -212,7 +228,14 @@ fn resolve_image_token_id_with_config(
         spec = spec.name(),
         "resolved image-placeholder token id"
     );
-    Some(id as TokenIdType)
+    let prompt_kind = match spec.name() {
+        "kimi_k3" => ImagePromptKind::KimiK3,
+        _ => ImagePromptKind::RepeatedPad,
+    };
+    Some(ResolvedModelRouting {
+        token_id: id as TokenIdType,
+        prompt_kind,
+    })
 }
 
 /// Bundle of routing-side token info resolved from a model's HF JSON
@@ -230,6 +253,10 @@ pub struct RoutingTokens {
     /// above. Equals `image_token_id` for most VLMs; Qwen2-VL / Qwen2.5-VL
     /// emit `<|image_pad|>` here while the per-patch id is `<|vision_pad|>`.
     pub chat_placeholder_token_id: Option<TokenIdType>,
+    /// Model-specific shape of the routing-side image prompt. This comes from
+    /// the same `ModelProcessorSpec` registry lookup as `image_token_id`, so a
+    /// K3 checkpoint cannot accidentally take K2.x's repeated-pad path.
+    pub image_prompt_kind: Option<ImagePromptKind>,
     /// `bos_token` string from `tokenizer_config.json` when
     /// `add_bos_token: true`. Caller encodes via its model tokenizer to
     /// produce the routing-side prepend id. `None` for models that don't
@@ -247,13 +274,15 @@ pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens
     let config = read_json(model_dir, "config.json");
     let tokenizer_config = read_json(model_dir, "tokenizer_config.json");
 
-    let image_token_id = config
+    let resolved = config
         .as_ref()
-        .and_then(|c| resolve_image_token_id_with_config(model_id, model_dir, c));
+        .and_then(|c| resolve_model_routing_with_config(model_id, model_dir, c));
+    let image_token_id = resolved.as_ref().map(|r| r.token_id);
     let chat_placeholder_token_id = config
         .as_ref()
         .and_then(extract_chat_placeholder_from_config)
         .or(image_token_id);
+    let image_prompt_kind = resolved.as_ref().map(|r| r.prompt_kind);
     let bos_token_string = tokenizer_config
         .as_ref()
         .and_then(extract_bos_token_from_tokenizer_config);
@@ -261,6 +290,7 @@ pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens
     RoutingTokens {
         image_token_id,
         chat_placeholder_token_id,
+        image_prompt_kind,
         bos_token_string,
     }
 }
@@ -385,6 +415,44 @@ mod tests {
         // 640x480 is already aligned to patch_size * merge_size (32).
         // (640 / 16) * (480 / 16) / merge_size² = 300.
         assert_eq!(counter.count_tokens(640, 480), 300);
+    }
+
+    fn write_model_config(model_dir: &Path, model_type: &str) {
+        std::fs::write(
+            model_dir.join("config.json"),
+            serde_json::json!({
+                "model_type": model_type,
+                "media_placeholder_token_id": 163605
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn routing_tokens_classify_kimi_k3_prompt_shape_via_model_registry() {
+        let model_dir = tempfile::tempdir().unwrap();
+        write_model_config(model_dir.path(), "kimi_k3");
+
+        let resolved = resolve_routing_tokens("/models/internal-checkpoint", model_dir.path());
+
+        assert_eq!(resolved.image_token_id, Some(163605));
+        assert_eq!(resolved.chat_placeholder_token_id, Some(163605));
+        assert_eq!(resolved.image_prompt_kind, Some(ImagePromptKind::KimiK3));
+    }
+
+    #[test]
+    fn routing_tokens_keep_kimi_k2_on_repeated_pad_prompt_shape() {
+        let model_dir = tempfile::tempdir().unwrap();
+        write_model_config(model_dir.path(), "kimi_k25");
+
+        let resolved = resolve_routing_tokens("moonshotai/Kimi-K2.6", model_dir.path());
+
+        assert_eq!(resolved.image_token_id, Some(163605));
+        assert_eq!(
+            resolved.image_prompt_kind,
+            Some(ImagePromptKind::RepeatedPad)
+        );
     }
 
     /// Coverage table for the VLM families we claim to support. Each row is

@@ -512,6 +512,84 @@ pub struct MmImageEntry {
     pub height: u32,
 }
 
+#[cfg(feature = "mm-routing")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutingImagePromptLayout {
+    RepeatedPad,
+    KimiK3 {
+        media_begin: TokenIdType,
+        media_content: TokenIdType,
+        media_end: TokenIdType,
+    },
+}
+
+#[cfg(feature = "mm-routing")]
+fn encode_routing_segment(
+    tokenizer: &dyn Tokenizer,
+    text: &str,
+    allow_special: bool,
+) -> Result<Vec<TokenIdType>> {
+    let segment = crate::tokenizers::EncodeSegment::new(text, allow_special);
+    Ok(tokenizer.encode_segments(&[segment])?.token_ids().to_vec())
+}
+
+#[cfg(feature = "mm-routing")]
+fn resolve_routing_image_prompt_layout(
+    tokenizer: &dyn Tokenizer,
+    kind: lightseek_mm::ImagePromptKind,
+) -> Result<RoutingImagePromptLayout> {
+    if kind == lightseek_mm::ImagePromptKind::RepeatedPad {
+        return Ok(RoutingImagePromptLayout::RepeatedPad);
+    }
+
+    let resolve_control = |token: &str| -> Result<TokenIdType> {
+        let ids = encode_routing_segment(tokenizer, token, true)?;
+        if ids.len() != 1 {
+            bail!(
+                "Kimi-K3 routing control token {token:?} encoded to {} ids ({ids:?}); expected exactly one",
+                ids.len()
+            );
+        }
+        Ok(ids[0])
+    };
+
+    Ok(RoutingImagePromptLayout::KimiK3 {
+        media_begin: resolve_control("<|media_begin|>")?,
+        media_content: resolve_control("<|media_content|>")?,
+        media_end: resolve_control("<|media_end|>")?,
+    })
+}
+
+#[cfg(feature = "mm-routing")]
+fn append_mm_routing_replacement(
+    expanded: &mut Vec<TokenIdType>,
+    tokenizer: &dyn Tokenizer,
+    layout: RoutingImagePromptLayout,
+    image: MmImageEntry,
+    num_image_tokens: usize,
+) -> Result<()> {
+    let fill_token = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+
+    match layout {
+        RoutingImagePromptLayout::RepeatedPad => {
+            expanded.extend(std::iter::repeat_n(fill_token, num_image_tokens));
+        }
+        RoutingImagePromptLayout::KimiK3 {
+            media_begin,
+            media_content,
+            media_end,
+        } => {
+            expanded.push(media_begin);
+            let dimensions = format!("image {}x{}", image.width, image.height);
+            expanded.extend(encode_routing_segment(tokenizer, &dimensions, false)?);
+            expanded.push(media_content);
+            expanded.extend(std::iter::repeat_n(fill_token, num_image_tokens));
+            expanded.push(media_end);
+        }
+    }
+    Ok(())
+}
+
 struct MediaFetchTask<'a> {
     modality: &'static str,
     slot_idx: usize,
@@ -763,6 +841,11 @@ pub struct OpenAIPreprocessor {
     /// back to text-prefix routing.
     #[cfg(feature = "mm-routing")]
     routing_image_token_id: Option<crate::protocols::TokenIdType>,
+    /// Model-specific routing-side image prompt shape. Most families replace
+    /// only an existing pad token; Kimi-K3 also inserts its structural wrapper
+    /// and pre-resize dimensions. `None` disables exact MM routing.
+    #[cfg(feature = "mm-routing")]
+    routing_image_prompt_layout: Option<RoutingImagePromptLayout>,
     /// BOS token id to prepend to the routing-side sequence so per-block
     /// hashes match the backend's HF processor output on models with
     /// `add_bos_token: true` (LLaVA-1.5 and other `LlamaTokenizer`
@@ -1466,87 +1549,112 @@ impl OpenAIPreprocessor {
         };
 
         #[cfg(feature = "mm-routing")]
-        let (image_token_counter, routing_image_token_id, bos_token_string) =
-            match image_token_inputs {
-                Some((model_id, model_type, model_dir)) => {
-                    // Resolve counter + image-token id independently so the
-                    // summary log can name which piece is missing.
-                    let (counter, counter_err): (
-                        Option<lightseek_mm::LightseekMmCounter>,
-                        Option<String>,
-                    ) = match lightseek_mm::LightseekMmCounter::try_new(
-                        &model_id,
-                        Some(&model_type),
-                        &model_dir,
-                    ) {
-                        Ok(c) => (Some(c), None),
-                        Err(e) => (None, Some(e.to_string())),
-                    };
-                    let (img_tok, bos_tok_string) = if fastokens_active {
-                        (None, None)
-                    } else {
-                        // One-shot config/tokenizer_config read for all
-                        // routing-side token info. Parsing lives next to the
-                        // spec resolution in the MM-routing module.
-                        let routing_tokens =
-                            lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
-                        // `chat_placeholder_token_id` already prefers
-                        // config.json's explicit field and falls back to the
-                        // spec value, so it is used for both the engagement
-                        // gate and the routing fill.
-                        (
-                            routing_tokens.chat_placeholder_token_id,
-                            routing_tokens.bos_token_string,
-                        )
-                    };
+        let (
+            image_token_counter,
+            routing_image_token_id,
+            routing_image_prompt_layout,
+            bos_token_string,
+        ) = match image_token_inputs {
+            Some((model_id, model_type, model_dir)) => {
+                // Resolve counter + image-token id independently so the
+                // summary log can name which piece is missing.
+                let (counter, counter_err): (
+                    Option<lightseek_mm::LightseekMmCounter>,
+                    Option<String>,
+                ) = match lightseek_mm::LightseekMmCounter::try_new(
+                    &model_id,
+                    Some(&model_type),
+                    &model_dir,
+                ) {
+                    Ok(c) => (Some(c), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
+                let (img_tok, prompt_layout, bos_tok_string) = if fastokens_active {
+                    (None, None, None)
+                } else {
+                    // One-shot config/tokenizer_config read for all
+                    // routing-side token info. Parsing lives next to the
+                    // spec resolution in the MM-routing module.
+                    let routing_tokens =
+                        lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
+                    let prompt_layout =
+                            routing_tokens.image_prompt_kind.and_then(|kind| {
+                                match resolve_routing_image_prompt_layout(tokenizer.as_ref(), kind) {
+                                    Ok(layout) => Some(layout),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: "mm_routing",
+                                            model = %model_id,
+                                            error = %e,
+                                            "model-specific routing image prompt could not be resolved; exact MM routing disabled"
+                                        );
+                                        None
+                                    }
+                                }
+                            });
+                    // `chat_placeholder_token_id` already prefers
+                    // config.json's explicit field and falls back to the
+                    // spec value, so it is used for both the engagement
+                    // gate and the routing fill. Require the model-specific
+                    // prompt shape too: K3 must never silently fall back to
+                    // K2.x's repeated-pad expansion.
+                    (
+                        routing_tokens
+                            .chat_placeholder_token_id
+                            .filter(|_| prompt_layout.is_some()),
+                        prompt_layout,
+                        routing_tokens.bos_token_string,
+                    )
+                };
 
-                    match (counter.is_some(), img_tok.is_some()) {
-                        (true, true) => tracing::info!(
-                            target: "mm_routing",
-                            model = %model_id,
-                            model_dir = %model_dir.display(),
-                            "MM-aware KV routing enabled"
-                        ),
-                        _ if fastokens_active => {}
-                        (counter_ok, img_ok) => {
-                            let mut reasons: Vec<String> = Vec::new();
-                            if !counter_ok {
-                                reasons.push(format!(
-                                    "model not supported by the MM-routing registry ({})",
-                                    counter_err.as_deref().unwrap_or("unknown error")
-                                ));
-                            }
-                            if !img_ok {
-                                reasons.push(
-                                    "image-placeholder token unresolvable from \
+                match (counter.is_some(), img_tok.is_some()) {
+                    (true, true) => tracing::info!(
+                        target: "mm_routing",
+                        model = %model_id,
+                        model_dir = %model_dir.display(),
+                        "MM-aware KV routing enabled"
+                    ),
+                    _ if fastokens_active => {}
+                    (counter_ok, img_ok) => {
+                        let mut reasons: Vec<String> = Vec::new();
+                        if !counter_ok {
+                            reasons.push(format!(
+                                "model not supported by the MM-routing registry ({})",
+                                counter_err.as_deref().unwrap_or("unknown error")
+                            ));
+                        }
+                        if !img_ok {
+                            reasons.push(
+                                "image-placeholder token or model-specific prompt layout \
+                                     unresolvable from \
                                      config.json / processor_config.json / \
                                      tokenizer_config.json / vocab probe"
-                                        .to_string(),
-                                );
-                            }
-                            tracing::warn!(
-                                target: "mm_routing",
-                                model = %model_id,
-                                reasons = %reasons.join("; "),
-                                "{} is not supported for MM-aware KV routing ({}). \
-                                 Falling back to KV routing without MM awareness — \
-                                 text-prefix overlap still works but the router \
-                                 cannot distinguish requests by image content.",
-                                model_id,
-                                reasons.join("; ")
+                                    .to_string(),
                             );
                         }
+                        tracing::warn!(
+                            target: "mm_routing",
+                            model = %model_id,
+                            reasons = %reasons.join("; "),
+                            "{} is not supported for MM-aware KV routing ({}). \
+                             Falling back to KV routing without MM awareness — \
+                             text-prefix overlap still works but the router \
+                             cannot distinguish requests by image content.",
+                            model_id,
+                            reasons.join("; ")
+                        );
                     }
-                    (counter, img_tok, bos_tok_string)
                 }
-                None => {
-                    tracing::debug!(
-                        target: "mm_routing",
-                        "model directory not derivable from MDC; MM-aware routing disabled"
-                    );
-                    (None, None, None)
-                }
-            };
+                (counter, img_tok, prompt_layout, bos_tok_string)
+            }
+            None => {
+                tracing::debug!(
+                    target: "mm_routing",
+                    "model directory not derivable from MDC; MM-aware routing disabled"
+                );
+                (None, None, None, None)
+            }
+        };
 
         // Force the dim-fetch HTTP client to build at startup for any
         // MM-countable or routable preprocessor, so TLS / env-var / reqwest-init
@@ -1616,6 +1724,8 @@ impl OpenAIPreprocessor {
             image_token_counter,
             #[cfg(feature = "mm-routing")]
             routing_image_token_id,
+            #[cfg(feature = "mm-routing")]
+            routing_image_prompt_layout,
             #[cfg(feature = "mm-routing")]
             routing_prepend_bos,
         }))
@@ -2541,7 +2651,8 @@ impl OpenAIPreprocessor {
 
     /// Build `MmRoutingInfo` for exact MM-aware KV routing. The worker-bound
     /// `token_ids` are unchanged — only the routing-side view is expanded.
-    /// Supports single-special-token placeholder families (Qwen-VL, LLaVA).
+    /// Supports single-special-token placeholder families (Qwen-VL, LLaVA,
+    /// Kimi-K2.x) and Kimi-K3's dimension-bearing media wrapper.
     /// Returns `Ok(())` with no work performed on any precondition miss
     /// (caller falls back to text-prefix routing).
     #[cfg(feature = "mm-routing")]
@@ -2560,6 +2671,13 @@ impl OpenAIPreprocessor {
             tracing::debug!(
                 target: "mm_routing",
                 "routing_image_token_id unresolved; skipping MM routing info"
+            );
+            return Ok(());
+        };
+        let Some(prompt_layout) = self.routing_image_prompt_layout else {
+            tracing::debug!(
+                target: "mm_routing",
+                "routing_image_prompt_layout unresolved; skipping MM routing info"
             );
             return Ok(());
         };
@@ -2623,9 +2741,13 @@ impl OpenAIPreprocessor {
         let mut i = 0usize;
         for &t in normalized_token_ids.iter() {
             if t == find_token_id && i < mm_image_entries.len() {
-                let fill_token =
-                    dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_image_entries[i].mm_hash);
-                expanded.extend(std::iter::repeat_n(fill_token, n_tokens[i]));
+                append_mm_routing_replacement(
+                    &mut expanded,
+                    self.tokenizer.as_ref(),
+                    prompt_layout,
+                    mm_image_entries[i],
+                    n_tokens[i],
+                )?;
                 i += 1;
             } else {
                 expanded.push(t);
@@ -5541,6 +5663,135 @@ mod tests {
             None,
             "overflow must omit the aggregate rather than wrap"
         );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    struct RoutingTestTokenizer {
+        atomic_controls: bool,
+    }
+
+    #[cfg(feature = "mm-routing")]
+    impl crate::tokenizers::traits::Encoder for RoutingTestTokenizer {
+        fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
+            Ok(Encoding::Sp(
+                input.bytes().map(|byte| 1000 + u32::from(byte)).collect(),
+            ))
+        }
+
+        fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
+            inputs.iter().map(|input| self.encode(input)).collect()
+        }
+
+        fn encode_segments(
+            &self,
+            segments: &[crate::tokenizers::EncodeSegment<'_>],
+        ) -> anyhow::Result<Encoding> {
+            let mut ids = Vec::new();
+            for segment in segments {
+                if segment.allow_special {
+                    if !self.atomic_controls {
+                        ids.extend([9000, 9001]);
+                        continue;
+                    }
+                    ids.push(match segment.text {
+                        "<|media_begin|>" => 163602,
+                        "<|media_content|>" => 163603,
+                        "<|media_end|>" => 163604,
+                        other => anyhow::bail!("unexpected control segment {other:?}"),
+                    });
+                } else {
+                    ids.extend(segment.text.bytes().map(|byte| 1000 + u32::from(byte)));
+                }
+            }
+            Ok(Encoding::Sp(ids))
+        }
+    }
+
+    #[cfg(feature = "mm-routing")]
+    impl crate::tokenizers::traits::Decoder for RoutingTestTokenizer {
+        fn decode(
+            &self,
+            _token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<crate::tokenizers::traits::DecodeResult> {
+            Ok(crate::tokenizers::traits::DecodeResult::Complete(
+                String::new(),
+            ))
+        }
+    }
+
+    #[cfg(feature = "mm-routing")]
+    impl Tokenizer for RoutingTestTokenizer {}
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn kimi_k3_routing_replacement_includes_dimensions_and_structural_tokens() {
+        let tokenizer = RoutingTestTokenizer {
+            atomic_controls: true,
+        };
+        let layout =
+            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
+                .unwrap();
+        let image = MmImageEntry {
+            mm_hash: 0x1234,
+            width: 320,
+            height: 240,
+        };
+        let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+        let dimension_ids: Vec<TokenIdType> = "image 320x240"
+            .bytes()
+            .map(|byte| 1000 + u32::from(byte))
+            .collect();
+        let mut expanded = vec![7];
+
+        append_mm_routing_replacement(&mut expanded, &tokenizer, layout, image, 3).unwrap();
+
+        let mut expected = vec![7, 163602];
+        expected.extend(dimension_ids);
+        expected.push(163603);
+        expected.extend([fill; 3]);
+        expected.push(163604);
+        assert_eq!(expanded, expected);
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn kimi_k2_routing_replacement_remains_repeated_pad_only() {
+        let tokenizer = RoutingTestTokenizer {
+            atomic_controls: true,
+        };
+        let image = MmImageEntry {
+            mm_hash: 0x5678,
+            width: 320,
+            height: 240,
+        };
+        let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+        let mut expanded = vec![7];
+
+        append_mm_routing_replacement(
+            &mut expanded,
+            &tokenizer,
+            RoutingImagePromptLayout::RepeatedPad,
+            image,
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(expanded, vec![7, fill, fill, fill]);
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn kimi_k3_layout_resolution_rejects_non_atomic_control_tokens() {
+        let tokenizer = RoutingTestTokenizer {
+            atomic_controls: false,
+        };
+
+        let error =
+            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
+                .unwrap_err();
+
+        assert!(error.to_string().contains("expected exactly one"));
     }
 
     #[cfg(feature = "mm-routing")]
