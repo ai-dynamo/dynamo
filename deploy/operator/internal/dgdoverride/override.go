@@ -585,9 +585,13 @@ func materializeBetaContainerArgsAppends(
 			}
 		}
 
-		baseArgs, _, err := unstructured.NestedStringSlice(baseContainer, "args")
+		// Append only to an explicit base list so implicit operator or image defaults stay intact.
+		baseArgs, found, err := unstructured.NestedStringSlice(baseContainer, "args")
 		if err != nil {
 			return fmt.Errorf("beta blueprint spec.components[%d] container %q args must be a list of strings: %w", componentIndex, name, err)
+		}
+		if !found {
+			return fmt.Errorf("beta blueprint spec.components[%d] container %q must define args explicitly before they can be appended", componentIndex, name)
 		}
 
 		// Replace the directive with the complete list consumed by structural merge.

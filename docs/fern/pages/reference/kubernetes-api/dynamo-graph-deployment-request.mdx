@@ -661,23 +661,24 @@ spec:
       kind: DynamoGraphDeployment
       spec:
         components:
-        - name: Worker
+        - name: Frontend
           podTemplate:
             spec:
               containers:
-              - name: metrics
+              - name: main
                 $patch:
                   args: append
                 args:
-                - --verbose
+                - --router-mode
+                - kv
 ```
 
 The only supported modifier is `args: append`, and its `args` list must contain at least one
-non-empty string. The target container must already be present in the generated blueprint. The
-override helper combines the argument lists and removes `$patch` before returning the final DGD.
-Without `$patch`, specifying `args` retains the standard replacement behavior. To override a
-container that the Operator adds later, such as a generated frontend `main` container, provide the
-complete desired argument list instead.
+non-empty string. The target container and its `args` list must already be present in the generated
+blueprint. The profiler blueprints define the complete default CLI for `Frontend/main`, so the
+example preserves `python3 -m dynamo.frontend` and appends the KV router flags. The override helper
+combines the argument lists and removes `$patch` before returning the final DGD. Without `$patch`,
+specifying `args` retains the standard replacement behavior and requires the complete desired list.
 
 <Note>
   Existing `nvidia.com/v1alpha1` overrides remain supported. They use the older `spec.services`
