@@ -239,7 +239,7 @@ pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Erro
 /// Validates the top_p parameter
 pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
     if let Some(p) = top_p
-        && (p <= MIN_TOP_P || p > MAX_TOP_P)
+        && !(p.is_finite() && p > MIN_TOP_P && p <= MAX_TOP_P)
     {
         anyhow::bail!(
             "Top_p must be between {} and {}, got {}",
