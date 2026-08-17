@@ -42,6 +42,18 @@ pub(crate) struct PublisherHandles {
     snapshot_publisher: Option<Arc<SnapshotPublisher>>,
 }
 
+fn zmq_source_config(
+    endpoint: String,
+    topic: String,
+    image_token_id: Option<u32>,
+) -> KvEventSourceConfig {
+    KvEventSourceConfig::Zmq {
+        endpoint,
+        topic,
+        image_token_id,
+    }
+}
+
 // Sync — `KvEventPublisher::new_with_local_indexer` doesn't await. The
 // snapshot router-publisher construction below is async because
 // `create_endpoint` does.
@@ -57,13 +69,12 @@ fn setup_kv_publishers(
         let dp_rank = source.dp_rank();
         let (source_config, on_ready) = match source {
             KvEventSource::Zmq {
-                endpoint, topic, ..
+                endpoint,
+                topic,
+                image_token_id,
+                ..
             } => (
-                Some(KvEventSourceConfig::Zmq {
-                    endpoint,
-                    topic,
-                    image_token_id: None,
-                }),
+                Some(zmq_source_config(endpoint, topic, image_token_id)),
                 None,
             ),
             KvEventSource::Push { on_ready, .. } => (None, Some(on_ready)),
@@ -176,4 +187,34 @@ pub(crate) async fn setup_publishers(
         kv_publishers,
         snapshot_publisher,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zmq_source_preserves_image_token_id() {
+        let config = zmq_source_config(
+            "tcp://127.0.0.1:5557".to_string(),
+            "events".to_string(),
+            Some(151655),
+        );
+        assert!(matches!(
+            config,
+            KvEventSourceConfig::Zmq {
+                image_token_id: Some(151655),
+                ..
+            }
+        ));
+
+        let config = zmq_source_config(String::new(), String::new(), None);
+        assert!(matches!(
+            config,
+            KvEventSourceConfig::Zmq {
+                image_token_id: None,
+                ..
+            }
+        ));
+    }
 }

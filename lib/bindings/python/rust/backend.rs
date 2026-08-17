@@ -1571,11 +1571,23 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
     let cls = class_name(item)?;
     let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
     match cls.as_str() {
-        "ZmqSource" => Ok(RsKvEventSource::Zmq {
-            endpoint: item.getattr("endpoint")?.extract()?,
-            topic: item.getattr("topic")?.extract()?,
-            dp_rank,
-        }),
+        "ZmqSource" => {
+            let image_token_id = match item.getattr("image_token_id") {
+                Ok(value) => value.extract()?,
+                Err(error)
+                    if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(item.py()) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error),
+            };
+            Ok(RsKvEventSource::Zmq {
+                endpoint: item.getattr("endpoint")?.extract()?,
+                topic: item.getattr("topic")?.extract()?,
+                dp_rank,
+                image_token_id,
+            })
+        }
         "PushSource" => {
             // Capture the Python callable as a `PyObject` and wrap in a
             // Rust closure. The closure runs once when Worker has the

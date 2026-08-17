@@ -16,6 +16,7 @@ use dynamo_backend_common::{
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -28,6 +29,24 @@ use crate::engine::VllmSidecarEngine;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
+
+#[test]
+fn vendored_proto_matches_compatible_vllm_revision() {
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("../proto/inference.proto"))
+        ),
+        "6152c306583166ecd691c9c715cab950523e8d1ed2db3dc2bcb538f6ca90e56f"
+    );
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("../proto/control.proto"))
+        ),
+        "390c88e94f1b68421c54c6d9440f2088d2709a432549c7a0fe94d35ce7b37476"
+    );
+}
 
 #[derive(Clone, Default)]
 struct FakeVllm {
@@ -102,10 +121,19 @@ impl pb::inference_server::Inference for FakeVllm {
             }
             None => return Err(Status::invalid_argument("prompt required")),
         };
+        let prompt_tokens = if request.media.is_empty() {
+            prompt_tokens
+        } else {
+            601
+        };
         let wants_logprobs = request
             .response
             .as_ref()
             .is_some_and(|response| response.output_logprobs);
+        let wants_prompt_token_ids = request
+            .response
+            .as_ref()
+            .is_some_and(|response| response.prompt_token_ids);
         let wants_prompt_logprobs = request
             .response
             .as_ref()
@@ -144,23 +172,28 @@ impl pb::inference_server::Inference for FakeVllm {
 
         let stream = async_stream::try_stream! {
             let _drop_signal = DropSignal(dropped);
-            let prompt_info = if wants_prompt_logprobs {
-                pb::PromptInfo {
-                    num_prompt_tokens: prompt_tokens,
-                    token_ids: vec![11, 22, 33],
-                    logprobs: vec![0.0, -0.2, -0.3],
-                    ranks: vec![0, 1, 2],
-                    candidate_tokens: vec![
-                        pb::CandidateTokenInfo::default(),
-                        pb::CandidateTokenInfo::default(),
-                        pb::CandidateTokenInfo::default(),
-                    ],
-                }
-            } else {
-                pb::PromptInfo {
-                    num_prompt_tokens: prompt_tokens,
-                    ..Default::default()
-                }
+            let prompt_info = pb::PromptInfo {
+                num_prompt_tokens: prompt_tokens,
+                token_ids: if wants_prompt_token_ids {
+                    (0..prompt_tokens).collect()
+                } else {
+                    Vec::new()
+                },
+                logprobs: if wants_prompt_logprobs {
+                    vec![-0.2; prompt_tokens as usize]
+                } else {
+                    Vec::new()
+                },
+                ranks: if wants_prompt_logprobs {
+                    vec![1; prompt_tokens as usize]
+                } else {
+                    Vec::new()
+                },
+                candidate_tokens: if wants_prompt_logprobs {
+                    vec![pb::CandidateTokenInfo::default(); prompt_tokens as usize]
+                } else {
+                    Vec::new()
+                },
             };
             yield pb::GenerateResponse {
                 prompt_info: Some(prompt_info),
@@ -558,6 +591,26 @@ fn engine(
         GrpcEndpoint::parse(endpoint, "--vllm-endpoint").expect("valid test endpoint"),
         DiscoveredModel::from_proto(model, server_info()).expect("valid discovery"),
         mode,
+        false,
+        transport,
+    )
+}
+
+fn multimodal_engine(
+    endpoint: &str,
+    mode: DisaggregationMode,
+    connections: usize,
+    model: pb::ModelInfo,
+) -> VllmSidecarEngine {
+    let transport = GrpcTransportConfig {
+        connections: NonZeroUsize::new(connections).expect("non-zero connection count"),
+        ..Default::default()
+    };
+    VllmSidecarEngine::new(
+        GrpcEndpoint::parse(endpoint, "--vllm-endpoint").expect("valid test endpoint"),
+        DiscoveredModel::from_proto(model, server_info()).expect("valid discovery"),
+        mode,
+        true,
         transport,
     )
 }
@@ -636,6 +689,27 @@ async fn startup_rejects_model_identity_change_after_bootstrap() {
 }
 
 #[tokio::test]
+async fn multimodal_opt_in_requires_a_multimodal_model() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let argv = vec![
+        "dynamo-vllm-sidecar".to_string(),
+        "--vllm-endpoint".to_string(),
+        server.endpoint.clone(),
+        "--enable-multimodal".to_string(),
+        "--grpc-startup-deadline-secs".to_string(),
+        "5".to_string(),
+    ];
+    let result = tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+        .await
+        .expect("bootstrap task");
+    let error = match result {
+        Ok(_) => panic!("text-only model must reject multimodal opt-in"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("requires a multimodal model"));
+}
+
+#[tokio::test]
 async fn aggregated_generation_converts_request_stream_and_usage() {
     let server = FakeServer::start(FakeVllm::default()).await;
     let (engine, worker) = engine_from_args(&server.endpoint).await;
@@ -667,7 +741,11 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     );
     assert!(sources.iter().all(|source| matches!(
         source,
-        dynamo_backend_common::KvEventSource::Zmq { topic, .. } if topic.is_empty()
+        dynamo_backend_common::KvEventSource::Zmq {
+            topic,
+            image_token_id: None,
+            ..
+        } if topic.is_empty()
     )));
     assert_eq!(
         sources
@@ -737,6 +815,296 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
         struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
     );
+}
+
+#[tokio::test]
+async fn multimodal_image_is_forwarded_with_uuid_and_routing_token() {
+    let model_dir = tempfile::Builder::new()
+        .prefix("Qwen2.5-VL-")
+        .tempdir()
+        .expect("temporary model config");
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        json!({
+            "model_type": "qwen2_5_vl",
+            "vision_token_id": 151654,
+            "image_token_id": 151655
+        })
+        .to_string(),
+    )
+    .expect("write model config");
+
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.model_id = model_dir.path().to_string_lossy().into_owned();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
+    let aggregate = multimodal_engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        discovered.clone(),
+    );
+    aggregate.start(0).await.expect("start");
+
+    let sources = aggregate
+        .kv_event_sources()
+        .await
+        .expect("KV event sources");
+    // Qwen2.5-VL expands the chat marker (151655), not vision_token_id
+    // (151654). Event normalization must use the token present on the wire.
+    assert!(sources.iter().all(|source| matches!(
+        source,
+        dynamo_backend_common::KvEventSource::Zmq {
+            image_token_id: Some(151655),
+            ..
+        }
+    )));
+
+    let mut image_request = request();
+    image_request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,iVBORw0KGgo=".to_string(),
+        )],
+    )]));
+    image_request.output_options.prompt_logprobs = None;
+    image_request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .extend([
+            (
+                "messages".to_string(),
+                json!([{"role": "user", "content": [{"type": "image_url"}]}]),
+            ),
+            ("formatted_prompt".to_string(), json!("<image>\nDescribe.")),
+            ("mm_hashes".to_string(), json!(["0123456789abcdef"])),
+        ]);
+
+    let outputs = collect(&aggregate, image_request.clone()).await;
+    assert_eq!(outputs[0].finish_reason, Some(FinishReason::Stop));
+    assert_eq!(
+        outputs[0]
+            .completion_usage
+            .as_ref()
+            .expect("usage")
+            .prompt_tokens,
+        601
+    );
+
+    let requests = server.service.requests.lock().await;
+    let media = &requests.last().expect("recorded request").media;
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].modality(), pb::Modality::Image);
+    assert_eq!(
+        media[0].uuid,
+        "0123456789abcdef000000000000000000000000000000000000000000000000"
+    );
+    assert!(matches!(
+        media[0].source.as_ref(),
+        Some(pb::media_item::Source::DataUri(_))
+    ));
+    drop(requests);
+
+    let prefill = multimodal_engine(
+        &server.endpoint,
+        DisaggregationMode::Prefill,
+        1,
+        discovered.clone(),
+    );
+    let decode = multimodal_engine(&server.endpoint, DisaggregationMode::Decode, 1, discovered);
+    prefill.start(1).await.expect("start prefill");
+    decode.start(2).await.expect("start decode");
+
+    let prefill_outputs = collect(&prefill, image_request.clone()).await;
+    let handoff = prefill_outputs[0]
+        .disaggregated_params
+        .clone()
+        .expect("multimodal handoff");
+    assert_eq!(
+        handoff["_dynamo_sidecar_multimodal_prompt_token_ids"]
+            .as_array()
+            .expect("expanded prompt token IDs")
+            .len(),
+        601
+    );
+
+    let mut decode_request = image_request;
+    decode_request.prefill_result = Some(PrefillResult {
+        disaggregated_params: handoff,
+        prompt_tokens_details: None,
+    });
+    let decode_outputs = collect(&decode, decode_request).await;
+    assert_eq!(
+        decode_outputs[0]
+            .completion_usage
+            .as_ref()
+            .expect("decode usage")
+            .prompt_tokens,
+        601
+    );
+
+    let requests = server.service.requests.lock().await;
+    let prefill_wire = &requests[requests.len() - 2];
+    let decode_wire = &requests[requests.len() - 1];
+    assert_eq!(prefill_wire.media.len(), 1);
+    assert!(
+        prefill_wire
+            .response
+            .as_ref()
+            .expect("prefill response options")
+            .prompt_token_ids
+    );
+    assert!(decode_wire.media.is_empty());
+    assert_eq!(
+        decode_wire.prompt.as_ref(),
+        Some(&pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+            ids: (0..601).collect(),
+        }))
+    );
+    let decode_kv = struct_to_json(
+        decode_wire
+            .kv
+            .as_ref()
+            .and_then(|kv| kv.kv_transfer_params.clone())
+            .expect("decode KV handoff"),
+    )
+    .expect("decode KV JSON");
+    assert!(
+        decode_kv["_dynamo_sidecar_multimodal_prompt_token_ids"].is_null(),
+        "sidecar metadata must not reach vLLM"
+    );
+}
+
+#[tokio::test]
+async fn multimodal_missing_routing_token_falls_back_without_source_metadata() {
+    let model_dir = tempfile::tempdir().expect("temporary model directory");
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.model_id = model_dir.path().to_string_lossy().into_owned();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
+    let engine = multimodal_engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        discovered,
+    );
+
+    engine.start(0).await.expect("start without routing token");
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert!(sources.iter().all(|source| matches!(
+        source,
+        dynamo_backend_common::KvEventSource::Zmq {
+            image_token_id: None,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn multimodal_non_qwen_model_does_not_claim_exact_kv_routing() {
+    let model_dir = tempfile::tempdir().expect("temporary model directory");
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        json!({"model_type": "llama4", "image_token_index": 32000}).to_string(),
+    )
+    .expect("write model config");
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.model_id = model_dir.path().to_string_lossy().into_owned();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
+    let engine = multimodal_engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        discovered,
+    );
+
+    engine.start(0).await.expect("start unqualified model");
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert!(sources.iter().all(|source| matches!(
+        source,
+        dynamo_backend_common::KvEventSource::Zmq {
+            image_token_id: None,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn multimodal_hashes_validate_order_and_user_uuid_precedence() {
+    let mut ordered = request();
+    ordered.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![
+            MultimodalData::RawUrl("data:image/png;base64,AA==".to_string()),
+            MultimodalData::RawUrl("data:image/png;base64,AQ==".to_string()),
+        ],
+    )]));
+    ordered.extra_args.as_mut().expect("extra args")["mm_hashes"] =
+        json!(["0123456789abcdef", "fedcba9876543210"]);
+    let wire = build_generate_request(
+        ordered,
+        "ordered-images".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("ordered multimodal request");
+    assert_eq!(
+        wire.media
+            .iter()
+            .map(|media| media.uuid.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "0123456789abcdef000000000000000000000000000000000000000000000000",
+            "fedcba9876543210000000000000000000000000000000000000000000000000",
+        ]
+    );
+
+    let mut invalid = request();
+    invalid.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,AA==".to_string(),
+        )],
+    )]));
+    invalid.extra_args.as_mut().expect("extra args")["mm_hashes"] = json!(["not-a-hash"]);
+    assert!(
+        build_generate_request(
+            invalid,
+            "invalid-hash".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("malformed MM hash must fail")
+        .to_string()
+        .contains("16-character hexadecimal")
+    );
+
+    let mut user_uuid = request();
+    user_uuid.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,AA==".to_string(),
+        )],
+    )]));
+    user_uuid.multi_modal_uuids = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![Some("caller-cache-id".to_string())],
+    )]));
+    user_uuid.extra_args.as_mut().expect("extra args")["mm_hashes"] = json!(["not-a-hash"]);
+    let wire = build_generate_request(
+        user_uuid,
+        "user-uuid".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("user UUID takes precedence over Dynamo hash");
+    assert_eq!(wire.media[0].uuid, "caller-cache-id");
 }
 
 #[tokio::test]
@@ -1093,11 +1461,7 @@ async fn unsupported_features_fail_before_rpc_submission() {
         Ok(_) => panic!("multimodal request must fail before RPC submission"),
         Err(error) => error,
     };
-    assert!(
-        error
-            .to_string()
-            .contains("released vLLM gRPC v0.27.1 protocol")
-    );
+    assert!(error.to_string().contains("require --enable-multimodal"));
 
     let mut multiple = request();
     multiple.sampling_options.n = Some(2);
