@@ -29,7 +29,7 @@ from typing import Generator
 
 import pytest
 import torch
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 from tests.utils.device import detect_target_device
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
@@ -45,7 +45,9 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.vllm,
     pytest.mark.core,
-    pytest.mark.nightly,
+    # TODO: revert to pytest.mark.nightly after pre_merge validation
+    # on this PR (see .ai/ci-guidelines.md).
+    pytest.mark.pre_merge,
     pytest.mark.gpu_1,
     pytest.mark.xpu_1,
     pytest.mark.model(TEST_MODEL),
@@ -252,7 +254,7 @@ class TestPromptEmbedsE2E:
         invalid_data = b"this is not a valid pytorch tensor format!" * 10
         invalid_base64 = base64.b64encode(invalid_data).decode("utf-8")
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(BadRequestError) as exc_info:
             dynamo_client.completions.create(
                 model=TEST_MODEL,
                 prompt="",
@@ -261,11 +263,11 @@ class TestPromptEmbedsE2E:
                 extra_body={"prompt_embeds": invalid_base64},
             )
 
-        error_msg = str(exc_info.value).lower()
-        assert any(
-            keyword in error_msg
-            for keyword in ["pytorch", "tensor", "invalid", "decode", "error"]
-        ), f"Expected tensor decode error, got: {error_msg}"
+        assert exc_info.value.status_code == 400
+        error_msg = str(exc_info.value)
+        assert (
+            "Failed to decode prompt_embeds as PyTorch tensor" in error_msg
+        ), f"Expected the worker's tensor decode error, got: {error_msg}"
 
     def test_usage_prompt_tokens_not_zero(self, dynamo_client):
         """

@@ -248,6 +248,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // Keep completions aligned with the chat-completions delta generator.
         let finish_reason = match delta.finish_reason {
             Some(common::FinishReason::Error(err_msg)) => {
+                self.tracker.record_finish();
                 return Err(anyhow::anyhow!(err_msg));
             }
             Some(reason) => Some(reason.into()),
@@ -454,12 +455,14 @@ mod tests {
         output.finish_reason = Some(common::FinishReason::Error(
             "invalid prompt embeddings".to_string(),
         ));
+        assert!(generator.tracker().total_time_ms().is_none());
 
         let error = generator
             .choice_from_postprocessor(output)
             .expect_err("backend error must fail the response");
 
-        assert!(error.to_string().contains("invalid prompt embeddings"));
+        assert_eq!(error.to_string(), "invalid prompt embeddings");
+        assert!(generator.tracker().total_time_ms().is_some());
     }
 
     #[test]
