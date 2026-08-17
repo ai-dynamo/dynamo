@@ -258,7 +258,7 @@ For deterministic structured-output and required or named tool-call smoke tests,
 2. Top-level reasoning controls such as `include_reasoning`, `thinking_token_budget`, `reasoning_effort`, and `usage.reasoning_tokens` are part of that shared API compatibility work. Use the Ultra-specific `chat_template_kwargs` and `nvext` controls above as the current model-specific workaround.
 3. Do not remove `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` or `--no-enable-flashinfer-autotune` from the vLLM worker commands unless rerunning the benchmark qualification. These are part of the performance recipe.
 4. Raw Moontrace replay may contain over-context or pathological long-generation rows. Do not drop those rows silently; preserve them as HTTP/error evidence or classify the run accordingly.
-5. Strict structured output and tool-call envelopes are not yet qualified with the combination of MTP speculative decoding and prefix caching in the pinned runtime. Use a no-MTP Refresh profile for contract validation until the runtime compatibility issue is resolved; keep the MTP5 256K profiles for their qualified performance path.
+5. Strict structured-output and required or named tool-call requests must use the nested no-thinking control above. Leaving thinking enabled can add reasoning-mode output that does not satisfy the constrained response envelope.
 
 ## File Layout
 
