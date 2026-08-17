@@ -930,6 +930,9 @@ navigation:
         path: ../pages-dev/reference/general/releases/release-history.mdx
         collapsed: true
         contents:
+          - page: Dynamo v1.4.0
+            path: ../pages-dev/reference/general/releases/dynamo-v1-4-0.mdx
+            slug: v1-4-0
           - page: Dynamo v1.3.0
             path: ../pages-dev/reference/general/releases/dynamo-v1-3-0.mdx
             slug: v1-3-0

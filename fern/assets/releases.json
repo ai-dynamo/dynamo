@@ -20,6 +20,7 @@
   "releases": [
     {
       "version": "v1.4.0",
+      "notesHref": "/dynamo/dev/reference/releases/v1-4-0",
       "date": "Aug 14, 2026",
       "kind": "stable",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.4.0",
@@ -36,7 +37,7 @@
       "delta": "Audit subsystem migrated into request trace (DYN_AUDIT_* honored as legacy aliases); HTTP header capture in trace records is an explicit fail-closed allowlist; deprecated multimodal worker flags and vLLM worker-role flags removed; runtime images no longer bundle software video decoders (H.264/H.265 decodes via NVDEC); UCX 1.21.x.",
       "notesSummary": "Experimental cross-datacenter prefix routing and reservation replay in the Router, a vLLM-compatible generate token endpoint, tokenizer L1 prefix cache on by default, NIXL disaggregation for vLLM-Omni pipelines, and the Spica deployment simulator.",
       "dateIso": "2026-08-14",
-      "notesUrl": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.4.0"
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-4-0"
     },
     {
       "version": "v1.3.1",
@@ -2031,6 +2032,13 @@
     }
   ],
   "releaseStats": {
+    "v1.4.0": {
+      "prs": 640,
+      "contributors": 127,
+      "firstTimers": 29,
+      "breaking": 51,
+      "knownIssues": 19
+    },
     "v1.3.0": {
       "prs": 930,
       "contributors": 125,
