@@ -190,14 +190,18 @@ class AudioGenerationHandler:
         output_format = (req.response_format or "wav").lower()
 
         # URL delivery, whole-file encoders, and speed adjustment require the
-        # complete waveform before the worker can emit a response. Older
-        # frontends do too: they decode only the first aggregated audio item.
-        frontend_accepts_chunks = bool(req.nvext and req.nvext.supports_audio_chunking)
+        # complete waveform before the worker can emit a response. A missing or
+        # false capability identifies a legacy frontend that also needs one
+        # aggregated item. TODO(v1.7): Remove this compatibility check after
+        # v1.4 leaves the N-2 window.
+        frontend_accepts_audio_chunks = bool(
+            req.nvext and req.nvext.frontend_accepts_audio_chunks
+        )
         returns_audio_bytes = req.data_source != "url"
         supports_chunk_encoding = output_format in {"pcm", "wav"}
         uses_default_speed = req.speed is None or req.speed == 1.0
         stream_audio = (
-            frontend_accepts_chunks
+            frontend_accepts_audio_chunks
             and returns_audio_bytes
             and supports_chunk_encoding
             and uses_default_speed

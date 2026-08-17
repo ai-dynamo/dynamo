@@ -99,7 +99,7 @@ impl
         assert_eq!(
             request
                 .nvext
-                .and_then(|nvext| nvext.supports_audio_chunking),
+                .and_then(|nvext| nvext.frontend_accepts_audio_chunks),
             Some(true)
         );
         let model = request.model.unwrap_or_default();

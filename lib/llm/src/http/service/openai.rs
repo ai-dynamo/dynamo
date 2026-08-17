@@ -4456,17 +4456,16 @@ async fn handler_audio_speech(
     // Option<String> model field; see below)
     check_ready(&state)?;
 
-    let streaming = request.data_source.as_deref() != Some("url");
+    let returns_audio_bytes = request.data_source.as_deref() != Some("url");
     let request_id = get_or_create_request_id(&headers);
-    if streaming {
-        // Compatibility with v1.3/v1.4 frontends during v1.5-v1.6 rolling
-        // upgrades. A new worker must not emit chunks to an older frontend,
-        // which decodes only the first aggregated audio item.
+    if returns_audio_bytes {
+        // Advertise that this frontend can concatenate incremental worker
+        // responses. Older frontends omit the signal, so new workers aggregate.
         // TODO(v1.7): Remove when v1.4 falls outside the N-2 window.
         request
             .nvext
             .get_or_insert_default()
-            .supports_audio_chunking = Some(true);
+            .frontend_accepts_audio_chunks = Some(true);
     }
     let request = context_from_headers(request, request_id, &headers)?;
 
@@ -4493,13 +4492,18 @@ async fn handler_audio_speech(
         CancellationLabels {
             model: model.clone(),
             endpoint: Endpoint::Audios.to_string(),
-            request_type: if streaming { "stream" } else { "unary" }.to_string(),
+            request_type: if returns_audio_bytes {
+                "stream"
+            } else {
+                "unary"
+            }
+            .to_string(),
         },
     )
     .await;
 
     let response = tokio::spawn(
-        audio_speech(state, request, model, streaming, stream_handle).in_current_span(),
+        audio_speech(state, request, model, returns_audio_bytes, stream_handle).in_current_span(),
     )
     .await
     .map_err(|e| {
@@ -4517,7 +4521,7 @@ async fn audio_speech(
     state: Arc<service_v2::State>,
     request: Context<NvCreateAudioSpeechRequest>,
     model: String,
-    streaming: bool,
+    returns_audio_bytes: bool,
     mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     let request_id = request.id().to_string();
@@ -4533,7 +4537,7 @@ async fn audio_speech(
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &model,
         Endpoint::Audios,
-        streaming,
+        returns_audio_bytes,
         &request_id,
     );
 
@@ -4573,7 +4577,7 @@ async fn audio_speech(
         );
     });
 
-    if streaming {
+    if returns_audio_bytes {
         let mut stream = Box::pin(stream);
         let first_response = loop {
             let Some(annotated) = stream.next().await else {

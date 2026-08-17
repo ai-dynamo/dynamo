@@ -229,7 +229,7 @@ class TestEngineInputsFromAudio:
 
         req = NvCreateAudioSpeechRequest(
             input="Hello world",
-            nvext=AudioNvExt(supports_audio_chunking=True),
+            nvext=AudioNvExt(frontend_accepts_audio_chunks=True),
         )
         inputs = await handler.build_engine_inputs(req)
         assert inputs.request_type == RequestType.AUDIO_GENERATION
@@ -238,8 +238,8 @@ class TestEngineInputsFromAudio:
         assert inputs.stream_audio is True
 
     @pytest.mark.asyncio
-    async def test_old_frontend_gets_complete_response(self):
-        """Workers aggregate audio unless the frontend advertises chunk support."""
+    async def test_legacy_frontend_gets_complete_response(self):
+        """Workers aggregate audio unless the frontend advertises that it accepts chunks."""
         handler = _make_audio_handler()
         handler.engine_client.stage_list = None
 
@@ -264,7 +264,7 @@ class TestEngineInputsFromAudio:
         req = NvCreateAudioSpeechRequest(
             input="hello",
             speed=2.0,
-            nvext=AudioNvExt(supports_audio_chunking=True),
+            nvext=AudioNvExt(frontend_accepts_audio_chunks=True),
         )
         inputs = await handler.build_engine_inputs(req)
         assert inputs.speed == 2.0
@@ -285,7 +285,7 @@ class TestEngineInputsFromAudio:
         inputs = await handler.build_engine_inputs(
             NvCreateAudioSpeechRequest(
                 input="hello",
-                nvext=AudioNvExt(supports_audio_chunking=True),
+                nvext=AudioNvExt(frontend_accepts_audio_chunks=True),
                 **request_args,
             )
         )
