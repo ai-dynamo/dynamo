@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Adapt Dynamo's existing NIXL WRITE embedding sender to workflow edges."""
+"""Adapt Dynamo's existing NIXL WRITE embedding transport to workflow edges."""
 
 from __future__ import annotations
 
@@ -11,7 +11,11 @@ import time
 from collections.abc import Awaitable, Mapping
 from typing import Any
 
-from dynamo.common.multimodal.embedding_transfer import NixlWriteEmbeddingSender
+from dynamo.common.multimodal.embedding_transfer import (
+    NixlWriteEmbeddingReceiver,
+    NixlWriteEmbeddingSender,
+    TransferRequest,
+)
 from dynamo.experimental.workflow.nixl import EmbeddingTransferRef
 from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.experimental.workflow.runtime import WorkflowExecutionError
@@ -135,5 +139,72 @@ class NixlWriteTensorCarrier:
                 observer.cancel()
             await asyncio.gather(*tuple(self._observers), return_exceptions=True)
         close = getattr(self._sender, "close", None)
+        if callable(close):
+            await close()
+
+
+class NixlWriteTensorReceiverCarrier:
+    """Import borrowed tensors from a pre-registered NIXL WRITE receive ring."""
+
+    def __init__(self, *, receiver: Any = None, buffer_size: int | None = None) -> None:
+        if receiver is not None and buffer_size is not None:
+            raise ValueError("receiver and buffer_size cannot both be provided")
+        self._receiver = (
+            receiver
+            if receiver is not None
+            else (
+                NixlWriteEmbeddingReceiver()
+                if buffer_size is None
+                else NixlWriteEmbeddingReceiver(buffer_size=buffer_size)
+            )
+        )
+        self._tensor_ids: dict[int, int] = {}
+
+    async def export_tensor(self, tensor: Any, transfer_id: str) -> Mapping[str, Any]:
+        del tensor, transfer_id
+        raise WorkflowExecutionError(
+            "NIXL WRITE receiver carrier cannot export tensors"
+        )
+
+    async def export_tensor_fanout(
+        self, tensor: Any, transfer_ids: tuple[str, ...]
+    ) -> Mapping[str, Mapping[str, Any]]:
+        del tensor, transfer_ids
+        raise WorkflowExecutionError(
+            "NIXL WRITE receiver carrier cannot export tensors"
+        )
+
+    async def import_tensor(self, reference: Mapping[str, Any]) -> Any:
+        parsed = EmbeddingTransferRef.from_dict(reference)
+        tensor_id, tensor = await self._receiver.receive_embeddings(
+            TransferRequest(
+                embeddings_shape=list(parsed.shape),
+                embedding_dtype_str=parsed.dtype,
+                serialized_request=parsed.serialized_request,
+            )
+        )
+        identity = id(tensor)
+        if identity in self._tensor_ids:
+            self._receiver.release_tensor(tensor_id)
+            raise WorkflowExecutionError(
+                "NIXL WRITE receiver reused a live tensor view"
+            )
+        self._tensor_ids[identity] = tensor_id
+        return tensor
+
+    def release_imported_tensor(self, tensor: Any) -> None:
+        try:
+            tensor_id = self._tensor_ids.pop(id(tensor))
+        except KeyError as error:
+            raise WorkflowExecutionError(
+                "NIXL WRITE imported tensor is not live"
+            ) from error
+        self._receiver.release_tensor(tensor_id)
+
+    async def close(self) -> None:
+        for tensor_id in tuple(self._tensor_ids.values()):
+            self._receiver.release_tensor(tensor_id)
+        self._tensor_ids.clear()
+        close = getattr(self._receiver, "close", None)
         if callable(close):
             await close()

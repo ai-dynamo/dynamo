@@ -3,7 +3,15 @@
 
 """Reusable vLLM-oriented workflow stages."""
 
-from dynamo.experimental.workflow.vllm.embedding_transfer import NixlWriteTensorCarrier
+from dynamo.experimental.workflow.vllm.embedding_transfer import (
+    NixlWriteTensorCarrier,
+    NixlWriteTensorReceiverCarrier,
+)
 from dynamo.experimental.workflow.vllm.stages import DynamoVllmStage, EncoderStage
 
-__all__ = ["DynamoVllmStage", "EncoderStage", "NixlWriteTensorCarrier"]
+__all__ = [
+    "DynamoVllmStage",
+    "EncoderStage",
+    "NixlWriteTensorCarrier",
+    "NixlWriteTensorReceiverCarrier",
+]

@@ -490,3 +490,170 @@ async def test_ordinary_values_work_on_nixl_capable_remote_bindings() -> None:
     assert await orchestrator.run({"text": "Hello Dynamo"}) == {
         "chunk": {"text": "dynamo hello"}
     }
+
+
+async def test_tensor_server_imports_input_and_exports_per_consumer() -> None:
+    tensor_spec = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
+
+    class TensorRunner:
+        contract = StageContract(
+            id="tensor",
+            inputs={"tensor": tensor_spec},
+            outputs={"tensor": tensor_spec},
+        )
+
+        async def run(self, inputs, context):
+            return {"tensor": inputs["tensor"] * 2}
+
+    class Carrier:
+        def __init__(self):
+            self.exports = []
+            self.released = []
+
+        async def import_tensor(self, reference):
+            assert reference == {"remote": "reference"}
+            return torch.ones((2, 4), dtype=torch.float32)
+
+        async def export_tensor(self, tensor, transfer_id):
+            return (await self.export_tensor_fanout(tensor, (transfer_id,)))[
+                transfer_id
+            ]
+
+        async def export_tensor_fanout(self, tensor, transfer_ids):
+            assert torch.equal(tensor, torch.full((2, 4), 2.0))
+            self.exports.extend(transfer_ids)
+            return {
+                transfer_id: NixlTensorRef(
+                    transfer_id=transfer_id,
+                    lease_id=f"lease-{transfer_id}",
+                    shape=tuple(tensor.shape),
+                    dtype="float32",
+                    device="cpu",
+                    rdma_metadata={"opaque": transfer_id},
+                ).to_dict()
+                for transfer_id in transfer_ids
+            }
+
+        def release_imported_tensor(self, tensor):
+            self.released.append(tensor)
+
+    carrier = Carrier()
+    request = StageRequestEnvelope(
+        workflow_name="remote-wire",
+        stage_id="tensor",
+        contract_id="tensor",
+        attempt_id="request-1",
+        invocation_id="request-1:tensor",
+        timeout_seconds=None,
+        inputs={"tensor": {"remote": "reference"}},
+        output_transfers={"tensor": ("classifier.tensor", "generator.tensor")},
+    )
+
+    responses = [
+        response
+        async for response in RemoteStageServer(
+            "tensor", TensorRunner(), carrier
+        ).generate(request.to_dict())
+    ]
+    outputs = StageResponseEnvelope.from_dict(responses[0]).outputs
+    fanout = NixlTensorFanout.from_dict(outputs["tensor"])
+
+    assert set(fanout.transfers) == {"classifier.tensor", "generator.tensor"}
+    assert carrier.exports == ["classifier.tensor", "generator.tensor"]
+    assert len(carrier.released) == 1
+    assert torch.equal(carrier.released[0], torch.ones((2, 4)))
+
+
+async def test_tensor_server_releases_borrowed_input_after_runner_failure() -> None:
+    tensor_spec = ValueSpec(type="tensor", dtype="float32", shape=(2, 4))
+
+    class FailingRunner:
+        contract = StageContract(
+            id="tensor",
+            inputs={"tensor": tensor_spec},
+            outputs={"result": ValueSpec(type="json")},
+        )
+
+        async def run(self, inputs, context):
+            raise RuntimeError("classifier failed")
+
+    class Carrier:
+        def __init__(self):
+            self.tensor = torch.ones((2, 4), dtype=torch.float32)
+            self.released = []
+
+        async def import_tensor(self, reference):
+            return self.tensor
+
+        async def export_tensor(self, tensor, transfer_id):
+            raise AssertionError("no tensor output is declared")
+
+        async def export_tensor_fanout(self, tensor, transfer_ids):
+            raise AssertionError("no tensor output is declared")
+
+        def release_imported_tensor(self, tensor):
+            self.released.append(tensor)
+
+    carrier = Carrier()
+    request = StageRequestEnvelope(
+        workflow_name="remote-wire",
+        stage_id="tensor",
+        contract_id="tensor",
+        attempt_id="request-1",
+        invocation_id="request-1:tensor",
+        timeout_seconds=None,
+        inputs={"tensor": {"remote": "reference"}},
+        output_transfers={},
+    )
+
+    with pytest.raises(RuntimeError, match="classifier failed"):
+        await RemoteStageServer("tensor", FailingRunner(), carrier).generate(
+            request.to_dict()
+        ).__anext__()
+
+    assert carrier.released == [carrier.tensor]
+
+
+async def test_tensor_import_is_bounded_by_remote_stage_deadline() -> None:
+    tensor_spec = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
+    import_cancelled = asyncio.Event()
+
+    class TensorRunner:
+        contract = StageContract(
+            id="tensor",
+            inputs={"tensor": tensor_spec},
+            outputs={"result": ValueSpec(type="json")},
+        )
+
+        async def run(self, inputs, context):
+            raise AssertionError("runner must not start before its tensor arrives")
+
+    class BlockingCarrier:
+        async def import_tensor(self, reference):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                import_cancelled.set()
+
+        async def export_tensor(self, tensor, transfer_id):
+            raise AssertionError("no tensor output is declared")
+
+        async def export_tensor_fanout(self, tensor, transfer_ids):
+            raise AssertionError("no tensor output is declared")
+
+    request = StageRequestEnvelope(
+        workflow_name="remote-wire",
+        stage_id="tensor",
+        contract_id="tensor",
+        attempt_id="request-1",
+        invocation_id="request-1:tensor",
+        timeout_seconds=0.01,
+        inputs={"tensor": {"remote": "reference"}},
+        output_transfers={},
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        await RemoteStageServer("tensor", TensorRunner(), BlockingCarrier()).generate(
+            request.to_dict()
+        ).__anext__()
+    assert import_cancelled.is_set()
