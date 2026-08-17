@@ -6,10 +6,8 @@ package cuda
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -21,24 +19,36 @@ func lockWithJobFile(ctx context.Context, pid int, jobFile string, log logr.Logg
 	if jobFile == "" {
 		return lock(ctx, pid, log)
 	}
-	return runActionWithJobFile(ctx, pid, actionLock, jobFile, log)
+	return runActionWithJobFile(ctx, pid, actionLock, "", jobFile, cudaCheckpointHelperBinary, log)
 }
 
 func checkpointWithJobFile(ctx context.Context, pid int, jobFile string, log logr.Logger) error {
 	if jobFile == "" {
 		return checkpoint(ctx, pid, log)
 	}
-	return runActionWithJobFile(ctx, pid, actionCheckpoint, jobFile, log)
+	return runActionWithJobFile(ctx, pid, actionCheckpoint, "", jobFile, cudaCheckpointHelperBinary, log)
 }
 
-func runActionWithJobFile(ctx context.Context, pid int, action, jobFile string, log logr.Logger) error {
-	args := []string{"--action", action, "--pid", strconv.Itoa(pid), "--job-file", jobFile}
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
+func restoreWithJobFile(ctx context.Context, pid int, deviceMap, jobFile, helperBinaryPath string, log logr.Logger) error {
+	if jobFile == "" {
+		return restoreProcess(ctx, pid, deviceMap, helperBinaryPath, log)
 	}
-	cmd.WaitDelay = helperWaitDelay
+	return runActionWithJobFile(ctx, pid, actionRestore, deviceMap, jobFile, helperBinaryPath, log)
+}
+
+func unlockWithJobFile(ctx context.Context, pid int, jobFile, helperBinaryPath string, log logr.Logger) error {
+	if jobFile == "" {
+		return unlock(ctx, pid, helperBinaryPath, log)
+	}
+	return runActionWithJobFile(ctx, pid, actionUnlock, "", jobFile, helperBinaryPath, log)
+}
+
+func runActionWithJobFile(ctx context.Context, pid int, action, deviceMap, jobFile, helperBinaryPath string, log logr.Logger) error {
+	args := []string{"--action", action, "--pid", strconv.Itoa(pid), "--job-file", jobFile}
+	if action == actionRestore && deviceMap != "" {
+		args = append(args, "--device-map", deviceMap)
+	}
+	cmd := helperCommand(ctx, helperBinaryPath, args...)
 	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,
 		OutermostPID:  pid,

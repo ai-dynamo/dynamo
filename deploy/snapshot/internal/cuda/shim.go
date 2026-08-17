@@ -43,8 +43,12 @@ func unlock(ctx context.Context, pid int, helperBinaryPath string, log logr.Logg
 	return runAction(ctx, pid, actionUnlock, "", helperBinaryPath, log)
 }
 
-func getState(ctx context.Context, pid int, helperBinaryPath string) (string, error) {
-	cmd := exec.CommandContext(ctx, helperBinaryPath, "--get-state", "--pid", strconv.Itoa(pid))
+func getState(ctx context.Context, pid int, jobFile, helperBinaryPath string) (string, error) {
+	args := []string{"--get-state", "--pid", strconv.Itoa(pid)}
+	if jobFile != "" {
+		args = append(args, "--job-file", jobFile)
+	}
+	cmd := helperCommand(ctx, helperBinaryPath, args...)
 	output, err := cmd.CombinedOutput()
 	state := strings.TrimSpace(string(output))
 	if err != nil {
@@ -61,12 +65,7 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
-	cmd := exec.CommandContext(ctx, helperBinaryPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
-	}
-	cmd.WaitDelay = helperWaitDelay
+	cmd := helperCommand(ctx, helperBinaryPath, args...)
 	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,
 		OutermostPID:  pid,
@@ -105,6 +104,16 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 		"output", out,
 	)
 	return nil
+}
+
+func helperCommand(ctx context.Context, helperBinaryPath string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, helperBinaryPath, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
+	}
+	cmd.WaitDelay = helperWaitDelay
+	return cmd
 }
 
 func normalizeProcessGroupKillError(err error) error {

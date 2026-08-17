@@ -435,8 +435,9 @@ func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *
 
 // executorCheckpoint is the production checkpointFn. The reconciler has already resolved the
 // container ID and host PID. It runs executor.Checkpoint to the destination, verifies the
-// artifact directory, and writes the snapshot-complete sentinel. On dump or verification
-// failure it SIGKILLs the CUDA-locked process before returning the error.
+// artifact directory, and writes the snapshot-complete sentinel for cooperative checkpoint
+// Job sources. On dump, verification, or sentinel failure it SIGKILLs the source process
+// before returning the error.
 func (w *NodeController) executorCheckpoint(ctx context.Context, params CheckpointParams) error {
 	log := logr.FromContextOrDiscard(ctx)
 
@@ -466,14 +467,21 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		return fmt.Errorf("verify checkpoint path %s: not a directory", params.HostPath)
 	}
 
-	if err := snapshotruntime.WriteControlSentinel(params.ContainerPID, snapshotprotocol.SnapshotCompleteFile); err != nil {
+	if err := writeSnapshotCompleteSentinel(params, snapshotruntime.WriteControlSentinel); err != nil {
 		w.killCheckpointProcess(log, params.ContainerPID, "checkpoint sentinel failed")
 		return fmt.Errorf("write snapshot-complete sentinel: %w", err)
 	}
 	return nil
 }
 
-// killCheckpointProcess signals the CUDA-locked process so it does not hang after a failed dump.
+func writeSnapshotCompleteSentinel(params CheckpointParams, writeSentinel func(int, string) error) error {
+	if params.Pod == nil || params.Pod.Labels[snapshotprotocol.CheckpointSourceLabel] != "true" {
+		return nil
+	}
+	return writeSentinel(params.ContainerPID, snapshotprotocol.SnapshotCompleteFile)
+}
+
+// killCheckpointProcess signals the source process so failed snapshots remain fail-closed.
 func (w *NodeController) killCheckpointProcess(log logr.Logger, pid int, reason string) {
 	if err := snapshotruntime.SendSignalToPID(log, pid, syscall.SIGKILL, reason); err != nil {
 		log.Error(err, "Failed to signal checkpoint process", "reason", reason)
