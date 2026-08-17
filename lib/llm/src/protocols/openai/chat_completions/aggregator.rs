@@ -1945,6 +1945,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_disabled_tool_parsing_preserves_structured_content_with_name() {
+        let json = r#"{"name":"Science Fair","date":"Friday","participants":["Alice","Bob"]}"#;
+        let annotated_delta = create_test_delta(
+            0,
+            json,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let response = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("hermes".to_string()), None)
+                .with_tool_call_parsing_enabled(false),
+        )
+        .await
+        .expect("aggregation should preserve assistant content");
+        let choice = &response.inner.choices[0];
+
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(json.to_string()))
+        );
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
     async fn test_preserves_non_tool_content_when_parsing_aggregated_tool_calls() {
         let annotated_delta = create_test_delta(
             0,

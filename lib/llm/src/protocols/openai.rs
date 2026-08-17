@@ -175,7 +175,6 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 return Err(e);
             }
         };
-
         Ok(common::SamplingOptions {
             n,
             best_of,
@@ -387,6 +386,17 @@ impl ParsingOptions {
         self
     }
 
+    /// Disable request-level tool parsing while preserving independent reasoning
+    /// parsing. `tool_call_parser` originates in model configuration, so HTTP
+    /// handlers must narrow it to requests that actually permit tool calls.
+    pub fn with_tool_call_parsing_enabled(mut self, enabled: bool) -> Self {
+        if !enabled {
+            self.tool_call_parser = None;
+            self.experimental_v2_batch_eligible = false;
+        }
+        self
+    }
+
     /// Set the request's `parallel_tool_calls`. `Some(false)` caps the aggregated
     /// response to the first tool call. `None` / `Some(true)` leave tool calls
     /// untouched.
@@ -401,5 +411,21 @@ impl ParsingOptions {
     pub fn with_move_reasoning_to_content_when_empty(mut self, enabled: bool) -> Self {
         self.move_reasoning_to_content_when_empty = enabled;
         self
+    }
+}
+
+#[cfg(test)]
+mod parsing_options_tests {
+    use super::ParsingOptions;
+
+    #[test]
+    fn disabling_tool_parsing_preserves_reasoning_parser() {
+        let options = ParsingOptions::new(Some("hermes".to_string()), Some("qwen3".to_string()))
+            .with_experimental_v2_batch_eligible(true)
+            .with_tool_call_parsing_enabled(false);
+
+        assert_eq!(options.tool_call_parser, None);
+        assert_eq!(options.reasoning_parser.as_deref(), Some("qwen3"));
+        assert!(!options.experimental_v2_batch_eligible);
     }
 }

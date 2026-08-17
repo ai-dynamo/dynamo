@@ -3237,12 +3237,22 @@ impl OpenAIPreprocessor {
                 .map(str::to_string)
         });
 
-        // Determine if we should apply jail (do this before moving request)
-        let should_jail = Self::should_apply_tool_jail(
-            effective_tool_call_parser.as_ref(),
-            request.inner.tool_choice.as_ref(),
-            has_tools,
-        )?;
+        // A parser describes model syntax, but request semantics decide whether
+        // tool calls are allowed. Keep K3's wrapper decoder active because that
+        // model wraps ordinary assistant content in XTML even without tools.
+        let parser_unwraps_all_kimi_k3_responses = effective_tool_call_parser
+            .as_deref()
+            .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
+        let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
+        let should_jail = if tool_call_parsing_enabled || parser_unwraps_all_kimi_k3_responses {
+            Self::should_apply_tool_jail(
+                effective_tool_call_parser.as_ref(),
+                request.inner.tool_choice.as_ref(),
+                has_tools,
+            )?
+        } else {
+            false
+        };
 
         // Convert OpenAI tools to parser ToolDefinition format before applying jail
         let tool_definitions = request.inner.tools.as_ref().map(|tools| {

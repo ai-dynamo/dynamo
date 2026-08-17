@@ -2680,13 +2680,17 @@ async fn chat_completions(
             err_response
         })?;
 
-    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
-    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
-    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
-        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
-            request.inner.tool_choice.as_ref(),
-        ),
-    );
+    // A model-level parser is only active when this request permits tool calls.
+    // In particular, auto choice yields to assistant response/guided constraints.
+    let tool_call_parsing_enabled =
+        crate::preprocessor::OpenAIPreprocessor::tool_call_parsing_enabled(&request);
+    let parsing_options = parsing_options
+        .with_experimental_v2_batch_eligible(
+            crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+                request.inner.tool_choice.as_ref(),
+            ),
+        )
+        .with_tool_call_parsing_enabled(tool_call_parsing_enabled);
 
     // When parallel_tool_calls is false, limit the response to a single tool call.
     let parsing_options =
@@ -3271,13 +3275,17 @@ async fn responses(
             err_response
         })?;
 
-    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
-    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
-    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
-        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
-            request.inner.tool_choice.as_ref(),
-        ),
-    );
+    // The Responses API is converted to the same chat request contract. Narrow
+    // the model parser before unary aggregation just as the streaming path does.
+    let tool_call_parsing_enabled =
+        crate::preprocessor::OpenAIPreprocessor::tool_call_parsing_enabled(&request);
+    let parsing_options = parsing_options
+        .with_experimental_v2_batch_eligible(
+            crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+                request.inner.tool_choice.as_ref(),
+            ),
+        )
+        .with_tool_call_parsing_enabled(tool_call_parsing_enabled);
 
     // NOTE: `move_reasoning_to_content_when_empty` is the aggregator flag and is
     // not set here. A non-streaming Responses request DOES reach the aggregator
