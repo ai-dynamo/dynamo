@@ -111,6 +111,14 @@ pub struct RequestTraceMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub router_admission_wait_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub router_hold_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_instance_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serving_worker_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<RequestTraceWorkerInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<RequestReplayMetrics>,
@@ -332,6 +340,10 @@ mod tests {
                 kv_hit_rate: None,
                 kv_transfer_estimated_latency_ms: None,
                 queue_depth: None,
+                router_admission_wait_ms: None,
+                router_hold_reason: None,
+                proxy_instance_id: None,
+                serving_worker_id: None,
                 worker: None,
                 replay: Some(RequestReplayMetrics {
                     trace_block_size: 2,

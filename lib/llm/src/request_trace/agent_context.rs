@@ -203,6 +203,15 @@ pub(crate) fn request_metrics(
                 decode_dp_rank: worker.decode_dp_rank,
             })
     });
+    let router_timeline = tracker.and_then(RequestTracker::router_timeline);
+    let proxy_instance_id = router_timeline
+        .as_ref()
+        .and_then(|timeline| timeline.proxy_instance_id)
+        .or_else(|| {
+            router_timeline.as_ref()?;
+            let worker = worker.as_ref()?;
+            worker.decode_worker_id.or(worker.prefill_worker_id)
+        });
 
     RequestTraceMetrics {
         request_id,
@@ -226,6 +235,16 @@ pub(crate) fn request_metrics(
         queue_depth: timing
             .as_ref()
             .and_then(|timing| timing.router_queue_depth.map(|v| v as u64)),
+        router_admission_wait_ms: router_timeline
+            .as_ref()
+            .and_then(|timeline| timeline.router_admission_wait_ms),
+        router_hold_reason: router_timeline
+            .as_ref()
+            .and_then(|timeline| timeline.router_hold_reason.clone()),
+        proxy_instance_id,
+        serving_worker_id: router_timeline
+            .as_ref()
+            .and_then(|timeline| timeline.serving_worker_id),
         worker,
         replay: None,
         finish_reason_metadata: None,
@@ -526,7 +545,7 @@ mod tests {
     use crate::protocols::common::extensions::AgentContext;
     use crate::protocols::common::{
         self,
-        timing::{RequestTracker, WORKER_TYPE_DECODE},
+        timing::{RequestTracker, RouterTimeline, WORKER_TYPE_DECODE},
     };
     use crate::protocols::openai::{
         chat_completions::NvCreateChatCompletionStreamResponse,
@@ -618,6 +637,30 @@ mod tests {
         assert_eq!(metrics.queue_depth, None);
         assert!(metrics.finish_reason_metadata.is_none());
         assert!(metrics.worker.is_none());
+    }
+
+    #[test]
+    fn test_request_metrics_disambiguates_proxy_and_serving_worker() {
+        let tracker = RequestTracker::new();
+        tracker.record_worker(44, None, WORKER_TYPE_DECODE);
+        tracker.set_external_router_timeline(RouterTimeline {
+            router_admission_wait_ms: Some(12.5),
+            router_hold_reason: Some("pressure".to_string()),
+            proxy_instance_id: None,
+            serving_worker_id: Some(99),
+        });
+
+        let metrics = request_metrics(
+            "req-1".to_string(),
+            None,
+            "test-model".to_string(),
+            Some(&tracker),
+        );
+
+        assert_eq!(metrics.router_admission_wait_ms, Some(12.5));
+        assert_eq!(metrics.router_hold_reason.as_deref(), Some("pressure"));
+        assert_eq!(metrics.proxy_instance_id, Some(44));
+        assert_eq!(metrics.serving_worker_id, Some(99));
     }
 
     #[tokio::test]

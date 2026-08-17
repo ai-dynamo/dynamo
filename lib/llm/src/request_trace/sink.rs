@@ -328,6 +328,10 @@ mod tests {
                 kv_hit_rate: None,
                 kv_transfer_estimated_latency_ms: None,
                 queue_depth: None,
+                router_admission_wait_ms: None,
+                router_hold_reason: None,
+                proxy_instance_id: None,
+                serving_worker_id: None,
                 worker: None,
                 replay: Some(RequestReplayMetrics {
                     trace_block_size: 2,

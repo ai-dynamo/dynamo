@@ -40,6 +40,7 @@ class Program:
 
     step_count: int = 0
     marked_for_pause: bool = False
+    hold_reason: Optional[str] = None
     # monotonic seconds; >0 means priority demotion active
     soft_demoted_until: float = 0.0
     waiting: Optional[asyncio.Event] = field(default=None, repr=False)

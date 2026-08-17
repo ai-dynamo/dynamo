@@ -257,6 +257,9 @@ fn drain_router_routing_data(
     if let Some(worker_id) = routing_data.worker_id {
         tracker.set_external_worker_info(worker_id);
     }
+    if let Some(router_timeline) = routing_data.router_timeline {
+        tracker.set_external_router_timeline(router_timeline);
+    }
     if let Some(token_ids) = routing_data.token_ids {
         tracker.set_external_query_token_ids(token_ids);
     }

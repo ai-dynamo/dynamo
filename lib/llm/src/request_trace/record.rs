@@ -36,6 +36,7 @@ fn sanitize_request(request: &mut RequestTraceMetrics) {
     request.kv_hit_rate = sanitize_finite(request.kv_hit_rate);
     request.kv_transfer_estimated_latency_ms =
         sanitize_finite(request.kv_transfer_estimated_latency_ms);
+    request.router_admission_wait_ms = sanitize_finite(request.router_admission_wait_ms);
 }
 
 fn event_time_unix_ms_from_request(request: &RequestTraceMetrics) -> u64 {
@@ -77,6 +78,10 @@ pub(crate) fn emit_request_end(
         kv_hit_rate: None,
         kv_transfer_estimated_latency_ms: None,
         queue_depth: None,
+        router_admission_wait_ms: None,
+        router_hold_reason: None,
+        proxy_instance_id: None,
+        serving_worker_id: None,
         worker: None,
         replay: Some(replay),
         finish_reason_metadata: None,

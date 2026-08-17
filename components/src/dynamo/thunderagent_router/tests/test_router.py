@@ -153,6 +153,7 @@ async def test_pause_acting_then_before_request_blocks_until_resume():
 
     decision = await asyncio.wait_for(waiter, timeout=1.0)
     assert decision.was_paused is True
+    assert decision.hold_reason == "pressure"
     assert decision.priority_jump == cfg.resume_priority_boost
     assert decision.assigned_worker_hint == 1
     metrics = await router.metrics_snapshot()
@@ -202,6 +203,7 @@ async def test_new_program_queues_before_first_request_when_capacity_full():
         router._resume_program(router._table.programs["new"], target_worker_id=1)
     decision = await asyncio.wait_for(waiter, timeout=1.0)
     assert decision.was_paused is True
+    assert decision.hold_reason == "admission_full"
 
 
 @pytest.mark.asyncio

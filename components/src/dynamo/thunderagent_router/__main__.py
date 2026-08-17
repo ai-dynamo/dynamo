@@ -121,6 +121,17 @@ def _inject_thunderagent_route_proof(
     chunk["engine_data"] = engine_data
 
 
+def _inject_router_timeline(chunk: Any, timeline: dict[str, Any]) -> None:
+    """Forward router admission and hop attribution to the frontend trace."""
+    if not isinstance(chunk, dict):
+        return
+    routing_data = chunk.get("routing_data")
+    if not isinstance(routing_data, dict):
+        routing_data = {}
+    routing_data["router_timeline"] = dict(timeline)
+    chunk["routing_data"] = routing_data
+
+
 class ThunderAgentRouterHandler:
     def __init__(
         self,
@@ -210,15 +221,24 @@ class ThunderAgentRouterHandler:
                 else None
             )
             first_chunk = True
+            timeline: dict[str, Any] = {
+                "router_admission_wait_ms": 0.0,
+                "router_hold_reason": None,
+                "proxy_instance_id": None,
+                "serving_worker_id": None,
+            }
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed  # type: ignore[arg-type]
             ):
-                if proof is not None:
-                    if first_chunk:
-                        first_chunk = False
-                        selected_worker = self._extract_worker_id(chunk)
-                        if selected_worker is not None:
+                if first_chunk:
+                    first_chunk = False
+                    selected_worker = self._extract_worker_id(chunk)
+                    if selected_worker is not None:
+                        timeline["serving_worker_id"] = selected_worker
+                        if proof is not None:
                             proof["selected_worker_id"] = selected_worker
+                    _inject_router_timeline(chunk, timeline)
+                if proof is not None:
                     _inject_thunderagent_route_proof(chunk, proof)
                 yield chunk
             return
@@ -236,12 +256,13 @@ class ThunderAgentRouterHandler:
         logger.debug(
             "thunderagent.route path=program program=%s prompt_tokens=%d "
             "worker_hint=%s waited_seconds=%.4f was_paused=%s "
-            "soft_demoted=%s priority_jump=%.3f",
+            "hold_reason=%s soft_demoted=%s priority_jump=%.3f",
             program_id,
             estimated_prompt_tokens,
             worker_pin,
             decision.waited_seconds,
             decision.was_paused,
+            decision.hold_reason,
             decision.was_soft_demoted,
             decision.priority_jump,
         )
@@ -262,7 +283,13 @@ class ThunderAgentRouterHandler:
         completion_tokens_seen = 0
         usage_completion_seen = False
         first_chunk = True
-        selected_worker_id = None
+        selected_worker_id = worker_pin
+        timeline = {
+            "router_admission_wait_ms": decision.waited_seconds * 1000.0,
+            "router_hold_reason": decision.hold_reason,
+            "proxy_instance_id": None,
+            "serving_worker_id": worker_pin,
+        }
         proof = (
             {
                 "handled_by": "thunderagent_router",
@@ -282,12 +309,18 @@ class ThunderAgentRouterHandler:
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed  # type: ignore[arg-type]
             ):
-                if first_chunk and worker_pin is None:
+                if first_chunk:
                     first_chunk = False
                     selected_worker = self._extract_worker_id(chunk)
+                    if selected_worker is None:
+                        selected_worker = worker_pin
                     if selected_worker is not None:
-                        await self._scheduler.assign_worker(program_id, selected_worker)
+                        if worker_pin is None:
+                            await self._scheduler.assign_worker(
+                                program_id, selected_worker
+                            )
                         selected_worker_id = selected_worker
+                        timeline["serving_worker_id"] = selected_worker
                         if proof is not None:
                             proof["selected_worker_id"] = selected_worker
                         logger.debug(
@@ -296,6 +329,7 @@ class ThunderAgentRouterHandler:
                             program_id,
                             selected_worker,
                         )
+                    _inject_router_timeline(chunk, timeline)
 
                 usage = (
                     chunk.get("completion_usage") if isinstance(chunk, dict) else None

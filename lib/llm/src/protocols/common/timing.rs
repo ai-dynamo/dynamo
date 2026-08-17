@@ -174,6 +174,9 @@ pub struct RequestTracker {
     /// process. First-write-wins.
     external_timing: OnceLock<TimingInfo>,
 
+    /// Router-hop metadata forwarded by a standalone proxy such as ThunderAgent.
+    external_router_timeline: OnceLock<RouterTimeline>,
+
     /// Tokenized prompt forwarded from a standalone router's query-only response
     /// (GAIE Stage 1), so the frontend can surface it in `nvext.token_ids` without
     /// re-tokenizing. Lives here rather than on `routing_data` because the preprocessor
@@ -196,10 +199,26 @@ pub struct RoutingData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<WorkerIdInfo>,
 
+    /// Admission and hop attribution measured by an external router.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_timeline: Option<RouterTimeline>,
+
     /// Tokenized prompt returned by a query-only (GAIE Stage 1) response so it can be
     /// reused without re-tokenizing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_ids: Option<Vec<u32>>,
+}
+
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct RouterTimeline {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_admission_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hold_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_instance_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_worker_id: Option<u64>,
 }
 
 impl RequestTracker {
@@ -237,6 +256,7 @@ impl RequestTracker {
             router_queue_depth: OnceLock::new(),
             prefill_complete_time: OnceLock::new(),
             external_timing: OnceLock::new(),
+            external_router_timeline: OnceLock::new(),
             external_query_token_ids: OnceLock::new(),
         }
     }
@@ -626,6 +646,15 @@ impl RequestTracker {
         let _ = self.external_timing.set(timing);
     }
 
+    /// Store router-hop metadata forwarded by a standalone proxy. First-write-wins.
+    pub fn set_external_router_timeline(&self, timeline: RouterTimeline) {
+        let _ = self.external_router_timeline.set(timeline);
+    }
+
+    pub fn router_timeline(&self) -> Option<RouterTimeline> {
+        self.external_router_timeline.get().cloned()
+    }
+
     /// Stash the tokenized prompt forwarded by a standalone router's query-only response
     /// (GAIE Stage 1) so `build_response_nvext` can surface it in `nvext.token_ids`.
     /// First-write-wins.
@@ -890,6 +919,23 @@ mod tests {
         // First-write-wins: a later forward does not clobber.
         tracker.set_external_query_token_ids(vec![44, 55]);
         assert_eq!(tracker.query_token_ids(), Some(&[11u32, 22, 33][..]));
+    }
+
+    #[test]
+    fn test_external_router_timeline_round_trip_is_first_write_wins() {
+        let tracker = RequestTracker::new();
+        let expected = RouterTimeline {
+            router_admission_wait_ms: Some(12.5),
+            router_hold_reason: Some("pressure".to_string()),
+            proxy_instance_id: None,
+            serving_worker_id: Some(99),
+        };
+        tracker.set_external_router_timeline(expected.clone());
+        tracker.set_external_router_timeline(RouterTimeline {
+            serving_worker_id: Some(100),
+            ..Default::default()
+        });
+        assert_eq!(tracker.router_timeline(), Some(expected));
     }
 
     #[test]

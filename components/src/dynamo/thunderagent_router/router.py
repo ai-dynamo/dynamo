@@ -35,6 +35,7 @@ class PauseDecision:
     was_paused: bool = False
     was_soft_demoted: bool = False
     assigned_worker_hint: Optional[int] = None
+    hold_reason: Optional[str] = None
 
 
 @dataclass
@@ -144,6 +145,8 @@ class ThunderAgentScheduler:
             if soft_demoted:
                 priority_jump += self._cfg.soft_demote_priority_jump
 
+            hold_reason = program.hold_reason if was_paused else None
+            program.hold_reason = None
             return PauseDecision(
                 program_id=program_id,
                 priority_jump=priority_jump,
@@ -151,6 +154,7 @@ class ThunderAgentScheduler:
                 was_paused=was_paused,
                 was_soft_demoted=soft_demoted,
                 assigned_worker_hint=program.assigned_worker_id,
+                hold_reason=hold_reason,
             )
 
     def _admit_locked(
@@ -195,6 +199,7 @@ class ThunderAgentScheduler:
         # All workers full: queue until the scheduler tick resumes us.
         program.waiting = program.waiting or asyncio.Event()
         program.lifecycle = ProgramLifecycle.PAUSED
+        program.hold_reason = "admission_full"
         self._table.paused[program_id] = None
         self._stat_pauses += 1
         logger.info(
@@ -429,6 +434,7 @@ class ThunderAgentScheduler:
             return False
         program.lifecycle = ProgramLifecycle.PAUSED
         program.assigned_worker_id = None
+        program.hold_reason = "pressure"
         if program.waiting is None:
             program.waiting = asyncio.Event()
         else:
