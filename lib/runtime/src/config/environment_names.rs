@@ -813,10 +813,16 @@ pub mod tcp_response_stream {
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
-    /// IP address or exact interface shared by the TCP request callback and QUIC response
-    /// listeners.
-    /// Unspecified addresses are rejected.
-    /// If unset, the server auto-detects a routable local IP.
+    /// Host or interface for the TCP response stream server.
+    ///
+    /// Accepts IPv4 and IPv6 literals, bracketed IPv6 literals, IPv4 or IPv6
+    /// wildcards, and interface names. Interface aliases such as `eth0:1` are
+    /// also accepted. If unset, the server selects the first usable
+    /// non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6
+    /// loopback. A wildcard uses a reachable address in its requested family.
+    /// If only the other family has a usable non-loopback address, the server
+    /// switches the bind wildcard to that family. Enumeration errors and
+    /// loopback fallbacks are retried and are not cached.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
 
     /// TCP request-plane TLS configuration
