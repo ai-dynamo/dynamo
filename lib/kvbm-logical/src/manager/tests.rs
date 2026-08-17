@@ -742,6 +742,8 @@ mod block_size_tests {
     #[case(256)]
     #[case(512)]
     #[case(1024)]
+    #[case(2048)]
+    #[case(4096)]
     fn test_builder_block_size_power_of_two(#[case] size: usize) {
         let registry = BlockRegistry::new();
         let result = BlockManager::<TestBlockData>::builder()
@@ -761,15 +763,15 @@ mod block_size_tests {
     }
 
     #[test]
-    #[should_panic(expected = "block_size must be between 1 and 1024")]
+    #[should_panic(expected = "block_size must be between 1 and 4096")]
     fn test_builder_block_size_too_large() {
         BlockManager::<TestBlockData>::builder()
             .block_count(10)
-            .block_size(2048); // Too large
+            .block_size(8192); // Too large
     }
 
     #[test]
-    #[should_panic(expected = "block_size must be between 1 and 1024")]
+    #[should_panic(expected = "block_size must be between 1 and 4096")]
     fn test_builder_block_size_zero() {
         BlockManager::<TestBlockData>::builder()
             .block_count(10)

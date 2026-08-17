@@ -429,7 +429,7 @@ impl VllmConnectorSlot {
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
-        debug_assert!(block_size.is_power_of_two() && block_size <= 1024);
+        debug_assert!(block_size.is_power_of_two() && block_size <= 4096);
         let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
 
         Self {

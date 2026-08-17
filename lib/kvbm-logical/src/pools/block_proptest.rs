@@ -103,7 +103,9 @@ pub(crate) mod tests {
         /// complete-able guard.
         #[test]
         fn prop_valid_block_sizes_work(
-            block_size in prop::sample::select(&[1usize, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]),
+            block_size in prop::sample::select(&[
+                1usize, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096,
+            ]),
         ) {
             prop_assert!(validate_test_block_size(block_size));
 
