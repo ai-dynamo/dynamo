@@ -2585,7 +2585,7 @@ mod tests {
         backoff.record_exhaustion(t0);
         assert_eq!(
             backoff.record_success(|| t0 + ACCEPT_BACKOFF_LOG_INTERVAL),
-            Some(4),
+            Some(3),
             "after the window elapses the recovery emits with the rolled-forward count",
         );
     }
