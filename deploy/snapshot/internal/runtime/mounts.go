@@ -38,28 +38,28 @@ func ReadMountInfo(pid int) ([]types.MountInfo, error) {
 	return mounts, nil
 }
 
+// EquivalentRunMountPaths accounts for the /var/run symlink used by container images.
+func EquivalentRunMountPaths(path string) []string {
+	switch {
+	case strings.HasPrefix(path, "/run/"):
+		return []string{path, "/var" + path}
+	case strings.HasPrefix(path, "/var/run/"):
+		return []string{path, strings.TrimPrefix(path, "/var")}
+	default:
+		return []string{path}
+	}
+}
+
 // ClassifyMounts sets IsOCIManaged on each mount by matching against the
 // container's OCI spec (mounts, masked paths, readonly paths).
-// Handles /run/ ↔ /var/run/ aliasing since some images symlink one to the other.
 func ClassifyMounts(mounts []types.MountInfo, ociSpec *specs.Spec, rootFS string) []types.MountInfo {
 	ociSet := collectOCIManagedPaths(ociSpec, rootFS)
 
 	for i := range mounts {
-		mp := mounts[i].MountPoint
-		if _, ok := ociSet[mp]; ok {
-			mounts[i].IsOCIManaged = true
-			continue
-		}
-		// /run/ ↔ /var/run/ aliasing
-		if strings.HasPrefix(mp, "/run/") {
-			if _, ok := ociSet["/var"+mp]; ok {
+		for _, path := range EquivalentRunMountPaths(mounts[i].MountPoint) {
+			if _, ok := ociSet[path]; ok {
 				mounts[i].IsOCIManaged = true
-				continue
-			}
-		}
-		if strings.HasPrefix(mp, "/var/run/") {
-			if _, ok := ociSet[strings.TrimPrefix(mp, "/var")]; ok {
-				mounts[i].IsOCIManaged = true
+				break
 			}
 		}
 	}

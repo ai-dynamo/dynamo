@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"k8s.io/client-go/kubernetes"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
@@ -32,6 +33,7 @@ type CheckpointRequest struct {
 	PodName            string
 	PodNamespace       string
 	PodIP              string
+	SourceMounts       []nvidiacomv1alpha1.CheckpointSourceMount
 	Clientset          kubernetes.Interface
 }
 
@@ -246,6 +248,7 @@ func configureCheckpoint(
 		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
+	m.K8s.Mounts = requiredSourceMounts(req.SourceMounts, m.CRIUDump.ExtMnt)
 	if len(state.CUDANSPIDs) > 0 {
 		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
 	}
@@ -255,6 +258,20 @@ func configureCheckpoint(
 	}
 
 	return criuOpts, m, nil
+}
+
+func requiredSourceMounts(candidates []nvidiacomv1alpha1.CheckpointSourceMount, externalMounts map[string]string) []nvidiacomv1alpha1.CheckpointSourceMount {
+	mounts := make([]nvidiacomv1alpha1.CheckpointSourceMount, 0, len(candidates))
+	for _, candidate := range candidates {
+		for _, path := range snapshotruntime.EquivalentRunMountPaths(candidate.Path) {
+			if _, required := externalMounts[path]; !required {
+				continue
+			}
+			mounts = append(mounts, candidate)
+			break
+		}
+	}
+	return mounts
 }
 
 func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
