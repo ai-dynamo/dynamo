@@ -27,11 +27,12 @@ impl Default for JsonlSinkOptions {
 
 /// Channel-backed handle for a buffered JSONL sink. Wraps a `Recorder<T>`,
 /// which appends records to disk on its own background task. Drop cancels
-/// the recorder.
+/// the recorder but cannot wait for its final flush; call [`Self::shutdown`]
+/// when completion must be awaited.
 pub struct JsonlWriter<T> {
     tx: mpsc::Sender<T>,
     // Holding the recorder keeps its background task alive; its Drop cancels.
-    _recorder: Recorder<T>,
+    recorder: Recorder<T>,
 }
 
 impl<T> JsonlWriter<T>
@@ -53,14 +54,18 @@ where
         .await
         .with_context(|| format!("opening jsonl sink at {path}"))?;
         let tx = recorder.event_sender();
-        Ok(Self {
-            tx,
-            _recorder: recorder,
-        })
+        Ok(Self { tx, recorder })
     }
 
     pub async fn send(&self, rec: T) -> Result<(), mpsc::error::SendError<T>> {
         self.tx.send(rec).await
+    }
+
+    /// Stop accepting records, drain every record already accepted into the
+    /// recorder channel, flush the buffered writer, and return only after the
+    /// writer task has exited. A second call is harmless.
+    pub async fn shutdown(&mut self) {
+        self.recorder.shutdown_drain().await;
     }
 }
 

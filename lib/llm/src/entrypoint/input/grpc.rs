@@ -110,12 +110,19 @@ pub async fn run(
 
     // Wait for both servers to complete, propagating the first error if any occurs
     // Both tasks should run indefinitely until cancelled by the shutdown token
-    tokio::try_join!(
+    let join_result = tokio::try_join!(
         grpc_service.run(shutdown_token.clone()),
         http_service.run(shutdown_token)
-    )?;
+    );
 
-    distributed_runtime.shutdown(); // Cancel primary token
+    // `run_watcher` spawned discovery tasks that hold clones of the
+    // distributed runtime and stay alive until the primary token is
+    // cancelled. `shutdown` cancels it, so it must run on every return path
+    // after the watcher has spawned — including a bind error from either
+    // server, which `try_join!` surfaces here.
+    distributed_runtime.shutdown();
+
+    join_result?;
     Ok(())
 }
 

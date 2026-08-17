@@ -13,7 +13,7 @@ use async_nats::jetstream;
 use async_trait::async_trait;
 use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
 use dynamo_runtime::transports::nats;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::telemetry::jsonl::{JsonlSinkOptions, JsonlWriter};
@@ -95,7 +95,10 @@ impl RequestTraceSink for NatsRequestTraceSink {
 }
 
 pub struct JsonlRequestTraceSink {
-    writer: JsonlWriter<RequestTraceRecord>,
+    // `JsonlWriter::shutdown` takes `&mut self`, but the sink only ever has
+    // `&self`, so the writer lives behind interior mutability and `shutdown`
+    // takes it out to drain and close it. `None` means shutdown already ran.
+    writer: Mutex<Option<JsonlWriter<RequestTraceRecord>>>,
 }
 
 impl JsonlRequestTraceSink {
@@ -103,7 +106,9 @@ impl JsonlRequestTraceSink {
         let writer = JsonlWriter::new(path.clone(), options)
             .await
             .with_context(|| format!("opening jsonl request trace sink at {path}"))?;
-        Ok(Self { writer })
+        Ok(Self {
+            writer: Mutex::new(Some(writer)),
+        })
     }
 
     async fn from_policy(policy: &RequestTracePolicy) -> anyhow::Result<Self> {
@@ -132,8 +137,23 @@ impl RequestTraceSink for JsonlRequestTraceSink {
     }
 
     async fn emit(&self, record: &RequestTraceRecord) {
-        if self.writer.send(record.clone()).await.is_err() {
+        let writer = self.writer.lock().await;
+        let accepted = match writer.as_ref() {
+            Some(writer) => writer.send(record.clone()).await.is_ok(),
+            None => false,
+        };
+        if !accepted {
             tracing::warn!("request trace file sink closed; dropping record");
+        }
+    }
+
+    async fn shutdown(&self) {
+        // Take the writer out under a short-lived guard so `shutdown`, which
+        // awaits the recorder draining its channel and flushing, does not run
+        // while holding the lock.
+        let writer = self.writer.lock().await.take();
+        if let Some(mut writer) = writer {
+            writer.shutdown().await;
         }
     }
 }
@@ -406,5 +426,35 @@ mod tests {
             }
             assert!(content.contains("\"request_id\":\"req-123\""));
         }
+    }
+
+    #[tokio::test]
+    async fn jsonl_sink_shutdown_drains_accepted_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("request_trace_shutdown.jsonl");
+        // Nothing but shutdown can flush this record: the buffer dwarfs one
+        // record and the flush tick is a minute away.
+        let sink = JsonlRequestTraceSink::new(
+            path.display().to_string(),
+            JsonlSinkOptions {
+                buffer_bytes: 1024 * 1024,
+                flush_interval: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+
+        sink.emit(&sample_record()).await;
+
+        RequestTraceSink::shutdown(&sink).await;
+        // A second shutdown must return normally rather than panic.
+        RequestTraceSink::shutdown(&sink).await;
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            content.contains("\"request_id\":\"req-123\""),
+            "shutdown returned without flushing the accepted record to {}",
+            path.display()
+        );
     }
 }
