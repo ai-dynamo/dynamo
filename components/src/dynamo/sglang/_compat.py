@@ -29,6 +29,25 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def set_pre_publish_server_args(server_args: Any, **fields: Any) -> None:
+    """Update resolved SGLang ServerArgs before runtime publication."""
+    # SGLang development releases after 0.5.16 require pre-publish updates here.
+    late_resolution = getattr(server_args, "_late_resolution", None)
+    if callable(late_resolution):
+        late_resolution("dynamo", **fields)
+        return
+
+    # SGLang 0.5.16 exposes override() as its post-resolution mutation API.
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override("dynamo", **fields)
+        return
+
+    # Fallback for SGLang <= 0.5.15; remove when it leaves the support window.
+    for name, value in fields.items():
+        setattr(server_args, name, value)
+
+
 @lru_cache(maxsize=1)
 def _warn_require_reasoning_unsupported() -> None:
     logger.warning(
@@ -178,4 +197,5 @@ __all__ = [
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
     "require_reasoning_kwargs",
+    "set_pre_publish_server_args",
 ]

@@ -25,6 +25,7 @@ from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
+    set_pre_publish_server_args,
 )
 from dynamo.sglang.args import (
     _forward_pass_metrics_source,
@@ -401,6 +402,46 @@ def test_compat_filters_async_generate_kwargs_for_older_engines():
     assert filter_supported_async_generate_kwargs(OldEngine(), kwargs) == {
         "input_ids": [1, 2, 3]
     }
+
+
+def test_set_pre_publish_server_args_uses_late_resolution():
+    class NewServerArgs:
+        def __init__(self):
+            self.calls = []
+
+        def _late_resolution(self, source, **fields):
+            self.calls.append((source, fields))
+
+    server_args = NewServerArgs()
+
+    set_pre_publish_server_args(server_args, enable_forward_pass_metrics=False)
+
+    assert server_args.calls == [
+        ("dynamo", {"enable_forward_pass_metrics": False})
+    ]
+
+
+def test_set_pre_publish_server_args_uses_legacy_override():
+    class LegacyServerArgs:
+        def __init__(self):
+            self.calls = []
+
+        def override(self, source, **fields):
+            self.calls.append((source, fields))
+
+    server_args = LegacyServerArgs()
+
+    set_pre_publish_server_args(server_args, load_format="auto")
+
+    assert server_args.calls == [("dynamo", {"load_format": "auto"})]
+
+
+def test_set_pre_publish_server_args_falls_back_to_assignment():
+    server_args = SimpleNamespace()
+
+    set_pre_publish_server_args(server_args, enable_memory_saver=True)
+
+    assert server_args.enable_memory_saver is True
 
 
 def test_compat_keeps_async_generate_kwargs_for_newer_engines():
