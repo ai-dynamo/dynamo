@@ -1548,7 +1548,7 @@ impl TcpRequestClient {
     /// Start a background task that eagerly warms TCP connections for
     /// newly-discovered backends.
     ///
-    /// Delegates to [`TcpConnectionPool::start_warmup_watcher`].
+    /// Delegates to `TcpConnectionPool::start_warmup_watcher`.
     pub fn start_warmup(
         &self,
         instance_rx: tokio::sync::watch::Receiver<Vec<crate::component::Instance>>,

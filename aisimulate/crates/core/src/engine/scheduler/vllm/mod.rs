@@ -4,7 +4,7 @@
 //! Shared vLLM/TRT-LLM scheduler simulation around a unified request model.
 //!
 //! vLLM and TRT-LLM share the queue, allocation, and lifecycle core. Their
-//! admission and preemption differences live in [`policy`].
+//! admission and preemption differences live in `policy`.
 
 mod core;
 mod policy;
