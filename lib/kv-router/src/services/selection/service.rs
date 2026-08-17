@@ -326,6 +326,10 @@ impl SelectionService {
         self.core.free_reservation(selection_id).await
     }
 
+    pub async fn abort_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
+        self.core.abort_reservation(selection_id).await
+    }
+
     pub fn ready(&self) -> ReadyResponse {
         self.core.ready()
     }

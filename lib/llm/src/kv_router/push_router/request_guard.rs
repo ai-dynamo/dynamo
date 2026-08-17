@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::{protocols::WorkerWithDpRank, selector::WorkerSelector};
+use dynamo_kv_router::{
+    protocols::WorkerWithDpRank, scheduling::RequestProgressUpdater, selector::WorkerSelector,
+};
 use dynamo_runtime::{
     error::DynamoError,
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
@@ -55,24 +57,39 @@ where
         }
     }
 
-    async fn finish(&mut self) {
+    async fn release(&mut self, completed_context_tokens: Option<usize>) {
         if self.freed {
             return;
         }
-        if self.scheduler_tracked
-            && let Err(error) = self
-                .chooser
-                .free_if_worker(&self.context_id, self.worker)
-                .await
-        {
-            tracing::warn!(
-                request_id = %self.context_id,
-                worker = ?self.worker,
-                %error,
-                "Failed to free request"
-            );
+        if self.scheduler_tracked {
+            let result = if let Some(context_tokens) = completed_context_tokens {
+                self.chooser
+                    .complete_if_worker(&self.context_id, self.worker, context_tokens)
+                    .await
+            } else {
+                self.chooser
+                    .abort_if_worker(&self.context_id, self.worker)
+                    .await
+            };
+            if let Err(error) = result {
+                tracing::warn!(
+                    request_id = %self.context_id,
+                    worker = ?self.worker,
+                    %error,
+                    completed = completed_context_tokens.is_some(),
+                    "Failed to release request"
+                );
+            }
         }
         self.freed = true;
+    }
+
+    async fn complete(&mut self, context_tokens: usize) {
+        self.release(Some(context_tokens)).await;
+    }
+
+    async fn abort(&mut self) {
+        self.release(None).await;
     }
 }
 
@@ -97,7 +114,7 @@ where
         let context_id = self.context_id.clone();
         let worker = self.worker;
         handle.spawn(async move {
-            let result = chooser.free_if_worker(&context_id, worker).await;
+            let result = chooser.abort_if_worker(&context_id, worker).await;
             if let Err(error) = result {
                 tracing::warn!(
                     request_id = %context_id,
@@ -225,11 +242,17 @@ impl RequestObservability {
 
 struct OutputBlockUpdate {
     decay_fraction: Option<f64>,
+    update_scheduler: bool,
+}
+
+fn routing_isl_tokens(request: &PreprocessedRequest) -> usize {
+    request.block_mm_routing_info().0.len()
 }
 
 /// Tracks when streamed output grows into a new scheduler accounting block.
 struct OutputBlockTracker {
     track_output_blocks: bool,
+    track_request_progress: bool,
     current_total_blocks: usize,
     isl_tokens: usize,
     block_size: usize,
@@ -239,12 +262,14 @@ struct OutputBlockTracker {
 impl OutputBlockTracker {
     fn new(
         track_output_blocks: bool,
+        track_request_progress: bool,
         isl_tokens: usize,
         block_size: usize,
         expected_output_tokens: Option<u32>,
     ) -> Self {
         Self {
             track_output_blocks,
+            track_request_progress,
             current_total_blocks: isl_tokens.div_ceil(block_size),
             isl_tokens,
             block_size,
@@ -253,7 +278,7 @@ impl OutputBlockTracker {
     }
 
     fn observe(&mut self, cumulative_osl: usize) -> Option<OutputBlockUpdate> {
-        if !self.track_output_blocks {
+        if !self.track_output_blocks && !self.track_request_progress {
             return None;
         }
 
@@ -267,7 +292,14 @@ impl OutputBlockTracker {
         let decay_fraction = self
             .expected_output_tokens
             .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
-        Some(OutputBlockUpdate { decay_fraction })
+        Some(OutputBlockUpdate {
+            decay_fraction,
+            update_scheduler: self.track_output_blocks,
+        })
+    }
+
+    fn context_tokens(&self, cumulative_osl: usize) -> usize {
+        self.isl_tokens.saturating_add(cumulative_osl)
     }
 }
 
@@ -282,6 +314,7 @@ where
     cleanup: RequestCleanup<Sel>,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
+    request_progress: Option<RequestProgressUpdater>,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
 }
@@ -297,17 +330,19 @@ where
         worker: WorkerWithDpRank,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
+        request_progress: Option<RequestProgressUpdater>,
     ) -> Self {
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
         let block_size = chooser.block_size() as usize;
-        let isl_tokens = request.token_ids.len();
+        let isl_tokens = routing_isl_tokens(request);
         let expected_output_tokens = request
             .routing
             .as_ref()
             .and_then(|routing| routing.expected_output_tokens);
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
+        let track_request_progress = request_progress.is_some();
         if scheduler_tracked {
             request_metrics.requests_started_total().inc();
         }
@@ -317,10 +352,12 @@ where
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
+                track_request_progress,
                 isl_tokens,
                 block_size,
                 expected_output_tokens,
             ),
+            request_progress,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
         }
@@ -381,6 +418,13 @@ where
             return;
         };
 
+        if let Some(progress) = &self.request_progress {
+            progress.update_context_tokens(self.output_blocks.context_tokens(cumulative_osl));
+        }
+        if !update.update_scheduler {
+            return;
+        }
+
         if let Err(error) = self
             .cleanup
             .chooser
@@ -399,11 +443,14 @@ where
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability.record_metrics();
-        self.cleanup.finish().await;
+        let context_tokens = self
+            .output_blocks
+            .context_tokens(self.observability.cumulative_osl());
+        self.cleanup.complete(context_tokens).await;
     }
 
     pub(super) async fn abort(&mut self) {
-        self.cleanup.finish().await;
+        self.cleanup.abort().await;
     }
 }
 
@@ -414,5 +461,30 @@ where
     fn drop(&mut self) {
         // RequestCleanup drops immediately afterward and performs resource cleanup.
         self.observability.record_metrics();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::preprocessor::MmRoutingInfo;
+
+    #[test]
+    fn terminal_context_uses_multimodal_routing_length() {
+        let request = PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .mm_routing_info(Some(MmRoutingInfo {
+                routing_token_ids: vec![1, 2, 3, 4],
+                block_mm_infos: Vec::new(),
+                expanded_prompt_len: 4,
+            }))
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+
+        assert_eq!(routing_isl_tokens(&request), 4);
     }
 }

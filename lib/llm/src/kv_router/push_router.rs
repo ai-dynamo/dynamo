@@ -289,6 +289,7 @@ where
             selected_worker,
             request,
             !is_query_only,
+            selection.request_progress.take(),
         );
 
         let record_result: Result<(), Error> = async {
@@ -717,7 +718,7 @@ mod tests {
 
     use dynamo_kv_router::{
         DefaultWorkerSelector, WorkerSelectionPolicy, config::KvRouterConfig,
-        protocols::RoutingConstraints,
+        protocols::RoutingConstraints, scheduling::RequestProgress,
     };
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
@@ -798,6 +799,7 @@ mod tests {
             WorkerWithDpRank::from_worker_id(0),
             &request(),
             false,
+            None,
         );
         let monitored = monitor_response_stream(source, context, guard);
         tokio::pin!(monitored);
@@ -806,6 +808,36 @@ mod tests {
         assert!(monitored.next().await.is_none());
         assert!(drained.load(Ordering::Acquire));
 
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn output_block_boundary_updates_live_admission_progress() {
+        let (router, runtime) = router(None).await;
+        let request = request();
+        let initial_context_tokens = request.token_ids.len();
+        let (progress, updater) = RequestProgress::new(initial_context_tokens);
+        let mut guard = RequestGuard::new(
+            Arc::clone(&router.chooser),
+            Arc::clone(&router.request_metrics),
+            "live-admission-progress".to_string(),
+            WorkerWithDpRank::from_worker_id(0),
+            &request,
+            false,
+            Some(updater),
+        );
+
+        guard
+            .on_item(&Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![2; 16],
+                ..Default::default()
+            }))
+            .await;
+
+        assert_eq!(progress.context_tokens(), initial_context_tokens + 16);
+        guard.abort().await;
         drop(router);
         runtime.shutdown();
     }

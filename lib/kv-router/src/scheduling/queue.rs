@@ -21,7 +21,8 @@ use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::{
     PolicyQueue, QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId,
-    QueueAdmissionWorker, QueueAdmissionWorkerSnapshot, QueueSnapshot, WorkerPlacement,
+    QueueAdmissionWorker, QueueAdmissionWorkerSnapshot, QueueSnapshot, RequestProgress,
+    RequestProgressUpdater, WorkerPlacement,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -59,6 +60,7 @@ struct QueuedRequest {
     enqueue_at: Instant,
     block_hashes: Option<Vec<LocalBlockHash>>,
     admission_id: Option<QueueAdmissionId>,
+    request_progress: Option<RequestProgressUpdater>,
 }
 
 struct SelectedWorkerForRequest {
@@ -979,7 +981,7 @@ impl<
             debug_assert!(inserted, "duplicate lifecycle request ID");
         }
 
-        let admission_decision = if lifecycle_request_id.is_some() {
+        let (admission_decision, request_progress) = if lifecycle_request_id.is_some() {
             self.refresh_admission_worker_snapshot();
             let workers = self.workers_with_configs.borrow();
             let routing_eligibility = request.eligibility();
@@ -988,21 +990,25 @@ impl<
                     .validate_worker_rank(&workers, worker)
                     .is_ok()
             };
-            self.pending.admit_with_admission_policy(
+            let (progress, updater) = RequestProgress::new(request.isl_tokens);
+            let decision = self.pending.admit_with_admission_policy(
                 request
                     .mode
                     .tracked_request_id()
                     .expect("lifecycle request is tracked"),
                 request.isl_tokens,
+                progress,
                 request.session_context.as_ref(),
                 &self.admission_worker_snapshot,
                 request.pinned_worker,
                 request.allowed_worker_ids.as_ref(),
                 request.routing_constraints.has_hard_constraints(),
                 &is_worker_eligible,
-            )
+            );
+            let request_progress = decision.as_ref().map(|_| updater);
+            (decision, request_progress)
         } else {
-            None
+            (None, None)
         };
         if let Some((admission_id, _)) = admission_decision {
             let replaced = self.managed_admission_request_ids.insert(
@@ -1021,7 +1027,7 @@ impl<
                 self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
             });
         if !should_queue {
-            return self.admit_one(request, decay_now, admission_id);
+            return self.admit_one(request, decay_now, admission_id, request_progress);
         }
 
         let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
@@ -1037,6 +1043,7 @@ impl<
             enqueue_at: decay_now,
             block_hashes,
             admission_id,
+            request_progress,
         };
         let worker_count = self.workers_with_configs.borrow().len();
         let enqueue = match admission_decision {
@@ -1415,12 +1422,13 @@ impl<
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
             let admission_id = queued.admission_id;
+            let request_progress = queued.request_progress;
             let request = queued.request;
             tracing::debug!(
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
-            self.admit_one(request, admit_now, admission_id);
+            self.admit_one(request, admit_now, admission_id, request_progress);
         }
     }
 
@@ -1506,6 +1514,7 @@ impl<
                 target_cached_prefix_blocks,
                 router_hint_candidates: request.router_hint_candidates.take(),
                 potential_decode_blocks: selected.selection.potential_decode_blocks,
+                request_progress: None,
             },
         })
     }
@@ -1517,6 +1526,7 @@ impl<
         mut request: SchedulingRequest,
         decay_now: Instant,
         admission_id: Option<QueueAdmissionId>,
+        request_progress: Option<RequestProgressUpdater>,
     ) -> (bool, bool) {
         let selected = match self.select_worker_for_request(&mut request, decay_now) {
             Ok(s) => s,
@@ -1541,6 +1551,7 @@ impl<
             target_cached_prefix_blocks,
             router_hint_candidates: request.router_hint_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
+            request_progress,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -1901,6 +1912,7 @@ mod tests {
     #[derive(Default)]
     struct AdmissionPolicyState {
         deferred: StdMutex<Option<QueueAdmissionId>>,
+        progress: StdMutex<Option<RequestProgress>>,
         dispatched: AtomicUsize,
         reconciled: AtomicUsize,
         aborted: AtomicUsize,
@@ -1916,6 +1928,7 @@ mod tests {
         fn admit(&mut self, request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
             assert_eq!(request.request_id(), "policy-request");
             *self.state.deferred.lock().unwrap() = Some(request.id());
+            *self.state.progress.lock().unwrap() = Some(request.progress().clone());
             QueueAdmissionDecision::Defer
         }
 
@@ -2548,6 +2561,30 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        let progress = response
+            .request_progress
+            .expect("policy-managed request receives a live-progress updater");
+        assert_eq!(
+            state
+                .progress
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("policy retained request progress")
+                .context_tokens(),
+            32
+        );
+        progress.update_context_tokens(47);
+        assert_eq!(
+            state
+                .progress
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("policy retained request progress")
+                .context_tokens(),
+            47
+        );
         lease.as_mut().unwrap().disarm();
         assert_eq!(state.dispatched.load(Ordering::Relaxed), 1);
         let reconciled_before_completion = state.reconciled.load(Ordering::Relaxed);
@@ -2570,6 +2607,20 @@ mod tests {
             reconciled_before_completion,
             "completion must not trigger a full policy reconciliation"
         );
+    }
+
+    #[tokio::test]
+    async fn default_queue_does_not_create_live_progress() {
+        let (queue, slots) = make_queue(1, 16, 128, None);
+        let (request, response_rx) = make_request("default-request", 32);
+
+        queue.enqueue(request).await;
+        let response = response_rx.await.unwrap().unwrap();
+
+        assert!(response.request_progress.is_none());
+        slots
+            .free(&"default-request".to_owned(), Instant::now())
+            .unwrap();
     }
 
     #[tokio::test]

@@ -101,6 +101,12 @@ struct ReservationBooking {
     lora_name: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum ReservationOutcome {
+    Completed,
+    Aborted,
+}
+
 #[derive(Debug, Clone)]
 pub struct SelectionServiceConfig {
     pub port: u16,
@@ -752,7 +758,7 @@ impl SelectionCore {
             )
             .await?;
         let mode = if book {
-            ScheduleMode::Tracked {
+            ScheduleMode::TrackedWithLifecycle {
                 request_id: selection_id.clone().ok_or_else(|| {
                     SelectionError::Internal(
                         "booked selection did not include a selection ID".to_string(),
@@ -810,15 +816,34 @@ impl SelectionCore {
             }
             result = entry.scheduler.schedule_request(schedule_request) => result?,
         };
-        let endpoint = self
+        let endpoint = match self
             .catalog
             .schedulable_endpoint(response.best_worker.worker_id, &key)
-            .ok_or_else(|| {
-                SelectionError::Internal(format!(
+        {
+            Some(endpoint) => endpoint,
+            None => {
+                if book && let Some(selection_id) = selection_id.as_deref() {
+                    match entry.scheduler.abort_if_present(selection_id).await {
+                        Ok(true) => {}
+                        Ok(false) => tracing::error!(
+                            %selection_id,
+                            %key,
+                            "Booked selection disappeared before endpoint resolution cleanup"
+                        ),
+                        Err(error) => tracing::error!(
+                            %selection_id,
+                            %key,
+                            %error,
+                            "Failed to abort booked selection after endpoint resolution failed"
+                        ),
+                    }
+                }
+                return Err(SelectionError::Internal(format!(
                     "selected worker {} is no longer schedulable",
                     response.best_worker.worker_id
-                ))
-            })?;
+                )));
+            }
+        };
         let overlap = MooncakeOverlapSummary::from_selected_worker_tiers(
             &response.selected_worker_tiers,
             entry.block_size,
@@ -1033,6 +1058,13 @@ impl SelectionCore {
             lora_name,
         } = booking;
 
+        if entry.scheduler.has_admission_policy() {
+            return Err(SelectionError::BadRequest(
+                "create_reservation is not supported with a queue admission policy; use select_and_reserve"
+                    .to_string(),
+            ));
+        }
+
         // Strict booking: never lazily recreate a worker/rank removed since the
         // reservation was resolved.
         entry
@@ -1073,17 +1105,39 @@ impl SelectionCore {
     }
 
     pub async fn free_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
-        let entries = self.initialized_entries();
+        self.release_reservation(selection_id, ReservationOutcome::Completed)
+            .await
+    }
+
+    pub async fn abort_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
+        self.release_reservation(selection_id, ReservationOutcome::Aborted)
+            .await
+    }
+
+    async fn release_reservation(
+        &self,
+        selection_id: &str,
+        outcome: ReservationOutcome,
+    ) -> Result<(), SelectionError> {
+        let mut entries = self.initialized_entries();
+        entries.sort_unstable_by(|left, right| {
+            (&left.key.model_name, &left.key.routing_group)
+                .cmp(&(&right.key.model_name, &right.key.routing_group))
+        });
         for entry in entries {
-            match entry.scheduler.free(selection_id).await {
-                Ok(()) => return Ok(()),
-                Err(SequenceError::RequestNotFound { .. }) => continue,
+            let result = match outcome {
+                ReservationOutcome::Completed => {
+                    entry.scheduler.free_if_present(selection_id).await
+                }
+                ReservationOutcome::Aborted => entry.scheduler.abort_if_present(selection_id).await,
+            };
+            match result {
+                Ok(true) => return Ok(()),
+                Ok(false) | Err(SequenceError::RequestNotFound { .. }) => continue,
                 Err(error) => return Err(error.into()),
             }
         }
-        Err(SelectionError::NotFound(format!(
-            "reservation {selection_id} not found"
-        )))
+        Ok(())
     }
 
     pub fn add_output_block(
@@ -1266,7 +1320,16 @@ impl Drop for SelectionCore {
 mod tests {
     use super::*;
     use crate::protocols::StorageTier;
+    use crate::scheduling::selector::{
+        WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+    };
+    use crate::scheduling::{
+        QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId, QueueAdmissionPolicy,
+        QueueAdmissionRequest, WorkerSelectionPolicyError,
+    };
     use crate::services::indexer::backend::test_util::store_event;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{OnceLock, Weak};
     use std::time::Duration;
 
     fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
@@ -1274,6 +1337,62 @@ mod tests {
             use_kv_events,
             router_queue_threshold: None,
             ..Default::default()
+        }
+    }
+
+    struct CatalogRemovingPicker {
+        core: Weak<SelectionCore>,
+        worker_id: WorkerId,
+    }
+
+    impl WorkerPicker for CatalogRemovingPicker {
+        fn pick(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            assert!(!input.candidates().is_empty());
+            self.core
+                .upgrade()
+                .expect("selection core")
+                .catalog
+                .set_lifecycle(self.worker_id, WorkerLifecycle::Unschedulable, Vec::new())
+                .expect("selected worker catalog record");
+            Ok(0)
+        }
+    }
+
+    struct AbortCountingAdmissionPolicy {
+        aborted: Arc<AtomicUsize>,
+    }
+
+    impl QueueAdmissionPolicy for AbortCountingAdmissionPolicy {
+        fn admit(&mut self, _request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
+            QueueAdmissionDecision::Ready
+        }
+
+        fn on_event(&mut self, event: QueueAdmissionEvent<'_>, _ready: &mut Vec<QueueAdmissionId>) {
+            if matches!(event, QueueAdmissionEvent::Aborted { .. }) {
+                self.aborted.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    struct DeferredAbortAdmissionPolicy {
+        deferred: Arc<AtomicUsize>,
+        aborted: Arc<AtomicUsize>,
+    }
+
+    impl QueueAdmissionPolicy for DeferredAbortAdmissionPolicy {
+        fn admit(&mut self, _request: QueueAdmissionRequest<'_>) -> QueueAdmissionDecision {
+            self.deferred.fetch_add(1, Ordering::Relaxed);
+            QueueAdmissionDecision::Defer
+        }
+
+        fn on_event(&mut self, event: QueueAdmissionEvent<'_>, _ready: &mut Vec<QueueAdmissionId>) {
+            if matches!(event, QueueAdmissionEvent::Aborted { .. }) {
+                self.aborted.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1481,6 +1600,154 @@ mod tests {
                 .list_filtered(Some("model"), Some("group-b"))
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn endpoint_resolution_failure_aborts_the_booked_admission() {
+        let config = test_config(false);
+        let tracking_hash = Arc::new(TrackingHashContext::from_config(&config).unwrap());
+        let aborted = Arc::new(AtomicUsize::new(0));
+        let observed_aborted = Arc::clone(&aborted);
+        let core_ref = Arc::new(OnceLock::<Weak<SelectionCore>>::new());
+        let factory_core_ref = Arc::clone(&core_ref);
+        let factory: WorkerSelectionPolicyFactory = Arc::new(
+            move |config: &crate::config::KvRouterConfig, worker_type, _partition| {
+                WorkerSelectionPolicy::new(
+                    config.clone(),
+                    worker_type.as_str(),
+                    Vec::new(),
+                    Box::new(CatalogRemovingPicker {
+                        core: factory_core_ref
+                            .get()
+                            .expect("core reference installed")
+                            .clone(),
+                        worker_id: 1,
+                    }),
+                )
+                .with_admission_policy(Box::new(AbortCountingAdmissionPolicy {
+                    aborted: Arc::clone(&observed_aborted),
+                }))
+            },
+        );
+        let core = Arc::new(SelectionCore::new_inner(
+            config,
+            1,
+            CancellationToken::new(),
+            None,
+            Some(factory),
+            true,
+            SelectionCacheConfig::default(),
+            tracking_hash,
+        ));
+        core_ref
+            .set(Arc::downgrade(&core))
+            .expect("install core reference");
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+
+        let error = core
+            .select_and_reserve(reserve_request("endpoint-race"))
+            .await
+            .expect_err("endpoint lookup should fail after catalog removal");
+        assert!(matches!(
+            error,
+            SelectionError::Internal(message)
+                if message.contains("selected worker 1 is no longer schedulable")
+        ));
+        assert_eq!(aborted.load(Ordering::Relaxed), 1);
+        let entry = core
+            .entry(&RoutingPartitionId::new("model", "default"))
+            .expect("selection entry");
+        assert!(
+            !entry
+                .scheduler
+                .free_if_present("endpoint-race")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_deferred_reservation_retracts_selection() {
+        let config = test_config(false);
+        let tracking_hash = Arc::new(TrackingHashContext::from_config(&config).unwrap());
+        let deferred = Arc::new(AtomicUsize::new(0));
+        let aborted = Arc::new(AtomicUsize::new(0));
+        let observed_deferred = Arc::clone(&deferred);
+        let observed_aborted = Arc::clone(&aborted);
+        let factory: WorkerSelectionPolicyFactory = Arc::new(
+            move |config: &crate::config::KvRouterConfig, worker_type, _partition| {
+                WorkerSelectionPolicy::default(config.clone(), worker_type.as_str())
+                    .with_admission_policy(Box::new(DeferredAbortAdmissionPolicy {
+                        deferred: Arc::clone(&observed_deferred),
+                        aborted: Arc::clone(&observed_aborted),
+                    }))
+            },
+        );
+        let core = Arc::new(SelectionCore::new_inner(
+            config,
+            1,
+            CancellationToken::new(),
+            None,
+            Some(factory),
+            true,
+            SelectionCacheConfig::default(),
+            tracking_hash,
+        ));
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+
+        let selection_core = Arc::clone(&core);
+        let selection = tokio::spawn(async move {
+            selection_core
+                .select_and_reserve(reserve_request("deferred-reservation"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while deferred.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reservation was not deferred");
+
+        core.abort_reservation("deferred-reservation")
+            .await
+            .expect("abort deferred reservation");
+        let error = tokio::time::timeout(Duration::from_secs(1), selection)
+            .await
+            .expect("aborted selection did not finish")
+            .expect("selection task panicked")
+            .expect_err("aborted selection must not reserve a worker");
+        assert!(matches!(
+            error,
+            SelectionError::Scheduler(KvSchedulerError::BookingFailed(message))
+                if message.contains("aborted before dispatch")
+        ));
+        assert_eq!(aborted.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn reservation_release_remains_idempotent_after_worker_removal() {
+        let core = SelectionCore::new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        );
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.select_and_reserve(reserve_request("removed-worker-reservation"))
+            .await
+            .expect("reservation");
+
+        core.delete_worker(1).await.expect("worker removal");
+        core.free_reservation("removed-worker-reservation")
+            .await
+            .expect("release after worker removal");
+        core.free_reservation("removed-worker-reservation")
+            .await
+            .expect("repeated release");
+        core.abort_reservation("unknown-reservation")
+            .await
+            .expect("unknown abort remains idempotent");
     }
 
     #[tokio::test]

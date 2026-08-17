@@ -145,6 +145,7 @@ pub struct QueueAdmissionRequest<'a> {
     id: QueueAdmissionId,
     request_id: &'a str,
     context_tokens: usize,
+    progress: RequestProgress,
     session_context: Option<&'a SessionContext>,
     worker_snapshot: &'a QueueAdmissionWorkerSnapshot,
     eligibility: QueueAdmissionEligibility<'a>,
@@ -163,6 +164,7 @@ impl<'a> QueueAdmissionRequest<'a> {
             id,
             request_id,
             context_tokens,
+            progress: RequestProgress::new(context_tokens).0,
             session_context,
             worker_snapshot,
             eligibility: QueueAdmissionEligibility::default(),
@@ -174,6 +176,7 @@ impl<'a> QueueAdmissionRequest<'a> {
         id: QueueAdmissionId,
         request_id: &'a str,
         context_tokens: usize,
+        progress: RequestProgress,
         session_context: Option<&'a SessionContext>,
         worker_snapshot: &'a QueueAdmissionWorkerSnapshot,
         pinned_worker: Option<WorkerWithDpRank>,
@@ -185,6 +188,7 @@ impl<'a> QueueAdmissionRequest<'a> {
             id,
             request_id,
             context_tokens,
+            progress,
             session_context,
             worker_snapshot,
             eligibility: QueueAdmissionEligibility {
@@ -223,6 +227,16 @@ impl<'a> QueueAdmissionRequest<'a> {
 
     pub fn context_tokens(&self) -> usize {
         self.context_tokens
+    }
+
+    /// Return the latest logical input-plus-output context for this request.
+    ///
+    /// The value starts at [`Self::context_tokens`] and advances monotonically
+    /// while the response stream crosses output-block boundaries. It can lag by
+    /// at most one such boundary; the terminal event carries the authoritative
+    /// final context. Policies may retain a clone for the request lifetime.
+    pub fn progress(&self) -> &RequestProgress {
+        &self.progress
     }
 
     pub fn session_context(&self) -> Option<&SessionContext> {

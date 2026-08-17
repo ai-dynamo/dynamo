@@ -17,8 +17,8 @@ use dynamo_kv_router::{
     },
     router_hint::{RouterHint, RouterHintRootCandidates},
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
-        ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestProgressUpdater,
+        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
         effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
@@ -176,6 +176,7 @@ pub enum FindBestMatchOutcome {
         potential_decode_blocks: u64,
         routing_hashes: Option<RoutingDecisionHashes>,
         router_hint: Option<RouterHint>,
+        request_progress: Option<RequestProgressUpdater>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -1160,6 +1161,7 @@ where
             total_us = total_elapsed.as_micros() as u64,
             "find_best_match completed"
         );
+        let request_progress = response.request_progress;
 
         match admission {
             FindBestMatchAdmission::WithAdmission { .. } => Ok(
@@ -1171,6 +1173,7 @@ where
                     potential_decode_blocks: response.potential_decode_blocks as u64,
                     routing_hashes,
                     router_hint,
+                    request_progress,
                 }),
             ),
             FindBestMatchAdmission::WithoutAdmission => Ok(
@@ -1311,6 +1314,27 @@ where
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         self.scheduler.free_if_worker(request_id, worker).await
+    }
+
+    /// Release a completed booking with its final input-plus-output context.
+    pub async fn complete_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        context_tokens: usize,
+    ) -> Result<(), SequenceError> {
+        self.scheduler
+            .complete_if_worker(request_id, worker, context_tokens)
+            .await
+    }
+
+    /// Release an aborted booking only if it still belongs to `worker`.
+    pub async fn abort_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        self.scheduler.abort_if_worker(request_id, worker).await
     }
 
     /// Number of requests currently parked in the scheduler queue.
