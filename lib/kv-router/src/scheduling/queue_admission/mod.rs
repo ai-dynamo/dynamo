@@ -302,6 +302,9 @@ pub enum QueueAdmissionDecision {
     /// Make the request runnable under Dynamo's built-in queue ordering.
     Ready,
     /// Keep the request in host-owned deferred storage until the policy wakes it.
+    ///
+    /// Deferred requests remain bounded queue residents and count toward the configured queue
+    /// limits until they are woken or receive a terminal event.
     Defer,
 }
 
