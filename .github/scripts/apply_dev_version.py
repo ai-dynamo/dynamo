@@ -53,9 +53,7 @@ VERSION_LINE_RE = re.compile(r'^(\s*version\s*=\s*")([^"]+)(")\s*$', re.MULTILIN
 
 # Root pyproject cross-ref to the separately built runtime wheel. AISimulate is
 # intentionally fixed until its nightly wheel is staged and published.
-PY_ROOT_PIN_RE = re.compile(
-    r'("ai-dynamo-runtime==)([0-9A-Za-z.!+_-]+)([^"]*")'
-)
+PY_ROOT_PIN_RE = re.compile(r'("ai-dynamo-runtime==)([0-9A-Za-z.!+_-]+)([^"]*")')
 
 
 def pep440(suffix: str, base: str) -> str:
