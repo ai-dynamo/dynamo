@@ -52,6 +52,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex, OnceLock},
 };
+use tokio_util::sync::CancellationToken;
 use tracing;
 
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
@@ -1569,6 +1570,11 @@ pub struct OpenAIPreprocessor {
     token_budget: Option<TokenBudget>,
     /// Model context limit used by the embedding truncation contract.
     context_length: u32,
+    /// Shutdown signal handed to detached speculative-prefill tasks. `None`
+    /// for callers that have no runtime to derive a token from (the C
+    /// bindings, the ext-proc gateway, tests); those tasks are still bounded
+    /// by the module's own timeout.
+    speculative_prefill_cancel: Option<CancellationToken>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -2238,7 +2244,7 @@ impl OpenAIPreprocessor {
         let tokenizer = mdc.tokenizer()?;
         let PromptFormatter::OAI(formatter) = embedding_prompt_formatter(&mdc)?;
         let embedding_tokenizers = EmbeddingTokenizerState::new(&mdc)?;
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, Some(embedding_tokenizers))
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, Some(embedding_tokenizers), None)
     }
 
     pub fn new_with_parts(
@@ -2246,7 +2252,20 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None)
+        Self::new_with_parts_and_cancel(mdc, formatter, tokenizer, None)
+    }
+
+    /// Same as [`OpenAIPreprocessor::new_with_parts`], plus the shutdown token
+    /// that detached speculative-prefill tasks watch. Pass the owning
+    /// runtime's token so those tasks end with the runtime; `None` leaves them
+    /// bounded only by their own timeout.
+    pub fn new_with_parts_and_cancel(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: crate::tokenizers::Tokenizer,
+        speculative_prefill_cancel: Option<CancellationToken>,
+    ) -> Result<Arc<Self>> {
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, speculative_prefill_cancel)
     }
 
     fn new_with_parts_inner(
@@ -2254,6 +2273,7 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
+        speculative_prefill_cancel: Option<CancellationToken>,
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
@@ -2562,6 +2582,7 @@ impl OpenAIPreprocessor {
             media_loader,
             token_budget,
             context_length,
+            speculative_prefill_cancel,
             #[cfg(feature = "mm-routing")]
             image_token_counter,
             #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
@@ -7098,6 +7119,7 @@ impl
             &next,
             &self.formatter,
             &self.tokenizer,
+            self.speculative_prefill_cancel.as_ref(),
         );
 
         let final_stream = crate::request_trace::wrap_chat_request_end_stream(
