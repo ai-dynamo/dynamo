@@ -358,7 +358,10 @@ def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[An
         if executor is None:
             executor = ThreadPoolExecutor(max_workers=1)
             _ASYNC_TOKENIZER_EXECUTORS[tokenizer] = executor
-            weakref.finalize(tokenizer, executor.shutdown)
+            # wait=False: the tokenizer's last reference may be dropped in
+            # the executor's own worker thread (releasing the completed work
+            # item), and shutdown(wait=True) cannot join the current thread.
+            weakref.finalize(tokenizer, executor.shutdown, wait=False)
     except TypeError:
         # Tokenizer does not support weak references.
         key = id(tokenizer)
