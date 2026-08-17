@@ -270,9 +270,10 @@ const (
 	// AnnotationCurrentWorkerHashV2 stores the active v2 worker generation hash.
 	AnnotationCurrentWorkerHashV2 = "nvidia.com/current-worker-hash-v2"
 
-	// AnnotationGroveWorkerHashSuffixEnabled records that Grove worker pod
-	// templates use the canonical worker hash as their runtime namespace suffix.
-	AnnotationGroveWorkerHashSuffixEnabled = "nvidia.com/grove-worker-hash-suffix-enabled"
+	// AnnotationGroveLegacyWorkerNamespace marks a PodCliqueSet migrating from
+	// legacy unsuffixed worker namespaces. The Grove reconciler removes it once
+	// the first hashed worker revision is accepted and complete.
+	AnnotationGroveLegacyWorkerNamespace = "nvidia.com/grove-legacy-worker-namespace"
 
 	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
 	// operator versions. Legacy worker DCDs (those without a worker hash label) are tagged

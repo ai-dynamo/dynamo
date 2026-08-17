@@ -31,6 +31,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -84,11 +85,40 @@ func (r *groveWorkloadRenderer) Render(
 		existingPodCliqueSet = nil
 	}
 
-	renderDeployment, err := groveRenderDeployment(dgd, existingPodCliqueSet)
+	legacyDesired, err := r.renderPodCliqueSet(
+		ctx, dgd, existingPodCliqueSet, restartState, checkpointInfos, false,
+	)
 	if err != nil {
 		return nil, err
 	}
-	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existingPodCliqueSet)
+
+	if !shouldRenderGroveWorkerHashSuffix(dgd, existingPodCliqueSet, legacyDesired) {
+		return legacyDesired, nil
+	}
+
+	desired, err := r.renderPodCliqueSet(
+		ctx, dgd, existingPodCliqueSet, restartState, checkpointInfos, true,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return desired, nil
+}
+
+func (r *groveWorkloadRenderer) renderPodCliqueSet(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	existing *grovev1alpha1.PodCliqueSet,
+	restartState *dynamo.RestartState,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+	workerHashSuffix bool,
+) (*grovev1alpha1.PodCliqueSet, error) {
+	renderDeployment, err := groveRenderDeployment(dgd, existing, workerHashSuffix)
+	if err != nil {
+		return nil, err
+	}
+
+	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existing)
 	desired, err := dynamo.GenerateGrovePodCliqueSet(
 		ctx,
 		renderDeployment,
@@ -104,18 +134,22 @@ func (r *groveWorkloadRenderer) Render(
 		return nil, err
 	}
 
-	prepareGroveTopologyConstraintUpgrade(desired, existingPodCliqueSet)
-	preserveGrovePodCliqueSetOrder(desired, existingPodCliqueSet)
-	preserveGrovePodCliqueSetReplicas(desired, existingPodCliqueSet, checkpointInfos)
+	prepareGroveTopologyConstraintUpgrade(desired, existing)
+	preserveGrovePodCliqueSetOrder(desired, existing)
+	preserveGrovePodCliqueSetReplicas(desired, existing, checkpointInfos)
 	return desired, nil
 }
 
 func groveRenderDeployment(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
+	workerHashSuffix bool,
 ) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
 	renderDeployment := dgd.DeepCopy()
 	applyGroveCompatibility(renderDeployment, pcs)
+	if !workerHashSuffix {
+		return renderDeployment, nil
+	}
 	if err := applyGroveWorkerHashSuffix(renderDeployment, dgd); err != nil {
 		return nil, err
 	}
@@ -126,10 +160,6 @@ func applyGroveWorkerHashSuffix(
 	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	hashSource *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
-	if hashSource.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] != commonconsts.KubeLabelValueTrue {
-		return nil
-	}
-
 	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(hashSource)
 	if err != nil {
 		return fmt.Errorf("compute Grove worker hash suffix: %w", err)
@@ -148,6 +178,110 @@ func applyGroveWorkerHashSuffix(
 		component.PodTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 	return nil
+}
+
+func shouldRenderGroveWorkerHashSuffix(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	existing *grovev1alpha1.PodCliqueSet,
+	legacyDesired *grovev1alpha1.PodCliqueSet,
+) bool {
+	if !dgdHasWorkerComponents(dgd) {
+		return false
+	}
+	if existing == nil ||
+		podCliqueSetHasGroveLegacyWorkerNamespace(existing) ||
+		podCliqueSetUsesGroveWorkerHashSuffix(dgd, existing) {
+		return true
+	}
+
+	// Start the one-time migration only when the desired legacy worker template
+	// differs from the active legacy template.
+	return groveWorkerTemplatesChanged(dgd, existing, legacyDesired)
+}
+
+// shouldMarkGroveLegacyWorkerNamespace starts a migration only when an
+// existing legacy PCS would otherwise receive a suffixed worker template.
+func shouldMarkGroveLegacyWorkerNamespace(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	existing *grovev1alpha1.PodCliqueSet,
+	desired *grovev1alpha1.PodCliqueSet,
+) bool {
+	return existing != nil &&
+		!podCliqueSetHasGroveLegacyWorkerNamespace(existing) &&
+		!podCliqueSetUsesGroveWorkerHashSuffix(dgd, existing) &&
+		podCliqueSetUsesGroveWorkerHashSuffix(dgd, desired)
+}
+
+func dgdHasWorkerComponents(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+	for i := range dgd.Spec.Components {
+		if dynamo.IsWorkerComponent(string(dgd.Spec.Components[i].ComponentType)) {
+			return true
+		}
+	}
+	return false
+}
+
+func podCliqueSetUsesGroveWorkerHashSuffix(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	pcs *grovev1alpha1.PodCliqueSet,
+) bool {
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		clique := podCliqueSetCliqueForComponent(pcs, component.ComponentName)
+		if clique == nil || clique.Labels[commonconsts.KubeLabelDynamoWorkerHash] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func groveWorkerTemplatesChanged(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	existing *grovev1alpha1.PodCliqueSet,
+	desired *grovev1alpha1.PodCliqueSet,
+) bool {
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		if !equality.Semantic.DeepEqual(
+			podCliqueSetCliqueForComponent(existing, component.ComponentName),
+			podCliqueSetCliqueForComponent(desired, component.ComponentName),
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+func podCliqueSetCliqueForComponent(
+	pcs *grovev1alpha1.PodCliqueSet,
+	componentName string,
+) *grovev1alpha1.PodCliqueTemplateSpec {
+	if pcs == nil {
+		return nil
+	}
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique != nil && clique.Labels[commonconsts.KubeLabelDynamoComponent] == componentName {
+			return clique
+		}
+	}
+	return nil
+}
+
+func podCliqueSetHasGroveLegacyWorkerNamespace(pcs *grovev1alpha1.PodCliqueSet) bool {
+	return pcs != nil && pcs.GetAnnotations()[commonconsts.AnnotationGroveLegacyWorkerNamespace] == commonconsts.KubeLabelValueTrue
+}
+
+func markPodCliqueSetGroveLegacyWorkerNamespace(pcs *grovev1alpha1.PodCliqueSet) {
+	if pcs.Annotations == nil {
+		pcs.Annotations = make(map[string]string)
+	}
+	pcs.Annotations[commonconsts.AnnotationGroveLegacyWorkerNamespace] = commonconsts.KubeLabelValueTrue
 }
 
 func applyGroveCompatibility(

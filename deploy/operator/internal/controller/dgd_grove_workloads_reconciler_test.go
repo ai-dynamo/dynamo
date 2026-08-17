@@ -101,7 +101,7 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 		},
 	}
 
-	result, err := reconciler.newGroveProgram().workloads.Reconcile(
+	result, _, err := reconciler.newGroveProgram().workloads.Reconcile(
 		context.Background(),
 		dgd,
 		nil,

@@ -1312,15 +1312,20 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
 			g.Expect(reason).To(gomega.Equal(tt.wantReason))
+
+			t.Log("Build the expected namespaces from the observed PCS availability")
+			wantServiceStatuses := make(map[string]v1beta1.ComponentReplicaStatus, len(tt.wantServiceStatuses))
 			for componentName, wantStatus := range tt.wantServiceStatuses {
 				component := betaDGD.GetComponentByName(componentName)
 				if component == nil {
 					continue
 				}
-				wantStatus.RuntimeNamespace = betaDGD.GetDynamoNamespaceForComponent(component)
-				tt.wantServiceStatuses[componentName] = wantStatus
+				if !IsWorkerComponent(string(component.ComponentType)) {
+					wantStatus.RuntimeNamespace = betaDGD.GetDynamoNamespaceForComponent(component)
+				}
+				wantServiceStatuses[componentName] = wantStatus
 			}
-			g.Expect(serviceStatuses).To(gomega.Equal(tt.wantServiceStatuses))
+			g.Expect(serviceStatuses).To(gomega.Equal(wantServiceStatuses))
 		})
 	}
 }
@@ -1329,161 +1334,214 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 	ctx := context.Background()
 	const (
 		componentName    = "prefill"
+		acceptedHash     = "accepted-worker-hash"
 		targetRevision   = "target-revision"
 		previousRevision = "previous-revision"
 	)
 
-	t.Log("Build reusable Grove cutover fixtures")
-	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-			Annotations: map[string]string{
-				commonconsts.AnnotationGroveWorkerHashSuffixEnabled: commonconsts.KubeLabelValueTrue,
-			},
-		},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
-				ComponentName: componentName,
-				ComponentType: v1beta1.ComponentTypePrefill,
-			}},
-		},
-	}
-	component := dgd.GetComponentByName(componentName)
-	baseNamespace := dgd.GetDynamoNamespaceForComponent(component)
-	workerHash, err := ComputeDGDWorkersSpecHash(dgd)
-	if err != nil {
-		t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
-	}
-	desiredNamespace := ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), workerHash)
-	activeNamespace := ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), "oldhash")
-
-	podCliqueSet := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-			Namespace:  dgd.Namespace,
-			Generation: 1,
-		},
-		Status: grovev1alpha1.PodCliqueSetStatus{
-			ObservedGeneration:    ptr.To(int64(1)),
-			CurrentGenerationHash: ptr.To(targetRevision),
-		},
-	}
-	completedAt := metav1.Now()
-	podClique := &grovev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       GroveComponentResourceName(dgd, componentName),
-			Namespace:  dgd.Namespace,
-			Generation: 1,
-		},
-		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
-		Status: grovev1alpha1.PodCliqueStatus{
-			Replicas:                          1,
-			ReadyReplicas:                     1,
-			UpdatedReplicas:                   1,
-			ScheduledReplicas:                 1,
-			ObservedGeneration:                ptr.To(int64(1)),
-			CurrentPodCliqueSetGenerationHash: ptr.To(targetRevision),
-			UpdateProgress:                    &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt},
-		},
-	}
-
 	tests := []struct {
-		name          string
-		active        bool
-		pcsAccepted   bool
-		childRevision string
-		updateEnded   bool
-		childReady    bool
-		wantReady     bool
-		wantNamespace string
+		name                  string
+		activeNamespace       bool
+		pcsAccepted           bool
+		childRevision         string
+		updateEnded           bool
+		childReady            bool
+		legacyPCS             bool
+		legacyMigrationMarker bool
+		wantReady             bool
+		wantNamespace         string
+		wantMigrationComplete bool
 	}{
-		{
-			name:          "new worker publishes the desired namespace before cutover",
-			childRevision: previousRevision,
-			wantNamespace: desiredNamespace,
-		},
-		{
-			name:          "unaccepted PCS retains the active namespace",
-			active:        true,
-			childRevision: targetRevision,
-			updateEnded:   true,
-			childReady:    true,
-			wantReady:     true,
-			wantNamespace: activeNamespace,
-		},
-		{
-			name:          "child at the previous revision retains the active namespace",
-			active:        true,
-			pcsAccepted:   true,
-			childRevision: previousRevision,
-			updateEnded:   true,
-			childReady:    true,
-			wantReady:     true,
-			wantNamespace: activeNamespace,
-		},
-		{
-			name:          "unfinished child update retains the active namespace",
-			active:        true,
-			pcsAccepted:   true,
-			childRevision: targetRevision,
-			childReady:    true,
-			wantReady:     true,
-			wantNamespace: activeNamespace,
-		},
-		{
-			name:          "completed child update publishes the desired namespace",
-			active:        true,
-			pcsAccepted:   true,
-			childRevision: targetRevision,
-			updateEnded:   true,
-			childReady:    true,
-			wantReady:     true,
-			wantNamespace: desiredNamespace,
-		},
-		{
-			name:          "desired namespace persists after worker health loss",
-			active:        true,
-			pcsAccepted:   true,
-			childRevision: targetRevision,
-			updateEnded:   true,
-			wantNamespace: desiredNamespace,
-		},
+		{name: "unaccepted PCS leaves a new worker namespace empty", childRevision: previousRevision},
+		{name: "unaccepted PCS preserves the active worker namespace", activeNamespace: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
+		{name: "accepted PCS with a previous child revision preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: previousRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
+		{name: "accepted PCS with an unfinished child update preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, wantReady: true, wantNamespace: "active"},
+		{name: "stale accepted PCS revision publishes its rendered hash instead of the desired DGD hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
+		{name: "accepted completed PCS revision remains published after worker health loss", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, wantNamespace: acceptedHash},
+		{name: "accepted legacy PCS publishes the base namespace", pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true},
+		{name: "completed marked migration keeps the base namespace until the marker is removed", pcsAccepted: true, legacyMigrationMarker: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantMigrationComplete: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Configure the requested Grove cutover state")
-			dgd := dgd.DeepCopy()
-			podCliqueSet := podCliqueSet.DeepCopy()
-			podClique := podClique.DeepCopy()
-			if tt.active {
+			t.Log("Build a DGD, PCS snapshot, and child status for the requested cutover state")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: componentName,
+						ComponentType: v1beta1.ComponentTypePrefill,
+					}},
+				},
+			}
+			component := dgd.GetComponentByName(componentName)
+			desiredHash, err := ComputeDGDWorkersSpecHash(dgd)
+			if err != nil {
+				t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
+			}
+			if desiredHash == acceptedHash {
+				t.Fatal("test requires a desired DGD hash different from the accepted PCS hash")
+			}
+			baseNamespace := dgd.GetDynamoNamespaceForComponent(component)
+			if tt.activeNamespace {
 				dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
-					componentName: {RuntimeNamespace: activeNamespace},
+					componentName: {RuntimeNamespace: ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), "active")},
 				}
 			}
-			if !tt.pcsAccepted {
-				podCliqueSet.Status.ObservedGeneration = ptr.To(int64(0))
+
+			annotations := map[string]string(nil)
+			if tt.legacyMigrationMarker {
+				annotations = map[string]string{commonconsts.AnnotationGroveLegacyWorkerNamespace: commonconsts.KubeLabelValueTrue}
 			}
-			podClique.Status.CurrentPodCliqueSetGenerationHash = ptr.To(tt.childRevision)
-			if !tt.updateEnded {
-				podClique.Status.UpdateProgress = nil
+			labels := map[string]string{commonconsts.KubeLabelDynamoComponent: componentName}
+			if !tt.legacyPCS {
+				labels[commonconsts.KubeLabelDynamoWorkerHash] = acceptedHash
+			}
+			podCliqueSet := &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+					Namespace:   dgd.Namespace,
+					Generation:  1,
+					Annotations: annotations,
+				},
+				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: labels}},
+				}},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					ObservedGeneration:    ptr.To(int64(0)),
+					CurrentGenerationHash: ptr.To(targetRevision),
+				},
+			}
+			if tt.pcsAccepted {
+				podCliqueSet.Status.ObservedGeneration = ptr.To(int64(1))
+			}
+			completedAt := metav1.Now()
+			podClique := &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, componentName), Namespace: dgd.Namespace, Generation: 1},
+				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
+				Status: grovev1alpha1.PodCliqueStatus{
+					Replicas:                          1,
+					ReadyReplicas:                     1,
+					UpdatedReplicas:                   1,
+					ScheduledReplicas:                 1,
+					ObservedGeneration:                ptr.To(int64(1)),
+					CurrentPodCliqueSetGenerationHash: ptr.To(tt.childRevision),
+				},
+			}
+			if tt.updateEnded {
+				podClique.Status.UpdateProgress = &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}
 			}
 			if !tt.childReady {
 				podClique.Status.ReadyReplicas = 0
 			}
 
-			t.Log("Evaluate the namespace published for the requested Grove cutover state.")
-			readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), podCliqueSet, podClique), dgd)
+			t.Log("Evaluate runtime namespace selection from the accepted PCS snapshot")
+			readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), podClique), dgd, podCliqueSet)
 			if err != nil {
 				t.Fatalf("EvaluateGroveReadiness() error = %v", err)
+			}
+
+			t.Log("Verify the published namespace and migration completion state")
+			wantNamespace := tt.wantNamespace
+			if wantNamespace != "" && wantNamespace != "active" {
+				wantNamespace = ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), wantNamespace)
+			} else if wantNamespace == "active" {
+				wantNamespace = ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), wantNamespace)
+			}
+			if tt.legacyPCS || tt.legacyMigrationMarker {
+				wantNamespace = baseNamespace
 			}
 			if readiness.Ready != tt.wantReady {
 				t.Fatalf("EvaluateGroveReadiness().Ready = %t, want %t", readiness.Ready, tt.wantReady)
 			}
-			if got := readiness.ComponentStatuses[componentName].RuntimeNamespace; got != tt.wantNamespace {
-				t.Fatalf("runtime namespace = %q, want %q", got, tt.wantNamespace)
+			if got := readiness.ComponentStatuses[componentName].RuntimeNamespace; got != wantNamespace {
+				t.Fatalf("runtime namespace = %q, want %q", got, wantNamespace)
+			}
+			if readiness.LegacyWorkerNamespaceMigrationComplete != tt.wantMigrationComplete {
+				t.Fatalf("LegacyWorkerNamespaceMigrationComplete = %t, want %t", readiness.LegacyWorkerNamespaceMigrationComplete, tt.wantMigrationComplete)
+			}
+		})
+	}
+}
+
+func TestEvaluateGroveReadinessSwitchesWorkersAtomically(t *testing.T) {
+	ctx := context.Background()
+	const (
+		acceptedHash     = "accepted-worker-hash"
+		acceptedRevision = "accepted-revision"
+		previousRevision = "previous-revision"
+	)
+
+	tests := []struct {
+		name                  string
+		secondWorkerCompleted bool
+		wantSuffix            bool
+	}{
+		{name: "one worker at a previous revision keeps every worker on the active namespace"},
+		{name: "all workers at the accepted revision publish the same suffix", secondWorkerCompleted: true, wantSuffix: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build two workers with an accepted PCS revision and active namespaces")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill},
+					{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeDecode},
+				}},
+			}
+			dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{}
+			for i := range dgd.Spec.Components {
+				component := &dgd.Spec.Components[i]
+				dgd.Status.Components[component.ComponentName] = v1beta1.ComponentReplicaStatus{
+					RuntimeNamespace: ComponentRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), string(component.ComponentType), "active"),
+				}
+			}
+
+			podCliqueSet := &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: PCSNameForDGD(dgd.Name, dgd.Spec.Components), Namespace: dgd.Namespace, Generation: 1},
+				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+						{Labels: map[string]string{commonconsts.KubeLabelDynamoComponent: "prefill", commonconsts.KubeLabelDynamoWorkerHash: acceptedHash}},
+						{Labels: map[string]string{commonconsts.KubeLabelDynamoComponent: "decode", commonconsts.KubeLabelDynamoWorkerHash: acceptedHash}},
+					},
+				}},
+				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: ptr.To(int64(1)), CurrentGenerationHash: ptr.To(acceptedRevision)},
+			}
+			completedAt := metav1.Now()
+			prefill := &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, "prefill"), Namespace: dgd.Namespace, Generation: 1},
+				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
+				Status:     grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ObservedGeneration: ptr.To(int64(1)), CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision), UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}},
+			}
+			decodeRevision := previousRevision
+			if tt.secondWorkerCompleted {
+				decodeRevision = acceptedRevision
+			}
+			decode := &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, "decode"), Namespace: dgd.Namespace, Generation: 1},
+				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
+				Status:     grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ObservedGeneration: ptr.To(int64(1)), CurrentPodCliqueSetGenerationHash: ptr.To(decodeRevision), UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}},
+			}
+
+			t.Log("Evaluate the worker group against the single accepted PCS snapshot")
+			readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), prefill, decode), dgd, podCliqueSet)
+			if err != nil {
+				t.Fatalf("EvaluateGroveReadiness() error = %v", err)
+			}
+
+			t.Log("Verify that all workers publish either the active or accepted namespace together")
+			for i := range dgd.Spec.Components {
+				component := &dgd.Spec.Components[i]
+				want := dgd.Status.Components[component.ComponentName].RuntimeNamespace
+				if tt.wantSuffix {
+					want = ComponentRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), string(component.ComponentType), acceptedHash)
+				}
+				if got := readiness.ComponentStatuses[component.ComponentName].RuntimeNamespace; got != want {
+					t.Fatalf("component %q runtime namespace = %q, want %q", component.ComponentName, got, want)
+				}
 			}
 		})
 	}
@@ -1500,9 +1558,6 @@ func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
-			Annotations: map[string]string{
-				commonconsts.AnnotationGroveWorkerHashSuffixEnabled: commonconsts.KubeLabelValueTrue,
-			},
 		},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
@@ -1518,6 +1573,12 @@ func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 			Namespace:  dgd.Namespace,
 			Generation: 1,
 		},
+		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: map[string]string{
+				commonconsts.KubeLabelDynamoComponent:  component.ComponentName,
+				commonconsts.KubeLabelDynamoWorkerHash: "accepted-worker-hash",
+			}}},
+		}},
 		Status: grovev1alpha1.PodCliqueSetStatus{
 			ObservedGeneration:    ptr.To(int64(1)),
 			CurrentGenerationHash: &targetRevision,
@@ -1557,7 +1618,7 @@ func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 		Build()
 
 	t.Log("Evaluate readiness and assert that namespace cutover reuses the child read.")
-	readiness, err := EvaluateGroveReadiness(ctx, reader, dgd)
+	readiness, err := EvaluateGroveReadiness(ctx, reader, dgd, podCliqueSet)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(readiness.Ready).To(gomega.BeTrue())
 	g.Expect(childReads).To(gomega.Equal(1))

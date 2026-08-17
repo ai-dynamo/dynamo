@@ -20,14 +20,12 @@ package defaulting
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -534,237 +532,28 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 	}
 }
 
-func TestDGDDefaulter_GroveWorkerHashSuffix(t *testing.T) {
-	type updateKind string
+func TestDGDDefaulterPreservesLegacyGroveWorkerHashSuffixAnnotation(t *testing.T) {
+	const legacyAnnotation = "nvidia.com/grove-worker-hash-suffix-enabled"
 
-	const (
-		frontendOnlyUpdate updateKind = "frontend-only"
-		workerUpdate       updateKind = "worker"
-	)
-
-	tests := []struct {
-		name               string
-		op                 admissionv1.Operation
-		groveEnabled       bool
-		provider           string
-		previousSuffix     bool
-		userSuppliedSuffix bool
-		update             updateKind
-		disableGroveIntent bool
-		wantSuffix         bool
-		wantProvider       string
-	}{
-		{
-			name:               "CREATE sets the suffix for a newly selected Grove provider",
-			op:                 admissionv1.Create,
-			groveEnabled:       true,
-			userSuppliedSuffix: true,
-			wantSuffix:         true,
-			wantProvider:       consts.WorkloadProviderGrove,
-		},
-		{
-			name:         "UPDATE preserves an unsuffixed Grove namespace for a frontend-only change",
-			op:           admissionv1.Update,
-			groveEnabled: true,
-			provider:     consts.WorkloadProviderGrove,
-			update:       frontendOnlyUpdate,
-			wantProvider: consts.WorkloadProviderGrove,
-		},
-		{
-			name:               "UPDATE uses the selected Grove provider when the feature gate and routing intent change",
-			op:                 admissionv1.Update,
-			provider:           consts.WorkloadProviderGrove,
-			update:             workerUpdate,
-			disableGroveIntent: true,
-			wantSuffix:         true,
-			wantProvider:       consts.WorkloadProviderGrove,
-		},
-		{
-			name:         "UPDATE normalizes old defaultable worker fields before comparing",
-			op:           admissionv1.Update,
-			provider:     consts.WorkloadProviderGrove,
-			wantProvider: consts.WorkloadProviderGrove,
-		},
-		{
-			name:           "UPDATE preserves a suffix enabled by an earlier Grove admission",
-			op:             admissionv1.Update,
-			provider:       consts.WorkloadProviderGrove,
-			previousSuffix: true,
-			wantSuffix:     true,
-			wantProvider:   consts.WorkloadProviderGrove,
-		},
-		{
-			name:               "UPDATE removes a user-supplied suffix marker for a component provider",
-			op:                 admissionv1.Update,
-			groveEnabled:       true,
-			provider:           consts.WorkloadProviderComponent,
-			userSuppliedSuffix: true,
-			update:             workerUpdate,
-			wantProvider:       consts.WorkloadProviderComponent,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build the incoming DGD and preserve the old object for update admission")
-			var old *nvidiacomv1beta1.DynamoGraphDeployment
-			dgd := groveWorkerHashSuffixTestDGD("")
-			if tt.op == admissionv1.Update {
-				old = groveWorkerHashSuffixTestDGD(tt.provider)
-				if tt.previousSuffix {
-					old.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
-				}
-				dgd = old.DeepCopy()
-			}
-			if tt.userSuppliedSuffix {
-				dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
-			}
-			switch tt.update {
-			case frontendOnlyUpdate:
-				frontend := dgd.GetComponentByName("frontend")
-				frontend.PodTemplate.Spec.Containers[0].Env = append(frontend.PodTemplate.Spec.Containers[0].Env,
-					corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
-			case workerUpdate:
-				prefill := dgd.GetComponentByName("prefill")
-				prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
-			}
-			if tt.disableGroveIntent {
-				dgd.Annotations[consts.KubeAnnotationEnableGrove] = consts.KubeLabelValueFalse
-			}
-
-			t.Log("Run defaulting with the configured feature-gate state")
-			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
-			if old != nil {
-				ctx = admissionCtxWithOld(t, tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK, old)
-			}
-			ctx = features.WithGate(ctx, features.Gates{Grove: tt.groveEnabled})
-			if err := NewDGDDefaulter("0.9.0").Default(ctx, dgd); err != nil {
-				t.Fatalf("Default() unexpected error: %v", err)
-			}
-
-			t.Log("Verify immutable provider selection and operator-owned suffix state")
-			if got := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
-				t.Errorf("workload provider = %q, want %q", got, tt.wantProvider)
-			}
-			gotSuffix := dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] == consts.KubeLabelValueTrue
-			if gotSuffix != tt.wantSuffix {
-				t.Errorf("worker hash suffix enabled = %t, want %t", gotSuffix, tt.wantSuffix)
-			}
-		})
-	}
-}
-
-func TestDGDDefaulter_GroveWorkerHashSuffixRejectsUnhashableUpdate(t *testing.T) {
-	type failureSource string
-
-	const (
-		previousWorkerSpec failureSource = "previous"
-		currentWorkerSpec  failureSource = "current"
-	)
-
-	tests := []struct {
-		name      string
-		source    failureSource
-		wantError string
-	}{
-		{
-			name:      "rejects an unhashable previous worker spec",
-			source:    previousWorkerSpec,
-			wantError: "failed to compute previous Grove worker hash suffix",
-		},
-		{
-			name:      "rejects an unhashable current worker spec",
-			source:    currentWorkerSpec,
-			wantError: "failed to compute Grove worker hash suffix",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build an immutable Grove update with an invalid worker spec")
-			old := groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
-			dgd := old.DeepCopy()
-			dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled] = consts.KubeLabelValueTrue
-			if tt.source == previousWorkerSpec {
-				setUnhashableGroveWorkerSpec(old)
-			} else {
-				setUnhashableGroveWorkerSpec(dgd)
-			}
-
-			t.Log("Default the update admission")
-			ctx := admissionCtxWithOld(t, admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK, old)
-			ctx = features.WithGate(ctx, features.Gates{Grove: false})
-			err := NewDGDDefaulter("0.9.0").Default(ctx, dgd)
-
-			t.Log("Reject the update without emitting a worker hash suffix marker")
-			if err == nil {
-				t.Fatal("Default() error = nil, want hash computation error")
-			}
-			if !strings.HasPrefix(err.Error(), tt.wantError) {
-				t.Errorf("Default() error = %q, want prefix %q", err, tt.wantError)
-			}
-			if got := dgd.Annotations[consts.AnnotationGroveWorkerHashSuffixEnabled]; got != "" {
-				t.Errorf("worker hash suffix marker = %q, want unset", got)
-			}
-		})
-	}
-}
-
-func TestDGDDefaulter_GroveWorkerHashSuffixRejectsUpdateWithoutOldDGD(t *testing.T) {
-	t.Log("Build an immutable Grove DGD without an admission old object")
-	dgd := groveWorkerHashSuffixTestDGD(consts.WorkloadProviderGrove)
-	ctx := admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
-	ctx = features.WithGate(ctx, features.Gates{Grove: true})
-
-	t.Log("Default the malformed update admission")
-	err := NewDGDDefaulter("0.9.0").Default(ctx, dgd)
-
-	t.Log("Reject the update because its operator-owned migration state is unknown")
-	if err == nil {
-		t.Fatal("Default() error = nil, want error for UPDATE without old DynamoGraphDeployment")
-	}
-}
-
-func groveWorkerHashSuffixTestDGD(provider string) *nvidiacomv1beta1.DynamoGraphDeployment {
-	annotations := make(map[string]string)
-	if provider != "" {
-		annotations[consts.KubeAnnotationWorkloadProvider] = provider
-	}
-
-	prefill := groveWorkerHashSuffixTestComponent("prefill", nvidiacomv1beta1.ComponentTypePrefill, "registry.example/dynamo-worker:1.4.0")
-	prefill.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "MODEL_MAX_LEN", Value: "4096"}}
-	return &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default", Annotations: annotations},
-		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-				prefill,
-				groveWorkerHashSuffixTestComponent("frontend", nvidiacomv1beta1.ComponentTypeFrontend, "registry.example/dynamo-frontend:1.4.0"),
+	t.Log("Build a DGD carrying the retired client annotation")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			Annotations: map[string]string{
+				legacyAnnotation: "client-value",
 			},
 		},
 	}
-}
 
-func groveWorkerHashSuffixTestComponent(
-	name string,
-	componentType nvidiacomv1beta1.ComponentType,
-	image string,
-) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
-	return nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-		ComponentName: name,
-		ComponentType: componentType,
-		PodTemplate: &corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: image}}},
-		},
+	t.Log("Default the DGD without owning or rewriting the retired annotation")
+	ctx := admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+	if err := NewDGDDefaulter("0.9.0").Default(ctx, dgd); err != nil {
+		t.Fatalf("Default() error = %v", err)
 	}
-}
 
-func setUnhashableGroveWorkerSpec(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-	prefill := dgd.GetComponentByName("prefill")
-	prefill.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-		GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
-			Mode:                  nvidiacomv1beta1.GMSModeIntraPod,
-			ExtraClientContainers: []string{"missing-client"},
-		},
+	t.Log("Verify the client annotation remains unchanged")
+	if got := dgd.Annotations[legacyAnnotation]; got != "client-value" {
+		t.Fatalf("legacy annotation = %q, want %q", got, "client-value")
 	}
 }

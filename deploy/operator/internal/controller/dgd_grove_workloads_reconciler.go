@@ -24,9 +24,11 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -70,7 +72,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) (ReconcileResult, error) {
+) (ReconcileResult, bool, error) {
 	logger := log.FromContext(ctx)
 
 	desiredPodCliqueSet, err := r.renderer.Render(
@@ -81,27 +83,34 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
-		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
+		return ReconcileResult{}, false, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
-	renderDeployment, err := groveRenderDeployment(dgd, desiredPodCliqueSet)
+	renderDeployment, err := groveRenderDeployment(
+		dgd,
+		desiredPodCliqueSet,
+		podCliqueSetUsesGroveWorkerHashSuffix(dgd, desiredPodCliqueSet),
+	)
 	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to prepare Grove deployment: %w", err)
+		return ReconcileResult{}, false, fmt.Errorf("failed to prepare Grove deployment: %w", err)
 	}
 
-	syncedPodCliqueSet, err := r.reconcilePodCliqueSet(ctx, dgd, desiredPodCliqueSet)
+	syncedPodCliqueSet, waitForPCSObservation, err := r.reconcilePodCliqueSet(ctx, dgd, desiredPodCliqueSet)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
+		return ReconcileResult{}, false, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
+	}
+	if waitForPCSObservation {
+		return ReconcileResult{}, true, nil
 	}
 
 	if err := r.scaler.Reconcile(ctx, dgd, checkpointInfos); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
+		return ReconcileResult{}, false, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
 	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderDeployment)
 	if err != nil {
-		return ReconcileResult{}, err
+		return ReconcileResult{}, false, err
 	}
 
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
@@ -110,19 +119,42 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		syncedPodCliqueSet,
 	)
 	if err != nil {
-		return ReconcileResult{}, err
+		return ReconcileResult{}, false, err
+	}
+	if readiness.LegacyWorkerNamespaceMigrationComplete {
+		if err := r.removeGroveLegacyWorkerNamespace(ctx, syncedPodCliqueSet); err != nil {
+			return ReconcileResult{}, false, err
+		}
+		return ReconcileResult{}, true, nil
 	}
 
 	resources := append(stableResources, podCliqueSetResource)
-	return checkGroveResourcesReadiness(resources, readiness.Classification), nil
+	return checkGroveResourcesReadiness(resources, readiness.Classification), false, nil
 }
 
 func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired *grovev1alpha1.PodCliqueSet,
-) (*grovev1alpha1.PodCliqueSet, error) {
-	_, synced, err := commoncontroller.SyncResource(
+) (*grovev1alpha1.PodCliqueSet, bool, error) {
+	existing := &grovev1alpha1.PodCliqueSet{}
+	if err := r.reader.Get(ctx, client.ObjectKeyFromObject(desired), existing); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, false, fmt.Errorf("get Grove PodCliqueSet: %w", err)
+		}
+		existing = nil
+	}
+
+	if shouldMarkGroveLegacyWorkerNamespace(dgd, existing, desired) {
+		previous := existing.DeepCopy()
+		markPodCliqueSetGroveLegacyWorkerNamespace(existing)
+		if err := r.syncer.Patch(ctx, existing, client.MergeFrom(previous)); err != nil {
+			return nil, false, fmt.Errorf("mark Grove legacy worker namespace: %w", err)
+		}
+		return existing, true, nil
+	}
+
+	modified, synced, err := commoncontroller.SyncResource(
 		ctx,
 		&r.syncer,
 		dgd,
@@ -131,9 +163,21 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 		},
 	)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return synced, nil
+	return synced, existing != nil && modified && podCliqueSetUsesGroveWorkerHashSuffix(dgd, desired), nil
+}
+
+func (r *groveWorkloadsReconciler) removeGroveLegacyWorkerNamespace(
+	ctx context.Context,
+	pcs *grovev1alpha1.PodCliqueSet,
+) error {
+	previous := pcs.DeepCopy()
+	delete(pcs.Annotations, commonconsts.AnnotationGroveLegacyWorkerNamespace)
+	if err := r.syncer.Patch(ctx, pcs, client.MergeFrom(previous)); err != nil {
+		return fmt.Errorf("remove Grove legacy worker namespace marker: %w", err)
+	}
+	return nil
 }
 
 // observePodCliqueSetReadiness takes the authoritative Grove snapshot after
@@ -144,7 +188,7 @@ func (r *groveWorkloadsReconciler) observePodCliqueSetReadiness(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
 ) (*commoncontroller.Resource, dynamo.GroveReadiness, error) {
-	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, dgd)
+	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, dgd, podCliqueSet)
 	if err != nil {
 		return nil, dynamo.GroveReadiness{}, err
 	}

@@ -35,7 +35,7 @@ const (
 	legacyGroveDGDSeeder    = "operatorenv-grove-legacy-seeder"
 )
 
-func TestGroveWorkerHashSuffixDefaultedForNewDGD(t *testing.T) {
+func TestGroveWorkerHashSuffixForNewDGD(t *testing.T) {
 	ctx := context.Background()
 	t.Log("Start an operator environment with Grove admission enabled")
 	env := newGroveWorkerHashSuffixTestEnv(t)
@@ -45,10 +45,10 @@ func TestGroveWorkerHashSuffixDefaultedForNewDGD(t *testing.T) {
 	dgd := newGroveWorkerHashSuffixTestDGD(env.Namespace(), "new-without-pcs")
 	require.NoError(t, env.Client().Create(ctx, dgd))
 
-	t.Log("Verify admission enabled the worker hash suffix")
+	t.Log("Verify admission does not own a DGD worker suffix annotation")
 	createdDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, env.Client().Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: env.Namespace()}, createdDGD))
-	require.Equal(t, createdDGD.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled], "true")
+	require.NotContains(t, createdDGD.GetAnnotations(), "nvidia.com/grove-worker-hash-suffix-enabled")
 
 	t.Log("Wait for the rendered Grove workers to carry the canonical suffix")
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(createdDGD)
@@ -67,11 +67,10 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	startGroveWorkerHashSuffixTestController(t, env)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, dgd, "")
 
-	t.Log("Read the admitted legacy DGD and verify its migration marker is absent")
+	t.Log("Read the legacy DGD for the frontend-only update")
 	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
 	require.NoError(t, env.Client().Get(ctx, key, current))
-	require.Empty(t, current.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled])
 
 	t.Log("Apply a frontend-only update")
 	frontend := current.GetComponentByName("frontend")
@@ -81,7 +80,6 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 
 	t.Log("Verify the frontend update does not enable or render a worker suffix")
 	require.NoError(t, env.Client().Get(ctx, key, current))
-	require.Empty(t, current.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled])
 	waitForGroveFrontendEnv(t, ctx, env, current, "FRONTEND_CONFIG_REVISION", "2")
 	checkGroveWorkerHashSuffixes(t, ctx, env, current, "")
 
@@ -90,8 +88,17 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	prefill := current.GetComponentByName("prefill")
 	prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
 	require.NoError(t, env.Client().Update(ctx, current))
-	require.NoError(t, env.Client().Get(ctx, key, current))
-	require.Equal(t, current.GetAnnotations()[consts.AnnotationGroveWorkerHashSuffixEnabled], "true")
+	dynamotesting.Eventually(t, func() (bool, string) {
+		pcs := &grovev1alpha1.PodCliqueSet{}
+		pcsKey := types.NamespacedName{Name: dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components), Namespace: dgd.Namespace}
+		if err := env.Client().Get(ctx, pcsKey, pcs); err != nil {
+			return false, fmt.Sprintf("get PodCliqueSet: %v", err)
+		}
+		if pcs.Annotations[consts.AnnotationGroveLegacyWorkerNamespace] != consts.KubeLabelValueTrue {
+			return false, "PodCliqueSet has not recorded the legacy worker namespace migration"
+		}
+		return true, "PodCliqueSet recorded the legacy worker namespace migration"
+	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove worker migration marker was not recorded")
 
 	t.Log("Wait for the updated Grove workers to carry the canonical suffix")
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(current)

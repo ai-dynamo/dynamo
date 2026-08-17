@@ -128,7 +128,7 @@ func (p *groveProgram) Reconcile(
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
-	result, err := p.workloads.Reconcile(
+	result, waitForPCSObservation, err := p.workloads.Reconcile(
 		ctx,
 		req.DGD,
 		restart.State,
@@ -136,6 +136,9 @@ func (p *groveProgram) Reconcile(
 	)
 	if err != nil {
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
+	}
+	if waitForPCSObservation {
+		return programResult, nil
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != reasonWaitingForCheckpoint {

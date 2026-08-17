@@ -1041,7 +1041,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				},
 			}
 
-			result, err := reconciler.newGroveProgram().workloads.Reconcile(
+			result, _, err := reconciler.newGroveProgram().workloads.Reconcile(
 				ctx,
 				dgd,
 				nil,
@@ -1054,7 +1054,23 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
+			t.Log("Expect workers to withhold their runtime namespace until a PCS revision is accepted")
+			want := tt.wantReconcileResult
+			want.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus, len(tt.wantReconcileResult.ComponentStatus))
+			for componentName, componentStatus := range tt.wantReconcileResult.ComponentStatus {
+				want.ComponentStatus[componentName] = componentStatus
+			}
+			for i := range dgd.Spec.Components {
+				component := &dgd.Spec.Components[i]
+				if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+					continue
+				}
+				componentStatus := want.ComponentStatus[component.ComponentName]
+				componentStatus.RuntimeNamespace = ""
+				want.ComponentStatus[component.ComponentName] = componentStatus
+			}
+
+			g.Expect(result).To(gomega.Equal(want))
 		})
 	}
 }
@@ -1116,7 +1132,7 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 		},
 	}
 
-	_, err := reconciler.newGroveProgram().workloads.Reconcile(
+	_, _, err := reconciler.newGroveProgram().workloads.Reconcile(
 		ctx,
 		dgd,
 		nil,
@@ -1207,7 +1223,7 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 
 	generatedPCS, err := renderer.Render(ctx, dgd, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	renderDGD, err := groveRenderDeployment(dgd, generatedPCS)
+	renderDGD, err := groveRenderDeployment(dgd, generatedPCS, podCliqueSetUsesGroveWorkerHashSuffix(dgd, generatedPCS))
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
 
@@ -1481,7 +1497,7 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 	)
 	desired, err := renderer.Render(ctx, dgd, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	renderDGD, err := groveRenderDeployment(dgd, desired)
+	renderDGD, err := groveRenderDeployment(dgd, desired, podCliqueSetUsesGroveWorkerHashSuffix(dgd, desired))
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	prefill := renderDGD.GetComponentByName("prefill")
 	if prefill == nil {

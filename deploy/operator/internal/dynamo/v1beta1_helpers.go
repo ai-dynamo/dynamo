@@ -7,7 +7,6 @@ package dynamo
 
 import (
 	"encoding/json"
-	"fmt"
 	"maps"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -299,42 +298,6 @@ func GetDCDRuntimeNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
 		string(dcd.Spec.ComponentType),
 		GetDCDEffectiveWorkerHash(dcd),
 	)
-}
-
-// getGroveRuntimeNamespace returns the runtime namespace published for a Grove
-// component. dgd and component must be non-nil. A worker keeps its previous
-// namespace until its child has completed the accepted PCS revision.
-func getGroveRuntimeNamespace(
-	dgd *v1beta1.DynamoGraphDeployment,
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	componentCompletedAcceptedPCSRevision bool,
-	workerHash string,
-) (string, error) {
-	// Non-workers and unmarked workers remain in the component's base namespace.
-	namespace := dgd.GetDynamoNamespaceForComponent(component)
-	if !IsWorkerComponent(string(component.ComponentType)) ||
-		dgd.GetAnnotations()[commonconsts.AnnotationGroveWorkerHashSuffixEnabled] != commonconsts.KubeLabelValueTrue {
-		return namespace, nil
-	}
-
-	// Direct callers resolve the canonical hash; readiness passes it once for all workers.
-	if workerHash == "" {
-		var err error
-		workerHash, err = ComputeDGDWorkersSpecHash(dgd)
-		if err != nil {
-			return "", fmt.Errorf("compute Grove worker hash suffix: %w", err)
-		}
-	}
-	desiredNamespace := ComponentRuntimeNamespace(namespace, string(component.ComponentType), workerHash)
-
-	// Keep routing on the previously active worker namespace until this child cuts over.
-	if !componentCompletedAcceptedPCSRevision {
-		if previousNamespace := dgd.Status.Components[component.ComponentName].RuntimeNamespace; previousNamespace != "" {
-			return previousNamespace, nil
-		}
-	}
-
-	return desiredNamespace, nil
 }
 
 // GetDCDSubComponentType returns the alpha subcomponent type restored by API

@@ -125,14 +125,63 @@ func newTestComponentWorkloadsReconciler(
 	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout)
 }
 
+func TestShouldMarkGroveLegacyWorkerNamespace(t *testing.T) {
+	tests := []struct {
+		name           string
+		existing       bool
+		existingHash   string
+		existingMarker bool
+		desiredHash    string
+		want           bool
+	}{
+		{name: "new PCS does not need a migration marker", desiredHash: "target"},
+		{name: "legacy PCS with a legacy desired template does not need a migration marker"},
+		{name: "legacy PCS records a marker before a suffixed desired template", existing: true, desiredHash: "target", want: true},
+		{name: "marked PCS does not rewrite its marker", existing: true, existingMarker: true, desiredHash: "target"},
+		{name: "already suffixed PCS does not need a migration marker", existing: true, existingHash: "active", desiredHash: "target"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build the existing and desired worker PCS templates")
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: consts.ComponentTypeWorker},
+			})
+			desired := &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: map[string]string{consts.KubeLabelDynamoComponent: "worker"}}},
+			}}}
+			if tt.desiredHash != "" {
+				desired.Spec.Template.Cliques[0].Labels[consts.KubeLabelDynamoWorkerHash] = tt.desiredHash
+			}
+			var existing *grovev1alpha1.PodCliqueSet
+			if tt.existing {
+				existing = &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: map[string]string{consts.KubeLabelDynamoComponent: "worker"}}},
+				}}}
+				if tt.existingHash != "" {
+					existing.Spec.Template.Cliques[0].Labels[consts.KubeLabelDynamoWorkerHash] = tt.existingHash
+				}
+				if tt.existingMarker {
+					existing.Annotations = map[string]string{consts.AnnotationGroveLegacyWorkerNamespace: consts.KubeLabelValueTrue}
+				}
+			}
+
+			t.Log("Verify whether this level state requires the legacy namespace marker")
+			if got := shouldMarkGroveLegacyWorkerNamespace(dgd, existing, desired); got != tt.want {
+				t.Fatalf("shouldMarkGroveLegacyWorkerNamespace() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 	tests := []struct {
-		name              string
-		hashSuffixEnabled bool
+		name             string
+		workerHashSuffix bool
 	}{
 		{
-			name:              "enabled",
-			hashSuffixEnabled: true,
+			name:             "enabled",
+			workerHashSuffix: true,
 		},
 		{
 			name: "disabled",
@@ -145,18 +194,15 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {ComponentType: consts.ComponentTypeWorker},
 			})
-			if tt.hashSuffixEnabled {
-				dgd.Annotations = map[string]string{consts.AnnotationGroveWorkerHashSuffixEnabled: "true"}
-			}
 
 			t.Log("Render the Grove deployment")
-			rendered, err := groveRenderDeployment(dgd, nil)
+			rendered, err := groveRenderDeployment(dgd, nil, tt.workerHashSuffix)
 			require.NoError(t, err)
 			worker := rendered.GetComponentByName("worker")
 			require.NotNil(t, worker)
 
 			t.Log("Verify the rendered suffix and source DGD immutability")
-			if tt.hashSuffixEnabled {
+			if tt.workerHashSuffix {
 				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 				require.NoError(t, err)
 				require.NotNil(t, worker.PodTemplate)
