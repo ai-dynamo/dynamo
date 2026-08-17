@@ -15,4 +15,8 @@ pub(crate) struct Args {
     /// vLLM gRPC endpoint as host:port or an http:// URL.
     #[arg(long, env = "VLLM_GRPC_ENDPOINT")]
     pub vllm_endpoint: String,
+
+    /// Enable the unreleased vLLM multimodal gRPC contract.
+    #[arg(long, env = "DYN_ENABLE_MULTIMODAL", default_value_t = false)]
+    pub enable_multimodal: bool,
 }

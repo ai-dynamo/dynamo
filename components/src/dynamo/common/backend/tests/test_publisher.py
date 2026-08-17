@@ -40,7 +40,16 @@ pytestmark = [
 
 def test_source_descriptors_carry_payload_and_defaults():
     zmq = ZmqSource(endpoint="tcp://127.0.0.1:5557")
-    assert (zmq.endpoint, zmq.topic, zmq.dp_rank) == ("tcp://127.0.0.1:5557", "", 0)
+    assert (zmq.endpoint, zmq.topic, zmq.dp_rank, zmq.image_token_id) == (
+        "tcp://127.0.0.1:5557",
+        "",
+        0,
+        None,
+    )
+    assert (
+        ZmqSource(endpoint="tcp://127.0.0.1:5558", image_token_id=151655).image_token_id
+        == 151655
+    )
 
     seen: list[object] = []
     push = PushSource(on_ready=seen.append, dp_rank=2)

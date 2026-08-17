@@ -26,13 +26,21 @@ It is a standalone Rust executable.
 - Sampling, stop conditions, structured output, logprobs, cache options, and priority
 - Opaque `kv_transfer_params` handoff
 - Data-parallel rank routing and KV-event source discovery
+- Opt-in image URL and data-URI requests; exact KV routing is qualified for
+  Qwen2-VL, Qwen2.5-VL, and Qwen3-VL
 
-The released vLLM v0.27.1 protocol does not support multimodal requests, LoRA,
-encode workers, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers.
-The sidecar rejects those request features before submitting an RPC. Parser
-defaults returned by Control are intentionally not advertised to the Dynamo
-frontend because the current inference protocol does not preserve all
-parser-related request semantics.
+The released vLLM v0.27.1 protocol does not support multimodal requests. The
+image profile requires a vLLM build from revision
+`3d1f5cee1552b8208f3009c75f8bc856f27e0eff` and the explicit sidecar
+`--enable-multimodal` flag. Without that opt-in, the sidecar rejects media before
+submitting an RPC so a v0.27.1 server cannot silently discard the newer media
+fields. The image profile accepts `http://`, `https://`, and `data:` sources; it
+does not accept decoded/RDMA media, audio, video, or processor overrides.
+
+LoRA, encode workers, beam search, `n > 1`, and Dynamo tool-call and reasoning
+parsers remain unsupported. Parser defaults returned by Control are
+intentionally not advertised to the Dynamo frontend because the current
+inference protocol does not preserve all parser-related request semantics.
 
 ## Run
 
@@ -53,12 +61,39 @@ dynamo-vllm-sidecar \
   --vllm-endpoint 127.0.0.1:50051
 ```
 
+For the compatible multimodal vLLM revision, opt in explicitly:
+
+```bash
+dynamo-vllm-sidecar \
+  --vllm-endpoint 127.0.0.1:50051 \
+  --enable-multimodal
+```
+
 Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
-provided through the environment.
+provided through the environment. `DYN_ENABLE_MULTIMODAL=true` is equivalent to
+the multimodal flag.
 
 The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates.
 
 The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
+
+For an opted-in multimodal model, the sidecar resolves the model's chat image
+placeholder token from its local or Hugging Face configuration and attaches it
+to every ZMQ source. This lets backend events use the same canonical image hash
+as frontend routing for the qualified Qwen families. Other multimodal families,
+or a configuration fetch/token-resolution failure, keep inference available but
+omit exact multimodal source metadata and receive only ordinary text-prefix KV
+routing. The current Control API reports the model ID but not its Hugging Face
+revision, so a vLLM launch using `--revision` should expose the same local model
+directory as its model ID and mount that path into the sidecar. Otherwise the
+sidecar can only fetch the repository's default revision and may disable or
+misconfigure exact routing.
+
+The forwarded 64-hex vLLM media identifier contains Dynamo's 64-bit routing hash
+and becomes part of vLLM's encoder/prefix-cache identity. Treat passed-through
+HTTP URLs as immutable: changing the bytes behind one URL can reuse stale media
+cache state. User-supplied media UUIDs retain their vLLM semantics and disable
+exact Dynamo multimodal credit.
 
 Aggregated serving is the default. Set the existing `--disaggregation-mode` to `prefill` or `decode` only for non-aggregated deployments; the current Control API does not report engine role.
 
@@ -104,8 +139,10 @@ There is no published vLLM sidecar image yet, so you build and push your own fro
 The sidecar waits for both the Control and Inference services through the
 standard gRPC health API before registering the worker. The deployment
 manifests retain lightweight socket probes for container lifecycle monitoring.
-The examples pair the exact vLLM v0.27.1 engine image with protocol files
-vendored from the same release.
+The examples pair the exact vLLM v0.27.1 engine image with its released text-only
+profile. To exercise images, replace the engine image with a build of revision
+`3d1f5cee1552b8208f3009c75f8bc856f27e0eff` and add
+`--enable-multimodal` to the sidecar arguments.
 
 ### Prerequisites
 
