@@ -23,7 +23,7 @@ use super::types::{
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
-use crate::WorkerSelectionPolicyFactory;
+use crate::{WorkerSelectionPolicyFactory, WorkerType};
 
 pub struct SelectionServiceBuilder {
     kv_router_config: KvRouterConfig,
@@ -73,7 +73,7 @@ impl SelectionServiceBuilder {
     where
         F: for<'a> Fn(
                 &KvRouterConfig,
-                &'static str,
+                WorkerType,
                 RoutingPartitionRef<'a>,
             ) -> WorkerSelectionPolicy
             + Send

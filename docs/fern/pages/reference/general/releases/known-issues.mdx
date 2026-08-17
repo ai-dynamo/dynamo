@@ -12,9 +12,15 @@ import { RELEASE_STATS } from "@/components/releases.data";
 
 Known issues are mirrored verbatim from each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
 
+<a id="v140"></a>
+
+## v1.4.0 — current release
+
+The v1.4.0 known issues come from the GitHub release notes and land here when the notes publish. Until then, the v1.3.1 entries below remain the latest recorded issues.
+
 <a id="v131"></a>
 
-## v1.3.1 — current release
+## v1.3.1
 
 <span className="dynref-badge dynref-badge--blue">SGLang</span> **Intermittent Stall in Disaggregated Serving over EFA:** Requests return an empty HTTP 200 response with zero completion tokens after approximately 300 seconds. The condition is intermittent and more likely on newly started decode workers, including after a restart. It affects SGLang disaggregated serving on the NIXL LIBFABRIC backend over EFA; other transports are unaffected. The defect is in the EFA provider in libfabric. The data path and the network are healthy and EFA counters show no drops or errors, so the failure surfaces as a silent stall with no error reported. **Targeted fix:** an AWS EFA release in the coming weeks. It is not included in this release.
 
