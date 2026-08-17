@@ -865,15 +865,11 @@ pub(crate) fn self_host_base_url(
         return Ok(None);
     };
 
-    let configured = dynamo_runtime::RuntimeConfig::from_settings()
-        .unwrap_or_default()
-        .system_host;
-    let host = match configured.as_str() {
-        "0.0.0.0" | "::" | "[::]" => dynamo_runtime::utils::local_ip_for_advertise(),
-        _ => configured,
-    };
+    Ok(Some(system_status_base_url(&info)))
+}
 
-    Ok(Some(format!("http://{host}:{}", info.port())))
+fn system_status_base_url(info: &dynamo_runtime::SystemStatusServerInfo) -> String {
+    format!("http://{}", info.advertised_socket_addr())
 }
 
 /// Scan `model_dir` for files to advertise alongside the typed MDC slots.
@@ -927,6 +923,13 @@ mod self_host_metadata_default_tests {
         assert!(self_host_metadata_default(Some(""))); // empty
         assert!(self_host_metadata_default(Some("garbage"))); // unrecognized
         assert!(!self_host_metadata_default(Some("false"))); // explicit opt-out
+    }
+
+    #[test]
+    fn self_host_url_uses_the_bound_status_address() {
+        let info = dynamo_runtime::SystemStatusServerInfo::new("[::1]:8080".parse().unwrap(), None);
+
+        assert_eq!(system_status_base_url(&info), "http://[::1]:8080");
     }
 }
 
