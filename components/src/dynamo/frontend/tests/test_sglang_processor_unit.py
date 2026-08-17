@@ -865,6 +865,7 @@ def test_normalize_sglang_parser_name_accepts_minimax_m3_aliases():
     assert _normalize_sglang_parser_name("minimax-m3-nom") == "minimax-m3"
     assert _normalize_sglang_parser_name("kimi_k2") == "kimi_k2"
     assert _normalize_sglang_parser_name("kimi-k3") == "kimi_k3"
+    assert _normalize_sglang_parser_name("gemma-4") == "gemma4"
 
 
 def test_minimax_m3_force_reasoning_uses_thinking_mode():
