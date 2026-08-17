@@ -34,7 +34,11 @@ pub(super) struct SessionAffinityUpdate {
     pub worker_id: u64,
     pub dp_rank: Option<u32>,
     pub router_id: u64,
+    // Compatibility with pre-revision frontends through the v1.5 N-2 window.
+    // TODO(v1.6): Remove after pre-revision frontends leave the window.
+    #[serde(default)]
     pub revision: u64,
+    #[serde(default)]
     pub revision_router_id: u64,
 }
 
@@ -326,6 +330,20 @@ mod tests {
         assert!(!should_apply_update(7, &[10, 11], &update(7, 10)));
         assert!(!should_apply_update(7, &[10, 11], &update(8, 12)));
         assert!(should_apply_update(7, &[10, 11], &update(8, 10)));
+    }
+
+    #[test]
+    fn pre_revision_update_defaults_revision() {
+        let legacy = serde_json::json!({
+            "session_id": "session",
+            "worker_id": 10,
+            "dp_rank": 0,
+            "router_id": 7,
+        });
+        let payload = rmp_serde::to_vec_named(&legacy).unwrap();
+        let update: SessionAffinityUpdate = rmp_serde::from_slice(&payload).unwrap();
+
+        assert_eq!((update.revision, update.revision_router_id), (0, 0));
     }
 
     #[test]
