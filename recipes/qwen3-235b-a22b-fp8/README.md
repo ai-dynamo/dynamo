@@ -52,8 +52,11 @@ kubectl apply -f trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}       # H100/H200
 ## Cloud Provider Overlays
 
 The Blackwell disaggregated recipe keeps the shared deployment in `trtllm/disagg/blackwell/kustomize/base/deploy.yaml`.
-Provider-specific deltas live in Kustomize Components and instance-type templates
-and are selected by `trtllm/disagg/blackwell/.kustomize-matrix.yaml`.
+Provider-specific deltas live in Kustomize Components and template bundles and
+are selected by `trtllm/disagg/blackwell/.kustomize-matrix.yaml`. AWS instance
+types inherit the shared `recipes/kustomize/templates/aws-efa/` bundle and
+provide only their hardware-specific values unless their Kustomize structure
+also differs.
 Shared Kustomize building blocks belong under `recipes/kustomize/components/`;
 the disaggregated provider Components use the
 backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
