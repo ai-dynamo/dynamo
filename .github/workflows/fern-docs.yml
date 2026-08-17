@@ -269,10 +269,21 @@ jobs:
           fi
 
       - name: Generate, validate, and sync release assets
+        env:
+          IS_MAIN: ${{ steps.ctx.outputs.is_main }}
         run: |
           set -euo pipefail
 
-          python3 source-checkout/docs/fern/scripts/gen_llms_tables.py --assets-only
+          gen_script="source-checkout/docs/fern/scripts/gen_llms_tables.py"
+          if [ ! -f "$gen_script" ]; then
+            if [ "${IS_MAIN:-false}" = "true" ]; then
+              echo "::error::$gen_script is missing; cannot generate release assets"
+              exit 1
+            fi
+            echo "::notice::$gen_script not in this source tree; skipping release-asset generation"
+            exit 0
+          fi
+          python3 "$gen_script" --assets-only
 
           generated_json="source-checkout/docs/fern/assets/releases.json"
           generated_atom="source-checkout/docs/fern/assets/releases-atom.xml"
@@ -285,6 +296,7 @@ jobs:
 
           python3 - <<'PY'
           import json
+          import os
           import sys
           from pathlib import Path
 
@@ -313,7 +325,13 @@ jobs:
           if not isinstance(releases, list) or not releases:
               fail("generated releases.json must contain a non-empty releases array")
 
-          if published_path.exists():
+          if os.environ.get("IS_MAIN") != "true":
+              # Preview builds can lag main by a release; only a main publish
+              # is held to non-regression against the published copy.
+              print(
+                  "::notice::Preview build; entry-count regression check skipped"
+              )
+          elif published_path.exists():
               published = load_json(published_path, "previously published releases.json")
               published_releases = published.get("releases")
               if not isinstance(published_releases, list):
@@ -339,12 +357,14 @@ jobs:
           except (KeyError, OSError, gen_llms_tables.TSParseError) as exc:
               fail(f"could not read CURRENT_VERSION from releases.data.ts: {exc}")
 
-          latest = releases[0]
-          if not isinstance(latest, dict) or latest.get("version") != current_version:
-              latest_version = latest.get("version") if isinstance(latest, dict) else None
+          # Membership, not position: RELEASES may be headed by a platform-preview
+          # or model-build entry while CURRENT_VERSION stays on the prior stable
+          # (components resolve it with .find(), never [0]).
+          versions = [r.get("version") for r in releases if isinstance(r, dict)]
+          if current_version not in versions:
               fail(
-                  "latest generated release version does not match CURRENT_VERSION "
-                  f"({latest_version!r} != {current_version!r})"
+                  "generated releases.json does not contain CURRENT_VERSION "
+                  f"from releases.data.ts ({current_version!r})"
               )
           PY
 
@@ -605,6 +625,10 @@ jobs:
 
   release-version:
     name: Release Version to docs-website
+    # This job does not touch fern/assets/: releases.json and releases-atom.xml
+    # on docs-website are whatever the last main-sync generated. A release lands
+    # its releases.data.ts bump on main before the tag, so that copy is current
+    # by the time this job runs; a tag-only rerun republishes it unchanged.
     # Run on tag push OR manual dispatch with a tag specified
     if: |
       github.ref_type == 'tag' ||
