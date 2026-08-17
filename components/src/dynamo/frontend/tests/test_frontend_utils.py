@@ -9,6 +9,7 @@ from dynamo.frontend.utils import (
     handle_engine_error,
     make_backend_error,
     make_internal_error,
+    request_id_from_context,
     resolve_chat_template,
 )
 
@@ -54,6 +55,21 @@ class TestResolveChatTemplate:
         assert resolve_chat_template(str(tmp_path), backend="sglang") == (
             "custom template\n"
         )
+
+
+class TestRequestIdFromContext:
+    def test_uses_context_id_method(self):
+        class Context:
+            def id(self):
+                return "ctx-123"
+
+        assert request_id_from_context(Context()) == "ctx-123"
+
+    def test_falls_back_without_context(self):
+        request_id = request_id_from_context(None)
+
+        assert len(request_id) == 16
+        int(request_id, 16)
 
 
 class TestMakeInternalError:  # FRONTEND.8 — InternalError construction

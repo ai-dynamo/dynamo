@@ -1019,6 +1019,14 @@ class _FakePostProcessor:
         }
 
 
+class _FakeContext:
+    def __init__(self, request_id="ctx-request"):
+        self._request_id = request_id
+
+    def id(self):
+        return self._request_id
+
+
 @pytest.fixture
 def vllm_processor_module(monkeypatch):
     import dynamo.frontend.vllm_processor as module
@@ -1209,6 +1217,22 @@ class TestRoutedEnginePath:
             "output_tokens": 1,
             "chunk_tokens": 1,
         }
+
+    @pytest.mark.asyncio
+    async def test_routed_stream_uses_context_id_for_response_id(
+        self, vllm_processor_module
+    ):
+        routed_engine = _FakeRoutedEngine(
+            [{"token_ids": [101], "index": 0, "finish_reason": None}]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        chunks = await _run_generate(
+            processor, _base_preproc(), context=_FakeContext("ctx-123")
+        )
+
+        assert chunks[0]["data"]["id"] == "ctx-123"
+        assert routed_engine.kwargs[0]["context"].id() == "ctx-123"
 
     @pytest.mark.asyncio
     async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):

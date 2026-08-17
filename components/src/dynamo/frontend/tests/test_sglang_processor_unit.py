@@ -82,6 +82,14 @@ MODEL = "Qwen/Qwen3-0.6B"
 BYTE_FALLBACK_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 
+class FakeContext:
+    def __init__(self, request_id="ctx-request"):
+        self._request_id = request_id
+
+    def id(self):
+        return self._request_id
+
+
 @pytest.fixture(scope="module")
 def tokenizer():
     return get_tokenizer(MODEL)
@@ -3326,6 +3334,38 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         chunk = items[0]["data"]
         assert chunk["nvext"]["stop_reason"] == "END"
         assert "stop_reason" not in chunk["choices"][0]
+
+    def test_stream_uses_context_id_for_response_id(self, tokenizer):
+        """OpenAI response id matches Dynamo's internal context id."""
+
+        async def collect():
+            processor = SglangProcessor(
+                tokenizer=tokenizer,
+                routed_engine=FakeRoutedEngine(
+                    items=[{"token_ids": [101], "finish_reason": None}]
+                ),
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+                eos_token_ids=None,
+            )
+            post = SglangStreamingPostProcessor(
+                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            )
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "local-req",
+                    {"model": "test-model"},
+                    {},
+                    [],
+                    post,
+                    context=FakeContext("ctx-123"),
+                )
+            ]
+
+        items = asyncio.run(collect())
+
+        assert items[0]["data"]["id"] == "ctx-123"
 
     def _run_stream(self, tokenizer, items):
         processor = SglangProcessor(
