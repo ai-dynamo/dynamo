@@ -223,7 +223,8 @@ def test_throughput_metrics_source_invalid():
         PlannerConfig(namespace="test-ns", throughput_metrics_source="invalid")
 
 
-def test_prometheus_request_timeout_defaults_to_ten_seconds():
+def test_prometheus_request_timeout_defaults_to_ten_seconds(monkeypatch):
+    monkeypatch.delenv("PROMETHEUS_REQUEST_TIMEOUT_SECONDS", raising=False)
     config = PlannerConfig(namespace="test-ns")
 
     assert config.metric_pulling_prometheus_request_timeout_seconds == 10.0
@@ -244,6 +245,16 @@ def test_prometheus_request_timeout_rejects_non_positive_values(timeout):
             namespace="test-ns",
             metric_pulling_prometheus_request_timeout_seconds=timeout,
         )
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1"])
+def test_prometheus_request_timeout_rejects_non_positive_environment_values(
+    monkeypatch, timeout
+):
+    monkeypatch.setenv("PROMETHEUS_REQUEST_TIMEOUT_SECONDS", timeout)
+
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns")
 
 
 @pytest.mark.parametrize("bucket_size", [1, 4, 9, 16, 25])

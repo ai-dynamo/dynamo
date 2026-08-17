@@ -477,7 +477,7 @@ These fields default from environment variables and are excluded from serialized
 </ParamField>
 
 <ParamField path="metric_pulling_prometheus_request_timeout_seconds" type="number" default="10.0">
-  Maximum time in seconds for each Prometheus API request. Defaults from `PROMETHEUS_REQUEST_TIMEOUT_SECONDS` and must be greater than `0`. The Planner does not retry failed requests within the same collection cycle.
+  Connection and read inactivity timeout in seconds for each Prometheus API request. Defaults from `PROMETHEUS_REQUEST_TIMEOUT_SECONDS` and must be greater than `0`. This is not a total wall-clock deadline: a response that continues delivering data can run longer. The Planner does not retry failed requests within the same collection cycle.
 </ParamField>
 
 <ParamField path="metric_reporting_prometheus_port" type="integer" default="0">

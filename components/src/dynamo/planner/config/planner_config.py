@@ -583,13 +583,14 @@ class PlannerConfig(BaseModel):
         default_factory=lambda: float(
             os.environ.get("PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "10")
         ),
+        validate_default=True,
         gt=0,
         exclude=True,
         description=(
-            "Maximum time in seconds for each Prometheus API request. This bounds "
-            "metric collection when Prometheus is slow or unreachable so the planner "
-            "control loop can continue. Failed requests are not retried within the "
-            "same collection cycle."
+            "Connection and read inactivity timeout in seconds for each Prometheus "
+            "API request. This is not a total wall-clock deadline: a response that "
+            "continues delivering data can run longer. Failed requests are not "
+            "retried within the same collection cycle."
         ),
     )
 
