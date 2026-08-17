@@ -64,8 +64,8 @@ Applicability and provenance are separate:
 - **Generic** cases run for every model.
 - **Model-specific** cases run only for the resolved model profile. Kimi K2
   currently adds two multi-turn cases.
-- A `customer_` prefix records regression provenance. A customer case can be
-  generic or model-specific; source PRs are stored in `Case.regression_prs`.
+- A `customer_` prefix identifies a customer regression. A customer case can
+  be generic or model-specific.
 
 Model-specific request fields such as thinking controls are supplied through
 `--request-contract-json` and merged by `custom_runner.py`. They do not require
@@ -163,8 +163,7 @@ flowchart LR
 1. Add a reusable Custom case and assertion in `tool_calling_probe.py`.
 2. Add universal cases to `generic_cases`, or profile-only cases to
    `model_specific_cases`, in `profiles.json`.
-3. Add a `customer_` prefix and `regression_prs` when preserving a customer
-   regression.
+3. Add a `customer_` prefix when preserving a customer regression.
 4. Update the focused tests and verify the exact selection and record counts.
 
 Run the focused unit tests with:

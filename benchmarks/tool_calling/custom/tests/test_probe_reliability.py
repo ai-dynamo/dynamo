@@ -15,21 +15,6 @@ sys.path.insert(0, str(ROOT.parent))
 import tool_calling_probe as probe  # noqa: E402
 import tool_calling_static_report as static_report  # noqa: E402
 
-EXPECTED_CUSTOMER_REGRESSION_PRS = {
-    "https://github.com/ai-dynamo/dynamo/pull/9778",
-    "https://github.com/ai-dynamo/dynamo/pull/9804",
-    "https://github.com/ai-dynamo/dynamo/pull/9864",
-    "https://github.com/ai-dynamo/dynamo/pull/10030",
-    "https://github.com/ai-dynamo/dynamo/pull/11045",
-    "https://github.com/ai-dynamo/dynamo/pull/11205",
-    "https://github.com/ai-dynamo/dynamo/pull/11554",
-    "https://github.com/ai-dynamo/dynamo/pull/11653",
-    "https://github.com/ai-dynamo/dynamo/pull/12684",
-    "https://github.com/ai-dynamo/frontend-crates/pull/133",
-    "https://github.com/ai-dynamo/frontend-crates/pull/152",
-    "https://github.com/ai-dynamo/frontend-crates/pull/188",
-}
-
 
 def qualification_custom_config() -> dict:
     profiles_path = ROOT.parent / "e2e_verifier" / "profiles.json"
@@ -98,7 +83,7 @@ def test_kimi_k2_adds_only_its_model_specific_customer_regressions() -> None:
     )
 
 
-def test_customer_regressions_are_pinned_with_pr_provenance() -> None:
+def test_customer_regressions_are_in_the_qualification_profile() -> None:
     qualification_ids = set(qualification_case_ids("kimi_k2"))
     customer_cases = {
         case.case_id: case
@@ -111,21 +96,6 @@ def test_customer_regressions_are_pinned_with_pr_provenance() -> None:
         case_id for case_id in qualification_ids if case_id.startswith("customer_")
     }
     assert "customer_calculate_sum_auto" in customer_cases
-
-    sourced_cases = {
-        case_id: case for case_id, case in customer_cases.items() if case.regression_prs
-    }
-    assert len(sourced_cases) == 9
-    assert {
-        pull_request
-        for case in sourced_cases.values()
-        for pull_request in case.regression_prs
-    } == EXPECTED_CUSTOMER_REGRESSION_PRS
-    assert all(
-        pull_request.startswith("https://github.com/ai-dynamo/")
-        for case in sourced_cases.values()
-        for pull_request in case.regression_prs
-    )
 
 
 def test_customer_marker_regressions_include_recent_native_formats() -> None:

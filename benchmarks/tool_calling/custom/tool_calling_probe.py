@@ -562,7 +562,6 @@ class Case:
     expected_final_content_fragments: tuple[str, ...] = ()
     scripted_followup: dict[str, Any] | None = None
     request_overrides: dict[str, Any] | None = None
-    regression_prs: tuple[str, ...] = ()
     profiles: tuple[str, ...] = ("generic",)
 
 
@@ -761,7 +760,6 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             exact_tool_calls=1,
             expected_tool_names=("collect_items",),
             expected_arg_values=(("collect_items", "items", ["alpha", "beta"]),),
-            regression_prs=("https://github.com/ai-dynamo/dynamo/pull/9778",),
         ),
         Case(
             case_id="customer_required_marker_isolation",
@@ -790,11 +788,6 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             expected_arg_fragments=("PUBLIC_ECHO_MARKER_REQUIRED_4C21",),
             forbidden_arg_fragments=(ECHO_SCHEMA_SENTINEL, ECHO_SYSTEM_SENTINEL),
             forbidden_content_fragments=(ECHO_SCHEMA_SENTINEL, ECHO_SYSTEM_SENTINEL),
-            regression_prs=(
-                "https://github.com/ai-dynamo/dynamo/pull/11045",
-                "https://github.com/ai-dynamo/frontend-crates/pull/133",
-                "https://github.com/ai-dynamo/frontend-crates/pull/152",
-            ),
         ),
         Case(
             case_id="customer_truncated_tool_markup_hidden",
@@ -816,7 +809,6 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             min_tool_calls=0,
             max_tokens=32,
             request_overrides=thinking_disabled,
-            regression_prs=("https://github.com/ai-dynamo/dynamo/pull/9864",),
         ),
         Case(
             case_id="customer_required_forces_weather",
@@ -835,14 +827,6 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             tools=(weather,),
             tool_choice="required",
             expected_tool_names=("get_weather",),
-            regression_prs=(
-                "https://github.com/ai-dynamo/dynamo/pull/9804",
-                "https://github.com/ai-dynamo/dynamo/pull/10030",
-                "https://github.com/ai-dynamo/dynamo/pull/11205",
-                "https://github.com/ai-dynamo/dynamo/pull/11554",
-                "https://github.com/ai-dynamo/dynamo/pull/12684",
-                "https://github.com/ai-dynamo/frontend-crates/pull/188",
-            ),
         ),
         Case(
             case_id="customer_required_forces_weather_thinking_disabled",
@@ -854,11 +838,6 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             tool_choice="required",
             expected_tool_names=("get_weather",),
             request_overrides=thinking_disabled,
-            regression_prs=(
-                "https://github.com/ai-dynamo/dynamo/pull/11554",
-                "https://github.com/ai-dynamo/dynamo/pull/12684",
-                "https://github.com/ai-dynamo/frontend-crates/pull/188",
-            ),
         ),
         Case(
             case_id="customer_named_calculator_choice",
@@ -873,13 +852,6 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             tool_choice={"type": "function", "function": {"name": "calculate"}},
             expected_tool_names=("calculate",),
             expected_arg_fragments=("937", "18"),
-            regression_prs=(
-                "https://github.com/ai-dynamo/dynamo/pull/9804",
-                "https://github.com/ai-dynamo/dynamo/pull/10030",
-                "https://github.com/ai-dynamo/dynamo/pull/11205",
-                "https://github.com/ai-dynamo/dynamo/pull/11554",
-                "https://github.com/ai-dynamo/dynamo/pull/12684",
-            ),
         ),
         Case(
             case_id="customer_named_calculator_choice_thinking_disabled",
@@ -895,10 +867,6 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             expected_tool_names=("calculate",),
             expected_arg_fragments=("937", "18"),
             request_overrides=thinking_disabled,
-            regression_prs=(
-                "https://github.com/ai-dynamo/dynamo/pull/11554",
-                "https://github.com/ai-dynamo/dynamo/pull/12684",
-            ),
         ),
         Case(
             case_id="auto_multi_distinct_tools",
@@ -1031,7 +999,6 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             expect_content=True,
             validate_schema=False,
             expected_arg_fragments=(),
-            regression_prs=("https://github.com/ai-dynamo/dynamo/pull/11653",),
             profiles=("kimi_k2",),
         ),
         Case(
@@ -1060,7 +1027,6 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             validate_schema=True,
             max_tokens=2048,
             request_overrides=thinking_enabled,
-            regression_prs=("https://github.com/ai-dynamo/dynamo/pull/11653",),
             profiles=("kimi_k2",),
         ),
         Case(
