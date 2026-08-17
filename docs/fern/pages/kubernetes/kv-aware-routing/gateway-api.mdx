@@ -34,7 +34,7 @@ Set the namespace, resource names, model, and local filenames used throughout th
 
 ```bash
 export NAMESPACE=my-model
-export DYNAMO_VERSION=1.4.0
+export DYNAMO_VERSION=1.5.0
 export DGD_NAME=qwen
 export DGD_MANIFEST=qwen-gateway.yaml
 export ROUTE_NAME=qwen
@@ -50,6 +50,16 @@ Copy your working DGD manifest to `$DGD_MANIFEST`, then make the changes in the 
 
 Add one component with `type: epp` to `qwen-gateway.yaml`. The EPP configuration below selects
 aggregated or decode workers and scores them with the Dynamo decode scorer.
+
+<Warning>
+**Go EPP deprecation.** The `eppConfig` block below configures the Go-based EPP, which Dynamo no
+longer ships as the default. New EPP components should omit `eppConfig` and use the native Rust EPP
+(bundled in the FrontEnd image, first available at `dynamo-frontend:1.5.0`) instead — see
+[Migrate from the Go EPP to the Rust EPP](#migrate-from-the-go-epp-to-the-rust-epp) for the Rust EPP
+equivalent of this example. Existing DGDs that already set `eppConfig` keep the legacy Go EPP Pod
+contract across operator upgrades until you migrate explicitly; that section also covers the
+supported blue/green and in-place migration paths, including readiness and rollback checkpoints.
+</Warning>
 
 ```yaml
 spec:
@@ -84,7 +94,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.0
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -124,7 +134,7 @@ spec:
         - name: main
           # Keep the existing worker configuration.
         - name: sidecar-frontend
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           args:
           - -m
           - dynamo.frontend
@@ -257,6 +267,221 @@ kubectl logs -n "$NAMESPACE" \
 </Step>
 
 </Steps>
+
+## Migrate from the Go EPP to the Rust EPP
+
+Dynamo's native Rust EPP is bundled in the FrontEnd image starting at `dynamo-frontend:1.5.0`. If
+you have a DGD running the legacy Go EPP (its EPP component sets `eppConfig`), use one of the two
+procedures below. A DGD allows at most one `type: epp` component, so "add a Rust EPP alongside the
+existing one" is not an option — you either stand up a second DGD or edit the existing one in
+place. The two paths have different traffic impact and different rollback boundaries; read both
+before you start.
+
+| | Blue/green (new DGD) | In-place (existing DGD) |
+|---|---|---|
+| Traffic impact | None until you explicitly patch the route | Rolls the EPP Pod immediately, behind the existing Service |
+| Verification | Full dry run (new DGD Ready, EPP Ready, pool present) before any traffic moves | Only possible after the Pod has already rolled |
+| Rollback | Patch the route back to the old pool (until the old DGD is deleted) | Re-apply the old `eppConfig` (rolls the Pod a second time) |
+| Extra capacity | Runs two full DGDs (workers included) during the overlap window | None |
+
+Prefer blue/green whenever you can afford a second DGD's worth of capacity for the overlap window.
+
+### Blue/green: bring up a new DGD, verify it, then cut the route over
+
+This keeps the current (Go EPP) DGD serving all traffic, completely unmodified, until a second
+(Rust EPP) DGD has been verified end to end. The only traffic-affecting action in the whole
+procedure is a single `HTTPRoute` patch, and that patch can be reverted at any point before the old
+DGD is deleted.
+
+**Step 1 — Set variables.** Use separate names for the old and new DGDs; do not reuse `$DGD_NAME`
+from the setup steps above.
+
+```bash
+export NAMESPACE=my-model
+export OLD_DGD_NAME=qwen
+export NEW_DGD_NAME=qwen-rust-epp
+export OLD_DGD_MANIFEST=qwen-gateway.yaml         # already applied for $OLD_DGD_NAME
+export NEW_DGD_MANIFEST=qwen-gateway-rust-epp.yaml
+export ROUTE_NAME=qwen
+export MODEL_NAME=Qwen/Qwen3-0.6B
+export DYNAMO_VERSION=1.5.0                       # first release with the native Rust EPP
+```
+
+**Step 2 — Leave the old DGD and its `eppConfig` unchanged.** Do not edit `$OLD_DGD_MANIFEST` and
+do not touch its `eppConfig`. Confirm its current state before you start:
+
+```bash
+kubectl get dynamographdeployment "$OLD_DGD_NAME" -n "$NAMESPACE"
+kubectl get inferencepool "${OLD_DGD_NAME}-pool" -n "$NAMESPACE"
+
+kubectl get httproute "$ROUTE_NAME" -n "$NAMESPACE" \
+  -o jsonpath='{.spec.rules[0].backendRefs[0].name}{"\n"}'
+```
+
+The last command should print `${OLD_DGD_NAME}-pool`. It stays that way through Step 5.
+
+**Step 3 — Create the new, `eppConfig`-free DGD.** Copy the manifest and apply exactly three
+changes: a new name, no `eppConfig` on the EPP component, and a Rust EPP image tag.
+
+```bash
+cp "$OLD_DGD_MANIFEST" "$NEW_DGD_MANIFEST"
+```
+
+Edit `$NEW_DGD_MANIFEST`:
+
+- Set `metadata.name` to `$NEW_DGD_NAME`.
+- On the `type: epp` component, delete the `eppConfig` block entirely — an empty `eppConfig: {}`
+  is still legacy-Go-EPP configuration and fails validation, it does not select the Rust EPP.
+- Set that component's container image to `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_VERSION}`.
+
+```yaml
+spec:
+  components:
+  - name: Epp
+    type: epp
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.0
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          env:
+          - name: DYN_MODEL_NAME
+            value: Qwen/Qwen3-0.6B
+          - name: DYN_KV_CACHE_BLOCK_SIZE
+            value: "16"
+```
+
+Keep every other component (workers, sidecars) identical to `$OLD_DGD_NAME` so the two DGDs serve
+the same model the same way. This duplicates the worker fleet for the overlap window; only trim
+that duplication if you understand you are reducing verification coverage before cutover.
+
+**Step 4 — Apply the new DGD and wait for it, independently of the old one.**
+
+```bash
+kubectl apply -n "$NAMESPACE" -f "$NEW_DGD_MANIFEST"
+
+kubectl wait -n "$NAMESPACE" \
+  dynamographdeployment/$NEW_DGD_NAME \
+  --for=condition=Ready \
+  --timeout=1800s
+```
+
+**Step 5 — Verify the new DGD, EPP, and InferencePool before any traffic moves.**
+
+```bash
+kubectl get pods -n "$NAMESPACE" \
+  -l nvidia.com/dynamo-graph-deployment-name=$NEW_DGD_NAME,nvidia.com/dynamo-component-type=epp
+
+kubectl get inferencepool "${NEW_DGD_NAME}-pool" -n "$NAMESPACE"
+
+# confirm the route has not moved yet
+kubectl get httproute "$ROUTE_NAME" -n "$NAMESPACE" \
+  -o jsonpath='{.spec.rules[0].backendRefs[0].name}{"\n"}'
+```
+
+`$NEW_DGD_NAME` produces its own `${NEW_DGD_NAME}-pool` InferencePool — it does not replace or
+merge with `${OLD_DGD_NAME}-pool`. The route should still read `${OLD_DGD_NAME}-pool`. This is the
+last point at which the old DGD is unconditionally the only thing serving requests.
+
+**Step 6 — Patch `HTTPRoute.backendRefs` from `${OLD_DGD_NAME}-pool` to `${NEW_DGD_NAME}-pool`.**
+This one patch is the entire traffic-affecting step in this procedure:
+
+```bash
+kubectl patch httproute "$ROUTE_NAME" -n "$NAMESPACE" --type='json' -p='[
+  {"op":"replace","path":"/spec/rules/0/backendRefs/0/name","value":"'"${NEW_DGD_NAME}"'-pool"}
+]'
+
+kubectl get httproute "$ROUTE_NAME" -n "$NAMESPACE" \
+  -o jsonpath='{.spec.rules[0].backendRefs[0].name}{"\n"}'
+```
+
+Confirm the last command now prints `${NEW_DGD_NAME}-pool`.
+
+**Step 7 — Send a real request through the Gateway** and confirm the new EPP handled it (reuse the
+port-forward from [Verify the request path](#verify-the-request-path)):
+
+```bash
+curl --max-time 180 -sS http://localhost:8000/v1/chat/completions \
+  -H "X-Gateway-Model-Name: $MODEL_NAME" \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Explain KV-aware routing."}],
+    "max_tokens": 64
+  }' | jq .
+
+kubectl logs -n "$NAMESPACE" \
+  -l nvidia.com/dynamo-graph-deployment-name=$NEW_DGD_NAME,nvidia.com/dynamo-component-type=epp \
+  --tail=200
+```
+
+Do not proceed to Step 8 until this request succeeds and the logs confirm the new EPP performed
+endpoint selection.
+
+**Step 8 — Only now, scale down or delete the old DGD.** Scaling to zero keeps a fast rollback
+path; deleting does not.
+
+```bash
+# Recommended first: scale to zero, keep the DGD/Service/InferencePool around
+kubectl get dynamographdeployment "$OLD_DGD_NAME" -n "$NAMESPACE" -o json \
+  | jq '(.spec.components[] | select(has("replicas"))).replicas = 0' \
+  | kubectl apply -n "$NAMESPACE" -f -
+
+# Once you no longer need a rollback path:
+kubectl delete dynamographdeployment "$OLD_DGD_NAME" -n "$NAMESPACE"
+```
+
+#### Rollback (blue/green)
+
+- **Before `$OLD_DGD_NAME` is deleted:** rollback is the same patch, reversed. If you scaled it to
+  zero, scale it back up first, then:
+
+  ```bash
+  kubectl patch httproute "$ROUTE_NAME" -n "$NAMESPACE" --type='json' -p='[
+    {"op":"replace","path":"/spec/rules/0/backendRefs/0/name","value":"'"${OLD_DGD_NAME}"'-pool"}
+  ]'
+  ```
+
+- **After `$OLD_DGD_NAME` is deleted:** there is no pool left to patch back to. Rollback means
+  re-applying the retained old DGD manifest from source control, waiting for it to become Ready,
+  and only then repeating the route patch. Treat deletion as the point of no quick return.
+
+### In-place: clear `eppConfig` on the live DGD
+
+Use this only when you cannot afford a second DGD's worth of capacity. It reuses the same DGD,
+Service (`${DGD_NAME}-epp`), and InferencePool (`${DGD_NAME}-pool`) names, so there is no second
+pool to stage traffic on and no dual-serving window: clearing `eppConfig` immediately rolls the EPP
+Pod through a standard Kubernetes Deployment rolling update behind the existing Service.
+
+```bash
+export NAMESPACE=my-model
+export DGD_NAME=qwen
+export DGD_MANIFEST=qwen-gateway.yaml
+export DYNAMO_VERSION=1.5.0
+```
+
+1. Edit `$DGD_MANIFEST`: remove the `eppConfig` block from the `type: epp` component and set its
+   image to `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_VERSION}`.
+2. Apply it. This is the moment the EPP Pod rolls — there is no readiness gate before it, unlike
+   the blue/green path:
+
+   ```bash
+   kubectl apply -n "$NAMESPACE" -f "$DGD_MANIFEST"
+   kubectl rollout status deployment/${DGD_NAME}-epp -n "$NAMESPACE"
+   ```
+
+3. Send a request per [Verify the request path](#verify-the-request-path) and confirm the EPP logs
+   show the Rust EPP handling selection.
+
+**Rollback boundary is different from blue/green.** There is no second pool or route to patch.
+Rolling back means re-editing `$DGD_MANIFEST` to restore the previous `eppConfig` block and Go EPP
+image tag, then re-applying it — which rolls the same Pod a second time. Because old and new EPP
+Pods share one Service during the rollout, rolling back does not undo any requests that were
+already routed to a Pod running the new EPP.
 
 ## Troubleshoot the Route
 
