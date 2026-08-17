@@ -24,6 +24,7 @@ from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
+    override_server_args,
     require_reasoning_kwargs,
 )
 from dynamo.sglang.args import (
@@ -66,6 +67,20 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def test_override_server_args_supports_legacy_xpu_pin():
+    server_args = SimpleNamespace(enable_memory_saver=False)
+
+    override_server_args(
+        server_args,
+        "dynamo.test",
+        enable_memory_saver=True,
+        load_format="legacy-loader",
+    )
+
+    assert server_args.enable_memory_saver is True
+    assert server_args.load_format == "legacy-loader"
 
 
 @pytest.fixture(autouse=True)
