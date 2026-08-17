@@ -55,3 +55,17 @@
 # The v1.4.0 release entry lands with the current-release promotion; the tag
 # URL 404s from CI until v1.4.0 is cut. Remove after the tag exists.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.4\.0$
+
+# Discord invite link; connection refused from GitHub runners.
+^https://discord\.gg/
+
+# Google Docs and YouTube are rate-limited / time out from GitHub runners.
+^https://docs\.google\.com/document/
+^https://www\.youtube\.com/
+
+# Dell newsroom pages are slow and time out from GitHub runners.
+^https://www\.dell\.com/en-us/dt/corporate/newsroom/
+
+# xgrammar docs site intermittently times out from GitHub runners.
+^https://xgrammar\.mlc\.ai/
+
