@@ -100,21 +100,8 @@ For any preset-capable object in `recommend`, `preset` has these forms:
 preset: default
 ```
 
-```yaml
-# Replace the default preset list with complete atomic choices.
-router:
-  preset:
-    - policy: round_robin
-      prefill_load_model: {type: none}
-      overlap_score_credit: null
-      prefill_load_scale: null
-      temperature: null
-    - policy: kv_router
-      prefill_load_model: {type: none}
-      overlap_score_credit: 1.0
-      prefill_load_scale: 1.0
-      temperature: 0.0
-```
+To replace a default preset list, provide a list of complete atomic mappings under `preset`. The
+parallelism section below shows the complete syntax; Planner uses the same list shape.
 
 ```yaml
 # Disable preset search. These two spellings are equivalent.
@@ -140,7 +127,8 @@ Preset controls are recommendation-only. `simulation.resolved.yaml` and recommen
 contain only the expanded concrete knobs.
 
 If the optional `router` or `planner` section is absent, that component stays fixed at its concrete
-default. Its default preset sweep is activated only when the section is present in a recommendation.
+default. A present Router searches its direct knob ranges. A present Planner activates its default
+preset sweep.
 
 ### Parallelism Preset Behavior
 
@@ -671,16 +659,15 @@ Engine fields.
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `router.preset` | `default` in `recommend` | `{choices: [default, load_aware]}` | `-` | Built-in preset choices, complete mapping list, `false`, or `{}`. |
-| `router.policy` | `round_robin` | `{choices: [round_robin, kv_router]}` | `router` | `round_robin` or `kv_router`. |
-| `router.prefill_load_model.type` | `none` | `{choices: [none, aic]}` | `router` | `aic` is KV-router-only. |
-| `router.overlap_score_credit` | `1.0` | `{choices: [0.0, 0.5, 1.0]}` | `router` | Finite, nonnegative, and KV-router-only. |
-| `router.prefill_load_scale` | `1.0` | `{choices: [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]}` | `router` | Finite, nonnegative, and KV-router-only. |
-| `router.temperature` | `0.0` | `{choices: [0.0, 0.2, 0.5, 1.0]}` | `router` | Finite, nonnegative, and KV-router-only. |
+| `router.policy` | `round_robin` | `{choices: [round_robin, kv_router]}` | `-` | `round_robin` or `kv_router`. |
+| `router.prefill_load_model.type` | `none` | `{choices: [none, aic]}` | `-` | `aic` is KV-router-only. |
+| `router.overlap_score_credit` | `1.0` | `{choices: [0.0, 0.5, 1.0]}` | `-` | Finite, nonnegative, and KV-router-only. |
+| `router.prefill_load_scale` | `1.0` | `{choices: [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]}` | `-` | Finite, nonnegative, and KV-router-only. |
+| `router.temperature` | `0.0` | `{choices: [0.0, 0.2, 0.5, 1.0]}` | `-` | Finite, nonnegative, and KV-router-only. |
 
 `round_robin` requires `prefill_load_model.type: none` and has no KV-router-only knobs. The
-`kv_router` policy may use either load model. A complete Router preset uses `null` for KV-router-only
-knobs in a round-robin mapping. Production-only Router fields remain outside the version 1 contract.
+`kv_router` policy may use either load model. Production-only Router fields remain outside the version
+1 contract.
 
 ## Planner
 
@@ -793,7 +780,7 @@ A field accepts at most one domain form. Domains are allowed only where **Defaul
 
 - Engine mode, backend, `hardware: auto`, parallelism preset and leaves, scheduler, and supported
   backend-specific fields.
-- Router preset, policy, load model, and supported policy-specific fields.
+- Router policy, load model, and supported policy-specific fields.
 - Planner preset, policy, and supported Planner-specific fields.
 - Traffic load intensity and timing fields marked `-` in the table.
 
@@ -938,7 +925,6 @@ engine:
       scheduler: {max_batched_tokens: 8192, max_sequences: 256}
 
 router:
-  preset: false
   policy: {choices: [round_robin, kv_router]}
   prefill_load_model: {type: none}
 
