@@ -101,13 +101,15 @@ func TestMapResourceClaimTemplateToDGDRequests(t *testing.T) {
 		},
 	}
 	unrelated.Spec.Components[0].Multinode = nil
-	lws := matching.DeepCopy()
-	lws.Name = "lws"
-	lws.Annotations = map[string]string{commonconsts.KubeAnnotationEnableGrove: commonconsts.KubeLabelValueFalse}
+	component := matching.DeepCopy()
+	component.Name = "component"
+	component.Annotations = map[string]string{
+		commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderComponent,
+	}
 	scheme := runtime.NewScheme()
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client:        fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, unrelated, lws).Build(),
+		Client:        fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, unrelated, component).Build(),
 		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Grove: true}},
 	}
 
@@ -117,6 +119,64 @@ func TestMapResourceClaimTemplateToDGDRequests(t *testing.T) {
 	})
 
 	assert.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "default", Name: "matching"}}}, requests)
+}
+
+func TestShouldMapDRAEventToDGD(t *testing.T) {
+	tests := []struct {
+		name         string
+		groveEnabled bool
+		annotations  map[string]string
+		want         bool
+	}{
+		{
+			name:         "selected Grove provider receives DGD-level DRA events",
+			groveEnabled: true,
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderGrove,
+			},
+			want: true,
+		},
+		{
+			name:         "selected component provider relies on DCD-level DRA events",
+			groveEnabled: true,
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderComponent,
+			},
+		},
+		{
+			name:         "unselected legacy DGD remains eligible until adoption",
+			groveEnabled: true,
+			want:         true,
+		},
+		{
+			name: "disabled Grove provider receives no DGD-level DRA events",
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderGrove,
+			},
+		},
+		{
+			name:         "unsupported provider receives no DGD-level DRA events",
+			groveEnabled: true,
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationWorkloadProvider: "unknown",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build the provider state visible to the DRA event mapper")
+			reconciler := &DynamoGraphDeploymentReconciler{
+				RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Grove: tt.groveEnabled}},
+			}
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations},
+			}
+
+			t.Log("Decide whether the DGD-level Grove program consumes the DRA event")
+			assert.Equal(t, tt.want, reconciler.shouldMapDRAEventToDGD(dgd))
+		})
+	}
 }
 
 func TestMapDeviceClassToDCDRequests(t *testing.T) {

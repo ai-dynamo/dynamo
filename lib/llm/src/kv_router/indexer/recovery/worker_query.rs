@@ -16,12 +16,10 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::component::{Component, Instance};
 use rand::Rng;
-use tokio::{
-    sync::{Mutex, Semaphore, watch},
-    task::JoinHandle,
-};
+use tokio::sync::{Mutex, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
+use super::recovery_lane::{RECOVERY_CONCURRENCY_LIMIT, RecoveryLane};
 use super::target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget};
 use super::worker_query_state::{LiveEventAction, PendingDrainPlan, RankState, RecoveryKey};
 use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
@@ -32,7 +30,6 @@ use crate::discovery::{
 
 const RECOVERY_MAX_RETRIES: u32 = 8;
 const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
-const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
 pub(crate) const DEFAULT_RECOVERY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const KV_EVENT_TOPIC: &str = dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
@@ -48,11 +45,6 @@ struct SourceBinding {
     source: KvEventSource,
     source_id: KvSourceId,
     lifetime: CancellationToken,
-}
-
-struct RecoveryTask {
-    cancel: CancellationToken,
-    handle: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,8 +108,7 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     slots: DashMap<RecoveryKey, Arc<Mutex<SourceSlot>>>,
     /// Immutable publisher binding and rank slot lookup performed once per event envelope.
     publisher_bindings: DashMap<PublisherId, ActivePublisherBinding>,
-    recovery_tasks: DashMap<RecoveryKey, RecoveryTask>,
-    recovery_semaphore: Arc<Semaphore>,
+    recovery_lane: RecoveryLane<RecoveryKey>,
     recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
 }
@@ -158,8 +149,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
             publisher_bindings: DashMap::new(),
-            recovery_tasks: DashMap::new(),
-            recovery_semaphore,
+            recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token,
         });
@@ -198,8 +188,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
             publisher_bindings: DashMap::new(),
-            recovery_tasks: DashMap::new(),
-            recovery_semaphore,
+            recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token: CancellationToken::new(),
         })
@@ -264,6 +253,19 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .or_insert_with(|| Arc::new(Mutex::new(SourceSlot::default())))
             .clone();
         let mut slot = slot_handle.lock().await;
+
+        if matches!(status, KvSourceStatus::Suppressed) {
+            let deactivated = self.deactivate_locked(key, &mut slot).await;
+            let reset_source = slot.pending_reset.take().or(deactivated);
+            if let Some(source_id) = reset_source
+                && let Err(error) = self.reset_rank_or_fence(key, &source_id, &mut slot).await
+            {
+                tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear legacy KV state while suppressing its source; reset remains pending");
+                return;
+            }
+            slot.rank = RankState::default();
+            return;
+        }
 
         let selected = status.active_source().cloned();
         if let (Some(active), Some(selected)) = (&slot.active, &selected)
@@ -584,6 +586,18 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         };
         let binding = active.binding;
         let expected = binding.source.worker;
+        if matches!(
+            self.membership_rx.borrow().status(&expected),
+            Some(KvSourceStatus::Suppressed)
+        ) {
+            tracing::debug!(
+                publisher_id,
+                worker_id = expected.worker_id,
+                dp_rank = expected.dp_rank,
+                "Dropping legacy KV events for a rank owned by the state-agent source mode"
+            );
+            return;
+        }
         if let Some(event) = events.iter().find(|event| {
             event.worker_id != expected.worker_id || event.event.dp_rank != expected.dp_rank
         }) {
@@ -702,14 +716,10 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
     }
 
     async fn cancel_recovery(&self, key: RecoveryKey) {
-        if let Some((_, task)) = self.recovery_tasks.remove(&key) {
-            task.cancel.cancel();
-            task.handle.abort();
-            if let Err(error) = task.handle.await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, "KV recovery task failed while joining cancellation");
-            }
+        if let Some(error) = self.recovery_lane.cancel(key).await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, "KV recovery task failed while joining cancellation");
         }
     }
 
@@ -765,8 +775,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 client.target.complete_initial_recovery(key.0, key.1).await;
             }
         });
-        self.recovery_tasks
-            .insert(key, RecoveryTask { cancel, handle });
+        self.recovery_lane.insert(key, cancel, handle);
     }
 
     fn schedule_recovery_after_current(
@@ -999,8 +1008,8 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 // Limit only the in-flight RPC. The shared permit is deliberately released
                 // before retry backoff so unresponsive targets cannot starve unrelated pools.
                 let _permit = self
-                    .recovery_semaphore
-                    .clone()
+                    .recovery_lane
+                    .semaphore()
                     .acquire_owned()
                     .await
                     .context("recovery semaphore closed")?;
@@ -1491,6 +1500,45 @@ mod tests {
             .sync_membership_with_ready_sources(&HashSet::from([ready_source(&source)]))
             .await;
         assert!(client.publisher_bindings.contains_key(&source.publisher_id));
+    }
+
+    #[tokio::test]
+    async fn suppressing_an_active_legacy_source_resets_its_rank() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let worker = WorkerWithDpRank::new(42, 4);
+        let source = source_for(&kv_endpoint, worker, 100, None);
+        let initial = membership_view(
+            &serving,
+            &kv_endpoint,
+            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()))],
+        );
+        let (_tx, rx) = watch::channel(initial.clone());
+        let target = RecordingTarget::default();
+        let client = WorkerQueryClient::new_target_for_test(
+            target.clone(),
+            rx,
+            Arc::new(MockTransport::default()),
+        );
+        client.reconcile_view(initial).await;
+        client
+            .handle_live_batch(100, vec![store_for(worker, 1)])
+            .await;
+        target.calls.lock().await.clear();
+
+        client
+            .reconcile_view(membership_view(
+                &serving,
+                &kv_endpoint,
+                [(worker, KvSourceStatus::Suppressed)],
+            ))
+            .await;
+
+        assert_eq!(
+            target.calls.lock().await.as_slice(),
+            &[TargetCall::Reset(100, RecoveryResetReason::Lifecycle)]
+        );
+        assert!(!client.publisher_bindings.contains_key(&100));
     }
 
     #[tokio::test]
@@ -2809,6 +2857,7 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(kv_state_endpoint.clone()),
             sources: statuses,
             kv_event_publishing_enabled: HashMap::new(),
+            kv_event_source_mode: HashMap::new(),
             recovery_expected: HashMap::new(),
         }
     }
@@ -2969,6 +3018,7 @@ mod tests {
                 serving.clone(),
                 indexer,
                 membership_watch,
+                4,
                 "test-model".to_string(),
                 None,
                 crate::kv_router::KvEventSourceRequirement::Unknown,
