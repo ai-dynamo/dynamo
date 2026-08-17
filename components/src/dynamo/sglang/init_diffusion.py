@@ -141,19 +141,10 @@ async def init_image_diffusion(
     if not server_args.model_path:
         raise ValueError("--model is required for diffusion workers")
 
-    tp_size = getattr(server_args, "tp_size", 1)
-    dp_size = getattr(server_args, "dp_size", 1)
-    num_gpus = tp_size * dp_size
-
-    dist_timeout = getattr(server_args, "dist_timeout", None)
-
-    generator = DiffGenerator.from_pretrained(
-        model_path=server_args.model_path,
-        num_gpus=num_gpus,
-        tp_size=tp_size,
-        dp_size=dp_size,
-        dist_timeout=dist_timeout,
-    )
+    # server_args is a DiffusionWorkerArgs adapter; engine_args is the
+    # natively parsed sglang diffusion ServerArgs, handed over wholesale so
+    # every engine option the user set on the CLI takes effect.
+    generator = DiffGenerator.from_server_args(server_args.engine_args)
 
     fs_url = dynamo_args.media_output_fs_url
 
@@ -228,19 +219,10 @@ async def init_video_diffusion(
     if not server_args.model_path:
         raise ValueError("--model is required for video generation workers")
 
-    tp_size = getattr(server_args, "tp_size", 1)
-    dp_size = getattr(server_args, "dp_size", 1)
-    num_gpus = tp_size * dp_size
-
-    dist_timeout = getattr(server_args, "dist_timeout", None)
-
-    generator = DiffGenerator.from_pretrained(
-        model_path=server_args.model_path,
-        num_gpus=num_gpus,
-        tp_size=tp_size,
-        dp_size=dp_size,
-        dist_timeout=dist_timeout,
-    )
+    # server_args is a DiffusionWorkerArgs adapter; engine_args is the
+    # natively parsed sglang diffusion ServerArgs, handed over wholesale so
+    # every engine option the user set on the CLI takes effect.
+    generator = DiffGenerator.from_server_args(server_args.engine_args)
 
     fs_url = dynamo_args.media_output_fs_url
 
