@@ -969,6 +969,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            router::DYN_ENCODER_CUDA_TO_CPU_RATIO,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
