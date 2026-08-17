@@ -8,14 +8,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, Protocol
 
-from dynamo.common.external_encoder import ExternalEncoderResult
-from dynamo.experimental.workflow.nixl import NixlTensorRef
 from dynamo.experimental.workflow.runtime import StageContext, WorkflowExecutionError
 from dynamo.experimental.workflow.types import StageContract
 
 GENERATE_REQUEST_PORT = "request"
-GENERATE_FEATURES_PORT = "encoder_features"
-GENERATE_METADATA_PORT = "encoder_metadata"
 GENERATE_OUTPUT_PORT = "completion"
 
 
@@ -74,28 +70,7 @@ class GenerateEndpointInvoker:
         if not isinstance(request_value, Mapping):
             raise WorkflowExecutionError("Generate endpoint request must be an object")
         request = dict(request_value)
-        if "encoder_result" in request:
-            raise WorkflowExecutionError(
-                "Generate endpoint request already contains encoder_result"
-            )
         _validate_request_options(request)
-        for field_name in (
-            "multi_modal_data",
-            "multi_modal_uuids",
-            "mm_processor_kwargs",
-            "mm_routing_info",
-        ):
-            request.pop(field_name, None)
-
-        features = NixlTensorRef.from_dict(inputs[GENERATE_FEATURES_PORT]).to_dict()
-        metadata = inputs[GENERATE_METADATA_PORT]
-        try:
-            encoder_result = ExternalEncoderResult.from_parts(
-                features, metadata
-            ).to_dict()
-        except ValueError as error:
-            raise WorkflowExecutionError(str(error)) from error
-        request["encoder_result"] = encoder_result
 
         transport_context = None
         if context.request_context is not None:
@@ -122,14 +97,8 @@ class GenerateEndpointInvoker:
         contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
-        output_transfers: Mapping[str, tuple[str, ...]],
     ) -> Mapping[str, Any]:
         del contract
-        if output_transfers:
-            raise WorkflowExecutionError(
-                f"Generate endpoint stage {stage_id!r} cannot export tensor outputs"
-            )
-
         stream = await self.open(stage_id, inputs, context)
         try:
             completion = await collect_generation(stream, stage_id)

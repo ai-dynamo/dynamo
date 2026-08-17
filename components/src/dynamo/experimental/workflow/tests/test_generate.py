@@ -7,12 +7,9 @@ from typing import Any
 
 import pytest
 
-from dynamo.common.external_encoder import ExternalEncoderResult
 from dynamo.experimental.workflow import (
     DeploymentSpec,
     GenerateEndpointBinding,
-    NixlTensorRef,
-    RemoteBinding,
     StageContext,
     StageContract,
     ValueSpec,
@@ -32,57 +29,36 @@ pytestmark = [
 ]
 
 
-TENSOR = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
-ENCODER = StageContract(
-    id="encoder",
-    inputs={"request": ValueSpec(type="json")},
-    outputs={"encoder_features": TENSOR, "encoder_metadata": ValueSpec(type="json")},
-)
 GENERATOR = StageContract(
     id="generator",
-    inputs={
-        "request": ValueSpec(type="json"),
-        "encoder_features": TENSOR,
-        "encoder_metadata": ValueSpec(type="json"),
-    },
+    inputs={"request": ValueSpec(type="json")},
     outputs={"completion": ValueSpec(type="json")},
 )
 
 
 def _workflow(generator_contract: StageContract = GENERATOR) -> Workflow:
-    workflow = Workflow("external-encoder")
+    workflow = Workflow("request-generator")
     request = workflow.input("request", ValueSpec(type="json"))
-    encoder = workflow.stage("encoder", ENCODER, request=request)
     generator = workflow.stage(
         "generator",
         generator_contract,
         request=request,
-        encoder_features=encoder.encoder_features,
-        encoder_metadata=encoder.encoder_metadata,
     )
     workflow.output("completion", generator.completion)
     return workflow
 
 
-def test_generate_binding_compiles_with_remote_stage_protocols() -> None:
+def test_generate_binding_compiles_for_request_only_contract() -> None:
     plan = compile_workflow(
         _workflow(),
         DeploymentSpec(
-            {
-                "encoder": RemoteBinding(
-                    "workflows.encoder.generate", tensor_carrier="nixl"
-                ),
-                "generator": GenerateEndpointBinding("models.decoder.generate"),
-            }
+            {"generator": GenerateEndpointBinding("models.decoder.generate")}
         ),
     )
 
     assert plan.remote
-    assert {edge.transfer_id: edge.carrier for edge in plan.edges} == {
-        "encoder.request": "inline",
-        "generator.request": "inline",
-        "generator.encoder_features": "nixl",
-        "generator.encoder_metadata": "inline",
+    assert plan.bindings == {
+        "generator": GenerateEndpointBinding("models.decoder.generate")
     }
 
 
@@ -92,41 +68,14 @@ def test_generate_binding_rejects_a_non_generate_stage_contract() -> None:
         inputs=GENERATOR.inputs,
         outputs={"completion": ValueSpec(type="text")},
     )
+
     with pytest.raises(WorkflowValidationError, match="stage output"):
         compile_workflow(
             _workflow(incompatible),
             DeploymentSpec(
-                {
-                    "encoder": RemoteBinding(
-                        "workflows.encoder.generate", tensor_carrier="nixl"
-                    ),
-                    "generator": GenerateEndpointBinding("models.decoder.generate"),
-                }
+                {"generator": GenerateEndpointBinding("models.decoder.generate")}
             ),
         )
-
-
-def _reference() -> NixlTensorRef:
-    return NixlTensorRef(
-        transfer_id="generator.encoder_features",
-        lease_id="lease-1",
-        shape=(2, 4),
-        dtype="float32",
-        device="cuda:0",
-        rdma_metadata={"opaque": "read"},
-    )
-
-
-def test_external_encoder_result_round_trips_strictly() -> None:
-    value = ExternalEncoderResult.from_parts(
-        _reference().to_dict(), {"row_splits": [0, 2], "image_token_id": 151655}
-    )
-
-    assert ExternalEncoderResult.from_dict(value.to_dict()) == value
-    bad = value.to_dict()
-    bad["row_splits"] = [0, 1]
-    with pytest.raises(ValueError, match="packed feature rows"):
-        ExternalEncoderResult.from_dict(bad)
 
 
 class _Client:
@@ -172,9 +121,9 @@ class _Runtime:
         return _Endpoint(self._clients[endpoint_id])
 
 
-def _context(request_context=None) -> StageContext:
+def _context(request_context: Any = None) -> StageContext:
     return StageContext(
-        workflow_name="external-encoder",
+        workflow_name="request-generator",
         stage_id="generator",
         attempt_id="request-1",
         invocation_id="request-1:generator",
@@ -201,31 +150,30 @@ class _ParentContext:
         return self.child
 
 
-async def test_generate_invoker_opens_stream_and_collector_folds_deltas() -> None:
+def _request() -> dict[str, Any]:
+    return {
+        "token_ids": [1, 2],
+        "sampling_options": {"n": 1},
+        "output_options": {},
+        "multi_modal_data": {"image_url": [{"Url": "data:image/jpeg;base64,AA=="}]},
+        "multi_modal_uuids": ["image-1"],
+        "mm_processor_kwargs": {"max_pixels": 1024},
+        "mm_routing_info": {"mm_hashes": ["hash-1"]},
+    }
+
+
+async def test_generate_invoker_forwards_multimodal_request_unchanged() -> None:
     transport = _Client(
         [
             {"token_ids": [7], "index": 0},
             {"token_ids": [8, 9], "index": 0, "finish_reason": "stop"},
         ]
     )
+    request = _request()
+
     stream = await GenerateEndpointInvoker(transport).open(
         "generator",
-        {
-            "request": {
-                "token_ids": [1, 2],
-                "sampling_options": {"n": 1},
-                "output_options": {},
-                "multi_modal_data": {"image_url": [{"Url": "ignored"}]},
-                "multi_modal_uuids": ["ignored-uuid"],
-                "mm_processor_kwargs": {"max_pixels": 1024},
-                "mm_routing_info": {"mm_hashes": ["hash"]},
-            },
-            "encoder_features": _reference().to_dict(),
-            "encoder_metadata": {
-                "row_splits": [0, 2],
-                "image_token_id": 151655,
-            },
-        },
+        {"request": request},
         _context(),
     )
     completion = await collect_generation(stream, "generator")
@@ -236,18 +184,10 @@ async def test_generate_invoker_opens_stream_and_collector_folds_deltas() -> Non
         "index": 0,
         "finish_reason": "stop",
     }
-    assert transport.request is not None
-    encoder_result = ExternalEncoderResult.from_dict(
-        transport.request["encoder_result"]
-    )
-    assert encoder_result.features == _reference().to_dict()
-    assert "multi_modal_data" not in transport.request
-    assert "multi_modal_uuids" not in transport.request
-    assert "mm_processor_kwargs" not in transport.request
-    assert "mm_routing_info" not in transport.request
+    assert transport.request == request
 
 
-async def test_generate_client_accepts_null_n_as_the_frontend_default() -> None:
+async def test_generate_invoker_accepts_null_n_as_the_frontend_default() -> None:
     transport = _Client([{"token_ids": [42], "index": 0, "finish_reason": "stop"}])
 
     result = await GenerateEndpointInvoker(transport).run(
@@ -258,15 +198,9 @@ async def test_generate_client_accepts_null_n_as_the_frontend_default() -> None:
                 "token_ids": [1, 2],
                 "sampling_options": {"n": None},
                 "output_options": {},
-            },
-            "encoder_features": _reference().to_dict(),
-            "encoder_metadata": {
-                "row_splits": [0, 2],
-                "image_token_id": 151655,
-            },
+            }
         },
         _context(),
-        {},
     )
 
     assert result["completion"]["token_ids"] == [42]
@@ -285,16 +219,8 @@ async def test_generate_invoker_cancels_owned_stream_on_collection_error() -> No
         await GenerateEndpointInvoker(transport).run(
             "generator",
             GENERATOR,
-            {
-                "request": {"token_ids": [1], "output_options": {}},
-                "encoder_features": _reference().to_dict(),
-                "encoder_metadata": {
-                    "row_splits": [0, 2],
-                    "image_token_id": 151655,
-                },
-            },
+            {"request": {"token_ids": [1], "output_options": {}}},
             _context(parent),
-            {},
         )
 
     assert parent.child.stopped
@@ -305,12 +231,7 @@ async def test_dispatcher_binds_generate_protocol_for_stock_endpoint() -> None:
     plan = compile_workflow(
         _workflow(),
         DeploymentSpec(
-            {
-                "encoder": RemoteBinding(
-                    "workflows.encoder.generate", tensor_carrier="nixl"
-                ),
-                "generator": GenerateEndpointBinding("models.decoder.generate"),
-            }
+            {"generator": GenerateEndpointBinding("models.decoder.generate")}
         ),
     )
     generator_client = _Client(
@@ -318,31 +239,19 @@ async def test_dispatcher_binds_generate_protocol_for_stock_endpoint() -> None:
     )
     dispatcher = await StageDispatcher.bind(
         plan,
-        runtime=_Runtime(
-            {
-                "workflows.encoder.generate": _Client([]),
-                "models.decoder.generate": generator_client,
-            }
-        ),
+        runtime=_Runtime({"models.decoder.generate": generator_client}),
     )
+    request = _request()
 
     result = await dispatcher.call(
         "generator",
         GENERATOR,
-        {
-            "request": {"token_ids": [1], "output_options": {}},
-            "encoder_features": _reference().to_dict(),
-            "encoder_metadata": {
-                "row_splits": [0, 2],
-                "image_token_id": 151655,
-            },
-        },
+        {"request": request},
         _context(),
     )
 
     assert result["completion"]["token_ids"] == [42]
-    assert generator_client.request is not None
-    assert "encoder_result" in generator_client.request
+    assert generator_client.request == request
 
 
 @pytest.mark.parametrize(
@@ -352,21 +261,13 @@ async def test_dispatcher_binds_generate_protocol_for_stock_endpoint() -> None:
         ({"output_options": {"logprobs": 0}}, "does not support logprobs"),
     ],
 )
-async def test_generate_client_rejects_unsupported_frontend_options(
+async def test_generate_invoker_rejects_unsupported_frontend_options(
     request_value: Mapping[str, Any], message: str
 ) -> None:
     with pytest.raises(WorkflowExecutionError, match=message):
         await GenerateEndpointInvoker(_Client([])).run(
             "generator",
             GENERATOR,
-            {
-                "request": request_value,
-                "encoder_features": _reference().to_dict(),
-                "encoder_metadata": {
-                    "row_splits": [0, 2],
-                    "image_token_id": 151655,
-                },
-            },
+            {"request": request_value},
             _context(),
-            {},
         )
