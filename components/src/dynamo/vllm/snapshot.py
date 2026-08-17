@@ -6,6 +6,9 @@ import logging
 import os
 from collections.abc import Callable
 
+from vllm import SamplingParams
+from vllm.inputs import TokensPrompt
+
 from dynamo.common.snapshot.lifecycle import (
     EngineSnapshotController,
     SnapshotConfig,
@@ -13,6 +16,7 @@ from dynamo.common.snapshot.lifecycle import (
 )
 
 from .args import Config
+from .constants import DisaggregationMode
 from .handlers import VllmEnginePauseController
 from .worker_factory import EngineSetupResult
 
@@ -39,6 +43,32 @@ async def prepare_snapshot_engine(
     config.engine_args.enable_sleep_mode = True
 
     engine = setup_vllm_engine(config)
+    if (
+        config.disaggregation_mode == DisaggregationMode.AGGREGATED
+        and not config.realtime
+        and not config.enable_multimodal
+        and not config.route_to_encoder
+        and engine[1].model_config.runner_type == "generate"
+    ):
+        logger.info("Running vLLM snapshot warmup generation")
+        prompt = TokensPrompt(prompt_token_ids=[1, 2, 3, 4])
+        sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=16,
+            ignore_eos=True,
+        )
+        async for _ in engine[0].generate(
+            prompt,
+            sampling_params,
+            request_id="dynamo-snapshot-warmup",
+        ):
+            pass
+        logger.info("vLLM snapshot warmup generation completed")
+    else:
+        logger.info(
+            "Skipping vLLM snapshot warmup: only ordinary aggregated "
+            "generation workers are supported"
+        )
     gc.collect()
     snapshot_controller = EngineSnapshotController(
         engine=engine,
