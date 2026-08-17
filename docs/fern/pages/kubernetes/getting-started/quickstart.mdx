@@ -67,12 +67,10 @@ kubectl get resourceslices
   </Step>
 
   <Step title="Install Dynamo">
-    Install the Dynamo platform chart in a dedicated namespace. Helm creates the namespace for you:
+    Use the `DYNAMO_VERSION` value from the selector above to install the Dynamo platform chart in a dedicated namespace. Helm creates the namespace for you:
 
 ```bash
 export NAMESPACE=dynamo-system
-export DYNAMO_VERSION=1.3.0
-export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:${DYNAMO_VERSION}"
 
 helm upgrade --install dynamo-platform \
   "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${DYNAMO_VERSION}.tgz" \
@@ -84,7 +82,7 @@ helm upgrade --install dynamo-platform \
 kubectl get pods --namespace "$NAMESPACE"
 ```
 
-    For this DGDR quickstart, `DYNAMO_IMAGE` points to the Dynamo planner image. The planner profiles the model and creates the worker deployment; you do not need to choose a separate runtime image for the NVIDIA GPU path.
+    For the NVIDIA GPU DGDR path, `DYNAMO_IMAGE` points to the Dynamo planner image from the selector above. The planner profiles the model and creates the worker deployment; you do not need to choose a separate runtime image for that path.
   </Step>
 
   <Step title="Create the model access secret">
@@ -117,6 +115,7 @@ spec:
   model: Qwen/Qwen3-0.6B
   backend: auto
   image: ${DYNAMO_IMAGE}
+  runtimeVersionOverride: "${DYNAMO_RUNTIME_VERSION:-${DYNAMO_VERSION}}"
 EOF
 ```
       </Tab>

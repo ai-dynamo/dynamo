@@ -15,6 +15,7 @@ use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional
 use crate::common::utils::prefill_handoff_transfer_timing;
 use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::SglangDestinationReservation;
+#[cfg(test)]
 use crate::replay::TraceCollector;
 use crate::replay::offline::evidence::record_pressure_readmission;
 
@@ -29,8 +30,8 @@ use crate::scheduler::{
     ActiveHandoffRequests, AdmissionInvariant, AdmissionStage, CapturedRouterEventBuffer,
     DestinationHolds, EnginePassResult, MockerMetrics, PendingDestinations, RemovedSource,
     RouterEventVisibility, SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult,
-    SchedulerLifecycleEvent, SourceCompletion, SourceHolds, accept_length_sample,
-    build_fpm_snapshot, capture_router_event_sink,
+    SchedulerLifecycleEvent, SourceCompletion, SourceHolds, build_fpm_snapshot,
+    capture_router_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -378,10 +379,7 @@ impl SglangCore {
     }
 
     fn build_request(&self, request: DirectRequest) -> SglangRequest {
-        let max_output_tokens = request
-            .output_token_ids
-            .as_ref()
-            .map_or(request.max_output_tokens, Vec::len);
+        let max_output_tokens = request.effective_max_output_tokens();
         let output_storage_hint = self.config.output_storage_hint(
             request.tokens.len(),
             max_output_tokens,
@@ -603,44 +601,25 @@ impl SglangCore {
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> EnginePassResult {
-        self.try_execute_pass(collector, now_ms)
-            .expect("SGLang scheduler pass failed")
+        let pass = self
+            .try_execute_pass(now_ms)
+            .expect("SGLang scheduler pass failed");
+        collector.on_scheduler_pass(&pass, now_ms, Some(pass.token_completion_ms));
+        pass
     }
 
-    pub(crate) fn try_execute_pass(
-        &mut self,
-        collector: &mut TraceCollector,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
-        self.try_execute_pass_internal(Some(collector), now_ms)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
-        self.try_execute_hidden_pass(now_ms)
-            .expect("SGLang hidden scheduler pass failed")
-    }
-
-    pub(crate) fn try_execute_hidden_pass(
-        &mut self,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
-        self.try_execute_pass_internal(None, now_ms)
+    pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
+        self.try_execute_pass_internal(now_ms)
     }
 
     #[cfg(test)]
-    pub(super) fn execute_pass_internal(
-        &mut self,
-        collector: Option<&mut TraceCollector>,
-        now_ms: f64,
-    ) -> EnginePassResult {
-        self.try_execute_pass_internal(collector, now_ms)
+    pub(super) fn execute_pass_internal(&mut self, now_ms: f64) -> EnginePassResult {
+        self.try_execute_pass_internal(now_ms)
             .expect("SGLang scheduler pass failed")
     }
 
     pub(super) fn try_execute_pass_internal(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
         now_ms: f64,
     ) -> anyhow::Result<EnginePassResult> {
         let mut admissions = self.promote_prebuilt_ready();
@@ -668,9 +647,6 @@ impl SglangCore {
         admissions.append(&mut admit.admissions);
         for admission in &admissions {
             record_pressure_readmission(admission.uuid, now_ms);
-            if let Some(collector) = collector.as_deref_mut() {
-                collector.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
-            }
         }
 
         // Capture per-request prefill FPM data before dispersing can_run.
@@ -711,14 +687,6 @@ impl SglangCore {
 
         for request in decode.completed_requests.drain(..) {
             self.complete_source(request);
-        }
-
-        if let Some(collector) = collector {
-            for signal in &decode.output_signals {
-                if signal.token_id.is_some() {
-                    collector.on_token(signal.uuid, decode.end_ms);
-                }
-            }
         }
 
         for req in decode.requests.drain(..).rev() {
@@ -792,11 +760,16 @@ impl SglangCore {
             (decode.end_ms - now_ms) / 1000.0,
         );
 
-        let (accept_length_output_tokens, accept_length_decode_forwards) =
-            accept_length_sample(&decode.output_signals);
+        let accept_length = decode.accept_length;
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            (accept_length.output_tokens, accept_length.decode_forwards),
+            crate::scheduler::accept_length_sample(&decode.output_signals)
+        );
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
         Ok(EnginePassResult {
             end_ms: decode.end_ms,
+            token_completion_ms: decode.end_ms,
             completed_requests: decode
                 .output_signals
                 .iter()
@@ -814,8 +787,8 @@ impl SglangCore {
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
             fpm: Some(fpm),
-            accept_length_output_tokens,
-            accept_length_decode_forwards,
+            accept_length_output_tokens: accept_length.output_tokens,
+            accept_length_decode_forwards: accept_length.decode_forwards,
         })
     }
 

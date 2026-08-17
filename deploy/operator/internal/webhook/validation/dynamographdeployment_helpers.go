@@ -136,6 +136,27 @@ func grovePathwayForDynamoGraphDeployment(
 	groveEnabled bool,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (bool, string) {
+	// A durable selection takes precedence over current capabilities and the
+	// original routing annotation. Availability is reported by the selected
+	// workload program, while admission retains that program's API semantics.
+	if provider, exists := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]; exists {
+		switch provider {
+		case consts.WorkloadProviderGrove:
+			return true, ""
+		case consts.WorkloadProviderComponent:
+			return false, fmt.Sprintf(
+				"requires the Grove pathway, but workload provider %q is selected",
+				provider,
+			)
+		default:
+			return false, fmt.Sprintf(
+				"requires the Grove pathway, but annotation %q has unsupported value %q",
+				consts.KubeAnnotationWorkloadProvider,
+				provider,
+			)
+		}
+	}
+
 	if !groveEnabled {
 		return false, "requires the Grove pathway, but Grove is disabled in the operator configuration"
 	}
@@ -160,7 +181,7 @@ func dgdComponentResourceNameLength(
 	combinedLength := len(pcsName) + len(strings.ToLower(componentName))
 	detail := "PCS name + component name"
 
-	if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
+	if component.UsesPCSG() {
 		longestPodCliqueName := dynamo.LongestPodCliqueNameForDGDComponent(componentName, component)
 		combinedLength += len(longestPodCliqueName)
 		detail = fmt.Sprintf("PCS name + PCSG name + longest PodClique name %q", longestPodCliqueName)

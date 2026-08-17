@@ -9,7 +9,6 @@ use crate::common::handoff::{
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
-use crate::replay::TraceCollector;
 use crate::scheduler::{
     EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandEffects,
     SchedulerCommandResult, SchedulerLifecycleEvent,
@@ -33,7 +32,7 @@ pub(crate) struct AggRequestState {
 impl AggRequestState {
     pub(crate) fn new_queued(request: ReplayRequestPayload) -> Self {
         let input_tokens = request.input_length();
-        let output_tokens = request.metadata().max_output_tokens;
+        let output_tokens = request.metadata().effective_max_output_tokens();
         Self {
             request: Some(request),
             phase: AggRequestPhase::QueuedAtRouter,
@@ -183,9 +182,9 @@ impl DisaggRequestState {
     }
 
     pub(crate) fn build_prefill_request(&mut self) -> Result<DirectRequest> {
-        let mut request = self.materialize_original_request()?.clone();
-        request.max_output_tokens = request.max_output_tokens.min(1);
-        Ok(request)
+        Ok(self
+            .materialize_original_request()?
+            .clone_with_output_limit(1))
     }
 
     pub(crate) fn take_replay_hashes(&mut self) -> Option<ReplayRequestHashes> {
@@ -432,25 +431,14 @@ impl OfflineWorkerState {
             .expect("offline worker completed more requests than it owned");
     }
 
-    pub(crate) fn try_execute_pass(
-        &mut self,
-        collector: &mut TraceCollector,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
-        self.core.try_execute_pass(collector, now_ms)
+    pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
+        self.core.try_execute_pass(now_ms)
     }
 
     #[cfg(test)]
-    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
-        self.try_execute_hidden_pass(now_ms)
-            .expect("offline worker hidden scheduler pass failed")
-    }
-
-    pub(crate) fn try_execute_hidden_pass(
-        &mut self,
-        now_ms: f64,
-    ) -> anyhow::Result<EnginePassResult> {
-        self.core.try_execute_hidden_pass(now_ms)
+    pub(crate) fn execute_pass_unrecorded(&mut self, now_ms: f64) -> EnginePassResult {
+        self.try_execute_pass(now_ms)
+            .expect("offline worker scheduler pass failed")
     }
 
     #[cfg(feature = "kvbm-offload")]
@@ -582,7 +570,7 @@ mod tests {
             let mut now_ms = 0.0;
             let mut events = Vec::new();
             while !worker.core.is_empty() {
-                let pass = worker.execute_hidden_pass(now_ms);
+                let pass = worker.execute_pass_unrecorded(now_ms);
                 now_ms = pass.end_ms;
                 worker.mark_completed(pass.completed_requests);
                 events.extend(pass.kv_events);
@@ -639,6 +627,8 @@ mod tests {
         };
         let mut driver = WorkloadDriver::new_trace(trace, 64).unwrap();
         let compact = driver.pop_ready_compact(0.0, 1).pop().unwrap();
+        let original_output_token_ids =
+            compact.request.metadata().output_token_ids.clone().unwrap();
         let mut state = DisaggRequestState::new(
             compact.request,
             0.0,
@@ -654,6 +644,22 @@ mod tests {
         let request = state.build_prefill_request().unwrap();
 
         assert_eq!(request.max_output_tokens, 1);
+        assert_eq!(
+            request.output_token_ids.as_deref(),
+            Some(&original_output_token_ids[..1]),
+            "prefill request must retain the original first planned output token"
+        );
+        let prefill_plan = request.output_token_ids.as_ref().unwrap();
+        assert_eq!(prefill_plan.capacity(), prefill_plan.len());
+        assert_eq!(
+            state
+                .original_request()
+                .unwrap()
+                .output_token_ids
+                .as_deref(),
+            Some(original_output_token_ids.as_slice()),
+            "decode must retain the complete original output plan"
+        );
         assert!(request.tokens[..64].iter().all(|token| *token == 21));
         assert!(request.tokens[64..].iter().all(|token| *token == 22));
         assert!(state.materialized_tokens().unwrap().is_some());
@@ -711,7 +717,7 @@ mod tests {
             assert_eq!(prefill.in_flight(), 1);
             let mut now_ms = 0.0;
             while !prefill.core.is_empty() {
-                let pass = prefill.execute_hidden_pass(now_ms);
+                let pass = prefill.execute_pass_unrecorded(now_ms);
                 now_ms = pass.end_ms;
                 prefill.mark_completed(pass.completed_requests);
             }
@@ -844,7 +850,7 @@ mod tests {
             assert_eq!(completed_decode.in_flight(), 1);
             let mut now_ms = 0.0;
             while !completed_decode.core.is_empty() {
-                let pass = completed_decode.execute_hidden_pass(now_ms);
+                let pass = completed_decode.execute_pass_unrecorded(now_ms);
                 now_ms = pass.end_ms.max(now_ms + 1.0);
                 completed_decode.mark_completed(pass.completed_requests);
             }
@@ -885,7 +891,7 @@ mod tests {
                     .any(|event| matches!(event.event.data, KvCacheEventData::Stored(_)))
             );
 
-            let pass = decode.execute_hidden_pass(0.0);
+            let pass = decode.execute_pass_unrecorded(0.0);
             assert!(
                 pass.kv_events
                     .iter()

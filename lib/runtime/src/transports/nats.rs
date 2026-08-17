@@ -406,7 +406,7 @@ impl Default for NatsAuth {
 }
 
 /// Extract NATS bucket and key from a nats URL of the form:
-/// nats://host[:port]/bucket/key
+/// `nats://host[:port]/bucket/key`
 pub fn url_to_bucket_and_key(url: &Url) -> anyhow::Result<(String, String)> {
     let Some(mut path_segments) = url.path_segments() else {
         anyhow::bail!("No path in NATS URL: {url}");

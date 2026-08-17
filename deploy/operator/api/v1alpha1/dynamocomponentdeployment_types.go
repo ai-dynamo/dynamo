@@ -73,7 +73,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
 	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
 	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
-	// It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+	// It does not change the image. Setting or changing an override that resolves to version 1.5.0 or
+	// later may trigger a rollout. Keep it consistent with the image's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
@@ -153,8 +154,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
-	// When enabled, replicas are managed via DGDSA and external autoscalers can scale
-	// the service using the Scale subresource. When disabled, replicas can be modified directly.
+	// When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
+	// via the Scale subresource; when disabled, replicas are set directly. Opt in with
+	// `scalingAdapter: {enabled: true}` -- a bare `scalingAdapter: {}` is disabled because
+	// `enabled` defaults to false.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
@@ -266,7 +269,6 @@ type DynamoComponentDeploymentStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:storageversion
 // +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoComponentDeployment is deprecated; use nvidia.com/v1beta1 DynamoComponentDeployment"
 // +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
@@ -291,10 +293,6 @@ type DynamoComponentDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoComponentDeployment `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {

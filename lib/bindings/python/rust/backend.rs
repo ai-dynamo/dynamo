@@ -134,7 +134,7 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
 // EngineConfig — mirror of `dynamo_backend_common::EngineConfig`.
 //
 // Engines may return either this pyclass or any object with the canonical
-// attributes `model` / `served_model_name` / `runtime_data` / `llm`; the
+// attributes `model` / `served_model_name` / `model_aliases` / `runtime_data` / `llm`; the
 // bridge's `start()` extraction accepts both. Note `llm` is a nested record
 // (LlmRegistration), NOT flat fields — an object exposing flat `context_length`
 // etc. (the pre-split shape) registers with `llm=None`, i.e. no KV/DP/bootstrap
@@ -236,12 +236,13 @@ pub struct EngineConfig {
 #[pymethods]
 impl EngineConfig {
     #[new]
-    #[pyo3(signature = (model, served_model_name = None, runtime_data = None, llm = None))]
+    #[pyo3(signature = (model, served_model_name = None, runtime_data = None, llm = None, model_aliases = None))]
     fn new(
         model: String,
         served_model_name: Option<String>,
         runtime_data: Option<&Bound<'_, PyDict>>,
         llm: Option<LlmRegistration>,
+        model_aliases: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let runtime_data = runtime_data
             .map(|dict| depythonize::<HashMap<String, serde_json::Value>>(dict))
@@ -253,6 +254,7 @@ impl EngineConfig {
             inner: RsEngineConfig {
                 model,
                 served_model_name,
+                model_aliases: model_aliases.unwrap_or_default(),
                 runtime_data,
                 llm: llm.map(|l| l.inner),
             },
@@ -266,6 +268,10 @@ impl EngineConfig {
     #[getter]
     fn served_model_name(&self) -> Option<&str> {
         self.inner.served_model_name.as_deref()
+    }
+    #[getter]
+    fn model_aliases(&self) -> &[String] {
+        &self.inner.model_aliases
     }
     #[getter]
     fn llm(&self) -> Option<LlmRegistration> {
@@ -484,8 +490,8 @@ pub struct Worker {
     /// Single-shot guard — flipped to `true` on the first `run()` call.
     /// The Rust `Worker` underneath consumes `self`; calling `run()`
     /// twice from Python would build a second `RsWorker` and call
-    /// `engine.start()` again, which most engines (vLLM, sglang, trtllm)
-    /// don't tolerate. We surface a clear `RuntimeError` instead.
+    /// `engine.start()` again, which engine implementations generally do not
+    /// tolerate. We surface a clear `RuntimeError` instead.
     consumed: AtomicBool,
     /// `true` when `engine` is a `DiffusionEngine` (raw media pipeline).
     /// Set by the Python `Worker` shim via `isinstance`. Selects the raw
@@ -862,6 +868,7 @@ impl PyEngineCore {
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
                 served_model_name: opt_attr::<String>(bound, "served_model_name")?,
+                model_aliases: opt_attr::<Vec<String>>(bound, "model_aliases")?.unwrap_or_default(),
                 runtime_data: match bound.getattr("runtime_data") {
                     Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
                     Ok(_) => HashMap::new(),

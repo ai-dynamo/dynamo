@@ -43,7 +43,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -104,7 +104,7 @@ func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 	}
 
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -231,9 +231,9 @@ func TestDGDCheckpointsReconciler_CreateDoesNotAdoptLegacyIdentityTemplate(t *te
 			WithObjects(existing, dgd, template).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{GMSSnapshot: true},
+			Gate: features.Gates{},
 		},
 	}
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -292,9 +292,9 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 			WithObjects(deviceClass).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{GMSSnapshot: true},
+			Gate: features.Gates{},
 		},
 	}
 
@@ -420,7 +420,7 @@ func TestDGDCheckpointsReconciler_SyncGMSResourceClaimTemplateUsesTemporaryDGDOw
 			WithScheme(testScheme).
 			WithObjects(dgd, deviceClass).
 			Build(),
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 	checkpointReconciler := newTestDGDCheckpointsReconciler(reconciler)
 
@@ -525,7 +525,7 @@ func TestDGDCheckpointsReconciler_CreateUsesTargetContainer(t *testing.T) {
 		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
 		Config: &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{GMSSnapshot: true},
+			Gate: features.Gates{},
 		},
 	}
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -960,7 +960,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 			WithStatusSubresource(referenced).
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
@@ -1057,7 +1057,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 			WithStatusSubresource(referenced).
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
@@ -1147,9 +1147,9 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 			WithStatusSubresource(referenced).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{Checkpoint: true, GMSSnapshot: true},
+			Gate: features.Gates{Checkpoint: true},
 		},
 	}
 
@@ -1228,7 +1228,7 @@ func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testi
 			WithStatusSubresource(referenced).
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
@@ -1314,7 +1314,7 @@ func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
 				},
 			},
 		},
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
@@ -1404,7 +1404,7 @@ func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *
 			WithStatusSubresource(existing).
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 

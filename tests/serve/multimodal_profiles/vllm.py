@@ -6,6 +6,7 @@ import os
 import pytest
 
 from dynamo.common.multimodal.nvdec_decoder import nvdec_available
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED
 from tests.utils.multimodal import (
@@ -132,7 +133,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # installs_extra_dependencies: this VP9 case therefore proves the routing
                 # works *given* a decoder, not that VP9 decodes in a shipped
                 # image -- it does not, until the opt-in decoders land.
-                env={"DYN_TEST_ONLY_PIP_INSTALL": "opencv-python-headless"},
+                env={
+                    # The validated, version-bounded spec -- a floating install
+                    # here would test a decoder version no deployment gets.
+                    "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
+                        "opencv-python-headless"
+                    ],
+                },
                 tests=[MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED))],
             ),
             # NVDEC hardware-decode path: H.264/H.265 video input decoded on the
@@ -247,7 +254,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_714_881_000,
                 # See agg_video: install the opencv backend decoder for this test
                 # only, so this is likewise a installs_extra_dependencies case.
-                env={"DYN_TEST_ONLY_PIP_INSTALL": "opencv-python-headless"},
+                env={
+                    # The validated, version-bounded spec -- a floating install
+                    # here would test a decoder version no deployment gets.
+                    "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
+                        "opencv-python-headless"
+                    ],
+                },
                 tests=[MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED))],
             ),
             "p_d": TopologyConfig(
@@ -480,7 +493,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                profiled_vram_gib=19.2,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially
+                # if the skip is removed.
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-1.5 (placeholder-template `<image>` path).
@@ -535,11 +550,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.nightly],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                # Profiled with `tests/utils/profile_pytest.py --gpus 0,1` on
-                # 2x RTX 6000 Ada (48 GB each). Encoder GPU peaked ~13.5 GB
-                # (static, full model fp16 load); PD GPU peaked ~19 GB
-                # (weights + KV @ 4 GB cap + activations). 2x safety on KV.
-                profiled_vram_gib=19.0,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially.
                 requested_vllm_kv_cache_bytes=4_308_848_000,
                 tests=[
                     MmCase(
@@ -606,7 +618,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                profiled_vram_gib=19.2,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially
+                # if the skip is removed.
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-NeXT (anyres multi-crop processor).

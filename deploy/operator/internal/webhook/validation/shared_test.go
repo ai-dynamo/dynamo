@@ -359,9 +359,10 @@ func TestValidateExperimentalSpecDoesNotExposePodTemplate(t *testing.T) {
 	errs := validation.validateExperimentalSpec(
 		&nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: gms},
 		fldPath,
-		nvidiacomv1beta1.ComponentTypeWorker,
-		corev1.ResourceRequirements{},
-		nil,
+		experimentalSpecValidationOptions{
+			componentType: nvidiacomv1beta1.ComponentTypeWorker,
+			grovePathway:  true,
+		},
 	)
 	assertFieldPaths(t, errs, []string{"spec.components[0].experimental.gpuMemoryService"})
 	if errs[0].BadValue != "" {

@@ -65,6 +65,7 @@
 
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/kv-router/                                                              @ai-dynamo/dynamo-router-codeowners
+/lib/router-plugins/                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/tests/                                                        @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/indexer/                                                  @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/recovery/                                                 @ai-dynamo/dynamo-router-codeowners
@@ -74,7 +75,9 @@
 /lib/kv-router/src/scheduling/                                               @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/kv_dc_relay/                                          @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/                                        @ai-dynamo/dynamo-router-codeowners
+/components/src/dynamo/kv_state_agent/                                       @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/squeeze_evolve/                                       @ai-dynamo/dynamo-router-codeowners
+/examples/router/custom-policy-example/                                      @ai-dynamo/dynamo-router-codeowners
 /examples/router/policy-class-queues.yaml                                    @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/tests/                                  @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/thunderagent_router/                                  @ai-dynamo/dynamo-router-codeowners
@@ -162,7 +165,6 @@
 
 # === planner  (@ai-dynamo/dynamo-planner-codeowners) ===
 /aisimulate/                                                                 @ai-dynamo/dynamo-planner-codeowners
-/examples/aisimulate/                                                        @ai-dynamo/dynamo-planner-codeowners
 /examples/global_planner/                                                    @ai-dynamo/dynamo-planner-codeowners
 /examples/power-aware-budget/                                                @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/                                              @ai-dynamo/dynamo-planner-codeowners
@@ -385,6 +387,7 @@
 /lib/gpu_memory_service/client/                                              @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/common/                                              @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/server/                                              @ai-dynamo/dynamo-gms-codeowners
+/benchmarks/cuda_custom_storage/                                             @ai-dynamo/dynamo-gms-codeowners
 /deploy/snapshot/internal/types/                                             @ai-dynamo/dynamo-gms-codeowners
 /deploy/snapshot/cmd/snapshotctl/                                            @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/snapshot/                                            @ai-dynamo/dynamo-gms-codeowners
@@ -671,14 +674,12 @@
 /components/src/dynamo/vllm/engine_monitor.py                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/multimodal_utils/                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/trtllm/encode_helper.py                               @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
-/components/src/dynamo/vllm/logits_processing/                               @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/sglang/init_diffusion.py                              @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/trtllm/engine_monitor.py                              @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /deploy/operator/config/prometheus/monitor.yaml                              @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-observability-codeowners
 /dev/observability/grafana_dashboards/kvbm.json                              @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/common/backend/metrics.py                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/init_multimodal.py                             @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-multimodal-codeowners
-/components/src/dynamo/sglang/logits_processing/                             @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/trtllm/logits_processing/                             @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                             @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /benchmarks/frontend/scripts/sweep_k8s/metrics.py                            @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-observability-codeowners
@@ -704,7 +705,6 @@
 /components/src/dynamo/trtllm/request_handlers/diffusion/                    @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/common/recv_forward_pass_metrics.py                   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/request_handlers/multimodal/                   @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-multimodal-codeowners
-/components/src/dynamo/planner/connectors/kubernetes_api.py                  @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/profiler/utils/dgdr_v1beta1_types.py                  @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer/                  @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/planner/monitoring/planner_metrics.py                 @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-observability-codeowners
@@ -717,6 +717,7 @@
 /components/src/dynamo/common/utils/label_injecting_collector.py             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/request_handlers/video_generation/             @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/vllm/tests/test_vllm_sleep_wake_handlers.py           @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/planner/connectors/clients/kubernetes_api.py          @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/sglang/request_handlers/embedding/metrics.py          @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/tests/test_sglang_gms_memory_saver.py          @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/trtllm/tests/test_trtllm_gms_delay_commit.py          @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners

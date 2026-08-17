@@ -79,7 +79,15 @@ ADD --checksum=sha256:f60e802b6f41350393e34b24793db888a8be514054769bd17e7a6e9c0c
 
 # Install xpu-smi without explicitly changing the Intel compute runtime stack.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends /tmp/xpu-smi.deb && \
+    if command -v xpu-smi >/dev/null 2>&1; then \
+        echo "xpu-smi already present in base image, skipping install"; \
+    else \
+        if apt-cache show intel-gsc >/dev/null 2>&1; then \
+            apt-get install -y --no-install-recommends /tmp/xpu-smi.deb; \
+        else \
+            echo "WARNING: intel-gsc is not available from configured apt sources; skipping xpu-smi install"; \
+        fi; \
+    fi && \
     rm -f /tmp/xpu-smi.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
@@ -588,9 +596,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 {% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 {% if target == "planner" %}
-# AI Simulate is a separate Python distribution. Build it only for the planner
-# image, after the Dynamo wheels so Python-only changes do not invalidate the
-# expensive Rust build layers above.
+# AI Simulate is a separate Python distribution used by the planner image. Build
+# it after the Dynamo wheels so Python-only changes do not invalidate the
+# expensive Rust build layers above. This wheel remains an image-local artifact.
 COPY aisimulate/ /opt/dynamo/aisimulate/
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \

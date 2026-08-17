@@ -9,6 +9,7 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use uuid::Uuid;
 
 use crate::common::protocols::OutputSignal;
+use crate::scheduler::EnginePassResult;
 
 // 0.1% relative quantile error. The enlarged store covers latency/rate values
 // spanning roughly 10^28 within one sign while remaining bounded (~512 KiB for
@@ -79,7 +80,7 @@ pub struct TraceThroughputStats {
 /// Goodput: throughput restricted to the requests that satisfy the SLA. Present
 /// on the report only when an SLA was supplied to the collector (goodput is
 /// undefined without one). A completed request counts as "good" per
-/// [`SlaThresholds::is_good`].
+/// `SlaThresholds::is_good`.
 #[derive(Debug, Clone)]
 pub struct TraceGoodputStats {
     /// Completed requests that satisfied the SLA.
@@ -596,7 +597,7 @@ pub(crate) struct TraceRequestStatsSnapshot {
     pub first_admission_reused_input_tokens: usize,
 }
 
-/// SLA thresholds used to classify requests for goodput. Mirrors Spica's
+/// SLA thresholds used to classify requests for goodput. Mirrors Sweeper's
 /// `SLATarget` shape: set `ttft_ms` + `itl_ms` together, or `e2e_ms` alone.
 /// Only the thresholds that are set are checked, so an e2e-only SLA gates on
 /// e2e and a ttft+itl SLA gates on both. All-`None` (the default) means "no
@@ -897,6 +898,7 @@ impl TraceCollector {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn on_prefill_admit(
         &mut self,
         uuid: Uuid,
@@ -904,6 +906,15 @@ impl TraceCollector {
         reused_input_tokens: usize,
     ) {
         self.on_admit(uuid, admit_time_ms, reused_input_tokens);
+        self.on_prefill_pool_admit(uuid, admit_time_ms, reused_input_tokens);
+    }
+
+    pub(crate) fn on_prefill_pool_admit(
+        &mut self,
+        uuid: Uuid,
+        admit_time_ms: f64,
+        reused_input_tokens: usize,
+    ) {
         self.on_pool_admission(
             uuid,
             ReplayRequestPool::Prefill,
@@ -921,6 +932,7 @@ impl TraceCollector {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn on_decode_admit(
         &mut self,
         uuid: Uuid,
@@ -928,6 +940,15 @@ impl TraceCollector {
         reused_input_tokens: usize,
     ) {
         self.on_admit(uuid, admit_time_ms, reused_input_tokens);
+        self.on_decode_pool_admit(uuid, admit_time_ms, reused_input_tokens);
+    }
+
+    pub(crate) fn on_decode_pool_admit(
+        &mut self,
+        uuid: Uuid,
+        admit_time_ms: f64,
+        reused_input_tokens: usize,
+    ) {
         self.on_pool_admission(
             uuid,
             ReplayRequestPool::Decode,
@@ -1127,34 +1148,69 @@ impl TraceCollector {
         }
     }
 
-    /// Move the tokens emitted by one scheduler pass to a shared completion
-    /// boundary. Scheduler cores record their rank-local end time while the
-    /// pass is formed; attention-DP replay then aligns every rank in the group
-    /// to the slowest rank before the pass becomes externally visible.
-    pub(crate) fn align_pass_token_times(
+    /// Record the generic collector effects of one scheduler pass. A hidden
+    /// pass supplies no token boundary but still records admissions at its
+    /// epoch start; topology-specific pool state remains with the caller.
+    #[inline]
+    pub(crate) fn on_scheduler_pass(
+        &mut self,
+        pass: &EnginePassResult,
+        admit_time_ms: f64,
+        token_completion_ms: Option<f64>,
+    ) {
+        for admission in &pass.admissions {
+            self.on_admit(admission.uuid, admit_time_ms, admission.reused_input_tokens);
+        }
+        if let Some(token_completion_ms) = token_completion_ms {
+            self.on_output_signals(
+                &pass.output_signals,
+                token_completion_ms,
+                pass.accept_length_output_tokens > pass.accept_length_decode_forwards,
+            );
+        }
+    }
+
+    /// Record tokens emitted by one scheduler pass at its externally visible
+    /// completion boundary.
+    pub(crate) fn on_output_signals(
         &mut self,
         output_signals: &[OutputSignal],
         completion_time_ms: f64,
+        has_bursts: bool,
     ) {
-        let mut emitted_by_request = FxHashMap::default();
-        for signal in output_signals {
-            if signal.token_id.is_some() {
-                *emitted_by_request.entry(signal.uuid).or_insert(0usize) += 1;
+        if !has_bursts {
+            for signal in output_signals {
+                if !signal.rejected && signal.token_id.is_some() {
+                    self.on_token(signal.uuid, completion_time_ms);
+                }
             }
+            return;
         }
 
-        for (uuid, emitted) in emitted_by_request {
-            let Some(stats) = self.requests.get_mut(&uuid) else {
+        let mut signal_idx = 0;
+        while signal_idx < output_signals.len() {
+            let uuid = output_signals[signal_idx].uuid;
+            let mut run_end = signal_idx;
+            let mut emitted_tokens = 0;
+            while run_end < output_signals.len() && output_signals[run_end].uuid == uuid {
+                let signal = &output_signals[run_end];
+                emitted_tokens += usize::from(!signal.rejected && signal.token_id.is_some());
+                run_end += 1;
+            }
+            if emitted_tokens == 0 {
+                signal_idx = run_end;
                 continue;
-            };
-            let TokenTimeline::Recording(times) = &mut stats.token_timeline else {
-                continue;
-            };
-            let start = times
-                .len()
-                .checked_sub(emitted)
-                .expect("scheduler emitted more output signals than collector tokens");
-            times[start..].fill(completion_time_ms);
+            }
+            if let Some(stats) = self.requests.get_mut(&uuid)
+                && let TokenTimeline::Recording(times) = &mut stats.token_timeline
+            {
+                if emitted_tokens == 1 {
+                    times.push(completion_time_ms);
+                } else {
+                    times.resize(times.len() + emitted_tokens, completion_time_ms);
+                }
+            }
+            signal_idx = run_end;
         }
     }
 
@@ -1681,6 +1737,79 @@ mod tests {
         assert!((report.throughput.gpu_hours - 0.1 / 3600.0).abs() < 1e-12);
         assert_eq!(report.latency.ttft.mean_ms, 0.0);
         assert_eq!(report.latency.e2e.mean_ms, 0.0);
+    }
+
+    #[test]
+    fn scheduler_output_runs_exclude_rejected_tokens_and_share_the_boundary() {
+        let mut collector = TraceCollector::default();
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        collector.on_arrival(first, 0.0, 4, 3);
+        collector.on_arrival(second, 0.0, 4, 1);
+        let pass = EnginePassResult {
+            end_ms: 42.0,
+            token_completion_ms: 42.0,
+            completed_requests: 2,
+            admissions: vec![
+                crate::scheduler::AdmissionEvent {
+                    uuid: first,
+                    reused_input_tokens: 2,
+                },
+                crate::scheduler::AdmissionEvent {
+                    uuid: second,
+                    reused_input_tokens: 1,
+                },
+            ],
+            output_signals: vec![
+                OutputSignal {
+                    uuid: first,
+                    token_id: Some(10),
+                    completed: false,
+                    rejected: false,
+                    cached_tokens: None,
+                    handoff_delay_ms: None,
+                },
+                OutputSignal {
+                    uuid: first,
+                    token_id: Some(11),
+                    completed: false,
+                    rejected: false,
+                    cached_tokens: None,
+                    handoff_delay_ms: None,
+                },
+                OutputSignal {
+                    uuid: first,
+                    token_id: Some(12),
+                    completed: true,
+                    rejected: true,
+                    cached_tokens: None,
+                    handoff_delay_ms: None,
+                },
+                OutputSignal {
+                    uuid: second,
+                    token_id: Some(20),
+                    completed: true,
+                    rejected: false,
+                    cached_tokens: None,
+                    handoff_delay_ms: None,
+                },
+            ],
+            lifecycle_events: Vec::new(),
+            mocker_metrics: crate::scheduler::vllm::MockerMetrics::default(),
+            router_event_visibility: crate::scheduler::RouterEventVisibility::PassEnd,
+            kv_events: Vec::new(),
+            fpm: None,
+            accept_length_output_tokens: 3,
+            accept_length_decode_forwards: 2,
+        };
+        collector.on_scheduler_pass(&pass, 5.0, Some(42.0));
+
+        let first_times = &collector.requests[&first].token_timeline;
+        let second_times = &collector.requests[&second].token_timeline;
+        assert_eq!(collector.requests[&first].first_admit_ms, Some(5.0));
+        assert_eq!(collector.requests[&second].first_admit_ms, Some(5.0));
+        assert!(matches!(first_times, TokenTimeline::Recording(times) if times == &[42.0, 42.0]));
+        assert!(matches!(second_times, TokenTimeline::Recording(times) if times == &[42.0]));
     }
 
     #[test]

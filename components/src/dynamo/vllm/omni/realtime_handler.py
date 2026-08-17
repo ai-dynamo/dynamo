@@ -43,6 +43,7 @@ import asyncio
 import base64
 import logging
 import uuid
+from collections.abc import Mapping
 from typing import Any, AsyncGenerator, Optional, Sequence
 
 import numpy as np
@@ -180,15 +181,18 @@ class Turn(RealtimeTurn):
         """Extract per-step audio deltas from an engine output.
 
         Audio lives in ``output.multimodal_output['audio'|'model_outputs']`` as a
-        float32 waveform (or list of them). Some engine paths emit a growing
-        cumulative waveform; ``waveform_to_deltas`` reconciles both shapes
-        against ``self.audio_ref`` so the client never hears duplicates.
+        float32 waveform (or list of them). The payload is a ``Mapping`` -- a
+        ``MultimodalPayload`` or a plain dict, depending on what the step
+        attached -- so read it through that interface, not a concrete type. Some
+        engine paths emit a growing cumulative waveform; ``waveform_to_deltas``
+        reconciles both shapes against ``self.audio_ref`` so the client never
+        hears duplicates.
         """
         mm = getattr(output, "multimodal_output", None)
-        if mm is None:
+        if not isinstance(mm, Mapping):
             return []
 
-        raw_audio = mm.tensors["audio"] if "audio" in mm.tensors.keys() else None
+        raw_audio = mm.get("audio" if "audio" in mm else "model_outputs")
         if raw_audio is None:
             return []
 
@@ -462,6 +466,11 @@ def tensor_to_numpy(value: Any) -> np.ndarray | None:
             arr = np.asarray(value)
         except Exception:  # noqa: BLE001 - non-array engine payloads are skipped
             return None
+    # ``model_outputs`` is model-defined, so a structured value there survives
+    # np.asarray as an object array; skip it rather than fail the turn on the
+    # astype below. "biuf" is bool/int/uint/float.
+    if arr.dtype.kind not in "biuf":
+        return None
     if arr.ndim > 1:
         arr = arr.reshape(-1)
     return arr.astype(np.float32, copy=False)
