@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Qualify the remote encoder -> NIXL -> Dynamo vLLM workflow at a constant
+# Qualify metadata-control and tensor-fanout classifier workflows at a constant
 # offered load. Every repetition starts fresh server processes.
 
 set -euo pipefail
@@ -28,7 +28,7 @@ KV_EVENT_PORT="${DYN_BENCH_KV_EVENT_PORT:-20080}"
 KV_EVENTS_CONFIG="$(printf \
     '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:%s","enable_kv_cache_events":true}' \
     "$KV_EVENT_PORT")"
-DEFAULT_CELL_PLAN="1:remote"
+DEFAULT_CELL_PLAN="1:metadata 2:metadata 3:metadata 1:tensor 2:tensor 3:tensor"
 CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
 WORKFLOW_PROVIDER="${DYN_BENCH_WORKFLOW_PROVIDER:-examples.experimental.workflow.user_ensemble.benchmark.encoder_decoder_provider:provide_workflow}"
 
@@ -63,8 +63,9 @@ export DYN_CUSTOM_ENCODER_DISPATCH_LOG=1
 export DYN_ENCODER_BATCH_QUEUE_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_WAIT_MS:-0}"
 export DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS:-0}"
 export DYN_VLLM_EMBEDDING_TRANSFER_MODE=nixl-write
-export DYN_BENCH_SKIP_CLASSIFIER=1
-export DYN_WORKFLOW_PERF_TRACE="${DYN_WORKFLOW_PERF_TRACE:-0}"
+export DYN_CLASSIFIER_NIXL_BUFFER_BYTES="${DYN_CLASSIFIER_NIXL_BUFFER_BYTES:-536870912}"
+export DYN_BENCH_SKIP_CLASSIFIER=0
+export DYN_WORKFLOW_PERF_TRACE="${DYN_WORKFLOW_PERF_TRACE:-1}"
 export DYN_WORKFLOW_PERF_SAMPLE_EVERY="${DYN_WORKFLOW_PERF_SAMPLE_EVERY:-32}"
 if [[ "$DYN_WORKFLOW_PERF_TRACE" == 1 ]]; then
     export DYN_LOG="${DYN_LOG:-info}"
@@ -134,13 +135,16 @@ python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_ben
     --batch-queue-wait-ms "$DYN_ENCODER_BATCH_QUEUE_WAIT_MS" \
     --batch-queue-max-wait-ms "$DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS" \
     --embedding-transfer-mode "$DYN_VLLM_EMBEDDING_TRANSFER_MODE" \
+    --classifier-nixl-buffer-bytes "$DYN_CLASSIFIER_NIXL_BUFFER_BYTES" \
     --workflow-provider "$WORKFLOW_PROVIDER" \
     --perf-trace "$DYN_WORKFLOW_PERF_TRACE" \
     --perf-sample-every "$DYN_WORKFLOW_PERF_SAMPLE_EVERY"
 
 sha256sum \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/workflow.py" \
+    "$REPO_ROOT/examples/experimental/workflow/user_ensemble/stages.py" \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/benchmark/encoder_decoder_provider.py" \
+    "$REPO_ROOT/examples/experimental/workflow/user_ensemble/remote/classifier_worker.py" \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/remote/launch.sh" \
     "$REPO_ROOT/components/src/dynamo/common/multimodal/embedding_transfer.py" \
     "$REPO_ROOT/components/src/dynamo/vllm/multimodal_utils/external_encoder.py" \
@@ -148,6 +152,8 @@ sha256sum \
     "$REPO_ROOT/components/src/dynamo/vllm/multimodal_utils/custom_encoder/batcher.py" \
     "$REPO_ROOT/components/src/dynamo/experimental/workflow/nixl.py" \
     "$REPO_ROOT/components/src/dynamo/experimental/workflow/perf.py" \
+    "$REPO_ROOT/components/src/dynamo/experimental/workflow/remote.py" \
+    "$REPO_ROOT/components/src/dynamo/experimental/workflow/runtime.py" \
     "$REPO_ROOT/lib/bindings/python/src/dynamo/nixl_connect/__init__.py" \
     "$REPO_ROOT/examples/custom_encoder/qwen2_5_vl_benchmark_encoder.py" \
     > "$OUTPUT_ROOT/source_files_sha256.txt"
@@ -185,7 +191,7 @@ launch_topology() {
     )
     local workflow_namespace="dynamo-qwen-$topology-$(date +%s%N)"
 
-    if [[ "$topology" != remote ]]; then
+    if [[ "$topology" != metadata && "$topology" != tensor ]]; then
         echo >&2 "unknown topology: $topology"
         return 2
     fi
@@ -199,6 +205,7 @@ launch_topology() {
     setsid env \
         DYN_NAMESPACE="$workflow_namespace" \
         DYN_USER_ENSEMBLE_NAMESPACE="$workflow_namespace" \
+        DYN_BENCH_CLASSIFIER_INPUT="$topology" \
         DYN_BENCH_WORKFLOW_PROVIDER="$WORKFLOW_PROVIDER" \
         bash "$launch_script" "${launch_args[@]}" \
         > "$output_dir/server.log" 2>&1 &
@@ -323,14 +330,12 @@ run_cell() {
         --gpu-telemetry "$output_dir/gpu_telemetry.csv" \
         --output "$output_dir/cell_audit.json"
 
-    if [[ "$topology" == remote ]]; then
-        python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark \
-            smoke \
-            --input "$WARMUP_INPUT" \
-            --output "$output_dir/joined_smoke.json" \
-            --endpoint "http://127.0.0.1:$HTTP_PORT/v1/chat/completions" \
-            --model "$MODEL"
-    fi
+    python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark \
+        smoke \
+        --input "$WARMUP_INPUT" \
+        --output "$output_dir/joined_smoke.json" \
+        --endpoint "http://127.0.0.1:$HTTP_PORT/v1/chat/completions" \
+        --model "$MODEL"
     cleanup_cell
 }
 
@@ -338,8 +343,8 @@ for cell in $CELL_PLAN; do
     repetition="${cell%%:*}"
     topology="${cell#*:}"
     if [[ "$repetition" == "$cell" \
-        || ! "$repetition" =~ ^1$ \
-        || "$topology" != remote ]]; then
+        || ! "$repetition" =~ ^[1-3]$ \
+        || ( "$topology" != metadata && "$topology" != tensor ) ]]; then
         echo >&2 "invalid DYN_BENCH_CELL_PLAN entry: $cell"
         exit 2
     fi

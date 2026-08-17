@@ -31,16 +31,36 @@ class DummyClassifier:
         features = inputs["encoder_features"]
         if not isinstance(features, torch.Tensor):
             raise InvalidArgument("classifier features must be a torch.Tensor")
-        mean = float(features.float().mean().item())
-        if not math.isfinite(mean):
-            raise InvalidArgument("classifier features must contain finite values")
-        positive = (math.tanh(mean) + 1.0) / 2.0
+        if features.numel() == 0:
+            raise InvalidArgument("classifier features must not be empty")
+        sample = float(features.reshape(-1)[0].float().item())
+        if not math.isfinite(sample):
+            raise InvalidArgument("classifier feature sample must be finite")
+        positive = (math.tanh(sample) + 1.0) / 2.0
         return {
             "scores": {
-                "positive-mean": positive,
-                "negative-mean": 1.0 - positive,
+                "positive-sample": positive,
+                "negative-sample": 1.0 - positive,
             }
         }
+
+
+class DummyMetadataClassifier:
+    """Control classifier that joins after the encoder without reading its tensor."""
+
+    contract = StageContract(
+        id="metadata-classifier",
+        inputs={"encoder_metadata": ValueSpec(type="json")},
+        outputs={"scores": ValueSpec(type="json")},
+    )
+
+    async def run(
+        self, inputs: Mapping[str, Any], context: StageContext
+    ) -> Mapping[str, Any]:
+        context.raise_if_cancelled()
+        if not isinstance(inputs["encoder_metadata"], Mapping):
+            raise InvalidArgument("classifier metadata must be an object")
+        return {"scores": {"metadata-control": 1.0}}
 
 
 class EnsembleResponseStage:
