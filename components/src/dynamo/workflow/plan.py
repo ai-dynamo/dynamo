@@ -63,12 +63,8 @@ def validate_binding_contract(binding: Binding, contract: StageContract) -> None
 
     if not isinstance(binding, GenerateEndpointBinding):
         return
-    expected_inputs = {"request", "encoder_features", "encoder_metadata"}
-    if contract.inputs != expected_inputs:
-        raise WorkflowValidationError(
-            "Generate endpoint stage inputs must be request, encoder_features, "
-            "and encoder_metadata"
-        )
+    if contract.inputs != {"request"}:
+        raise WorkflowValidationError("Generate endpoint stage input must be request")
     if contract.outputs != {"completion"}:
         raise WorkflowValidationError(
             "Generate endpoint stage output must be completion"
