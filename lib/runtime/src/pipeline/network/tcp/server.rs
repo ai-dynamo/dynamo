@@ -2518,10 +2518,7 @@ mod tests {
         }
         // Ordinary errors stay on the immediate-retry path.
         let ordinary = std::io::Error::from(std::io::ErrorKind::ConnectionAborted);
-        assert_eq!(
-            AcceptBackoff::classify(&ordinary),
-            AcceptFailure::Ordinary,
-        );
+        assert_eq!(AcceptBackoff::classify(&ordinary), AcceptFailure::Ordinary,);
     }
 
     #[cfg(unix)]
@@ -2540,7 +2537,12 @@ mod tests {
             .position(|d| *d == ACCEPT_BACKOFF_MAX_DELAY)
             .expect("delay reaches the ceiling");
         for pair in delays[..=sat].windows(2) {
-            assert!(pair[1] > pair[0], "delay must grow: {:?} -> {:?}", pair[0], pair[1]);
+            assert!(
+                pair[1] > pair[0],
+                "delay must grow: {:?} -> {:?}",
+                pair[0],
+                pair[1]
+            );
         }
         assert!(delays[sat..].iter().all(|d| *d == ACCEPT_BACKOFF_MAX_DELAY));
 
