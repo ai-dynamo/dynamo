@@ -138,20 +138,20 @@ contain only the expanded concrete knobs.
 If the optional `router` or `planner` section is absent, that component stays fixed at its concrete
 default. Its default preset sweep is activated only when the section is present in a recommendation.
 
-### Parallelism Preset Exception
+### Parallelism Preset Behavior
 
-`engine.workers.<role>.parallelism` follows the same complete-mapping rule, but its default is
-`preset: auto` instead of `preset: default`:
+`engine.workers.<role>.parallelism` uses the same `preset: default` spelling as every other
+preset-capable object:
 
 ```yaml
 parallelism:
-  preset: auto
+  preset: default
 ```
 
-`auto` invokes the existing Sweeper parallel-configuration enumeration and projection. It generates
-feasible complete mappings, then decomposes them into the correlated optimizer dimensions used by the
-Sweeper. The six fields are `replicas`, `tensor`, `pipeline`, `attention_data`, `moe_tensor`, and
-`moe_expert`.
+The built-in parallelism default preset invokes the existing Sweeper parallel-configuration
+enumeration and projection. It generates feasible complete mappings, then decomposes them into the
+correlated optimizer dimensions used by the Sweeper. The six fields are `replicas`, `tensor`,
+`pipeline`, `attention_data`, `moe_tensor`, and `moe_expert`.
 
 A user-provided preset is a list of complete parallelism mappings:
 
@@ -162,9 +162,9 @@ parallelism:
     - {replicas: 2, tensor: 2, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
 ```
 
-Unlike `auto`, this list is kept flat: each complete mapping is one categorical choice and the
-Sweeper does not decompose it. To search independent dimensions, disable the preset and provide zero
-or more per-knob domains:
+Unlike the built-in default preset, this list is kept flat: each complete mapping is one categorical
+choice and the Sweeper does not decompose it. To search independent dimensions, disable the preset
+and provide zero or more per-knob domains:
 
 ```yaml
 parallelism:
@@ -518,7 +518,7 @@ engine:
 | `engine.backend_version` | `null` | `-` | `-` | Fixed when set. |
 | `engine.context_length` | Required | `-` | `-` | Positive. |
 | `engine.workers` | Required | `-` | `-` | Aggregated role or prefill plus decode roles. |
-| `engine.workers.<role>.parallelism.preset` | `auto` in `recommend` | `-` | `-` | `auto`, a complete mapping list, `false`, or `{}`. |
+| `engine.workers.<role>.parallelism.preset` | `default` in `recommend` | `-` | `-` | Default list, complete mapping list, `false`, or `{}`. |
 | `engine.workers.<role>.parallelism.replicas` | `1` | Feasible positive values within GPU budget | `parallelism` | Positive. |
 | `engine.workers.<role>.parallelism.tensor` | `1` | Feasible registry values | `parallelism` | Positive and model/backend compatible. |
 | `engine.workers.<role>.parallelism.pipeline` | `1` | Feasible registry values | `parallelism` | Positive and model/backend compatible. |
@@ -882,13 +882,13 @@ engine:
   context_length: 32768
   workers:
     aggregated:
-      parallelism: {preset: auto}
+      parallelism: {preset: default}
       scheduler: {max_batched_tokens: {choices: [8192, 16384]}, max_sequences: {choices: [256, 512]}}
     prefill:
-      parallelism: {preset: auto}
+      parallelism: {preset: default}
       scheduler: {max_batched_tokens: 8192, max_sequences: 64}
     decode:
-      parallelism: {preset: auto}
+      parallelism: {preset: default}
       scheduler: {max_batched_tokens: 8192, max_sequences: 256}
 
 router:
