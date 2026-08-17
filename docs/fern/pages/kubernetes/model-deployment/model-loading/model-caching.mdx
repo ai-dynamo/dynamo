@@ -74,13 +74,14 @@ spec:
 ### Use a Private Hugging Face-Compatible Registry
 
 To download from a private registry such as [MatrixHub](https://github.com/matrixhub-ai/matrixhub),
-set `HF_ENDPOINT` in the download Job. MatrixHub is a self-hosted, Hugging Face-compatible
-model registry. ModelExpress is not required for this path.
+add `HF_ENDPOINT` to the download Job's existing `env` list. Keep `MODEL_NAME`,
+`MODEL_REVISION`, and `HF_HOME`. MatrixHub is a self-hosted, Hugging Face-compatible model
+registry. ModelExpress is not required for this path.
 
 ```yaml
-env:
-  - name: HF_ENDPOINT
-    value: "https://matrixhub.example.com"
+# Add this entry to the downloader container's existing env list.
+- name: HF_ENDPOINT
+  value: "https://matrixhub.example.com"
 ```
 
 The Hugging Face CLI keeps the same cache layout when it uses a compatible registry, so the
@@ -193,14 +194,13 @@ Use this path when startup time or fleet-wide model rollout time matters more th
 ### Use MatrixHub as the Initial Model Source
 
 To initialize the ModelExpress cache from [MatrixHub](https://github.com/matrixhub-ai/matrixhub),
-set `HF_ENDPOINT` on the ModelExpress server. MatrixHub supplies the initial model download;
-ModelExpress then caches or distributes the model to later workers.
+add `HF_ENDPOINT` to the ModelExpress server container's existing `env` list. MatrixHub supplies
+the initial model download; ModelExpress then caches or distributes the model to later workers.
 
 ```yaml
-# ModelExpress server Deployment
-env:
-  - name: HF_ENDPOINT
-    value: "https://matrixhub.example.com"
+# Add this entry to the ModelExpress server container's existing env list.
+- name: HF_ENDPOINT
+  value: "https://matrixhub.example.com"
 ```
 
 Set `HF_ENDPOINT` on Dynamo components that independently download model configuration or
