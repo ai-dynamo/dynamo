@@ -12,6 +12,39 @@
         "timeout_seconds": 420,
         "request_timeout_seconds": 90,
         "case_profile": "auto",
+        "generic_cases": [
+          "auto_echo_context_probe",
+          "auto_irrelevant_no_call",
+          "auto_multi_distinct_tools",
+          "auto_parallel_weather_two_cities",
+          "auto_parallel_weather_with_echo_probe",
+          "auto_single_weather",
+          "customer_calculate_sum_auto",
+          "customer_codex_items_schema_tool_call",
+          "customer_named_calculator_choice",
+          "customer_named_calculator_choice_thinking_disabled",
+          "customer_required_forces_weather",
+          "customer_required_forces_weather_thinking_disabled",
+          "customer_required_marker_isolation",
+          "customer_truncated_tool_markup_hidden",
+          "e2e_search_then_crawl_final_answer",
+          "named_array_arguments",
+          "named_literal_escaped_unicode",
+          "named_nested_object_arguments",
+          "named_no_argument_server_time",
+          "named_strict_nested_pipeline",
+          "named_weather_enum_argument",
+          "none_suppresses_weather",
+          "plain_no_tools",
+          "required_mixed_scalar_arguments",
+          "required_parallel_same_tool"
+        ],
+        "model_specific_cases": {
+          "kimi_k2": [
+            "customer_kimi_consume_prior_tool_result",
+            "customer_kimi_parallel_weather_final_answer"
+          ]
+        },
         "modes": ["nonstream", "stream"],
         "iterations": 1,
         "concurrency": 8,
@@ -19,25 +52,78 @@
         "max_tokens": 4096
       },
       "bfcl": {
-        "target_minutes": 10,
-        "timeout_seconds": 600,
+        "target_minutes": 5,
+        "timeout_seconds": 420,
         "parallelism": 10,
         "image": "nvcr.io/nvidia/eval-factory/bfcl:26.03@sha256:fc6b5f22698b75b759dc29715663d3006b7180847330e06b15ee080346462c03",
         "native_calling": true,
-        "categories": {
-          "simple_python": 30,
-          "multiple": 20,
-          "parallel": 20,
-          "parallel_multiple": 20,
-          "irrelevance": 20,
-          "live_simple": 20,
-          "live_multiple": 10,
-          "live_parallel": 10,
-          "live_parallel_multiple": 10,
-          "multi_turn_base": 10,
-          "multi_turn_miss_func": 10,
-          "multi_turn_miss_param": 10,
-          "multi_turn_long_context": 10
+        "cases": {
+          "simple": [
+            "simple_0",
+            "simple_1",
+            "simple_2",
+            "simple_3",
+            "simple_4",
+            "simple_5",
+            "simple_6",
+            "simple_7",
+            "simple_8",
+            "simple_9"
+          ],
+          "multiple": [
+            "multiple_0",
+            "multiple_1",
+            "multiple_2",
+            "multiple_3",
+            "multiple_4",
+            "multiple_5",
+            "multiple_6",
+            "multiple_7"
+          ],
+          "parallel": [
+            "parallel_0",
+            "parallel_1",
+            "parallel_2",
+            "parallel_3",
+            "parallel_4",
+            "parallel_5",
+            "parallel_6",
+            "parallel_7"
+          ],
+          "parallel_multiple": [
+            "parallel_multiple_0",
+            "parallel_multiple_1",
+            "parallel_multiple_2",
+            "parallel_multiple_3",
+            "parallel_multiple_4",
+            "parallel_multiple_5",
+            "parallel_multiple_6",
+            "parallel_multiple_7"
+          ],
+          "irrelevance": [
+            "irrelevance_0",
+            "irrelevance_1",
+            "irrelevance_2",
+            "irrelevance_3",
+            "irrelevance_4",
+            "irrelevance_5"
+          ],
+          "multi_turn_base": [
+            "multi_turn_base_0",
+            "multi_turn_base_1",
+            "multi_turn_base_2",
+            "multi_turn_base_3"
+          ],
+          "multi_turn_miss_func": [
+            "multi_turn_miss_func_0",
+            "multi_turn_miss_func_1",
+            "multi_turn_miss_func_2"
+          ],
+          "multi_turn_miss_param": [
+            "multi_turn_miss_param_0",
+            "multi_turn_miss_param_1",
+            "multi_turn_miss_param_2"
+          ]
         }
       },
       "tau2": {

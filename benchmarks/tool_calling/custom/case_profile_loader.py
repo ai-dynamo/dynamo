@@ -21,6 +21,7 @@ _TUPLE_FIELDS = (
     "expected_tool_names",
     "expected_tool_calls",
     "forbidden_output_fragments",
+    "regression_prs",
 )
 
 

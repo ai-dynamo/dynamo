@@ -8,15 +8,17 @@ reports response-shape, parser, and tool-call contract failures.
 
 Examples:
     # One smoke sweep against the NVIDIA-hosted deployment.
-    NVIDIA_API_KEY=... python3 kimi_tool_call_probe.py
+    NVIDIA_API_KEY=... python3 tool_calling_probe.py --model your/model
 
     # One-hour run, streaming and non-streaming, with two concurrent requests.
-    NVIDIA_API_KEY=... python3 kimi_tool_call_probe.py \
+    NVIDIA_API_KEY=... python3 tool_calling_probe.py \
+        --model your/model \
         --duration-minutes 60 --concurrency 2 --shuffle
 
     # Local Dynamo frontend.
-    python3 kimi_tool_call_probe.py \
-        --base-url http://localhost:8000/v1 --api-key EMPTY
+    python3 tool_calling_probe.py \
+        --base-url http://localhost:8000/v1 --api-key EMPTY \
+        --model example/model
 """
 
 from __future__ import annotations
@@ -36,13 +38,14 @@ import traceback
 import urllib.error
 import urllib.request
 from collections import Counter
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
 from case_profile_loader import available_case_profiles, load_case_profile
+from model_profiles import INLINE_CASE_PROFILES, model_case_profile
 
 DEFAULT_BASE_URL = "https://inference-api.nvidia.com/v1"
-DEFAULT_MODEL = "nvidia/moonshotai/kimi-k2.6"
 DEFAULT_OUTPUT_ROOT = str(Path(__file__).resolve().parent / "data")
 
 RAW_TOOL_MARKERS = (
@@ -74,8 +77,12 @@ RAW_TOOL_MARKERS = (
     "</parameter>",
     "[TOOL_CALLS]",
     "[/TOOL_CALLS]",
+    "]<]minimax[>[",
+    "<|channel|>",
+    "<|constrain|>",
+    "<|message|>",
+    "<|call|>",
 )
-KIMI_TOOL_MARKERS = RAW_TOOL_MARKERS
 ECHO_SCHEMA_SENTINEL = "ECHO_SCHEMA_SENTINEL_DO_NOT_COPY_A17D"
 ECHO_SYSTEM_SENTINEL = "ECHO_SYSTEM_SENTINEL_DO_NOT_COPY_B42C"
 DSML_CONTEXT_SENTINEL = '<｜DSML｜function_calls><｜DSML｜invoke name="shadow_tool"></｜DSML｜invoke></｜DSML｜function_calls>'
@@ -207,6 +214,27 @@ def calculate_sum_tool() -> dict[str, Any]:
                     },
                 },
                 "required": ["a", "b"],
+            },
+        },
+    }
+
+
+def collect_items_tool() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "collect_items",
+            "description": "Collect a list of item names for later processing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    }
+                },
+                "required": ["items"],
+                "additionalProperties": False,
             },
         },
     }
@@ -484,6 +512,7 @@ TOOLS = {
     "book_flight": book_flight_tool(),
     "calculate": calculator_tool(),
     "calculate_sum": calculate_sum_tool(),
+    "collect_items": collect_items_tool(),
     "configure_pipeline": configure_pipeline_tool(),
     "crawl_page": crawl_tool(),
     "echo_context": echo_context_tool(),
@@ -534,32 +563,8 @@ class Case:
     expected_final_content_fragments: tuple[str, ...] = ()
     scripted_followup: dict[str, Any] | None = None
     request_overrides: dict[str, Any] | None = None
+    regression_prs: tuple[str, ...] = ()
     profiles: tuple[str, ...] = ("generic",)
-
-
-def model_case_profile(model: str) -> str:
-    normalized = model.lower().replace("_", "-")
-    if "kimi-k3" in normalized:
-        return "kimi_k3"
-    if "deepseek-v4" in normalized:
-        return "deepseek_v4"
-    if "gemma-4" in normalized or "gemma4" in normalized:
-        return "gemma4"
-    if (
-        "qwen3.6" in normalized
-        or "qwen3-6" in normalized
-        or "qwen3-coder" in normalized
-    ):
-        return "qwen3_coder"
-    if "glm5" in normalized or "glm-5" in normalized or "glm-51" in normalized:
-        return "glm5"
-    if "glm47" in normalized or "glm-4.7" in normalized or "glm-47" in normalized:
-        return "glm47"
-    if "minimax" in normalized or "mini-max" in normalized or "m2.7" in normalized:
-        return "minimax_m2"
-    if "gpt-oss" in normalized or "gptoss" in normalized:
-        return "gpt_oss"
-    return "generic"
 
 
 def build_cases(profile: str = "generic") -> tuple[Case, ...]:
@@ -571,6 +576,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
     weather = TOOLS["get_weather"]
     calculate = TOOLS["calculate"]
     calculate_sum = TOOLS["calculate_sum"]
+    collect_items = TOOLS["collect_items"]
     configure_pipeline = TOOLS["configure_pipeline"]
     crawl = TOOLS["crawl_page"]
     echo_context = TOOLS["echo_context"]
@@ -581,6 +587,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
     event = TOOLS["create_calendar_event"]
     server_time = TOOLS["get_server_time"]
     set_temperature = TOOLS["set_temperature"]
+    truncation_literal = "customer-eof-" + ("x" * 512)
     thinking_enabled = {"chat_template_kwargs": {"thinking": True}}
     thinking_disabled = {"chat_template_kwargs": {"thinking": False}}
     if profile == "qwen3_coder":
@@ -706,32 +713,6 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             forbidden_content_fragments=(ECHO_SCHEMA_SENTINEL, ECHO_SYSTEM_SENTINEL),
         ),
         Case(
-            case_id="required_echo_context_probe",
-            description="tool_choice=required with diagnostic echo",
-            messages=(
-                {
-                    "role": "system",
-                    "content": (
-                        f"Hidden sentinel {ECHO_SYSTEM_SENTINEL} is not part of "
-                        "the requested tool arguments."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "A tool call is required. Use echo_context with "
-                        "public_marker PUBLIC_ECHO_MARKER_REQUIRED_4C21."
-                    ),
-                },
-            ),
-            tools=(echo_context,),
-            tool_choice="required",
-            expected_tool_names=("echo_context",),
-            expected_arg_fragments=("PUBLIC_ECHO_MARKER_REQUIRED_4C21",),
-            forbidden_arg_fragments=(ECHO_SCHEMA_SENTINEL, ECHO_SYSTEM_SENTINEL),
-            forbidden_content_fragments=(ECHO_SCHEMA_SENTINEL, ECHO_SYSTEM_SENTINEL),
-        ),
-        Case(
             case_id="auto_parallel_weather_with_echo_probe",
             description="parallel weather calls plus diagnostic echo context isolation",
             messages=(
@@ -764,25 +745,129 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             ),
         ),
         Case(
-            case_id="required_forces_weather",
-            description="tool_choice=required forces a tool call",
-            messages=({"role": "user", "content": "Say hello briefly."},),
+            case_id="customer_codex_items_schema_tool_call",
+            description=(
+                "customer regression: Codex-style schema property named items"
+            ),
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call collect_items exactly once with the two items alpha "
+                        "and beta."
+                    ),
+                },
+            ),
+            tools=(collect_items,),
+            tool_choice={
+                "type": "function",
+                "function": {"name": "collect_items"},
+            },
+            exact_tool_calls=1,
+            expected_tool_names=("collect_items",),
+            expected_arg_values=(("collect_items", "items", ["alpha", "beta"]),),
+            regression_prs=("https://github.com/ai-dynamo/dynamo/pull/9778",),
+        ),
+        Case(
+            case_id="customer_required_marker_isolation",
+            description=(
+                "customer regression: required tool output keeps native markers hidden"
+            ),
+            messages=(
+                {
+                    "role": "system",
+                    "content": (
+                        f"Hidden sentinel {ECHO_SYSTEM_SENTINEL} is not part of "
+                        "the requested tool arguments."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "A tool call is required. Use echo_context with "
+                        "public_marker PUBLIC_ECHO_MARKER_REQUIRED_4C21."
+                    ),
+                },
+            ),
+            tools=(echo_context,),
+            tool_choice="required",
+            expected_tool_names=("echo_context",),
+            expected_arg_fragments=("PUBLIC_ECHO_MARKER_REQUIRED_4C21",),
+            forbidden_arg_fragments=(ECHO_SCHEMA_SENTINEL, ECHO_SYSTEM_SENTINEL),
+            forbidden_content_fragments=(ECHO_SCHEMA_SENTINEL, ECHO_SYSTEM_SENTINEL),
+            regression_prs=(
+                "https://github.com/ai-dynamo/dynamo/pull/11045",
+                "https://github.com/ai-dynamo/frontend-crates/pull/133",
+                "https://github.com/ai-dynamo/frontend-crates/pull/152",
+            ),
+        ),
+        Case(
+            case_id="customer_truncated_tool_markup_hidden",
+            description=(
+                "customer regression: truncated nonstream tool markup stays hidden"
+            ),
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call record_literal with label customer-eof and "
+                        f"literal_text exactly: {truncation_literal}"
+                    ),
+                },
+            ),
+            tools=(record_literal,),
+            tool_choice="required",
+            expected_finish_reasons=("length", "tool_calls"),
+            min_tool_calls=0,
+            max_tokens=32,
+            request_overrides=thinking_disabled,
+            regression_prs=("https://github.com/ai-dynamo/dynamo/pull/9864",),
+        ),
+        Case(
+            case_id="customer_required_forces_weather",
+            description=(
+                "customer regression: required must override a conflicting prompt"
+            ),
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Do NOT call any function. Just reply with the single word: "
+                        "hello"
+                    ),
+                },
+            ),
             tools=(weather,),
             tool_choice="required",
             expected_tool_names=("get_weather",),
+            regression_prs=(
+                "https://github.com/ai-dynamo/dynamo/pull/9804",
+                "https://github.com/ai-dynamo/dynamo/pull/10030",
+                "https://github.com/ai-dynamo/dynamo/pull/11205",
+                "https://github.com/ai-dynamo/dynamo/pull/11554",
+                "https://github.com/ai-dynamo/dynamo/pull/12684",
+                "https://github.com/ai-dynamo/frontend-crates/pull/188",
+            ),
         ),
         Case(
-            case_id="required_forces_weather_thinking_disabled",
-            description="tool_choice=required with thinking disabled request override",
+            case_id="customer_required_forces_weather_thinking_disabled",
+            description=(
+                "customer regression: required tool call with thinking disabled"
+            ),
             messages=({"role": "user", "content": "Say hello briefly."},),
             tools=(weather,),
             tool_choice="required",
             expected_tool_names=("get_weather",),
             request_overrides=thinking_disabled,
+            regression_prs=(
+                "https://github.com/ai-dynamo/dynamo/pull/11554",
+                "https://github.com/ai-dynamo/dynamo/pull/12684",
+                "https://github.com/ai-dynamo/frontend-crates/pull/188",
+            ),
         ),
         Case(
-            case_id="named_calculator_choice",
-            description="named tool_choice forces calculate",
+            case_id="customer_named_calculator_choice",
+            description="customer regression: named tool choice with reasoning enabled",
             messages=(
                 {
                     "role": "user",
@@ -793,10 +878,17 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             tool_choice={"type": "function", "function": {"name": "calculate"}},
             expected_tool_names=("calculate",),
             expected_arg_fragments=("937", "18"),
+            regression_prs=(
+                "https://github.com/ai-dynamo/dynamo/pull/9804",
+                "https://github.com/ai-dynamo/dynamo/pull/10030",
+                "https://github.com/ai-dynamo/dynamo/pull/11205",
+                "https://github.com/ai-dynamo/dynamo/pull/11554",
+                "https://github.com/ai-dynamo/dynamo/pull/12684",
+            ),
         ),
         Case(
-            case_id="named_calculator_choice_thinking_disabled",
-            description="named tool_choice forces calculate with thinking disabled request override",
+            case_id="customer_named_calculator_choice_thinking_disabled",
+            description="customer regression: named tool choice with thinking disabled",
             messages=(
                 {
                     "role": "user",
@@ -808,6 +900,10 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             expected_tool_names=("calculate",),
             expected_arg_fragments=("937", "18"),
             request_overrides=thinking_disabled,
+            regression_prs=(
+                "https://github.com/ai-dynamo/dynamo/pull/11554",
+                "https://github.com/ai-dynamo/dynamo/pull/12684",
+            ),
         ),
         Case(
             case_id="auto_multi_distinct_tools",
@@ -899,8 +995,10 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             validate_schema=False,
         ),
         Case(
-            case_id="consume_prior_tool_result",
-            description="assistant should consume a prior tool result and stop",
+            case_id="customer_kimi_consume_prior_tool_result",
+            description=(
+                "customer regression: post-tool reasoning stays separate from content"
+            ),
             messages=(
                 {"role": "user", "content": "What is the weather in London?"},
                 {
@@ -938,10 +1036,14 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             expect_content=True,
             validate_schema=False,
             expected_arg_fragments=(),
+            regression_prs=("https://github.com/ai-dynamo/dynamo/pull/11653",),
+            profiles=("kimi_k2",),
         ),
         Case(
-            case_id="e2e_parallel_weather_final_answer",
-            description="actual loop: parallel weather calls, mock execution, final answer",
+            case_id="customer_kimi_parallel_weather_final_answer",
+            description=(
+                "customer regression: multi-turn parallel tools end in a clean answer"
+            ),
             messages=(
                 {
                     "role": "user",
@@ -963,6 +1065,8 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             validate_schema=True,
             max_tokens=2048,
             request_overrides=thinking_enabled,
+            regression_prs=("https://github.com/ai-dynamo/dynamo/pull/11653",),
+            profiles=("kimi_k2",),
         ),
         Case(
             case_id="e2e_search_then_crawl_final_answer",
@@ -995,6 +1099,156 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             validate_schema=True,
             max_tokens=2048,
             request_overrides=thinking_enabled,
+        ),
+        Case(
+            case_id="named_no_argument_server_time",
+            description="named tool choice with an empty object argument schema",
+            messages=(
+                {
+                    "role": "user",
+                    "content": "Call get_server_time exactly once with no arguments.",
+                },
+            ),
+            tools=(server_time,),
+            tool_choice={
+                "type": "function",
+                "function": {"name": "get_server_time"},
+            },
+            exact_tool_calls=1,
+            expected_tool_names=("get_server_time",),
+        ),
+        Case(
+            case_id="required_mixed_scalar_arguments",
+            description="required tool call with string, integer, and boolean arguments",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Book a flight to Lisbon for 2 passengers in economy class."
+                    ),
+                },
+            ),
+            tools=(book_flight,),
+            tool_choice="required",
+            exact_tool_calls=1,
+            expected_tool_names=("book_flight",),
+            expected_arg_values=(
+                ("book_flight", "destination", "Lisbon"),
+                ("book_flight", "passengers", 2),
+                ("book_flight", "first_class", False),
+            ),
+        ),
+        Case(
+            case_id="named_strict_nested_pipeline",
+            description="named tool choice with strict nested object and array arguments",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Configure the pipeline with 3 retries, flags fast and safe, "
+                        "and limits timeout_ms 2500 with enabled true."
+                    ),
+                },
+            ),
+            tools=(configure_pipeline,),
+            tool_choice={
+                "type": "function",
+                "function": {"name": "configure_pipeline"},
+            },
+            exact_tool_calls=1,
+            expected_tool_names=("configure_pipeline",),
+            expected_arg_fragments=("fast", "safe", "2500"),
+        ),
+        Case(
+            case_id="named_literal_escaped_unicode",
+            description="named tool choice preserves escaped and Unicode string content",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call record_literal exactly once with label portable-literal "
+                        'and literal_text exactly: quote="ready"; path=C:\\temp; '
+                        "symbol=☃"
+                    ),
+                },
+            ),
+            tools=(record_literal,),
+            tool_choice={
+                "type": "function",
+                "function": {"name": "record_literal"},
+            },
+            exact_tool_calls=1,
+            expected_tool_names=("record_literal",),
+            expected_arg_values=(
+                ("record_literal", "label", "portable-literal"),
+                (
+                    "record_literal",
+                    "literal_text",
+                    'quote="ready"; path=C:\\temp; symbol=☃',
+                ),
+            ),
+        ),
+        Case(
+            case_id="required_parallel_same_tool",
+            description="required parallel calls to the same tool keep arguments distinct",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call get_weather exactly twice: once for Madrid and once for "
+                        "Seoul. Make the two independent calls in parallel."
+                    ),
+                },
+            ),
+            tools=(weather,),
+            tool_choice="required",
+            parallel_tool_calls=True,
+            exact_tool_calls=2,
+            expected_tool_names=("get_weather", "get_weather"),
+            expected_arg_fragments=("Madrid", "Seoul"),
+        ),
+        Case(
+            case_id="auto_irrelevant_no_call",
+            description="auto tool choice avoids an irrelevant available tool",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "In one short sentence, explain why leaves are usually green. "
+                        "Do not call a tool."
+                    ),
+                },
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            validate_schema=False,
+        ),
+        Case(
+            case_id="named_weather_enum_argument",
+            description="named tool choice preserves a required string and enum value",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call get_weather for Reykjavik and request celsius units."
+                    ),
+                },
+            ),
+            tools=(weather,),
+            tool_choice={
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+            exact_tool_calls=1,
+            expected_tool_names=("get_weather",),
+            expected_arg_values=(
+                ("get_weather", "location", "Reykjavik"),
+                ("get_weather", "unit", "celsius"),
+            ),
         ),
         Case(
             case_id="gemma_no_arg_named_tool",
@@ -3673,7 +3927,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Probe OpenAI-compatible chat-completions tool calling."
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--model", required=True)
     parser.add_argument("--api-key-env", default="NVIDIA_API_KEY")
     parser.add_argument("--api-key", default=None)
     parser.add_argument(
@@ -3701,18 +3955,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated case IDs, or 'all'. Use --list-cases to inspect.",
     )
     parser.add_argument(
+        "--exclude-cases",
+        default="",
+        help=(
+            "Comma-separated case ID glob patterns to omit after --cases is "
+            "applied. Useful for keeping adversarial diagnostics out of a "
+            "qualification score."
+        ),
+    )
+    parser.add_argument(
         "--case-profile",
         default="auto",
         choices=(
             "auto",
-            "generic",
-            "deepseek_v4",
-            "gemma4",
-            "qwen3_coder",
-            "glm5",
-            "glm47",
-            "minimax_m2",
-            "gpt_oss",
+            *INLINE_CASE_PROFILES,
             *available_case_profiles(),
             "all",
         ),
@@ -3754,15 +4010,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def select_cases(all_cases: tuple[Case, ...], selector: str) -> tuple[Case, ...]:
+def select_cases(
+    all_cases: tuple[Case, ...], selector: str, exclude_selector: str = ""
+) -> tuple[Case, ...]:
     if selector == "all":
-        return all_cases
-    requested = {item.strip() for item in selector.split(",") if item.strip()}
-    by_id = {case.case_id: case for case in all_cases}
-    unknown = sorted(requested - set(by_id))
-    if unknown:
-        raise ValueError(f"unknown case ID(s): {', '.join(unknown)}")
-    return tuple(by_id[case_id] for case_id in sorted(requested))
+        selected = all_cases
+    else:
+        requested = {item.strip() for item in selector.split(",") if item.strip()}
+        by_id = {case.case_id: case for case in all_cases}
+        unknown = sorted(requested - set(by_id))
+        if unknown:
+            raise ValueError(f"unknown case ID(s): {', '.join(unknown)}")
+        selected = tuple(by_id[case_id] for case_id in sorted(requested))
+
+    exclude_patterns = tuple(
+        item.strip() for item in exclude_selector.split(",") if item.strip()
+    )
+    if exclude_patterns:
+        selected = tuple(
+            case
+            for case in selected
+            if not any(
+                fnmatchcase(case.case_id, pattern) for pattern in exclude_patterns
+            )
+        )
+    if not selected:
+        raise ValueError("case selection is empty after exclusions")
+    return selected
 
 
 def parse_modes(value: str) -> tuple[str, ...]:
@@ -3813,7 +4087,7 @@ def main() -> int:
         return 0
 
     try:
-        cases = select_cases(all_cases, args.cases)
+        cases = select_cases(all_cases, args.cases, args.exclude_cases)
         modes = parse_modes(args.modes)
         extra_headers = parse_headers(args.header)
     except ValueError as exc:
@@ -3846,6 +4120,7 @@ def main() -> int:
         "timeout_seconds": args.timeout_seconds,
         "modes": modes,
         "case_ids": [case.case_id for case in cases],
+        "exclude_cases": args.exclude_cases,
         "iterations": args.iterations,
         "duration_minutes": args.duration_minutes,
         "concurrency": args.concurrency,

@@ -1,6 +1,6 @@
 # Declarative case profiles
 
-Model-specific qualification matrices live in one place:
+Model-specific diagnostic matrices live in one place:
 
 ```text
 configs/case_profiles/<profile>.json
@@ -18,13 +18,20 @@ The probe discovers these files automatically. A profile contains:
 `kimi_k3.json` is the reference implementation. Its 76 scenarios produce 152
 records under the standard `nonstream,stream` harness modes.
 
+The automated verifier defines applicability separately in
+`../e2e_verifier/profiles.json`. Its `generic_cases` are the 25-case comparable
+baseline for every model. Its `model_specific_cases` mapping appends only the
+cases assigned to the resolved profile. A `customer_` case can live in either
+group because that prefix records where the regression came from, not which
+models must run it.
+
 ## Add a model profile
 
 1. Copy `configs/case_profiles/kimi_k3.json` to a new snake-case profile name.
 2. Change the top-level `profile`, description, shared markers, request
    presets, and tool definitions for the model.
-3. Keep applicable generic cases and adjust only the model-specific prompt or
-   expectation differences.
+3. Keep the generic baseline model-neutral. Put model-family-only request shapes
+   or expectations under that profile in `model_specific_cases`.
 4. Add automatic model-name detection in `model_case_profile()` if needed.
    Explicit `--case-profile <name>` works without code changes because the CLI
    discovers profile files.
@@ -34,13 +41,13 @@ records under the standard `nonstream,stream` harness modes.
 Inspect a profile without an endpoint:
 
 ```bash
-python3 kimi_tool_call_probe.py --case-profile kimi_k3 --list-cases
+python3 tool_calling_probe.py --case-profile kimi_k3 --list-cases
 ```
 
 Run only selected cases:
 
 ```bash
-python3 kimi_tool_call_probe.py \
+python3 tool_calling_probe.py \
   --base-url http://localhost:8000/v1 \
   --no-auth \
   --model moonshotai/Kimi-K3 \
@@ -62,6 +69,7 @@ expectations include:
 - `expect_reasoning`
 - `forbidden_output_fragments`
 - `scripted_followup` for deterministic tool-result turns
+- `regression_prs` for customer-case provenance
 
 Tool schemas and expected arguments remain ordinary JSON, so profiles require
 no Python changes for routine model adaptations.

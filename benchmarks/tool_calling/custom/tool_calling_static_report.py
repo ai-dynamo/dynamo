@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generate a static tool-calling report.
 
-This is the cron-friendly counterpart to kimi_tool_call_probe.py. It runs a
+This is the cron-friendly counterpart to tool_calling_probe.py. It runs a
 fixed OpenAI-compatible tool-calling sweep against NVIDIA's endpoint using a
 server-side key, then publishes static HTML/JSON artifacts that nginx can serve
 without exposing an interactive backend or API-key form.
@@ -32,12 +32,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import kimi_tool_call_probe as probe  # noqa: E402
+import tool_calling_probe as probe  # noqa: E402
 
 DEFAULT_SITE_DIR = Path(probe.DEFAULT_OUTPUT_ROOT) / "static-site"
 DEFAULT_RUNS_ROOT = Path(probe.DEFAULT_OUTPUT_ROOT) / "static-runs"
-DEFAULT_TITLE = "Kimi Tool Calling Report"
-DEFAULT_MODEL_LABEL = "Kimi K2.6"
+DEFAULT_TITLE = "Tool Calling Qualification Report"
 ALLOWED_BASE_URL_HOSTS = {
     "inference-api.nvidia.com",
     "integrate.api.nvidia.com",
@@ -270,7 +269,7 @@ def response_has_tool_marker(record: dict[str, Any]) -> bool:
         str(record.get(key) or "")
         for key in ("content", "reasoning_content", "raw_response")
     )
-    markers = getattr(probe, "RAW_TOOL_MARKERS", probe.KIMI_TOOL_MARKERS)
+    markers = probe.RAW_TOOL_MARKERS
     return any(marker in text for marker in markers)
 
 
@@ -1130,7 +1129,9 @@ def run_probe(args: argparse.Namespace) -> tuple[dict[str, Any], list[dict[str, 
         if args.case_profile == "auto"
         else args.case_profile
     )
-    cases = probe.select_cases(probe.build_cases(case_profile), args.cases)
+    cases = probe.select_cases(
+        probe.build_cases(case_profile), args.cases, args.exclude_cases
+    )
     modes = probe.parse_modes(args.modes)
     extra_headers = probe.parse_headers(args.header)
     url = probe.endpoint_url(base_url)
@@ -1150,6 +1151,7 @@ def run_probe(args: argparse.Namespace) -> tuple[dict[str, Any], list[dict[str, 
         "modes": modes,
         "case_ids": [case.case_id for case in cases],
         "case_profile": case_profile,
+        "exclude_cases": args.exclude_cases,
         "iterations": args.iterations,
         "concurrency": args.concurrency,
         "seed": args.seed,
@@ -2935,7 +2937,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", default=str(DEFAULT_RUNS_ROOT))
     parser.add_argument("--title", default=DEFAULT_TITLE)
     parser.add_argument("--base-url", default=probe.DEFAULT_BASE_URL)
-    parser.add_argument("--model", default=probe.DEFAULT_MODEL)
+    parser.add_argument("--model", required=True)
     parser.add_argument(
         "--model-slug",
         default=None,
@@ -2973,18 +2975,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cases", default="all")
     parser.add_argument(
+        "--exclude-cases",
+        default="",
+        help="Comma-separated case ID glob patterns to omit from the report.",
+    )
+    parser.add_argument(
         "--case-profile",
         default="auto",
         choices=(
             "auto",
-            "generic",
-            "deepseek_v4",
-            "gemma4",
-            "qwen3_coder",
-            "glm5",
-            "glm47",
-            "minimax_m2",
-            "gpt_oss",
+            *probe.INLINE_CASE_PROFILES,
+            *probe.available_case_profiles(),
             "all",
         ),
         help="Case profile to run. auto infers from --model.",

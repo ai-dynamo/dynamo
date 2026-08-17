@@ -12,7 +12,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import kimi_tool_call_probe as probe  # noqa: E402
+import tool_calling_probe as probe  # noqa: E402
 
 
 class KimiK3ProfileTests(unittest.TestCase):

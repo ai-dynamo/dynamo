@@ -76,5 +76,5 @@ Every run writes `summary.json`, `summary.md`, and per-case raw artifacts. A
 nonzero exit code means at least one semantic check failed. This focused matrix
 is intended for quick local parser checks. External deployment harnesses should
 use `benchmarks/tool_calling/e2e_verifier`; its `custom` section runs the full
-generic/model-specific qualification matrix and keeps behavioral verdicts
-separate from evaluator execution failures.
+25-case shared qualification matrix in streaming and nonstreaming modes and
+keeps behavioral verdicts separate from evaluator execution failures.
