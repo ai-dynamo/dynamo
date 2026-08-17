@@ -110,12 +110,11 @@ CheckpointSource describes the environment a checkpoint was created from.
 _Appears in:_
 - [DynamoCheckpointStatus](#dynamocheckpointstatus)
 - [PodSnapshotContentStatus](#podsnapshotcontentstatus)
-- [PodSnapshotStatus](#podsnapshotstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `hardware` _[CheckpointSourceHardware](#checkpointsourcehardware)_ | Hardware contains available source hardware facts. |  | Optional: \{\} <br /> |
-| `provenance` _[CheckpointSourceProvenance](#checkpointsourceprovenance)_ | Provenance identifies where and when the checkpoint was created. |  | Optional: \{\} <br /> |
+| `provenance` _[CheckpointSourceProvenance](#checkpointsourceprovenance)_ | Provenance identifies the source node. |  | Optional: \{\} <br /> |
 | `mounts` _[CheckpointSourceMount](#checkpointsourcemount) array_ | Mounts lists source pod mounts required by the checkpoint. Mounted volume<br />contents are not captured in the checkpoint. |  | Optional: \{\} <br /> |
 | `mountCount` _integer_ | MountCount is the number of source pod mounts required by the checkpoint. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `runtimeManagedMounts` _integer_ | RuntimeManagedMounts is the number of additional mounts recreated by the<br />container runtime or kubelet. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -171,15 +170,13 @@ _Appears in:_
 | `path` _string_ | Path is the mount destination inside the captured container. |  |  |
 | `volume` _string_ | Volume is the source pod volume name. |  |  |
 | `providedBy` _string_ | ProvidedBy identifies the Kubernetes volume source. |  |  |
-| `readOnly` _boolean_ | ReadOnly reports whether the source container mounted the volume read-only. |  | Optional: \{\} <br /> |
-| `subPath` _string_ | SubPath is the path within the volume mounted into the container. |  | Optional: \{\} <br /> |
 
 
 #### CheckpointSourceProvenance
 
 
 
-CheckpointSourceProvenance identifies the source workload and capture time.
+CheckpointSourceProvenance identifies the source node.
 
 
 
@@ -189,8 +186,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `node` _string_ | Node is the source node name. |  | Optional: \{\} <br /> |
-| `pod` _string_ | Pod is the namespaced source pod name. |  | Optional: \{\} <br /> |
-| `capturedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CapturedAt is the checkpoint manifest creation time. |  | Optional: \{\} <br /> |
 
 
 #### CheckpointStartupPolicy
@@ -1453,7 +1448,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `boundSnapshotContentName` _string_ | BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent<br />this PodSnapshot is bound to. It is nil until the agent has created the<br />content and recorded the binding. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions reflect the latest observations of the PodSnapshot's state.<br />Standard types are Ready and Failed. |  | Optional: \{\} <br /> |
-| `source` _[CheckpointSource](#checkpointsource)_ | Source describes the environment recorded in the checkpoint manifest. |  | Optional: \{\} <br /> |
 
 
 #### ProfilingConfigSpec

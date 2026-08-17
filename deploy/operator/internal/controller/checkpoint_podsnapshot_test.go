@@ -322,6 +322,30 @@ func TestMapSourcePodToCheckpoint(t *testing.T) {
 	assert.Nil(t, mapSourcePodToCheckpoint(context.Background(), noLabel))
 }
 
+func TestMapPodSnapshotContentToCheckpoint(t *testing.T) {
+	ckpt := newOwnedCheckpoint()
+	snap := ownedCheckpointSnapshot(ckpt, "checkpoint-snapshot")
+	snap.UID = types.UID("snapshot-uid")
+	content := &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-content"},
+		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{
+				Namespace: snap.Namespace,
+				Name:      snap.Name,
+				UID:       snap.UID,
+			},
+		},
+	}
+	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt, snap)
+
+	reqs := r.mapPodSnapshotContentToCheckpoint(context.Background(), content)
+	require.Len(t, reqs, 1)
+	assert.Equal(t, types.NamespacedName{Namespace: ckpt.Namespace, Name: ckpt.Name}, reqs[0].NamespacedName)
+
+	content.Spec.PodSnapshotRef.UID = types.UID("stale-uid")
+	assert.Empty(t, r.mapPodSnapshotContentToCheckpoint(context.Background(), content))
+}
+
 func TestIsCheckpointSourcePod(t *testing.T) {
 	source := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Labels: map[string]string{snapshotprotocol.CheckpointSourceLabel: "true"},

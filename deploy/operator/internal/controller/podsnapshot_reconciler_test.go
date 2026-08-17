@@ -449,54 +449,6 @@ func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 	}
 }
 
-func TestSnapshotReconciler_SourceFailureDoesNotBlockReady(t *testing.T) {
-	s := snapshotReconcilerScheme()
-	snap := makeSnapshotForReconcile()
-	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
-	mountCount := int32(1)
-	content := &nvidiacomv1alpha1.PodSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
-		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
-			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
-			Source: nvidiacomv1alpha1.PodSnapshotContentSource{
-				PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a",
-			},
-		},
-		Status: nvidiacomv1alpha1.PodSnapshotContentStatus{
-			Conditions: []metav1.Condition{{
-				Type: nvidiacomv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Agent", Message: "done",
-			}},
-			Source: &nvidiacomv1alpha1.CheckpointSource{MountCount: &mountCount},
-		},
-	}
-	sourcePatches := 0
-	funcs := interceptor.Funcs{
-		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			sourcePatches++
-			if sourcePatches == 1 {
-				return errors.New("source status rejected")
-			}
-			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
-		},
-	}
-	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap, content)
-
-	t.Log("Persist Ready before the source patch fails")
-	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: snap.Name}})
-	require.Error(t, err)
-	updated := &nvidiacomv1alpha1.PodSnapshot{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
-	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
-	assert.Nil(t, updated.Status.Source)
-
-	t.Log("Retry only the source enrichment")
-	reconcileSnapshot(t, r, snap.Name)
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
-	require.NotNil(t, updated.Status.Source)
-	require.NotNil(t, updated.Status.Source.MountCount)
-	assert.Equal(t, int32(1), *updated.Status.Source.MountCount)
-}
-
 func TestSnapshotReconciler_ProceedsWithoutCheckpointIDLabel(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()

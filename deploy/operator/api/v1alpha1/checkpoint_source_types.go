@@ -5,15 +5,13 @@
 
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 // CheckpointSource describes the environment a checkpoint was created from.
 type CheckpointSource struct {
 	// Hardware contains available source hardware facts.
 	// +optional
 	Hardware *CheckpointSourceHardware `json:"hardware,omitempty"`
 
-	// Provenance identifies where and when the checkpoint was created.
+	// Provenance identifies the source node.
 	// +optional
 	Provenance *CheckpointSourceProvenance `json:"provenance,omitempty"`
 
@@ -53,19 +51,11 @@ type CheckpointSourceGPU struct {
 	UUID string `json:"uuid,omitempty"`
 }
 
-// CheckpointSourceProvenance identifies the source workload and capture time.
+// CheckpointSourceProvenance identifies the source node.
 type CheckpointSourceProvenance struct {
 	// Node is the source node name.
 	// +optional
 	Node string `json:"node,omitempty"`
-
-	// Pod is the namespaced source pod name.
-	// +optional
-	Pod string `json:"pod,omitempty"`
-
-	// CapturedAt is the checkpoint manifest creation time.
-	// +optional
-	CapturedAt *metav1.Time `json:"capturedAt,omitempty"`
 }
 
 // CheckpointSourceMount describes a source pod mount required at restore.
@@ -79,12 +69,4 @@ type CheckpointSourceMount struct {
 
 	// ProvidedBy identifies the Kubernetes volume source.
 	ProvidedBy string `json:"providedBy"`
-
-	// ReadOnly reports whether the source container mounted the volume read-only.
-	// +optional
-	ReadOnly bool `json:"readOnly,omitempty"`
-
-	// SubPath is the path within the volume mounted into the container.
-	// +optional
-	SubPath string `json:"subPath,omitempty"`
 }

@@ -89,8 +89,6 @@ type SourceMountManifest struct {
 	Path       string `yaml:"path"`
 	Volume     string `yaml:"volume"`
 	ProvidedBy string `yaml:"providedBy"`
-	ReadOnly   bool   `yaml:"readOnly,omitempty"`
-	SubPath    string `yaml:"subPath,omitempty"`
 }
 
 func NewSourcePodManifest(containerID string, pid int, sourceNode, podName, podNamespace, podIP string, stdioFDs []string) SourcePodManifest {

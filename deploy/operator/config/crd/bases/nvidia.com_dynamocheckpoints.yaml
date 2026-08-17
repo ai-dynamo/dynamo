@@ -8528,12 +8528,6 @@ spec:
                           providedBy:
                             description: ProvidedBy identifies the Kubernetes volume source.
                             type: string
-                          readOnly:
-                            description: ReadOnly reports whether the source container mounted the volume read-only.
-                            type: boolean
-                          subPath:
-                            description: SubPath is the path within the volume mounted into the container.
-                            type: string
                           volume:
                             description: Volume is the source pod volume name.
                             type: string
@@ -8544,17 +8538,10 @@ spec:
                         type: object
                       type: array
                     provenance:
-                      description: Provenance identifies where and when the checkpoint was created.
+                      description: Provenance identifies the source node.
                       properties:
-                        capturedAt:
-                          description: CapturedAt is the checkpoint manifest creation time.
-                          format: date-time
-                          type: string
                         node:
                           description: Node is the source node name.
-                          type: string
-                        pod:
-                          description: Pod is the namespaced source pod name.
                           type: string
                       type: object
                     runtimeManagedMounts:

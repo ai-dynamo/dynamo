@@ -38,8 +38,6 @@ func TestManifestRoundTrip(t *testing.T) {
 		Path:       "/data",
 		Volume:     "model-cache",
 		ProvidedBy: "PersistentVolumeClaim/model-cache",
-		ReadOnly:   true,
-		SubPath:    "weights",
 	}}
 	original.K8s.RuntimeManagedMounts = &runtimeManagedMounts
 

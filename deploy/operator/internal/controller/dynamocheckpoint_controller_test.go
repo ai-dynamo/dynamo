@@ -987,13 +987,26 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		}
 		return snap
 	}
+	snapshotContent := func(snap *nvidiacomv1alpha1.PodSnapshot, source *nvidiacomv1alpha1.CheckpointSource) *nvidiacomv1alpha1.PodSnapshotContent {
+		return &nvidiacomv1alpha1.PodSnapshotContent{
+			ObjectMeta: metav1.ObjectMeta{Name: *snap.Status.BoundPodSnapshotContentName},
+			Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+				PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{
+					Namespace: snap.Namespace,
+					Name:      snap.Name,
+					UID:       snap.UID,
+				},
+			},
+			Status: nvidiacomv1alpha1.PodSnapshotContentStatus{Source: source},
+		}
+	}
 
 	t.Run("PodSnapshot Ready with JobComplete transitions checkpoint to Ready", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
 		job := markCheckpointJobComplete(newCheckpointJob(defaultCheckpointJobName))
 		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionReady)
 		mountCount := int32(1)
-		snap.Status.Source = &nvidiacomv1alpha1.CheckpointSource{MountCount: &mountCount}
+		content := snapshotContent(snap, &nvidiacomv1alpha1.CheckpointSource{MountCount: &mountCount})
 
 		sourcePatches := 0
 		funcs := interceptor.Funcs{
@@ -1002,7 +1015,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			},
 		}
-		r := makeCheckpointReconcilerWithInterceptor(s, funcs, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
+		r := makeCheckpointReconcilerWithInterceptor(s, funcs, ckpt, job, snap, content, newOwnedPod(podNameFromJob(job.Name), job))
 		r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
 
 		t.Log("Persist checkpoint Ready independently from source enrichment")
@@ -1019,7 +1032,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Equal(t, "PodSnapshotAndJobReady", cond.Reason)
 		assert.Nil(t, updated.Status.Source)
 
-		t.Log("Enrich the already-Ready checkpoint from its PodSnapshot")
+		t.Log("Enrich the already-Ready checkpoint from its PodSnapshotContent")
 		request := ctrl.Request{NamespacedName: types.NamespacedName{Name: testHash, Namespace: testNamespace}}
 		_, err = r.Reconcile(ctx, request)
 		require.NoError(t, err)
@@ -1315,7 +1328,21 @@ func TestCheckpointSourceFailurePreservesReadyAndRetries(t *testing.T) {
 	ckpt.UID = types.UID("checkpoint-uid")
 	snap := ownedCheckpointSnapshot(ckpt, "checkpoint-snapshot")
 	mountCount := int32(2)
-	snap.Status.Source = &nvidiacomv1alpha1.CheckpointSource{MountCount: &mountCount}
+	contentName := "checkpoint-snapshot-content"
+	snap.Status.BoundPodSnapshotContentName = &contentName
+	content := &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: contentName},
+		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{
+				Namespace: snap.Namespace,
+				Name:      snap.Name,
+				UID:       snap.UID,
+			},
+		},
+		Status: nvidiacomv1alpha1.PodSnapshotContentStatus{
+			Source: &nvidiacomv1alpha1.CheckpointSource{MountCount: &mountCount},
+		},
+	}
 
 	sourcePatches := 0
 	funcs := interceptor.Funcs{
@@ -1327,7 +1354,7 @@ func TestCheckpointSourceFailurePreservesReadyAndRetries(t *testing.T) {
 			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 	}
-	r := makeCheckpointReconcilerWithInterceptor(s, funcs, ckpt, snap)
+	r := makeCheckpointReconcilerWithInterceptor(s, funcs, ckpt, snap, content)
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: ckpt.Namespace}}
 
 	t.Log("Reject source enrichment without changing Ready")

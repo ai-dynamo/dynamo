@@ -523,14 +523,7 @@ func checkpointSourceFromManifest(manifest *snapshottypes.CheckpointManifest) *n
 	provenance := &nvidiacomv1alpha1.CheckpointSourceProvenance{
 		Node: manifest.K8s.SourceNode,
 	}
-	if manifest.K8s.PodNamespace != "" && manifest.K8s.PodName != "" {
-		provenance.Pod = manifest.K8s.PodNamespace + "/" + manifest.K8s.PodName
-	}
-	if !manifest.CreatedAt.IsZero() {
-		capturedAt := metav1.NewTime(manifest.CreatedAt)
-		provenance.CapturedAt = &capturedAt
-	}
-	if provenance.Node != "" || provenance.Pod != "" || provenance.CapturedAt != nil {
+	if provenance.Node != "" {
 		source.Provenance = provenance
 	}
 
@@ -542,8 +535,6 @@ func checkpointSourceFromManifest(manifest *snapshottypes.CheckpointManifest) *n
 			Path:       mount.Path,
 			Volume:     mount.Volume,
 			ProvidedBy: mount.ProvidedBy,
-			ReadOnly:   mount.ReadOnly,
-			SubPath:    mount.SubPath,
 		})
 	}
 	if len(source.Mounts) > 0 || manifest.K8s.Mounts != nil || manifest.K8s.RuntimeManagedMounts != nil {
@@ -641,10 +632,6 @@ func sourceMountsForContainer(pod *corev1.Pod, containerName string) []snapshott
 			if sourceMountIsManaged(mount, volume, found) {
 				continue
 			}
-			subPath := mount.SubPath
-			if subPath == "" {
-				subPath = mount.SubPathExpr
-			}
 			providedBy := "Volume/" + mount.Name
 			if found {
 				providedBy = volumeProvider(volume)
@@ -653,8 +640,6 @@ func sourceMountsForContainer(pod *corev1.Pod, containerName string) []snapshott
 				Path:       mount.MountPath,
 				Volume:     mount.Name,
 				ProvidedBy: providedBy,
-				ReadOnly:   mount.ReadOnly,
-				SubPath:    subPath,
 			})
 		}
 		return mounts

@@ -112,7 +112,7 @@ CheckpointSource describes the environment a checkpoint was created from.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoCheckpointStatus](#dynamocheckpointstatus), [PodSnapshotContentStatus](#podsnapshotcontentstatus), [PodSnapshotStatus](#podsnapshotstatus)
+**Appears in:** [DynamoCheckpointStatus](#dynamocheckpointstatus), [PodSnapshotContentStatus](#podsnapshotcontentstatus)
 
 <ParamField path="hardware" type="CheckpointSourceHardware">
 Hardware contains available source hardware facts.
@@ -121,7 +121,7 @@ See [CheckpointSourceHardware](#checkpointsourcehardware).
 </ParamField>
 
 <ParamField path="provenance" type="CheckpointSourceProvenance">
-Provenance identifies where and when the checkpoint was created.
+Provenance identifies the source node.
 See [CheckpointSourceProvenance](#checkpointsourceprovenance).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -194,20 +194,10 @@ Volume is the source pod volume name.
 <ParamField path="providedBy" type="string">
 ProvidedBy identifies the Kubernetes volume source.
 </ParamField>
-
-<ParamField path="readOnly" type="boolean">
-ReadOnly reports whether the source container mounted the volume read-only.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="subPath" type="string">
-SubPath is the path within the volume mounted into the container.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
 </Accordion>
 
 <Accordion id="checkpointsourceprovenance" title="CheckpointSourceProvenance">
-CheckpointSourceProvenance identifies the source workload and capture time.
+CheckpointSourceProvenance identifies the source node.
 
 
 **Kind:** `type`
@@ -215,17 +205,6 @@ CheckpointSourceProvenance identifies the source workload and capture time.
 
 <ParamField path="node" type="string">
 Node is the source node name.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="pod" type="string">
-Pod is the namespaced source pod name.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="capturedAt" type="Time">
-CapturedAt is the checkpoint manifest creation time.
-See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2079,12 +2058,6 @@ BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent
 <ParamField path="conditions" type="Condition array">
 Conditions reflect the latest observations of the PodSnapshot's state. Standard types are Ready and Failed.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="source" type="CheckpointSource">
-Source describes the environment recorded in the checkpoint manifest.
-See [CheckpointSource](#checkpointsource).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

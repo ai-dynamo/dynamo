@@ -79,11 +79,8 @@ func TestSourceMountsForContainer(t *testing.T) {
 		Path:       "/model-cache",
 		Volume:     "model",
 		ProvidedBy: "PersistentVolumeClaim/model-pvc",
-		ReadOnly:   true,
-		SubPath:    "weights",
 	}, mounts[0])
 	assert.Equal(t, "EmptyDir", mounts[1].ProvidedBy)
-	assert.Equal(t, "$(POD_NAME)", mounts[2].SubPath)
 	assert.Equal(t, "Volume/unknown", mounts[3].ProvidedBy)
 	assert.Equal(t, "Projected", mounts[4].ProvidedBy)
 }
@@ -116,8 +113,6 @@ func TestCheckpointSourceFromManifest(t *testing.T) {
 	assert.Equal(t, []nvidiacomv1alpha1.CheckpointSourceGPU{{UUID: "GPU-a"}, {UUID: "GPU-b"}}, source.Hardware.GPUs)
 	require.NotNil(t, source.Provenance)
 	assert.Equal(t, "node-a", source.Provenance.Node)
-	assert.Equal(t, "inference/worker-0", source.Provenance.Pod)
-	assert.Equal(t, metav1.NewTime(createdAt), *source.Provenance.CapturedAt)
 	require.Len(t, source.Mounts, 1)
 	require.NotNil(t, source.MountCount)
 	assert.Equal(t, int32(1), *source.MountCount)
