@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Rung 3: does the prefix cache survive a REAL failover?
+# Does the vLLM prefix cache survive a real GMS engine failover?
 #
 # Two `dynamo.vllm --gms-shadow-mode` engines share one GPU through GMS. One
 # holds a POSIX flock and serves; the other sleeps in STANDBY polling the lock.
@@ -9,15 +9,20 @@
 # check whether the standby that takes over reports a cache HIT on the same
 # prompt.
 #
-# Unlike rung 2 this crosses a process boundary: the mirror must be readable by
-# a different process that computed its own identity digest, and the kill is a
-# crash rather than a graceful sleep.
+# This crosses a process boundary: the mirror must be readable by a different
+# process that computed its own identity digest, and the kill is a crash rather
+# than a graceful sleep.
+#
+# DESTRUCTIVE -- run it on a dedicated box or dev pod, never on a shared host.
+# cleanup() runs on every exit and kills *every* dynamo, GMS and CUDA process on
+# the machine (it sweeps `nvidia-smi --query-compute-apps`), not only the ones
+# it started.
 #
 # Control vs treatment is exactly one env var:
 #   GMS_KV_INDEX_PATH unset -> control    (expect 0 cached tokens after failover)
 #   GMS_KV_INDEX_PATH set   -> treatment  (expect a hit)
 #
-# Usage: ./rung3_failover.sh [MODEL] [NUM_GPU_BLOCKS]
+# Usage: ./kv_index_failover_check.sh [MODEL] [NUM_GPU_BLOCKS]
 set -u
 
 MODEL_NAME="${1:-Qwen/Qwen3-0.6B}"
@@ -26,7 +31,7 @@ MODEL_NAME="${1:-Qwen/Qwen3-0.6B}"
 # identity digest match across the two processes.
 NUM_BLOCKS="${2:-4096}"
 
-LOG_DIR="${RUNG3_LOG_DIR:-/tmp/rung3_$$}"
+LOG_DIR="${KVIDX_LOG_DIR:-/tmp/kv_index_failover_$$}"
 mkdir -p "$LOG_DIR"
 LOCK_PATH="$LOG_DIR/failover.lock"
 ENGINE_A_LOG="$LOG_DIR/engine_a.log"; ENGINE_B_LOG="$LOG_DIR/engine_b.log"
@@ -97,7 +102,7 @@ PY
 
 MODE="control"; [ -n "${GMS_KV_INDEX_PATH:-}" ] && MODE="treatment"
 echo "=============================================="
-echo "  Rung 3: prefix cache across a REAL failover"
+echo "   prefix cache across a REAL failover"
 echo "=============================================="
 echo "Model=$MODEL_NAME blocks=$NUM_BLOCKS mode=$MODE"
 echo "persist_kv=${DYN_GMS_PERSIST_KV:-unset} index=${GMS_KV_INDEX_PATH:-unset}"
@@ -174,12 +179,12 @@ echo "  warm : cached=$WARM_CACHED hash=$WARM_HASH"
 
 # ---- Phase 5: SIGKILL the whole active process group ----
 echo ""; echo "=== Phase 5: Failover (SIGKILL) ==="
-# RUNG3_KILL_UNDER_LOAD=1 crashes the engine with batches in flight rather than
+# KVIDX_KILL_UNDER_LOAD=1 crashes the engine with batches in flight rather than
 # idle. That is the case the publication fence exists for: labels are attached
 # during schedule(), before their KV is computed, so an engine killed mid-batch
 # must not hand those labels to its successor.
 LOAD_PIDS=()
-if [ "${RUNG3_KILL_UNDER_LOAD:-0}" = "1" ]; then
+if [ "${KVIDX_KILL_UNDER_LOAD:-0}" = "1" ]; then
     echo "Firing concurrent traffic so the kill lands mid-batch..."
     for i in $(seq 1 8); do
         python3 - "$MODEL_NAME" "$i" >/dev/null 2>&1 <<'PY' &
@@ -232,4 +237,4 @@ else
         || fail "control: unexpected hit (cached=$POST_CACHED) -- control is not a control"
 fi
 
-echo ""; echo "  RUNG 3 COMPLETE"
+echo ""; echo "  COMPLETE"

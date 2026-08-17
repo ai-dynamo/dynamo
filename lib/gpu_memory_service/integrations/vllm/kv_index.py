@@ -6,7 +6,8 @@
 GMS can already make the KV *bytes* outlive the engine that wrote them
 (``commit_layout()``). This carries the *index*: the ``block_hash -> block_id``
 binding that lives in the scheduler's ``BlockPool`` and cannot be regenerated
-from the bytes, because the hash is over token ids rather than content.
+from the bytes, because the hash is over token ids rather than content. Without
+it a standby adopts correct KV that it cannot find, and re-prefills anyway.
 
 The design is a write-through mirror rather than a periodic snapshot. vLLM has
 exactly three sites that change a block's label -- ``_insert_block_hash`` names
@@ -21,6 +22,17 @@ The invariant, from which everything else follows:
 
 Subset means every possible error is a missing label, and a missing label is a
 cache miss. No arrangement of failures yields a *wrong* label.
+
+Known gap: that invariant assumes every engine adopting these pages
+participates. An engine running with ``DYN_GMS_PERSIST_KV`` but *without* this
+feature adopts the pages, overwrites blocks and leaves nothing observable
+behind, so a later participant would replay labels describing bytes that engine
+changed. Closing it needs a writer epoch on the GMS handshake; until then, do
+not mix participating and non-participating engines over one pool.
+
+Enabled by setting ``GMS_KV_INDEX_PATH``; off by default. Installed through the
+``vllm.general_plugins`` entry point in ``setup.py``, which wraps
+``EngineCore.wake_up`` and ``EngineCore.sleep`` and nothing else.
 """
 
 from __future__ import annotations
@@ -36,6 +48,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Everything else is internal, exported only for the tests.
+__all__ = ["enable_kv_index"]
+
 MAGIC = b"DYNKVIX1"
 VERSION = 1
 HEADER_BYTES = 4096
@@ -43,36 +58,25 @@ HEADER_BYTES = 4096
 KEY_BYTES = 40
 
 _OFF_VERSION = 8
-_OFF_NUM_BLOCKS = 12
 _OFF_COMMITTED = 16
 _OFF_IDENTITY = 24
 _DIGEST_BYTES = 32
 
-
-def mirror_path() -> str | None:
-    """Where the mirror lives, or None when the feature is off (the default)."""
-    return os.environ.get("GMS_KV_INDEX_PATH") or None
-
-
-# vLLM's ``sleep(level>=1)`` clears the prefix cache (core.py:874) because it
-# assumes the KV is about to be discarded. Under GMS with a committed layout it
-# is not -- the server keeps the pages, so the labels stay true. A reset caused
-# by a sleep must therefore NOT wipe the mirror, while an RLHF weight-update
-# reset must. Nothing inside reset_prefix_cache can tell them apart.
+# vLLM's EngineCore.sleep(level>=1) clears the prefix cache because it assumes
+# the KV is about to be discarded. Under a committed GMS layout it is not -- the
+# server keeps the pages, so the labels stay true. A reset caused by a sleep must
+# therefore NOT wipe the mirror, while an RLHF weight-update reset must, and
+# nothing inside reset_prefix_cache can tell them apart.
 #
-# The flag covers the whole sleep->wake window rather than the sleep() call:
-# EngineCoreProc.pause_scheduler (core.py:1764) may defer _reset_caches into an
-# idle callback that fires after sleep() has already returned.
+# The flag spans sleep->wake rather than the sleep() call because
+# EngineCoreProc.pause_scheduler may defer the cache clear into an idle callback
+# that fires after sleep() has already returned.
 _IN_SLEEP = False
-
-
-def _in_sleep() -> bool:
-    return _IN_SLEEP
 
 # One slot per block, indexed by block_id -- a flat array, not a map.
 _REC = np.dtype(
     [
-        ("stamp", "<u8"),  # 0 == invalid; else the S in flight at publish
+        ("stamp", "<u8"),  # 0 == invalid; else `scheduled` at publish
         ("num_tokens", "<u4"),  # 0 encodes None
         ("key_len", "<u4"),
         ("key", np.uint8, (KEY_BYTES,)),
@@ -82,18 +86,22 @@ _REC = np.dtype(
 assert _REC.itemsize == 64, _REC.itemsize
 
 
-def identity_digest(**fields) -> bytes:
-    """Hash the 'ruler': everything that defines what a block id measures.
-
-    A label says "block 457". That only means something if both engines measure
-    blocks the same way, so a mismatch here is a refusal rather than a migration.
-    """
-    blob = json.dumps(fields, sort_keys=True, default=repr).encode()
-    return hashlib.sha256(blob).digest()
+def mirror_path() -> str | None:
+    """Where the mirror lives, or None when the feature is off (the default)."""
+    return os.environ.get("GMS_KV_INDEX_PATH") or None
 
 
 class MirrorFile:
-    """The artifact: a fixed-size shared mapping, header plus one slot per block."""
+    """The artifact: a fixed-size shared mapping, header plus one slot per block.
+
+    Also carries the publication watermark. vLLM attaches a label during
+    ``schedule()`` -- and, under async scheduling, inside ``update_from_output``
+    -- in both cases before the KV it names is certainly on the device. Batches
+    are reaped strictly FIFO, so counting schedules against completions is
+    enough: a label stamped with ``scheduled`` becomes trustworthy once
+    ``committed`` reaches it. An engine that dies mid-batch never advances
+    ``committed`` that far, so those labels stay untrusted forever.
+    """
 
     def __init__(self, path: str, mm: mmap.mmap, num_blocks: int):
         self.path = path
@@ -108,30 +116,36 @@ class MirrorFile:
         self._rec = np.ndarray(
             (num_blocks,), dtype=_REC, buffer=mm, offset=HEADER_BYTES
         )
+        # Continue the predecessor's stamp space: inherited labels stay valid
+        # and ours land strictly above them.
+        self.scheduled = self.committed
 
-    # ---- header ----
+    # ---- publication watermark ----
 
     @property
     def committed(self) -> int:
         return int(self._committed[0])
 
-    def set_committed(self, value: int) -> None:
-        self._committed[0] = value
+    def on_schedule(self) -> None:
+        self.scheduled += 1
+
+    def on_update(self) -> None:
+        self._committed[0] = self.committed + 1
 
     # ---- writer ----
 
-    def publish(self, block_id: int, key: bytes, num_tokens: int | None, stamp: int):
-        """Record a label. Stamp is written LAST, always 0 -> n.
+    def publish(self, block_id: int, key: bytes, num_tokens: int | None) -> None:
+        """Record a label. The stamp is written LAST, always 0 -> n.
 
         A block can only be re-named after being retracted (``set_block_hash``
-        asserts the slot is empty), so a record torn by SIGKILL always reads
-        back ``stamp == 0`` and is ignored. That is why no checksum is needed.
+        asserts the slot is empty), so a record torn by SIGKILL always reads back
+        ``stamp == 0`` and is ignored. That is why no checksum is needed.
         """
         n = len(key)
         self._rec["key"][block_id][:n] = np.frombuffer(key, dtype=np.uint8)
         self._rec["key_len"][block_id] = n
         self._rec["num_tokens"][block_id] = num_tokens or 0
-        self._rec["stamp"][block_id] = stamp
+        self._rec["stamp"][block_id] = self.scheduled
 
     def invalidate(self, block_id: int) -> None:
         self._rec["stamp"][block_id] = 0
@@ -142,10 +156,10 @@ class MirrorFile:
     def retain_only(self, block_ids) -> None:
         """Drop every record we did not install.
 
-        A refused record keeps a stamp that is *currently* above the watermark,
-        but our fence restarts at that watermark and counts up -- so a stale
-        stamp would eventually fall below it and start looking trustworthy.
-        We also now own the pool, so those blocks are ours to overwrite.
+        A refused record keeps a stamp above the current watermark, but our
+        watermark counts up from there -- so a stale stamp would eventually fall
+        below it and start looking trustworthy. We also own the pool now, so
+        those blocks are ours to overwrite.
         """
         keep = np.zeros(self.num_blocks, dtype=bool)
         if block_ids:
@@ -155,32 +169,26 @@ class MirrorFile:
     # ---- reader ----
 
     def live_block_ids(self) -> set[int]:
-        """Blocks currently claimed, ignoring the fence. For invariant tests."""
+        """Blocks currently claimed, ignoring the watermark. Test-only: the
+        subset invariant is asserted against this."""
         return set(np.nonzero(self._rec["stamp"] > 0)[0].tolist())
 
     def trusted(self):
-        """Yield ``(block_id, key, num_tokens)`` for labels the fence admits."""
+        """Yield ``(block_id, key, num_tokens)`` for labels whose KV exists."""
         stamps = self._rec["stamp"]
-        idx = np.nonzero((stamps > 0) & (stamps <= self.committed))[0]
-        for block_id in idx.tolist():
+        for block_id in np.nonzero((stamps > 0) & (stamps <= self.committed))[
+            0
+        ].tolist():
             n = int(self._rec["key_len"][block_id])
             key = bytes(self._rec["key"][block_id][:n])
-            nt = int(self._rec["num_tokens"][block_id])
-            yield block_id, key, (nt or None)
-
-    def close(self) -> None:
-        del self._committed, self._rec
-        self._mm.close()
+            yield block_id, key, (int(self._rec["num_tokens"][block_id]) or None)
 
     # ---- lifecycle ----
 
     @staticmethod
     def _map(path: str, num_blocks: int) -> "MirrorFile":
-        f = open(path, "r+b")
-        try:
+        with open(path, "r+b") as f:
             mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_WRITE)
-        finally:
-            f.close()
         return MirrorFile(path, mm, num_blocks)
 
     @classmethod
@@ -202,9 +210,8 @@ class MirrorFile:
     ) -> tuple["MirrorFile | None", str]:
         """Admit the mirror, or refuse it with a reason.
 
-        All-or-nothing gates live here; the per-record fence is applied later by
-        :meth:`trusted`. Any refusal degrades to a cold cache, never to a wrong
-        answer.
+        All-or-nothing gates live here; the per-record watermark is applied later
+        by :meth:`trusted`. Any refusal degrades to a cold cache.
         """
         if not os.path.exists(path):
             return None, "absent"
@@ -213,12 +220,12 @@ class MirrorFile:
                 head = f.read(HEADER_BYTES)
             actual_size = os.path.getsize(path)
         except OSError as e:
-            logger.warning("[kvidx] cannot read mirror %s: %s", path, e)
+            logger.warning("[kv_index] cannot read mirror %s: %s", path, e)
             return None, "unreadable"
 
         if len(head) < HEADER_BYTES or head[: len(MAGIC)] != MAGIC:
             return None, "magic"
-        (version, blocks) = struct.unpack_from("<II", head, _OFF_VERSION)
+        version, blocks = struct.unpack_from("<II", head, _OFF_VERSION)
         if version != VERSION:
             return None, "version"
         if blocks != num_blocks:
@@ -230,40 +237,14 @@ class MirrorFile:
         return cls._map(path, num_blocks), "ok"
 
 
-class Fence:
-    """The publication fence: two integers.
-
-    vLLM attaches labels during ``schedule()``, *before* the KV is computed, so
-    the index always contains bindings whose bytes do not exist yet. Batches are
-    reaped strictly FIFO, so ``update_from_output`` call #n reaps ``schedule()``
-    call #n: stamping a label with S and trusting it only once E has passed is
-    exactly the condition "the bytes exist".
-
-    Self-correcting: an engine that dies mid-batch never advances E to those
-    stamps, so they are permanently untrusted.
-    """
-
-    def __init__(self, mirror: MirrorFile, start: int = 0):
-        self._mirror = mirror
-        self.S = start
-        self.E = start
-        mirror.set_committed(start)
-
-    def on_schedule(self) -> None:
-        self.S += 1
-
-    def on_update(self) -> None:
-        self.E += 1
-        self._mirror.set_committed(self.E)
-
-
-def install_writer(pool, mirror: MirrorFile, fence: Fence) -> None:
+def install_writer(pool, mirror: MirrorFile) -> None:
     """Mirror every label change on this ``BlockPool`` instance.
 
     A runtime subclass swap rather than a patch on the class: it composes with
-    whatever ``BlockPool`` subclass is already in play, and it is scoped to the
-    one object we were handed.
+    whatever ``BlockPool`` subclass is already in play, and is scoped to the one
+    object we were handed. Re-arming on a later wake only re-points the mirror.
     """
+    pool._dyn_mirror = mirror
     if getattr(pool, "_dyn_mirrored", False):
         return
     base = type(pool)
@@ -278,10 +259,9 @@ def install_writer(pool, mirror: MirrorFile, fence: Fence) -> None:
             # carried a different primary name (out of scope: >1 KV cache
             # group). Never guess -- retract and stay a subset.
             self._dyn_mirror.invalidate(block.block_id)
-            self._dyn_out_of_scope += 1
             return
         self._dyn_mirror.publish(
-            block.block_id, bytes(label), block.block_hash_num_tokens, self._dyn_fence.S
+            block.block_id, bytes(label), block.block_hash_num_tokens
         )
 
     def _remove_cached_block_hashes(self, block):
@@ -294,9 +274,9 @@ def install_writer(pool, mirror: MirrorFile, fence: Fence) -> None:
         # whenever any block is in use, and dropping the mirror on a refusal
         # would zero it on every poll of a busy engine.
         ok = base.reset_prefix_cache(self)
-        if ok and not _in_sleep():
-            # Outside sleep this means the operator dropped the index on purpose
-            # -- an RLHF weight update -- so the labels are genuinely dead.
+        if ok and not _IN_SLEEP:
+            # Outside a sleep this means the operator dropped the index on
+            # purpose -- an RLHF weight update -- so the labels are dead.
             self._dyn_mirror.invalidate_all()
         return ok
 
@@ -309,9 +289,6 @@ def install_writer(pool, mirror: MirrorFile, fence: Fence) -> None:
             "reset_prefix_cache": reset_prefix_cache,
         },
     )
-    pool._dyn_mirror = mirror
-    pool._dyn_fence = fence
-    pool._dyn_out_of_scope = 0
     pool._dyn_mirrored = True
 
 
@@ -335,190 +312,8 @@ def replay(pool, mirror: MirrorFile) -> list:
         installed.append(block)
 
     _requeue_to_tail(pool, installed)
-    logger.info("[kvidx] replayed %d labels", len(installed))
+    logger.info("[kv_index] replayed %d labels", len(installed))
     return installed
-
-
-def _probe_adopted(worker) -> bool:
-    """Did THIS rank inherit the previous engine's KV pages?
-
-    Runs in the worker process via ``collective_rpc``. Module-level so it is
-    picklable to a spawned worker.
-
-    Reads the flag ``GMSWorker.wake_up`` recorded rather than the live GMS
-    grant: ``commit_layout()`` regrants a *creating* writer to ``RW_DATA`` as
-    well, so by the time this runs both cases look identical from the grant.
-    """
-    return bool(getattr(worker, "_gms_kv_adopted", False))
-
-
-def _identity(engine_core, num_blocks: int) -> bytes:
-    """The ruler: everything that decides what a block id measures.
-
-    A mismatch means two engines would read the same label as different bytes,
-    which is the one failure mode here that is a wrong answer rather than a miss.
-    """
-    import vllm
-    from vllm.v1.core import kv_cache_utils
-
-    cfg = engine_core.vllm_config
-    return identity_digest(
-        vllm=vllm.__version__,
-        model=cfg.model_config.model,
-        block_size=cfg.cache_config.block_size,
-        cache_dtype=str(cfg.cache_config.cache_dtype),
-        tp=cfg.parallel_config.tensor_parallel_size,
-        num_blocks=num_blocks,
-        # Root of the block-hash chain: os.urandom per process unless
-        # PYTHONHASHSEED is pinned, so this also catches an unpinned seed.
-        none_hash=bytes(kv_cache_utils.NONE_HASH).hex(),
-        hash_algo=str(cfg.cache_config.prefix_caching_hash_algo),
-    )
-
-
-def on_wake_up(engine_core) -> None:
-    """Take over the index, then start recording. The whole integration.
-
-    Runs after vLLM's ``wake_up`` returns -- the only point that is both after
-    every rank has re-attached its KV memory (``model_executor.wake_up`` is a
-    blocking collective) and before the scheduler can hand out a block.
-    """
-    path = mirror_path()
-    if not path or engine_core.model_executor.is_sleeping:
-        return
-
-    pool = engine_core.scheduler.kv_cache_manager.block_pool
-    num_blocks = len(pool.blocks)
-    identity = _identity(engine_core, num_blocks)
-
-    # Every rank, or nobody: the index is engine-wide but the bytes are
-    # per-rank, so a partial adoption is correct on some ranks and garbage on
-    # others -- the shape that produces plausible-looking wrong output.
-    try:
-        states = engine_core.collective_rpc(_probe_adopted)
-        adopted = bool(states) and all(states)
-    except Exception as e:
-        logger.warning("[kvidx] takeover probe failed (%s); not replaying", e)
-        adopted = False
-
-    mirror, reason, installed, live, trusted = None, "not_adopted", [], 0, 0
-    # vLLM's own index as we find it, BEFORE we touch anything. Sleep clears it,
-    # so this must be 0 -- replay is only doing real work if it rebuilds from
-    # nothing rather than riding on labels that survived in process memory.
-    pool_labeled_before = sum(1 for b in pool.blocks if b.block_hash is not None)
-    if adopted:
-        mirror, reason = MirrorFile.open_for_replay(
-            path, identity=identity, num_blocks=num_blocks
-        )
-        if mirror is None:
-            logger.info("[kvidx] not replaying (%s); starting a fresh mirror", reason)
-        else:
-            # Counted before replay so a harness can tell the stages apart:
-            # live==0 means the mirror was wiped, trusted==0 means the fence
-            # rejected everything, installed==0 with trusted>0 means the pool
-            # refused them.
-            live = len(mirror.live_block_ids())
-            trusted = sum(1 for _ in mirror.trusted())
-            installed = replay(pool, mirror)
-            mirror.retain_only({b.block_id for b in installed})
-
-    _record_takeover(
-        path,
-        adopted=adopted,
-        reason=reason,
-        pool_labeled_before=pool_labeled_before,
-        live=live if adopted and mirror is not None else 0,
-        trusted=trusted if adopted and mirror is not None else 0,
-        installed=len(installed),
-        num_blocks=num_blocks,
-        committed=mirror.committed if mirror is not None else 0,
-    )
-
-    if mirror is None:
-        # Either we built a fresh pool -- so whatever the old mirror describes
-        # no longer exists -- or it was refused. Same action either way.
-        mirror = MirrorFile.create(path, num_blocks, identity)
-
-    # Continue the predecessor's stamp space: inherited labels stay valid and
-    # ours land strictly above them.
-    fence = Fence(mirror, start=mirror.committed)
-    install_writer(pool, mirror, fence)
-    _install_fence(engine_core.scheduler, fence)
-    pool._dyn_mirror = mirror
-    pool._dyn_fence = fence
-
-    global _IN_SLEEP
-    _IN_SLEEP = False  # back to serving: a reset now means what it says
-
-
-def _record_takeover(path: str, **fields) -> None:
-    """Append one line per wake to ``<mirror>.status.jsonl``.
-
-    A fail-closed design that fails *silently* decays into fail-open the first
-    time someone inverts a condition, and "refused" has to be distinguishable
-    from "never ran". This is the surface a harness asserts on; the engine
-    process's logging config is not reliably ours to configure.
-    """
-    try:
-        with open(f"{path}.status.jsonl", "a") as f:
-            f.write(json.dumps(fields) + "\n")
-    except OSError:
-        pass
-
-
-def _install_fence(scheduler, fence: Fence) -> None:
-    """Wrap schedule/update_from_output once; re-point the fence on later wakes."""
-    scheduler._dyn_fence = fence
-    if getattr(scheduler, "_dyn_fenced", False):
-        return
-    schedule, update = scheduler.schedule, scheduler.update_from_output
-
-    def _schedule(*args, **kwargs):
-        scheduler._dyn_fence.on_schedule()
-        return schedule(*args, **kwargs)
-
-    def _update_from_output(*args, **kwargs):
-        out = update(*args, **kwargs)
-        scheduler._dyn_fence.on_update()
-        return out
-
-    scheduler.schedule = _schedule
-    scheduler.update_from_output = _update_from_output
-    scheduler._dyn_fenced = True
-
-
-def enable_kv_index() -> None:
-    """Entry point for ``vllm.general_plugins``. Self-disables when unset.
-
-    Patches ``wake_up`` and nothing else. Notably NOT ``EngineCore.__init__``:
-    plugins are loaded by its first statement, so a wrapper installed from here
-    could never affect the frame already executing.
-    """
-    if not mirror_path():
-        return
-    from vllm.v1.engine.core import EngineCore
-
-    if getattr(EngineCore, "_dyn_kvidx_patched", False):
-        return
-    original_wake, original_sleep = EngineCore.wake_up, EngineCore.sleep
-
-    def wake_up(self, *args, **kwargs):
-        result = original_wake(self, *args, **kwargs)
-        try:
-            on_wake_up(self)
-        except Exception as e:  # persistence must never break serving
-            logger.warning("[kvidx] takeover failed (%s); continuing cold", e)
-        return result
-
-    def sleep(self, *args, **kwargs):
-        global _IN_SLEEP
-        _IN_SLEEP = True  # cleared by the wake, not by this call returning
-        return original_sleep(self, *args, **kwargs)
-
-    EngineCore.wake_up = wake_up
-    EngineCore.sleep = sleep
-    EngineCore._dyn_kvidx_patched = True
-    logger.info("[kvidx] enabled; mirror at %s", mirror_path())
 
 
 def _requeue_to_tail(pool, blocks: list) -> None:
@@ -530,9 +325,9 @@ def _requeue_to_tail(pool, blocks: list) -> None:
     prefix sits at the head and the very first request served is handed its own
     blocks and overwrites them -- the cache would not survive one request.
 
-    Descending ``num_tokens`` puts the deepest prefix furthest from the head, so
-    the shallow end is evicted first and a usable leading prefix survives. Same
-    convention vLLM uses in ``free_blocks``.
+    Sorted descending by ``num_tokens`` so the deepest match sits nearest the
+    head and is evicted first, leaving the shallow leading prefix -- which more
+    requests can reuse -- alive longest. Same order ``free_blocks`` produces.
     """
     if not blocks:
         return
@@ -540,3 +335,179 @@ def _requeue_to_tail(pool, blocks: list) -> None:
         pool.free_block_queue.remove(block)
     blocks.sort(key=lambda b: (b.block_hash_num_tokens or 0), reverse=True)
     pool.free_block_queue.append_n(blocks)
+
+
+def _probe_adopted(worker) -> bool:
+    """Did THIS rank inherit the previous engine's KV pages?
+
+    Runs in the worker process via ``collective_rpc``; module-level so it is
+    picklable to a spawned worker. Reads the flag ``GMSWorker.wake_up`` recorded
+    rather than the live GMS grant, because ``commit_layout()`` regrants a
+    *creating* writer to ``RW_DATA`` as well.
+    """
+    return bool(getattr(worker, "_gms_kv_adopted", False))
+
+
+def _identity(engine_core, num_blocks: int) -> bytes:
+    """Hash the ruler: everything that decides what a block id measures.
+
+    A label says "block 457". That only means something if both engines measure
+    blocks the same way, so a mismatch is a refusal rather than a migration --
+    the one failure mode here that would be a wrong answer rather than a miss.
+    """
+    import vllm
+    from vllm.v1.core import kv_cache_utils
+
+    cfg = engine_core.vllm_config
+    fields = {
+        "vllm": vllm.__version__,
+        "model": cfg.model_config.model,
+        "block_size": cfg.cache_config.block_size,
+        "cache_dtype": str(cfg.cache_config.cache_dtype),
+        "tp": cfg.parallel_config.tensor_parallel_size,
+        "num_blocks": num_blocks,
+        # Root of the block-hash chain: os.urandom per process unless
+        # PYTHONHASHSEED is pinned, so this also catches an unpinned seed.
+        "none_hash": bytes(kv_cache_utils.NONE_HASH).hex(),
+        "hash_algo": str(cfg.cache_config.prefix_caching_hash_algo),
+    }
+    return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).digest()
+
+
+def on_wake_up(engine_core) -> None:
+    """Take over the index, then start recording. The whole integration.
+
+    Runs after vLLM's ``wake_up`` returns -- the only point that is both after
+    every rank has re-attached its KV memory (``model_executor.wake_up`` is a
+    blocking collective) and before the scheduler can hand out a block.
+    """
+    path = mirror_path()
+    # _IN_SLEEP gates this to wakes that actually followed a sleep. A spurious
+    # wake would otherwise re-run the takeover against a live pool and, finding
+    # nothing installable, retain_only() its way through the whole mirror.
+    if not path or not _IN_SLEEP or engine_core.model_executor.is_sleeping:
+        return
+
+    pool = engine_core.scheduler.kv_cache_manager.block_pool
+    num_blocks = len(pool.blocks)
+    identity = _identity(engine_core, num_blocks)
+    # vLLM's own index as we find it. Sleep clears it, so this is normally 0;
+    # it is what distinguishes "replay rebuilt the index" from "labels happened
+    # to survive in process memory".
+    labelled_before = sum(1 for b in pool.blocks if b.block_hash is not None)
+
+    # Every rank, or nobody: the index is engine-wide but the bytes are
+    # per-rank, so a partial adoption is correct on the ranks that adopted and
+    # garbage on the one that did not.
+    try:
+        states = engine_core.collective_rpc(_probe_adopted)
+        adopted = bool(states) and all(states)
+    except Exception as e:
+        logger.warning("[kv_index] takeover probe failed (%s); not replaying", e)
+        adopted = False
+
+    mirror, reason, installed = None, "not_adopted", []
+    if adopted:
+        mirror, reason = MirrorFile.open_for_replay(
+            path, identity=identity, num_blocks=num_blocks
+        )
+        if mirror is None:
+            logger.info("[kv_index] not replaying (%s); starting fresh", reason)
+        else:
+            installed = replay(pool, mirror)
+            mirror.retain_only({b.block_id for b in installed})
+
+    _record_takeover(
+        path,
+        adopted=adopted,
+        reason=reason,
+        labelled_before=labelled_before,
+        installed=len(installed),
+    )
+
+    if mirror is None:
+        # Either we built a fresh pool -- so whatever the old mirror describes
+        # no longer exists -- or it was refused. Same action either way, and it
+        # is what makes a stale mirror inert for everyone after us.
+        mirror = MirrorFile.create(path, num_blocks, identity)
+
+    install_writer(pool, mirror)
+    _install_watermark(engine_core.scheduler, mirror)
+
+
+def _record_takeover(path: str, **fields) -> None:
+    """Append one line per wake to ``<mirror>.status.jsonl``.
+
+    A fail-closed design that fails *silently* decays into fail-open the first
+    time someone inverts a condition, and "refused" has to be distinguishable
+    from "never ran". The engine process's logging config is not reliably ours.
+    """
+    try:
+        with open(f"{path}.status.jsonl", "a") as f:
+            f.write(json.dumps(fields) + "\n")
+    except OSError:
+        pass
+
+
+def _install_watermark(scheduler, mirror: MirrorFile) -> None:
+    """Count schedules and completions. Wrapped once; re-pointed on later wakes."""
+    scheduler._dyn_mirror = mirror
+    if getattr(scheduler, "_dyn_watermarked", False):
+        return
+    schedule, update = scheduler.schedule, scheduler.update_from_output
+
+    def _schedule(*args, **kwargs):
+        scheduler._dyn_mirror.on_schedule()
+        return schedule(*args, **kwargs)
+
+    def _update_from_output(*args, **kwargs):
+        out = update(*args, **kwargs)
+        scheduler._dyn_mirror.on_update()
+        return out
+
+    scheduler.schedule = _schedule
+    scheduler.update_from_output = _update_from_output
+    scheduler._dyn_watermarked = True
+
+
+def enable_kv_index() -> None:
+    """Entry point for ``vllm.general_plugins``. Self-disables when unset.
+
+    Patches ``wake_up`` and ``sleep``, and nothing else. Notably NOT
+    ``EngineCore.__init__``: plugins are loaded by its first statement, so a
+    wrapper installed from here could never affect the frame already executing.
+    """
+    if not mirror_path():
+        return
+    from vllm.v1.engine.core import EngineCore
+
+    if getattr(EngineCore, "_dyn_kv_index_patched", False):
+        return
+    original_wake, original_sleep = EngineCore.wake_up, EngineCore.sleep
+
+    def wake_up(self, *args, **kwargs):
+        global _IN_SLEEP
+        result = original_wake(self, *args, **kwargs)
+        try:
+            on_wake_up(self)
+        except Exception as e:  # persistence must never break serving
+            logger.warning("[kv_index] takeover failed (%s); continuing cold", e)
+        finally:
+            # Back to serving: a reset now means what it says. Cleared even on
+            # failure, or an RLHF reset would silently stop invalidating.
+            _IN_SLEEP = False
+        return result
+
+    def sleep(self, *args, **kwargs):
+        global _IN_SLEEP
+        _IN_SLEEP = True  # cleared by the wake, not by this call returning
+        try:
+            return original_sleep(self, *args, **kwargs)
+        except BaseException:
+            _IN_SLEEP = False
+            raise
+
+    EngineCore.wake_up = wake_up
+    EngineCore.sleep = sleep
+    EngineCore._dyn_kv_index_patched = True
+    logger.info("[kv_index] enabled; mirror at %s", mirror_path())

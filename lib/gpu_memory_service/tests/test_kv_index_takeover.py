@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Rung 4: the takeover decision, and the two bugs that hardware runs caught.
+"""The takeover decision: which situation we woke into, and what we do about it.
 
 ``test_kv_index.py`` covers the mirror's mechanics. This covers ``on_wake_up``:
 which of the two situations we are in, and what we do about it. Both bugs found
@@ -24,14 +24,13 @@ import pytest
 
 pytest.importorskip("vllm")
 
+from gpu_memory_service.integrations.vllm import kv_index  # noqa: E402
 from vllm.v1.core import kv_cache_utils  # noqa: E402
 from vllm.v1.core.block_pool import BlockPool  # noqa: E402
 from vllm.v1.core.kv_cache_utils import (  # noqa: E402
     BlockHash,
     make_block_hash_with_group_id,
 )
-
-from gpu_memory_service.integrations.vllm import kv_index  # noqa: E402
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -75,6 +74,15 @@ class FakeEngineCore:
         return [self._adopted]
 
 
+def wake(engine):
+    """A wake, as the plugin performs it: on_wake_up only runs after a sleep."""
+    kv_index._IN_SLEEP = True
+    try:
+        kv_index.on_wake_up(engine)
+    finally:
+        kv_index._IN_SLEEP = False
+
+
 def key_for(tag: str):
     return make_block_hash_with_group_id(
         BlockHash(hashlib.sha256(tag.encode()).digest()), 0
@@ -105,11 +113,11 @@ def new_pool():
 
 def populate(engine, pool, n=5):
     """Serve a little: label n blocks and let their batch complete."""
-    pool._dyn_fence.on_schedule()
+    pool._dyn_mirror.on_schedule()
     blocks = pool.get_new_blocks(n)
     for i, b in enumerate(blocks):
         pool._insert_block_hash(key_for(f"k{i}"), b, BLOCK_SIZE * (i + 1))
-    pool._dyn_fence.on_update()
+    pool._dyn_mirror.on_update()
     pool.free_blocks(blocks)
     return blocks
 
@@ -127,7 +135,7 @@ def test_sleep_does_not_wipe_the_mirror(path):
     """
     pool = new_pool()
     engine = FakeEngineCore(pool, adopted=False)
-    kv_index.on_wake_up(engine)
+    wake(engine)
     blocks = populate(engine, pool)
     assert pool._dyn_mirror.live_block_ids() == {b.block_id for b in blocks}
 
@@ -135,23 +143,23 @@ def test_sleep_does_not_wipe_the_mirror(path):
     kv_index._IN_SLEEP = True
     assert pool.reset_prefix_cache() is True
     assert not any(b.block_hash for b in pool.blocks), "vLLM's index should be gone"
-    assert pool._dyn_mirror.live_block_ids() == {b.block_id for b in blocks}, (
-        "the mirror must survive a sleep -- GMS still holds the pages"
-    )
+    assert pool._dyn_mirror.live_block_ids() == {
+        b.block_id for b in blocks
+    }, "the mirror must survive a sleep -- GMS still holds the pages"
 
 
 def test_reset_outside_a_sleep_does_wipe_the_mirror(path):
     """An RLHF weight update is the case the wipe exists for."""
     pool = new_pool()
     engine = FakeEngineCore(pool, adopted=False)
-    kv_index.on_wake_up(engine)
+    wake(engine)
     populate(engine, pool)
 
     assert kv_index._IN_SLEEP is False
     assert pool.reset_prefix_cache() is True
-    assert pool._dyn_mirror.live_block_ids() == set(), (
-        "outside a sleep the operator meant it: the labels are dead"
-    )
+    assert (
+        pool._dyn_mirror.live_block_ids() == set()
+    ), "outside a sleep the operator meant it: the labels are dead"
 
 
 # ---------------------------------------------------------------------------
@@ -162,12 +170,12 @@ def test_reset_outside_a_sleep_does_wipe_the_mirror(path):
 def test_inherited_pages_replay(path):
     """The happy path: a successor rebuilds the predecessor's index."""
     pool_a = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool_a, adopted=False))
+    wake(FakeEngineCore(pool_a, adopted=False))
     blocks = populate(None, pool_a)
     expected = {b.block_id: b.block_hash for b in blocks}
 
     pool_b = new_pool()  # a different engine, same geometry
-    kv_index.on_wake_up(FakeEngineCore(pool_b, adopted=True))
+    wake(FakeEngineCore(pool_b, adopted=True))
 
     got = {b.block_id: b.block_hash for b in pool_b.blocks if b.block_hash}
     assert got == expected
@@ -181,15 +189,15 @@ def test_fresh_pages_never_replay(path):
     makes a stale one inert for everybody after us.
     """
     pool_a = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool_a, adopted=False))
+    wake(FakeEngineCore(pool_a, adopted=False))
     populate(None, pool_a)
 
     pool_b = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool_b, adopted=False))  # built its own
+    wake(FakeEngineCore(pool_b, adopted=False))  # built its own
 
-    assert not any(b.block_hash for b in pool_b.blocks), (
-        "labels were installed onto pages this engine allocated itself"
-    )
+    assert not any(
+        b.block_hash for b in pool_b.blocks
+    ), "labels were installed onto pages this engine allocated itself"
     assert pool_b._dyn_mirror.live_block_ids() == set(), "stale mirror not discarded"
 
 
@@ -201,13 +209,13 @@ def test_partial_adoption_across_ranks_refuses(path):
     which is the shape that produces plausible-looking wrong output.
     """
     pool_a = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool_a, adopted=False))
+    wake(FakeEngineCore(pool_a, adopted=False))
     populate(None, pool_a)
 
     pool_b = new_pool()
     engine = FakeEngineCore(pool_b, adopted=True)
     engine.collective_rpc = lambda fn: [True, False]  # rank 1 did not adopt
-    kv_index.on_wake_up(engine)
+    wake(engine)
 
     assert not any(b.block_hash for b in pool_b.blocks)
 
@@ -215,7 +223,7 @@ def test_partial_adoption_across_ranks_refuses(path):
 def test_a_probe_that_fails_refuses(path):
     """Losing the signal is a miss, never a guess."""
     pool_a = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool_a, adopted=False))
+    wake(FakeEngineCore(pool_a, adopted=False))
     populate(None, pool_a)
 
     pool_b = new_pool()
@@ -225,7 +233,7 @@ def test_a_probe_that_fails_refuses(path):
         raise RuntimeError("workers unreachable")
 
     engine.collective_rpc = boom
-    kv_index.on_wake_up(engine)
+    wake(engine)
     assert not any(b.block_hash for b in pool_b.blocks)
 
 
@@ -237,7 +245,7 @@ def test_a_probe_that_fails_refuses(path):
 def test_a_different_ruler_refuses(path):
     """Same block id, different meaning: the one failure that is not a miss."""
     pool_a = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool_a, adopted=False))
+    wake(FakeEngineCore(pool_a, adopted=False))
     populate(None, pool_a)
 
     class Changed(_Cfg):
@@ -247,18 +255,18 @@ def test_a_different_ruler_refuses(path):
     pool_b = new_pool()
     engine = FakeEngineCore(pool_b, adopted=True)
     engine.vllm_config = Changed
-    kv_index.on_wake_up(engine)
+    wake(engine)
 
     assert not any(b.block_hash for b in pool_b.blocks)
 
 
 def test_a_different_block_count_refuses(path):
     pool_a = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool_a, adopted=False))
+    wake(FakeEngineCore(pool_a, adopted=False))
     populate(None, pool_a)
 
     pool_b = BlockPool(N_BLOCKS * 2, True, BLOCK_SIZE)
-    kv_index.on_wake_up(FakeEngineCore(pool_b, adopted=True))
+    wake(FakeEngineCore(pool_b, adopted=True))
     assert not any(b.block_hash for b in pool_b.blocks)
 
 
@@ -281,7 +289,7 @@ def test_known_gap_a_non_participating_engine_is_invisible(path):
     with one asserting the replay is refused.
     """
     pool_a = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool_a, adopted=False))
+    wake(FakeEngineCore(pool_a, adopted=False))
     blocks = populate(None, pool_a)
     stale = {b.block_id: b.block_hash for b in blocks}
 
@@ -291,23 +299,41 @@ def test_known_gap_a_non_participating_engine_is_invisible(path):
 
     # Engine C, a participant again, takes over after B died.
     pool_c = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool_c, adopted=True))
+    wake(FakeEngineCore(pool_c, adopted=True))
     got = {b.block_id: b.block_hash for b in pool_c.blocks if b.block_hash}
 
-    assert got == stale, (
-        "if this now differs, the gap may be closed -- rewrite this test"
-    )
+    assert (
+        got == stale
+    ), "if this now differs, the gap may be closed -- rewrite this test"
+
+
+def test_a_wake_that_did_not_follow_a_sleep_does_nothing(path):
+    """A spurious wake must not re-run the takeover.
+
+    Against a live pool it would find every block already labelled, install
+    nothing, and then ``retain_only(set())`` its way through the whole mirror --
+    discarding a perfectly good index without touching a byte of KV.
+    """
+    pool = new_pool()
+    wake(FakeEngineCore(pool, adopted=False))
+    populate(None, pool)
+    before = pool._dyn_mirror.live_block_ids()
+    assert before, "nothing to protect -- test is vacuous"
+
+    kv_index.on_wake_up(FakeEngineCore(pool, adopted=True))  # no preceding sleep
+
+    assert pool._dyn_mirror.live_block_ids() == before
 
 
 def test_a_partial_wake_does_nothing(path):
     """Some tags still asleep: not our moment, and touching the pool would be wrong."""
     pool = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool, adopted=True, sleeping=True))
+    wake(FakeEngineCore(pool, adopted=True, sleeping=True))
     assert not hasattr(pool, "_dyn_mirror")
 
 
 def test_disabled_without_the_env_var(tmp_path, monkeypatch):
     monkeypatch.delenv("GMS_KV_INDEX_PATH", raising=False)
     pool = new_pool()
-    kv_index.on_wake_up(FakeEngineCore(pool, adopted=True))
+    wake(FakeEngineCore(pool, adopted=True))
     assert not hasattr(pool, "_dyn_mirror")
