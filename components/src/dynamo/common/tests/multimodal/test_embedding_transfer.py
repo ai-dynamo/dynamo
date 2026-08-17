@@ -112,6 +112,42 @@ class TestLocalEmbeddingTransfer:
         await benchmark(sender, receiver, from_cuda=True)
 
 
+@pytest.mark.gpu_0
+@pytest.mark.asyncio
+async def test_nixl_write_receiver_uses_one_completion_progress_loop():
+    class FakeNixlAgent:
+        def __init__(self):
+            self.calls = 0
+            self.notifs = {}
+
+        def update_notifs(self):
+            self.calls += 1
+            if self.calls == 2:
+                self.notifs = {"sender": [b"one", b"two"]}
+            return self.notifs
+
+    receiver = object.__new__(NixlWriteEmbeddingReceiver)
+    receiver.nixl_agent = FakeNixlAgent()
+    receiver._completion_waiters = {}
+    receiver._progress_wakeup = asyncio.Event()
+    receiver._state_update_task = None
+
+    loop = asyncio.get_running_loop()
+    first = loop.create_future()
+    second = loop.create_future()
+    receiver._completion_waiters[("sender", b"one")] = first
+    receiver._completion_waiters[("sender", b"two")] = second
+    receiver._ensure_state_update_task()
+    receiver._progress_wakeup.set()
+    try:
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=1)
+        assert receiver.nixl_agent.calls == 2
+        assert receiver._completion_waiters == {}
+        assert receiver.nixl_agent.notifs == {"sender": []}
+    finally:
+        await receiver.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.gpu_1  # NIXL init requires proper CUDA environment
 class TestNixlWriteEmbeddingTransfer:

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, AsyncIterator, Mapping, Optional, Protocol
 
-from dynamo.experimental.workflow.nixl import NixlTensorFanout, NixlTensorRef
+from dynamo.experimental.workflow.nixl import NixlTensorFanout, tensor_transfer_ref_from_dict
 from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.experimental.workflow.plan import INLINE_VALUE_TYPES
 from dynamo.experimental.workflow.runtime import (
@@ -445,7 +445,9 @@ class RemoteStageServer:
                         "from requested consumer transfers"
                     )
                 for transfer_id, reference in references.items():
-                    transfers[transfer_id] = NixlTensorRef.from_dict(reference)
+                    transfers[transfer_id] = tensor_transfer_ref_from_dict(
+                        reference, transfer_id=transfer_id
+                    )
                 wire_outputs[name] = NixlTensorFanout(transfers).to_dict()
             WORKFLOW_PERF_TRACE.emit(
                 logger,

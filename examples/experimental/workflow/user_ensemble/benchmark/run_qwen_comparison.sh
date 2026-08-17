@@ -15,6 +15,9 @@ OUTPUT_ROOT="${DYN_BENCH_OUTPUT_ROOT:?set DYN_BENCH_OUTPUT_ROOT to a new result 
 CONTAINER_IMAGE="${DYN_BENCH_CONTAINER_IMAGE:?set DYN_BENCH_CONTAINER_IMAGE}"
 AIPERF_BIN="${DYN_BENCH_AIPERF_BIN:-aiperf}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+ENCODER_SYSTEM_PORT="${DYN_ENCODER_SYSTEM_PORT:-8081}"
+CLASSIFIER_SYSTEM_PORT="${DYN_CLASSIFIER_SYSTEM_PORT:-8082}"
+DECODER_SYSTEM_PORT="${DYN_DECODER_SYSTEM_PORT:-8083}"
 MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 MEASURED_INPUT="$WORKLOAD_ROOT/measured/image_custom_1000_textisl644.jsonl"
 WARMUP_INPUT="$WORKLOAD_ROOT/warmup/image_custom_20_textisl644.jsonl"
@@ -27,6 +30,7 @@ KV_EVENTS_CONFIG="$(printf \
     "$KV_EVENT_PORT")"
 DEFAULT_CELL_PLAN="1:remote"
 CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
+WORKFLOW_PROVIDER="${DYN_BENCH_WORKFLOW_PROVIDER:-examples.experimental.workflow.user_ensemble.benchmark.encoder_decoder_provider:provide_workflow}"
 
 if [[ "$REQUEST_RATE" != 50 ]]; then
     echo >&2 "DYN_BENCH_REQUEST_RATE must be 50, got: $REQUEST_RATE"
@@ -56,11 +60,10 @@ export DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS=1,2,4,8,16,32,64
 export DYN_QWEN2_VL_GRAPH_IMAGE_SIZES=300x300,500x500
 export DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE=0
 export DYN_CUSTOM_ENCODER_DISPATCH_LOG=1
-export DYN_ENCODER_BATCH_QUEUE_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_WAIT_MS:-2}"
-export DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS:-50}"
-export DYN_NIXL_SEND_POOL_CAPACITY="${DYN_NIXL_SEND_POOL_CAPACITY:-64}"
-export DYN_NIXL_SEND_POOL_BYTES="${DYN_NIXL_SEND_POOL_BYTES:-4194304}"
-export DYN_NIXL_PROGRESS_THREAD="${DYN_NIXL_PROGRESS_THREAD:-0}"
+export DYN_ENCODER_BATCH_QUEUE_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_WAIT_MS:-0}"
+export DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS:-0}"
+export DYN_VLLM_EMBEDDING_TRANSFER_MODE=nixl-write
+export DYN_BENCH_SKIP_CLASSIFIER=1
 export DYN_WORKFLOW_PERF_TRACE="${DYN_WORKFLOW_PERF_TRACE:-0}"
 export DYN_WORKFLOW_PERF_SAMPLE_EVERY="${DYN_WORKFLOW_PERF_SAMPLE_EVERY:-32}"
 if [[ "$DYN_WORKFLOW_PERF_TRACE" == 1 ]]; then
@@ -130,15 +133,18 @@ python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_ben
     --kv-event-port "$KV_EVENT_PORT" \
     --batch-queue-wait-ms "$DYN_ENCODER_BATCH_QUEUE_WAIT_MS" \
     --batch-queue-max-wait-ms "$DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS" \
-    --nixl-send-pool-capacity "$DYN_NIXL_SEND_POOL_CAPACITY" \
-    --nixl-send-pool-bytes "$DYN_NIXL_SEND_POOL_BYTES" \
-    --nixl-progress-thread "$DYN_NIXL_PROGRESS_THREAD" \
+    --embedding-transfer-mode "$DYN_VLLM_EMBEDDING_TRANSFER_MODE" \
+    --workflow-provider "$WORKFLOW_PROVIDER" \
     --perf-trace "$DYN_WORKFLOW_PERF_TRACE" \
     --perf-sample-every "$DYN_WORKFLOW_PERF_SAMPLE_EVERY"
 
 sha256sum \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/workflow.py" \
+    "$REPO_ROOT/examples/experimental/workflow/user_ensemble/benchmark/encoder_decoder_provider.py" \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/remote/launch.sh" \
+    "$REPO_ROOT/components/src/dynamo/common/multimodal/embedding_transfer.py" \
+    "$REPO_ROOT/components/src/dynamo/vllm/multimodal_utils/external_encoder.py" \
+    "$REPO_ROOT/components/src/dynamo/vllm/workflow/components/embedding_transfer.py" \
     "$REPO_ROOT/components/src/dynamo/vllm/multimodal_utils/custom_encoder/batcher.py" \
     "$REPO_ROOT/components/src/dynamo/experimental/workflow/nixl.py" \
     "$REPO_ROOT/components/src/dynamo/experimental/workflow/perf.py" \
@@ -177,6 +183,7 @@ launch_topology() {
         --enable-prefix-caching
         --kv-events-config "$KV_EVENTS_CONFIG"
     )
+    local workflow_namespace="dynamo-qwen-$topology-$(date +%s%N)"
 
     if [[ "$topology" != remote ]]; then
         echo >&2 "unknown topology: $topology"
@@ -187,9 +194,12 @@ launch_topology() {
     export XDG_CACHE_HOME="/tmp/xdg-cache-user-ensemble-$topology"
     rm -rf "$VLLM_CACHE_ROOT" "$XDG_CACHE_HOME"
     mkdir -p "$VLLM_CACHE_ROOT" "$XDG_CACHE_HOME"
+    printf '%s\n' "$workflow_namespace" > "$output_dir/workflow_namespace.txt"
 
     setsid env \
-        DYN_NAMESPACE="dynamo-qwen-$topology-$(date +%s%N)" \
+        DYN_NAMESPACE="$workflow_namespace" \
+        DYN_USER_ENSEMBLE_NAMESPACE="$workflow_namespace" \
+        DYN_BENCH_WORKFLOW_PROVIDER="$WORKFLOW_PROVIDER" \
         bash "$launch_script" "${launch_args[@]}" \
         > "$output_dir/server.log" 2>&1 &
     SERVER_PID=$!
@@ -203,7 +213,10 @@ wait_control_plane() {
             sed -n '1,240p' "$output_dir/server.log" >&2
             return 1
         fi
-        if response=$(curl -fsS \
+        if endpoint_generate_ready "$ENCODER_SYSTEM_PORT" \
+            && classifier_ready \
+            && endpoint_generate_ready "$DECODER_SYSTEM_PORT" \
+            && response=$(curl -fsS \
             "http://127.0.0.1:$HTTP_PORT/v1/models" 2>/dev/null) \
             && python -c '
 import json
@@ -220,6 +233,27 @@ raise SystemExit(
         sleep 1
     done
     return 1
+}
+
+classifier_ready() {
+    [[ "$DYN_BENCH_SKIP_CLASSIFIER" == 1 ]] \
+        || endpoint_generate_ready "$CLASSIFIER_SYSTEM_PORT"
+}
+
+endpoint_generate_ready() {
+    local port="$1"
+    local response
+    response=$(curl -sS --max-time 2 \
+        "http://127.0.0.1:$port/health" 2>/dev/null) || return 1
+    python -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+raise SystemExit(
+    0 if payload.get("endpoints", {}).get("generate") == "ready" else 1
+)
+' <<< "$response"
 }
 
 run_cell() {
@@ -282,6 +316,7 @@ run_cell() {
     python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark \
         validate-cell \
         --profile "$output_dir/measured/profile_export_aiperf.json" \
+        --records "$output_dir/measured/profile_export.jsonl" \
         --wall-seconds "$output_dir/full_client_process_wall_seconds.txt" \
         --server-log "$output_dir/server.log" \
         --perf-log "$output_dir/measured/server.log" \

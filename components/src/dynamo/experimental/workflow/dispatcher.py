@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 from dynamo.experimental.workflow.generate import GenerateEndpointInvoker
-from dynamo.experimental.workflow.nixl import NixlTensorFanout
+from dynamo.experimental.workflow.nixl import NixlTensorFanout, tensor_transfer_ref_from_dict
 from dynamo.experimental.workflow.plan import (
     NIXL_CARRIER,
     ExecutionPlan,
@@ -19,16 +20,10 @@ from dynamo.experimental.workflow.plan import (
     RemoteBinding,
 )
 from dynamo.experimental.workflow.remote import NixlCarriedValue, RemoteStageClient
-from dynamo.experimental.workflow.runtime import (
-    StageContext,
-    StageRunner,
-    WorkflowExecutionError,
-)
-from dynamo.experimental.workflow.types import (
-    StageContract,
-    ValueRef,
-    WorkflowValidationError,
-)
+from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
+from dynamo.experimental.workflow.types import StageContract, ValueRef, WorkflowValidationError
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -42,8 +37,6 @@ class RemoteStageInvoker(Protocol):
         inputs: Mapping[str, Any],
         context: StageContext,
         output_transfers: Mapping[str, tuple[str, ...]],
-        *,
-        request_context: Any = None,
     ) -> Mapping[str, Any]:
         ...
 
@@ -184,9 +177,12 @@ class StageDispatcher:
                 raise WorkflowValidationError(
                     f"remote endpoint {endpoint_id!r} cannot mix stage protocols"
                 )
+            logger.info("Binding workflow endpoint %r", endpoint_id)
             endpoint = runtime.endpoint(endpoint_id)
             client = await endpoint.client()
+            logger.info("Waiting for workflow endpoint %r", endpoint_id)
             await client.wait_for_instances()
+            logger.info("Workflow endpoint %r is available", endpoint_id)
             clients[endpoint_id] = (
                 GenerateEndpointInvoker(client)
                 if protocols == {GenerateEndpointBinding}
@@ -197,14 +193,13 @@ class StageDispatcher:
     async def call(
         self,
         stage_id: str,
+        contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
-        *,
-        request_context: Any = None,
     ) -> dict[str, Any]:
         """Invoke one stage and validate its complete input/output contract."""
 
-        contract = self._plan.stage_contracts[stage_id]
+        context.raise_if_cancelled()
         expected_inputs = set(contract.inputs)
         actual_inputs = set(inputs)
         if actual_inputs != expected_inputs:
@@ -213,6 +208,22 @@ class StageDispatcher:
                 f"missing={sorted(expected_inputs - actual_inputs)}, "
                 f"extra={sorted(actual_inputs - expected_inputs)}"
             )
+        binding = self._plan.bindings[stage_id]
+        for input_name, spec in contract.inputs.items():
+            value_spec = _require_value_spec(
+                spec, f"stage {stage_id!r} input {input_name!r}"
+            )
+            value = inputs[input_name]
+            location = f"stage {stage_id!r} input {input_name!r}"
+            if isinstance(binding, RemoteBinding) and value_spec.type == "tensor":
+                reference = tensor_transfer_ref_from_dict(value)
+                _validate_value(
+                    value_spec,
+                    SimpleNamespace(dtype=reference.dtype, shape=reference.shape),
+                    location,
+                )
+            else:
+                _validate_value(value_spec, value, location)
 
         binding = self._plan.bindings[stage_id]
         frozen_inputs = MappingProxyType(dict(inputs))
@@ -222,11 +233,7 @@ class StageDispatcher:
             )
         elif isinstance(binding, GenerateEndpointBinding):
             result = await self._remote_clients[binding.endpoint_id].run(
-                stage_id,
-                contract,
-                frozen_inputs,
-                context,
-                request_context=request_context,
+                stage_id, contract, frozen_inputs, context
             )
         else:
             result = await self._remote_clients[binding.endpoint_id].run(
@@ -235,7 +242,6 @@ class StageDispatcher:
                 frozen_inputs,
                 context,
                 self._output_transfers.get(stage_id, MappingProxyType({})),
-                request_context=request_context,
             )
         if not isinstance(result, Mapping):
             raise WorkflowExecutionError(
