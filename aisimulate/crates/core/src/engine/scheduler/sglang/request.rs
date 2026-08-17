@@ -63,11 +63,6 @@ impl SglangRequest {
         self.sequence_tokens.len()
     }
 
-    pub(super) fn extend_input_len(&self) -> usize {
-        self.current_sequence_len()
-            .saturating_sub(self.materialized_tokens)
-    }
-
     pub(super) fn remaining_output_tokens(&self) -> usize {
         self.max_output_tokens.saturating_sub(self.output_len())
     }
@@ -101,6 +96,21 @@ impl SglangRequest {
 
     pub(super) fn sequence_prefix(&self, len: usize) -> &[u32] {
         &self.sequence_tokens[..len]
+    }
+
+    /// Populate page hashes for the tokens held so far. Idempotent: `new()`
+    /// and `append_output_token()` already keep these current, so this only
+    /// does work for a request built without going through `new()`.
+    pub(super) fn ensure_page_hashes(&mut self, block_size: usize) {
+        self.kv_lease
+            .ensure_page_hashes(&self.sequence_tokens, block_size);
+    }
+
+    /// Page hashes for the tokens this request currently holds. `new()` and
+    /// `append_output_token()` keep these in step with `sequence_tokens`, so a
+    /// prefix match can read them instead of re-hashing the prompt.
+    pub(super) fn page_hashes(&self) -> &[crate::engine::common::hashing::LocalBlockHash] {
+        self.kv_lease.page_hashes()
     }
 
     #[cfg(test)]

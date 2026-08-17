@@ -261,6 +261,76 @@ fn zero_output_completion_survives_decode_reservation_failure() {
 }
 
 #[test]
+fn cached_prompt_one_token_past_a_page_resumes_at_the_last_page() {
+    // 13 tokens with 4-token pages: len - 1 = 12 is already page-aligned.
+    // Rounding the resume point up-then-down a page landed at 8 instead of 12,
+    // so 5 tokens needed computing rather than 1. With chunked_prefill_size = 4
+    // that no longer fits one chunk and the request needs a second prefill
+    // round, stopping at 12 materialized tokens instead of finishing at 13.
+    let args = test_args(16, 4, 4);
+    let config = SglangConfig::from_args(&args);
+    let mut kv_manager = SglangKvManager::new(16, 4, KvEventPublishers::default(), 0);
+    let prompt: Vec<u32> = (1..=13u32).collect();
+
+    let cached = kv_manager.allocate_for_request(&prompt).unwrap();
+    kv_manager.finish(&prompt, cached.lease);
+
+    let mut waiting = VecDeque::from([SglangRequest {
+        uuid: Uuid::from_u128(77_002),
+        sequence_tokens: prompt.clone(),
+        prompt_len: prompt.len(),
+        max_output_tokens: 1,
+        planned_output_ids: None,
+        materialized_tokens: 0,
+        kv_lease: RadixRequestLease::default(),
+        allocated_tokens: 0,
+    }]);
+
+    let admit = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
+
+    assert_eq!(admit.can_run.len(), 1);
+    // Only the final page is left to compute, so the whole prompt lands in one
+    // chunk even with a 4-token chunk budget.
+    assert_eq!(admit.can_run[0].materialized_tokens, prompt.len());
+    assert!(waiting.is_empty());
+}
+
+#[test]
+fn prefix_cache_matches_past_the_first_chunk() {
+    // Regression for the chunk-then-match ordering: with the whole 16-token
+    // prompt already in the radix cache and chunked_prefill_size = 8, the
+    // reusable prefix used to be capped at the chunk size, so a fully cached
+    // prompt still reported 8 reused tokens and recomputed the rest.
+    let args = test_args(16, 4, 8);
+    let config = SglangConfig::from_args(&args);
+    let mut kv_manager = SglangKvManager::new(16, 4, KvEventPublishers::default(), 0);
+    let prompt: Vec<u32> = (1..=16u32).collect();
+
+    let cached = kv_manager.allocate_for_request(&prompt).unwrap();
+    kv_manager.finish(&prompt, cached.lease);
+
+    let mut waiting = VecDeque::from([SglangRequest {
+        uuid: Uuid::from_u128(77_001),
+        sequence_tokens: prompt.clone(),
+        prompt_len: prompt.len(),
+        max_output_tokens: 1,
+        planned_output_ids: None,
+        materialized_tokens: 0,
+        kv_lease: RadixRequestLease::default(),
+        allocated_tokens: 0,
+    }]);
+
+    let admit = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
+
+    // The whole prompt is cached, so one admission consumes it all and nothing
+    // is left waiting, regardless of chunked_prefill_size.
+    assert_eq!(admit.admissions.len(), 1);
+    assert_eq!(admit.admissions[0].reused_input_tokens, prompt.len());
+    assert_eq!(admit.can_run.len(), 1);
+    assert_eq!(admit.can_run[0].materialized_tokens, prompt.len());
+}
+
+#[test]
 fn fresh_prefill_tracks_cache_owned_prefix_pages_and_pressure_event() {
     let args = test_args(8, 4, 16);
     let config = SglangConfig::from_args(&args);

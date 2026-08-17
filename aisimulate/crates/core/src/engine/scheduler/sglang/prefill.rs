@@ -63,7 +63,42 @@ pub(super) fn get_new_batch_prefill(
     while can_run.len() < available_running_slots
         && let Some(mut req) = waiting.pop_front()
     {
-        let extend_input = req.extend_input_len();
+        // Match the radix cache against the whole prompt *before* chunking.
+        // SGLang calls init_next_round_input(tree_cache) and derives the extend
+        // length from full input minus the matched prefix, then chunks what is
+        // left. Chunking first and matching the chunk (which is what this did)
+        // caps the reusable prefix at chunked_prefill_size, so any prompt longer
+        // than one chunk sees almost no cache benefit.
+        //
+        // Only a fresh request can skip ahead: once materialized_tokens > 0 the
+        // request already owns its prefix pages through the lease.
+        let resume_from = if req.materialized_tokens == 0 {
+            // Match on the page hashes the request already carries rather than
+            // re-hashing the whole prompt on every admission attempt. `ensure`
+            // is a no-op once they are populated, and calling it here means the
+            // match does not silently depend on how the request was built.
+            req.ensure_page_hashes(config.block_size);
+            let matched = kv_manager
+                .cache()
+                .prefix_match_hashes_len(req.page_hashes());
+            // Leave at least one page to compute. A fully matched prompt would
+            // otherwise produce extend_input == 0, which this loop treats as
+            // unschedulable and pushes to `rejected` — a dead end rather than a
+            // free hit. Real SGLang recomputes the final page for the same reason.
+            //
+            // Round the last token down to its page start. Using
+            // next_multiple_of(..).saturating_sub(block_size) instead drops a
+            // whole extra page whenever len - 1 is already page-aligned: a
+            // 13-token prompt with 4-token pages would resume at 8 rather than
+            // 12, recomputing two pages the cache already held.
+            let ceiling = req.current_sequence_len().saturating_sub(1) / config.block_size
+                * config.block_size;
+            matched.min(ceiling)
+        } else {
+            req.materialized_tokens
+        };
+
+        let extend_input = req.current_sequence_len().saturating_sub(resume_from);
         if extend_input == 0 {
             rejected.push_back(req);
             break;
@@ -96,7 +131,7 @@ pub(super) fn get_new_batch_prefill(
             break;
         }
 
-        let chunk_end = req.materialized_tokens + chunk_tokens;
+        let chunk_end = resume_from + chunk_tokens;
         let old_allocated_tokens = req.allocated_tokens;
         let mut lease = std::mem::take(&mut req.kv_lease);
         let alloc_tokens = req.sequence_prefix(chunk_end);
