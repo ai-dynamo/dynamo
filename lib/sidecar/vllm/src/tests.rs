@@ -102,10 +102,19 @@ impl pb::inference_server::Inference for FakeVllm {
             }
             None => return Err(Status::invalid_argument("prompt required")),
         };
+        let prompt_tokens = if request.media.is_empty() {
+            prompt_tokens
+        } else {
+            601
+        };
         let wants_logprobs = request
             .response
             .as_ref()
             .is_some_and(|response| response.output_logprobs);
+        let wants_prompt_token_ids = request
+            .response
+            .as_ref()
+            .is_some_and(|response| response.prompt_token_ids);
         let wants_prompt_logprobs = request
             .response
             .as_ref()
@@ -144,23 +153,28 @@ impl pb::inference_server::Inference for FakeVllm {
 
         let stream = async_stream::try_stream! {
             let _drop_signal = DropSignal(dropped);
-            let prompt_info = if wants_prompt_logprobs {
-                pb::PromptInfo {
-                    num_prompt_tokens: prompt_tokens,
-                    token_ids: vec![11, 22, 33],
-                    logprobs: vec![0.0, -0.2, -0.3],
-                    ranks: vec![0, 1, 2],
-                    candidate_tokens: vec![
-                        pb::CandidateTokenInfo::default(),
-                        pb::CandidateTokenInfo::default(),
-                        pb::CandidateTokenInfo::default(),
-                    ],
-                }
-            } else {
-                pb::PromptInfo {
-                    num_prompt_tokens: prompt_tokens,
-                    ..Default::default()
-                }
+            let prompt_info = pb::PromptInfo {
+                num_prompt_tokens: prompt_tokens,
+                token_ids: if wants_prompt_token_ids {
+                    (0..prompt_tokens).collect()
+                } else {
+                    Vec::new()
+                },
+                logprobs: if wants_prompt_logprobs {
+                    vec![-0.2; prompt_tokens as usize]
+                } else {
+                    Vec::new()
+                },
+                ranks: if wants_prompt_logprobs {
+                    vec![1; prompt_tokens as usize]
+                } else {
+                    Vec::new()
+                },
+                candidate_tokens: if wants_prompt_logprobs {
+                    vec![pb::CandidateTokenInfo::default(); prompt_tokens as usize]
+                } else {
+                    Vec::new()
+                },
             };
             yield pb::GenerateResponse {
                 prompt_info: Some(prompt_info),
@@ -740,6 +754,133 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
 }
 
 #[tokio::test]
+async fn multimodal_image_is_forwarded_with_uuid() {
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
+    let (aggregate, _) = engine_from_args(&server.endpoint).await;
+    aggregate.start(0).await.expect("start");
+
+    let mut image_request = request();
+    image_request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,iVBORw0KGgo=".to_string(),
+        )],
+    )]));
+    image_request.output_options.prompt_logprobs = None;
+    image_request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .extend([
+            (
+                "messages".to_string(),
+                json!([{"role": "user", "content": [{"type": "image_url"}]}]),
+            ),
+            ("formatted_prompt".to_string(), json!("<image>\nDescribe.")),
+            ("mm_hashes".to_string(), json!(["0123456789abcdef"])),
+        ]);
+
+    let outputs = collect(&aggregate, image_request.clone()).await;
+    assert_eq!(outputs[0].finish_reason, Some(FinishReason::Stop));
+    assert_eq!(
+        outputs[0]
+            .completion_usage
+            .as_ref()
+            .expect("usage")
+            .prompt_tokens,
+        601
+    );
+
+    let requests = server.service.requests.lock().await;
+    let media = &requests.last().expect("recorded request").media;
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].modality(), pb::Modality::Image);
+    assert_eq!(
+        media[0].uuid,
+        "0123456789abcdef000000000000000000000000000000000000000000000000"
+    );
+    assert!(matches!(
+        media[0].source.as_ref(),
+        Some(pb::media_item::Source::DataUri(_))
+    ));
+    drop(requests);
+
+    let prefill = engine(
+        &server.endpoint,
+        DisaggregationMode::Prefill,
+        1,
+        discovered.clone(),
+    );
+    let decode = engine(&server.endpoint, DisaggregationMode::Decode, 1, discovered);
+    prefill.start(1).await.expect("start prefill");
+    decode.start(2).await.expect("start decode");
+
+    let prefill_outputs = collect(&prefill, image_request.clone()).await;
+    let handoff = prefill_outputs[0]
+        .disaggregated_params
+        .clone()
+        .expect("multimodal handoff");
+    assert_eq!(
+        handoff["_dynamo_sidecar_multimodal_prompt_token_ids"]
+            .as_array()
+            .expect("expanded prompt token IDs")
+            .len(),
+        601
+    );
+
+    let mut decode_request = image_request;
+    decode_request.prefill_result = Some(PrefillResult {
+        disaggregated_params: handoff,
+        prompt_tokens_details: None,
+    });
+    let decode_outputs = collect(&decode, decode_request).await;
+    assert_eq!(
+        decode_outputs[0]
+            .completion_usage
+            .as_ref()
+            .expect("decode usage")
+            .prompt_tokens,
+        601
+    );
+
+    let requests = server.service.requests.lock().await;
+    let prefill_wire = &requests[requests.len() - 2];
+    let decode_wire = &requests[requests.len() - 1];
+    assert_eq!(prefill_wire.media.len(), 1);
+    assert!(
+        prefill_wire
+            .response
+            .as_ref()
+            .expect("prefill response options")
+            .prompt_token_ids
+    );
+    assert!(decode_wire.media.is_empty());
+    assert_eq!(
+        decode_wire.prompt.as_ref(),
+        Some(&pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+            ids: (0..601).collect(),
+        }))
+    );
+    let decode_kv = struct_to_json(
+        decode_wire
+            .kv
+            .as_ref()
+            .and_then(|kv| kv.kv_transfer_params.clone())
+            .expect("decode KV handoff"),
+    )
+    .expect("decode KV JSON");
+    assert!(
+        decode_kv["_dynamo_sidecar_multimodal_prompt_token_ids"].is_null(),
+        "sidecar metadata must not reach vLLM"
+    );
+}
+
+#[tokio::test]
 async fn grpc_request_errors_are_propagated() {
     let service = FakeVllm::default();
     service.reject.store(true, Ordering::SeqCst);
@@ -1077,27 +1218,6 @@ async fn unsupported_features_fail_before_rpc_submission() {
     engine.start(0).await.expect("start");
 
     let mut requests = Vec::new();
-
-    let mut multimodal = request();
-    multimodal.multi_modal_data = Some(std::collections::HashMap::from([(
-        "image_url".to_string(),
-        vec![MultimodalData::RawUrl(
-            "data:image/png;base64,iVBORw0KGgo=".to_string(),
-        )],
-    )]));
-    let context = dynamo_backend_common::testing::mock_context();
-    let error = match engine
-        .generate(multimodal, GenerateContext::new(context, None))
-        .await
-    {
-        Ok(_) => panic!("multimodal request must fail before RPC submission"),
-        Err(error) => error,
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("released vLLM gRPC v0.27.1 protocol")
-    );
 
     let mut multiple = request();
     multiple.sampling_options.n = Some(2);
