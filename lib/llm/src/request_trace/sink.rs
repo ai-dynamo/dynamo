@@ -95,7 +95,8 @@ impl RequestTraceSink for NatsRequestTraceSink {
 }
 
 pub struct JsonlRequestTraceSink {
-    writer: JsonlWriter<RequestTraceRecord>,
+    /// `None` once the sink has been shut down; further records are dropped.
+    writer: tokio::sync::Mutex<Option<JsonlWriter<RequestTraceRecord>>>,
 }
 
 impl JsonlRequestTraceSink {
@@ -103,7 +104,9 @@ impl JsonlRequestTraceSink {
         let writer = JsonlWriter::new(path.clone(), options)
             .await
             .with_context(|| format!("opening jsonl request trace sink at {path}"))?;
-        Ok(Self { writer })
+        Ok(Self {
+            writer: tokio::sync::Mutex::new(Some(writer)),
+        })
     }
 
     async fn from_policy(policy: &RequestTracePolicy) -> anyhow::Result<Self> {
@@ -132,8 +135,24 @@ impl RequestTraceSink for JsonlRequestTraceSink {
     }
 
     async fn emit(&self, record: &RequestTraceRecord) {
-        if self.writer.send(record.clone()).await.is_err() {
-            tracing::warn!("request trace file sink closed; dropping record");
+        let guard = self.writer.lock().await;
+        match guard.as_ref() {
+            Some(writer) if writer.send(record.clone()).await.is_ok() => {}
+            _ => tracing::warn!("request trace file sink closed; dropping record"),
+        }
+    }
+
+    async fn shutdown(&self) {
+        // Take the writer out under a short-lived guard so the drain below is
+        // not awaited while the lock is held. Taking also makes this idempotent.
+        let writer = {
+            let mut guard = self.writer.lock().await;
+            guard.take()
+        };
+        if let Some(writer) = writer
+            && let Err(error) = writer.close().await
+        {
+            tracing::warn!(%error, "request trace file sink shutdown failed");
         }
     }
 }
@@ -368,6 +387,47 @@ mod tests {
         assert!(content.contains("\"schema\":\"dynamo.request.trace.v1\""));
         assert!(!content.contains("agent_context"));
         assert!(!content.contains("\"tool\""));
+    }
+
+    /// Records accepted by `emit` must survive shutdown. The buffer is 1 MiB
+    /// and the flush interval 60s, so nothing but the shutdown drain can get
+    /// them to disk, and the file is read once with no sleep or polling.
+    #[tokio::test]
+    async fn jsonl_sink_shutdown_flushes_accepted_records() {
+        const RECORDS: usize = 16;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("request_trace.jsonl");
+        let sink = JsonlRequestTraceSink::new(
+            path.display().to_string(),
+            JsonlSinkOptions {
+                buffer_bytes: 1024 * 1024,
+                flush_interval: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+
+        for index in 0..RECORDS {
+            let mut record = sample_record();
+            if let Some(request) = record.request.as_mut() {
+                request.request_id = format!("req-{index}");
+            }
+            sink.emit(&record).await;
+        }
+
+        // Shutting down twice must be harmless.
+        RequestTraceSink::shutdown(&sink).await;
+        RequestTraceSink::shutdown(&sink).await;
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content.lines().count(), RECORDS);
+        for index in 0..RECORDS {
+            assert!(
+                content.contains(&format!("\"request_id\":\"req-{index}\"")),
+                "record {index} missing from the file after shutdown"
+            );
+        }
     }
 
     #[tokio::test]

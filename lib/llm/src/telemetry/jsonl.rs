@@ -26,12 +26,15 @@ impl Default for JsonlSinkOptions {
 }
 
 /// Channel-backed handle for a buffered JSONL sink. Wraps a `Recorder<T>`,
-/// which appends records to disk on its own background task. Drop cancels
-/// the recorder.
+/// which appends records to disk on its own background task.
+///
+/// Drop cancels the recorder, but cannot wait for its final flush and abandons
+/// whatever is still queued. Call [`Self::shutdown`] or [`Self::close`] when
+/// every accepted record must reach the file.
 pub struct JsonlWriter<T> {
-    tx: mpsc::Sender<T>,
+    tx: Option<mpsc::Sender<T>>,
     // Holding the recorder keeps its background task alive; its Drop cancels.
-    _recorder: Recorder<T>,
+    recorder: Option<Recorder<T>>,
 }
 
 impl<T> JsonlWriter<T>
@@ -54,21 +57,42 @@ where
         .with_context(|| format!("opening jsonl sink at {path}"))?;
         let tx = recorder.event_sender();
         Ok(Self {
-            tx,
-            _recorder: recorder,
+            tx: Some(tx),
+            recorder: Some(recorder),
         })
     }
 
     pub async fn send(&self, rec: T) -> Result<(), mpsc::error::SendError<T>> {
-        self.tx.send(rec).await
+        match &self.tx {
+            Some(tx) => tx.send(rec).await,
+            // After shutdown the sink behaves exactly like a closed channel.
+            None => Err(mpsc::error::SendError(rec)),
+        }
+    }
+
+    /// Stop accepting records and wait for every already-accepted record to be
+    /// written and flushed. Idempotent: a second call is a no-op.
+    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.tx.take();
+        if let Some(recorder) = self.recorder.take() {
+            recorder.close().await?;
+        }
+        Ok(())
+    }
+
+    /// Consuming form of [`Self::shutdown`].
+    pub async fn close(mut self) -> anyhow::Result<()> {
+        self.shutdown().await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use serde::{Deserialize, Serialize};
+    use serde::ser::SerializeStruct;
+    use serde::{Deserialize, Serialize, Serializer};
     use tempfile::tempdir;
 
     use super::{JsonlSinkOptions, JsonlWriter};
@@ -77,6 +101,36 @@ mod tests {
     struct TestRecord {
         id: u64,
         name: String,
+    }
+
+    /// Two-way handshake used to park the recorder's writer task inside
+    /// `Serialize` for as long as the test needs, with no sleeping on either
+    /// side: the writer announces it is parked, then blocks until released.
+    struct BarrierGate {
+        parked_tx: tokio::sync::mpsc::UnboundedSender<()>,
+        release_rx: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    /// Test record whose serialization blocks on a [`BarrierGate`] when one is
+    /// attached. The gate is never serialized, so the on-disk shape is `{"id":N}`.
+    #[derive(Clone, Deserialize)]
+    struct BarrierRecord {
+        id: u64,
+        #[serde(skip)]
+        gate: Option<Arc<BarrierGate>>,
+    }
+
+    impl Serialize for BarrierRecord {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            if let Some(gate) = &self.gate {
+                gate.parked_tx.send(()).expect("test still listening");
+                // Ignore the result: a dropped release sender also releases us.
+                let _ = gate.release_rx.lock().unwrap().recv();
+            }
+            let mut state = serializer.serialize_struct("BarrierRecord", 1)?;
+            state.serialize_field("id", &self.id)?;
+            state.end()
+        }
     }
 
     #[tokio::test]
@@ -120,6 +174,74 @@ mod tests {
                 id: 1,
                 name: "record".to_string()
             }
+        );
+    }
+
+    /// Every record accepted by `send` must reach the file once `shutdown`
+    /// returns, even when the writer task is still busy with an earlier record
+    /// and a queue has built up behind it.
+    ///
+    /// The buffer is 1 MiB and the flush interval 60s, so neither a size-based
+    /// flush nor a timer tick can rescue the queued records: only the drain on
+    /// channel close can.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_drains_records_queued_behind_a_busy_writer() {
+        const RECORDS: u64 = 32;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("barrier.jsonl");
+
+        let writer: JsonlWriter<BarrierRecord> = JsonlWriter::new(
+            path.display().to_string(),
+            JsonlSinkOptions {
+                buffer_bytes: 1024 * 1024,
+                flush_interval: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+
+        let (parked_tx, mut parked_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new(BarrierGate {
+            parked_tx,
+            release_rx: Mutex::new(release_rx),
+        });
+
+        // Record 1 parks the writer task inside its own serialization.
+        writer
+            .send(BarrierRecord {
+                id: 1,
+                gate: Some(gate),
+            })
+            .await
+            .unwrap();
+        parked_rx.recv().await.expect("writer task parked");
+
+        // Records 2..=N are accepted into the channel while the writer is stuck.
+        for id in 2..=RECORDS {
+            writer
+                .send(BarrierRecord { id, gate: None })
+                .await
+                .expect("send accepted while writer is busy");
+        }
+
+        let shutdown = tokio::spawn(async move { writer.close().await });
+        release_tx.send(()).expect("writer task waiting on release");
+        shutdown.await.unwrap().expect("shutdown");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let ids: Vec<u64> = content
+            .lines()
+            .map(|line| {
+                let wrapper: serde_json::Value = serde_json::from_str(line).unwrap();
+                wrapper["event"]["id"].as_u64().unwrap()
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            (1..=RECORDS).collect::<Vec<_>>(),
+            "every accepted record must be written exactly once, in order"
         );
     }
 }
