@@ -175,11 +175,7 @@ clients send `X-Dynamo-Session-ID`, while agent-native clients use the correspon
 header listed in [Session IDs](../../../../use-cases/agents/session-ids.mdx). Agent-native identity is
 normalized only after the request reaches the frontend.
 
-Direct mode still requires the phase-appropriate explicit worker ID on every
-affinity request. The stored binding validates that target but does not supply a
-missing ID. In disaggregated serving, prefill and decode use separate phase-local
-bindings. If no prefill router is active, only the decode or aggregated binding is
-created.
+Direct mode requires the phase-appropriate explicit worker ID on every request; a matching stored binding can supply an omitted DP rank. In disaggregated serving, prefill and decode use separate phase-local bindings. If no prefill router is active, only the decode or aggregated binding is created.
 
 Session affinity does not create a backend session or send lifecycle RPCs. There is
 no explicit unbind; idle expiry removes only router-local state. The same session
