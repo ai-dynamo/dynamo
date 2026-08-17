@@ -14,6 +14,7 @@ pub mod overlap;
 #[cfg(feature = "standalone-indexer")]
 pub mod shared_cache;
 
+pub mod policy_registry;
 #[cfg(feature = "standalone-selection")]
 pub mod selection;
 

@@ -1013,7 +1013,7 @@ pub fn run_input<'p>(
             .is_kv_routing()
     {
         return Err(PyValueError::new_err(
-            "linked worker-selection policies require --router-mode kv",
+            "worker-selection policy instances require --router-mode kv",
         ));
     }
     if worker_selection_policy_factory.is_some() && !matches!(&input_enum, Input::Http) {

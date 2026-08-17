@@ -61,7 +61,7 @@ impl WorkerSelectionPolicyProviderError {
     }
 }
 
-/// A startup-only registry of policy types linked into a custom Dynamo image.
+/// A startup-only registry of policy types linked into this Dynamo artifact.
 #[derive(Clone, Default)]
 pub struct WorkerSelectionPolicyRegistry {
     providers: HashMap<String, WorkerSelectionPolicyProvider>,

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! YAML schema for process-wide custom worker-selection policy instances.
+//! YAML schema for process-wide first-party or linked worker-selection policy instances.
 
 use std::collections::HashMap;
 
@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use super::policy_config::{RouterPolicyConfigError, validate_identifier};
 
-/// Process-wide configuration for worker selection in a custom Dynamo image.
+/// Process-wide configuration for worker selection in a Dynamo image.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerSelectionConfig {
     aggregated: Option<String>,
@@ -63,7 +63,7 @@ pub struct WorkerSelectionInstance {
 }
 
 impl WorkerSelectionInstance {
-    /// The policy type registered by a linked policy crate.
+    /// The policy type registered by Dynamo or a linked policy crate.
     pub fn policy_type(&self) -> &str {
         &self.policy_type
     }

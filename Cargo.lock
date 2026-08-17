@@ -2599,6 +2599,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-first-party-router-policies"
+version = "1.5.0"
+dependencies = [
+ "dynamo-kv-router",
+ "fastrand",
+ "serde",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.5.0"
 dependencies = [

@@ -10,7 +10,6 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-#[cfg(feature = "custom-policy")]
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
@@ -38,8 +37,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-#[cfg(feature = "custom-policy")]
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::services::policy_registry::WorkerSelectionPolicyRegistry;
 use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
@@ -115,7 +113,6 @@ type PythonBidirectionalIngress = Ingress<
 
 static INIT: OnceCell<()> = OnceCell::new();
 
-#[cfg(feature = "custom-policy")]
 static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
@@ -271,24 +268,11 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 pub(crate) fn worker_selection_policy_factory(
     config: &KvRouterConfig,
 ) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
-    #[cfg(feature = "custom-policy")]
-    {
-        Ok(WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .map(|registry| registry.resolve(config))
-            .transpose()?
-            .flatten())
-    }
-
-    #[cfg(not(feature = "custom-policy"))]
-    {
-        if let Some(instance) = config.selected_worker_selection_policy_instance()? {
-            anyhow::bail!(
-                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
-            );
-        }
-        Ok(None)
-    }
+    WORKER_SELECTION_POLICY_REGISTRY
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("worker-selection policy registry was not initialized"))?
+        .resolve(config)
+        .map_err(Into::into)
 }
 
 #[cfg(feature = "select-service")]
@@ -310,33 +294,19 @@ pub(crate) fn standalone_worker_selection_policy_factory(
 ) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
     warn_if_standalone_ignores_stage_policies(config)?;
 
-    #[cfg(feature = "custom-policy")]
-    {
-        Ok(WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .map(|registry| {
-                registry.resolve_for_worker_type(config, dynamo_kv_router::WorkerType::Aggregated)
-            })
-            .transpose()?
-            .flatten())
-    }
-
-    #[cfg(not(feature = "custom-policy"))]
-    {
-        if let Some(instance) = config.selected_worker_selection_policy_instance_for(
-            dynamo_kv_router::WorkerType::Aggregated,
-        )? {
-            anyhow::bail!(
-                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
-            );
-        }
-        Ok(None)
-    }
+    WORKER_SELECTION_POLICY_REGISTRY
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("worker-selection policy registry was not initialized"))?
+        .resolve_for_worker_type(config, dynamo_kv_router::WorkerType::Aggregated)
+        .map_err(Into::into)
 }
 
-#[cfg(feature = "custom-policy")]
-fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn register_core_with_worker_selection_policies(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut registry = WorkerSelectionPolicyRegistry::default();
+    dynamo_first_party_router_policies::register(&mut registry)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+
+    #[cfg(feature = "custom-policy")]
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
@@ -349,17 +319,9 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
 }
 
 /// The extension-module entrypoint for a custom policy image.
-#[cfg(feature = "custom-policy")]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    register_core_with_custom_worker_selection_policy(m)
-}
-
-/// The stock extension-module entrypoint.
-#[cfg(not(feature = "custom-policy"))]
-#[pymodule]
-fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    register_core(m)
+    register_core_with_worker_selection_policies(m)
 }
 
 pub fn to_pyerr<E>(err: E) -> PyErr

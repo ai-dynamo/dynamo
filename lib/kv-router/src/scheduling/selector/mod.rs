@@ -13,7 +13,7 @@ use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 pub use policy::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
     WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionRequirements,
 };
 
 use default::{pick_default_worker, selection_weights};
@@ -32,6 +32,15 @@ use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, Worker
 /// External policies should compose [`WorkerScorer`] and [`WorkerPicker`] implementations with
 /// [`WorkerSelectionPolicy`] instead of implementing this trait directly.
 pub trait WorkerSelector<C: WorkerConfigLike> {
+    /// Inputs the selection host must materialize before invoking this selector.
+    ///
+    /// Existing selectors default to the full KV-aware contract. First-party simple policies
+    /// override this through [`WorkerSelectionPolicy`] so a future host can keep its indexer and
+    /// slot tracker uninitialized when they are unnecessary.
+    fn requirements(&self) -> WorkerSelectionRequirements {
+        WorkerSelectionRequirements::KV_AWARE
+    }
+
     fn select_worker(
         &self,
         workers: &HashMap<WorkerId, C>,

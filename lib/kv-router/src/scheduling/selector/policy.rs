@@ -78,6 +78,56 @@ impl BitOr for WorkerInputs {
     }
 }
 
+/// Infrastructure signals required by a worker-selection policy.
+///
+/// These are deliberately semantic rather than tied to a particular router implementation. A
+/// host may satisfy active-request load with its own occupancy accounting, while the KV host
+/// maps it to its slot tracker. This lets a host defer cache and tracking setup until the
+/// selected policy actually needs those signals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkerSelectionRequirements {
+    needs_cache_index: bool,
+    needs_active_request_load: bool,
+}
+
+impl WorkerSelectionRequirements {
+    /// A policy that only needs the eligible worker set.
+    pub const STATIC: Self = Self {
+        needs_cache_index: false,
+        needs_active_request_load: false,
+    };
+
+    /// A policy that reads the host's active-request count for each worker.
+    pub const ACTIVE_REQUEST_LOAD: Self = Self {
+        needs_cache_index: false,
+        needs_active_request_load: true,
+    };
+
+    /// Dynamo's standard KV-aware policy.
+    pub const KV_AWARE: Self = Self {
+        needs_cache_index: true,
+        needs_active_request_load: true,
+    };
+
+    /// Whether selection requires KV cache-overlap data.
+    pub const fn needs_cache_index(self) -> bool {
+        self.needs_cache_index
+    }
+
+    /// Whether selection requires a live active-request load for each worker.
+    pub const fn needs_active_request_load(self) -> bool {
+        self.needs_active_request_load
+    }
+}
+
+impl WorkerInputs {
+    const fn requirements(self) -> WorkerSelectionRequirements {
+        WorkerSelectionRequirements {
+            needs_cache_index: self.contains(Self::CACHE),
+            needs_active_request_load: self.contains(Self::LOAD),
+        }
+    }
+}
 /// KV-cache overlap values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerCacheInput {
@@ -163,6 +213,13 @@ pub trait WorkerPicker: Send {
 }
 
 impl WorkerSelectionContext<'_> {
+    /// Whether this selection is an advisory query that must not mutate
+    /// policy-local state. Stateful pickers use this to keep previews from
+    /// advancing a round-robin cursor or otherwise committing a decision.
+    pub fn is_advisory(&self) -> bool {
+        !self.request.mode.is_tracked()
+    }
+
     /// Return the incoming prompt size in KV blocks.
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
@@ -434,11 +491,22 @@ impl WorkerSelectionPolicy {
         }
     }
 
-    /// Wrap Dynamo's built-in selector for a host that uses the policy selector type.
+    /// Return the inputs the hosting router must materialize for this policy.
     ///
-    /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
-    /// [`crate::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
-    pub fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
+    /// A custom policy declares these through its filters, scorers, and picker. The default
+    /// selector remains cache-aware and conservatively requires both cache and load inputs.
+    pub fn requirements(&self) -> WorkerSelectionRequirements {
+        match &self.state {
+            WorkerSelectionPolicyState::Default(_) => WorkerSelectionRequirements::KV_AWARE,
+            WorkerSelectionPolicyState::Custom(state) => {
+                let state = state.borrow();
+                (state.filter_inputs | state.scorer_picker_inputs).requirements()
+            }
+        }
+    }
+
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+    pub(crate) fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
         let picker = DefaultWorkerPicker::new(kv_router_config.router_temperature);
         Self {
             kv_router_config,
@@ -630,6 +698,10 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
+    fn requirements(&self) -> WorkerSelectionRequirements {
+        WorkerSelectionPolicy::requirements(self)
+    }
+
     #[inline(always)]
     fn select_worker(
         &self,

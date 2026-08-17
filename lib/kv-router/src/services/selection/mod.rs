@@ -11,7 +11,6 @@ mod core;
 mod error;
 mod input;
 mod pending;
-mod policy_registry;
 mod server;
 mod service;
 mod types;

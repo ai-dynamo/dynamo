@@ -14,6 +14,7 @@ members = [
     "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-router",
+    "lib/router-plugins/first-party",
     "lib/router-plugins/catalog",
     "examples/router/custom-policy-example/simple-filter-score-pick",
     "examples/router/custom-policy-example/catalog",
@@ -68,6 +69,7 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.5.0" }
 dynamo-memory = { path = "lib/memory", version = "1.5.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
+dynamo-first-party-router-policies = { path = "lib/router-plugins/first-party", version = "1.5.0" }
 dynamo-protocols = { version = "=5.3.1" }
 dynamo-parsers = { version = "8.0.0" }
 

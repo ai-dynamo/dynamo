@@ -1717,6 +1717,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-first-party-router-policies"
+version = "1.5.0"
+dependencies = [
+ "dynamo-kv-router",
+ "fastrand",
+ "serde",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.5.0"
 dependencies = [
@@ -1986,6 +1995,7 @@ dependencies = [
  "clap",
  "dashmap",
  "dynamo-backend-common",
+ "dynamo-first-party-router-policies",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",
