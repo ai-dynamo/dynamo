@@ -536,6 +536,50 @@ async def test_handle_non_leader_node_clears_ready_on_error(
         await metrics_task
 
 
+@pytest.mark.asyncio
+async def test_handle_non_leader_node_cleans_up_when_metrics_task_fails_on_cancel():
+    runtime = FakeRuntime()
+    cleanup_called = asyncio.Event()
+
+    async def fail_on_cancel():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("metrics failed during shutdown") from exc
+
+    publisher = SimpleNamespace(
+        generate_endpoint=object(),
+        server_args=SimpleNamespace(
+            nnodes=2,
+            node_rank=1,
+            dp_size=1,
+            enable_dp_attention=False,
+            kv_events_config=None,
+        ),
+        dynamo_args=SimpleNamespace(use_kv_events=True),
+        cleanup=cleanup_called.set,
+    )
+    metrics_task = asyncio.create_task(fail_on_cancel())
+    task = asyncio.create_task(
+        handle_non_leader_node(
+            runtime,
+            SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
+            publisher,
+            metrics_task,
+        )
+    )
+
+    await asyncio.sleep(0)
+    assert runtime.health_calls == [True]
+
+    task.cancel()
+    with pytest.raises(RuntimeError, match="metrics failed during shutdown"):
+        await task
+
+    assert cleanup_called.is_set()
+    assert runtime.health_calls == [True, False]
+
+
 def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     calls = []
 
