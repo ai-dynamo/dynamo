@@ -169,7 +169,7 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
 	// like triton caches, tmp files) — base image files should not be overwritten.
 	log.Info("Applying rootfs diff", "target", targetRoot)
-	cmd := exec.Command("tar", "--skip-old-files", "-C", targetRoot, "-xf", rootfsDiffPath)
+	cmd := exec.Command("tar", "--skip-old-files", "--blocking-factor=2048", "-C", targetRoot, "-xf", rootfsDiffPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
