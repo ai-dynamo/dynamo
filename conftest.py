@@ -15,6 +15,14 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
+from tests.marker_categories import REQUIRED_CATEGORIES
+
+_NO_DEFAULT_MARKERS_ENV = "DYNAMO_PYTEST_NO_DEFAULT_MARKERS"
+_SUITE_MARKERS = REQUIRED_CATEGORIES["Lifecycle"]
+_MACHINE_MARKERS = REQUIRED_CATEGORIES["Hardware"]
+
 # Seed sys.modules with the venv copies before pytest collection runs.
 for _name in ("vllm", "sglang"):
     try:
@@ -54,3 +62,21 @@ except Exception:
 
 def pytest_runtest_setup(item):
     _strip_bad_path()
+
+
+def pytest_itemcollected(item):
+    """Apply CI defaults to tests missing lifecycle or hardware markers.
+
+    This hook lives in the repository-root conftest so it applies to every
+    collected test tree, including ``tests/``, ``components/src``, and
+    ``aisimulate/tests``. It runs before pytest's marker filter.
+
+    ``DYNAMO_PYTEST_NO_DEFAULT_MARKERS=1`` disables the defaults so the marker
+    report can inspect authored markers only.
+    """
+    if os.environ.get(_NO_DEFAULT_MARKERS_ENV) == "1":
+        return
+    if not any(item.get_closest_marker(marker) for marker in _SUITE_MARKERS):
+        item.add_marker(pytest.mark.pre_merge)
+    if not any(item.get_closest_marker(marker) for marker in _MACHINE_MARKERS):
+        item.add_marker(pytest.mark.gpu_0)

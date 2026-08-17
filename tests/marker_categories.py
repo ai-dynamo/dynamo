@@ -3,9 +3,9 @@
 
 """Marker categories every test must declare one of.
 
-Shared by tests/conftest.py, which defaults them onto unmarked tests, and
-tests/report_pytest_markers.py, which fails when a test declares none.
-Keeping one definition means the default and the gate cannot drift apart.
+Shared by the repository-root conftest.py, which defaults them onto unmarked
+tests, and tests/report_pytest_markers.py, which fails when a test declares
+none. Keeping one definition means the default and the gate cannot drift apart.
 """
 
 REQUIRED_CATEGORIES: dict[str, frozenset[str]] = {

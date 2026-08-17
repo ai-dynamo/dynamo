@@ -1,15 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the default-marker hook in tests/conftest.py."""
+"""Tests for the repository-wide default-marker hook."""
 
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import _NO_DEFAULT_MARKERS_ENV, pytest_itemcollected
+import conftest as root_conftest_plugin
+from conftest import _NO_DEFAULT_MARKERS_ENV, pytest_itemcollected
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytest_plugins = ["pytester"]
 
 
 class _FakeItem:
@@ -29,6 +31,26 @@ def test_unmarked_test_gets_both_defaults():
     item = _FakeItem()
     pytest_itemcollected(item)
     assert item.markers == {"pre_merge", "gpu_0"}
+
+
+def test_unmarked_test_in_sibling_collection_root_gets_both_defaults(pytester):
+    """The root hook must cover trees that do not load tests/conftest.py."""
+    root_conftest = Path(root_conftest_plugin.__file__)
+    pytester.makeconftest(root_conftest.read_text())
+    sibling_root = pytester.path / "components" / "src"
+    sibling_root.mkdir(parents=True)
+    sibling_test = sibling_root / "test_unmarked.py"
+    sibling_test.write_text("def test_unmarked():\n    pass\n")
+
+    result = pytester.runpytest(
+        "-o",
+        "addopts=",
+        "-m",
+        "pre_merge and gpu_0",
+        sibling_test,
+    )
+
+    result.assert_outcomes(passed=1)
 
 
 def test_machine_marker_is_not_overridden():

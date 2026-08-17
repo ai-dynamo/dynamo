@@ -656,10 +656,11 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
         LOG.info("Stubbed %d modules", len(stubber.stubbed))
 
     plugin = MarkerReportPlugin()
-    # tests/conftest.py defaults pre_merge/gpu_0 onto unmarked tests so CI still
-    # runs them. Opt out here: this report exists to show what tests actually
-    # declare, and with the defaults applied every test would look Lifecycle-
-    # and Hardware-complete, so no missing marker could ever be reported.
+    # The repository-root conftest.py defaults pre_merge/gpu_0 onto unmarked
+    # tests so CI still runs them. Opt out here: this report exists to show what
+    # tests actually declare, and with the defaults applied every test would
+    # look Lifecycle- and Hardware-complete, so no missing marker could ever be
+    # reported.
     os.environ["DYNAMO_PYTEST_NO_DEFAULT_MARKERS"] = "1"
     exitcode = pytest.main(
         [
