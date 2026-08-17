@@ -255,6 +255,13 @@ where
     Fut: Future<Output = anyhow::Result<Vec<Arc<dyn RequestTraceSink>>>>,
 {
     let mut live = generation().lock().await;
+    // A generation stays upgradable until its last worker finishes draining, so
+    // an initialization arriving after the generation's shutdown token fired but
+    // before that drain completes joins the outgoing generation and gets no
+    // workers of its own. The window is bounded by the drain plus
+    // `sink.shutdown()`, unlike the permanent latch this replaces. Closing it
+    // would mean re-binding a shared generation's workers to the newest token,
+    // which the sharing requirement rules out.
     if live.upgrade().is_some() {
         return Ok(());
     }
@@ -346,7 +353,7 @@ mod tests {
 
     use flate2::read::MultiGzDecoder;
     use tempfile::tempdir;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
     use crate::request_trace::RequestReplayMetrics;
     use crate::telemetry::jsonl_gz::segment_path;
@@ -523,8 +530,11 @@ mod tests {
         shutdown_generation(token_two).await;
     }
 
+    /// Sequential by design: the contended path, where the second initializer
+    /// arrives while the first is still constructing sinks, is covered by
+    /// `overlapping_initializer_waits_for_slow_sink_construction` below.
     #[tokio::test]
-    async fn concurrent_initializers_share_one_generation() {
+    async fn second_initializer_reuses_live_generation() {
         let _serialized = GENERATION_TEST_LOCK.lock().await;
         crate::request_trace::init_bus_for_test(64);
 
@@ -564,6 +574,82 @@ mod tests {
         assert!(
             records_two.try_recv().is_err(),
             "a duplicate worker emitted into the overlapping initializer's sink"
+        );
+
+        shutdown_generation(token).await;
+    }
+
+    /// The lock is held across sink construction, so an initializer that arrives
+    /// while a slow sink is still being built must wait for that construction
+    /// rather than be handed a success it cannot rely on.
+    #[tokio::test]
+    async fn overlapping_initializer_waits_for_slow_sink_construction() {
+        let _serialized = GENERATION_TEST_LOCK.lock().await;
+        crate::request_trace::init_bus_for_test(64);
+
+        let (sink_one, mut records_one, _shutdowns_one) = RecordingSink::new();
+        let (construction_started, started) = oneshot::channel();
+        let (release, wait_for_release) = oneshot::channel();
+        let token = CancellationToken::new();
+        let first = tokio::spawn(spawn_generation(token.clone(), move || async move {
+            let _ = construction_started.send(());
+            wait_for_release
+                .await
+                .expect("the test releases the blocked construction");
+            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_one];
+            Ok(sinks)
+        }));
+        started
+            .await
+            .expect("the first initializer reached sink construction");
+
+        let (sink_two, _records_two, _shutdowns_two) = RecordingSink::new();
+        let second_generation_builds = Arc::new(AtomicUsize::new(0));
+        let builds = Arc::clone(&second_generation_builds);
+        let mut second = tokio::spawn(spawn_generation(
+            CancellationToken::new(),
+            move || async move {
+                builds.fetch_add(1, Ordering::AcqRel);
+                let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_two];
+                Ok(sinks)
+            },
+        ));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut second)
+                .await
+                .is_err(),
+            "an initializer overlapping an unfinished sink construction returned before it completed"
+        );
+        assert_eq!(
+            second_generation_builds.load(Ordering::Acquire),
+            0,
+            "the overlapping initializer built sinks while the first construction held the lock"
+        );
+
+        release
+            .send(())
+            .expect("the first initializer is still waiting on construction");
+        first
+            .await
+            .expect("the first initializer task did not panic")
+            .expect("the first initializer started its generation");
+        tokio::time::timeout(Duration::from_secs(5), &mut second)
+            .await
+            .expect("the overlapping initializer never returned after construction completed")
+            .expect("the overlapping initializer task did not panic")
+            .expect("the overlapping initializer reported success");
+
+        assert_eq!(
+            second_generation_builds.load(Ordering::Acquire),
+            0,
+            "the overlapping initializer built a second set of sinks once it acquired the lock"
+        );
+
+        crate::request_trace::publish(record_with_request_id("slow-construction"));
+        assert!(
+            await_record(&mut records_one, "slow-construction").await,
+            "the generation built under contention never received its record"
         );
 
         shutdown_generation(token).await;
