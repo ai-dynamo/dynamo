@@ -5,11 +5,10 @@
 
 Invoked by nightly CI on the runner, before `docker buildx build`. Takes one
 argument -- a suffix like '.dev20260423' -- and rewrites, in place:
-  - [project].version in every Dynamo and AISimulate pyproject.toml (PEP 440 form)
+  - [project].version in every Dynamo pyproject.toml (PEP 440 form)
   - [package].version / [workspace.package].version in every Cargo.toml
     (SemVer form: dash instead of dot before 'dev', so '1.1.0-dev20260423')
-  - The `ai-dynamo-runtime==1.1.0` and conditional `aisimulate==0.1.0`
-    pins in the root pyproject
+  - The `ai-dynamo-runtime==1.1.0` pin in the root pyproject
   - The `version = "1.1.0"` pins on dynamo-*/kvbm-* path deps in root Cargo.toml
 
 Empty suffix is a no-op, so safe to run unconditionally in every workflow.
@@ -24,7 +23,6 @@ from pathlib import Path
 
 PYPROJECT_TARGETS = [
     "pyproject.toml",
-    "aisimulate/pyproject.toml",
     "lib/bindings/python/pyproject.toml",
     "lib/bindings/kvbm/pyproject.toml",
     "lib/gpu_memory_service/pyproject.toml",
@@ -53,11 +51,10 @@ SUBCRATE_CARGO_TARGETS = [
 # the `name = { version = "..." }` inline-table form which this regex skips.
 VERSION_LINE_RE = re.compile(r'^(\s*version\s*=\s*")([^"]+)(")\s*$', re.MULTILINE)
 
-# Root pyproject cross-refs to separately built Python wheels. Each pin keeps
-# its own base version: ai-dynamo-runtime follows Dynamo, while AISimulate is
-# currently versioned independently.
+# Root pyproject cross-ref to the separately built runtime wheel. AISimulate is
+# intentionally fixed until its nightly wheel is staged and published.
 PY_ROOT_PIN_RE = re.compile(
-    r'("(?:ai-dynamo-runtime|aisimulate)==)([0-9A-Za-z.!+_-]+)([^"]*")'
+    r'("ai-dynamo-runtime==)([0-9A-Za-z.!+_-]+)([^"]*")'
 )
 
 
