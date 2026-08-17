@@ -274,13 +274,34 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Sync assets/ into docs-checkout; force-add the generated pair
+          # because the synced fern/.gitignore ignores them, and an ignored
+          # bootstrap copy would be silently skipped by the commit step's
+          # `git add -A`, leaving the published raw URL 404 permanently.
+          sync_assets() {
+            if [ -d source-checkout/docs/fern/assets ]; then
+              echo "Syncing assets/ to docs-website branch..."
+              mkdir -p docs-checkout/fern/assets
+              cp -r source-checkout/docs/fern/assets/. docs-checkout/fern/assets/
+              for asset in releases.json releases-atom.xml; do
+                if [ -f "docs-checkout/fern/assets/$asset" ]; then
+                  git -C docs-checkout add -f "fern/assets/$asset"
+                fi
+              done
+            fi
+          }
+
+          # Older maintained branches may carry a gen_llms_tables.py without
+          # --assets-only (or no generator at all); their previews still sync
+          # whatever assets they commit. Main must always be able to generate.
           gen_script="source-checkout/docs/fern/scripts/gen_llms_tables.py"
-          if [ ! -f "$gen_script" ]; then
+          if ! { [ -f "$gen_script" ] && python3 "$gen_script" --help 2>/dev/null | grep -q -- '--assets-only'; }; then
             if [ "${IS_MAIN:-false}" = "true" ]; then
-              echo "::error::$gen_script is missing; cannot generate release assets"
+              echo "::error::gen_llms_tables.py with --assets-only support is required to generate release assets on main"
               exit 1
             fi
-            echo "::notice::$gen_script not in this source tree; skipping release-asset generation"
+            echo "::notice::Source tree lacks gen_llms_tables.py --assets-only; skipping release-asset generation"
+            sync_assets
             exit 0
           fi
           python3 "$gen_script" --assets-only
@@ -371,9 +392,7 @@ jobs:
           # Sync root-level assets/ (docs.yml logos/fonts and index.mdx reference
           # ./assets/ relative to the Fern root, not pages-dev). Merge-copy without
           # deleting so assets still referenced by older versioned pages survive.
-          echo "Syncing assets/ to docs-website branch..."
-          mkdir -p docs-checkout/fern/assets
-          cp -r source-checkout/docs/fern/assets/. docs-checkout/fern/assets/
+          sync_assets
 
       - name: Transform paths in dev.yml for docs-website layout
         run: |
