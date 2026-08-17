@@ -49,6 +49,8 @@ class _SyntheticReplayOptions(_CommonReplayOptions, total=False):
     request_rate: float | None
     arrival_interval_ms: float | None
     arrival_seed: int
+    random_range_ratio: float
+    random_seed: int
     turns_per_session: int
     shared_prefix_ratio: float
     num_prefix_groups: int
@@ -292,6 +294,8 @@ def run_synthetic_trace_replay(
     request_rate=None,
     arrival_interval_ms=None,
     arrival_seed=42,
+    random_range_ratio=1.0,
+    random_seed=0,
     turns_per_session=1,
     shared_prefix_ratio=0.0,
     num_prefix_groups=0,
@@ -305,7 +309,13 @@ def run_synthetic_trace_replay(
     capture_per_request=False,
     capture_planner_details=True,
 ) -> ReplayReport | dict[str, Any]:
-    """Run synthetic replay with the same timing boundary as trace replay."""
+    """Run synthetic replay with the same timing boundary as trace replay.
+
+    ``random_range_ratio`` uniformly samples ISL and OSL independently from
+    ``[int(ratio * configured_length), configured_length]``. The default 1.0
+    preserves fixed lengths; ``random_seed`` makes variable lengths repeatable.
+    Random lengths currently support single-turn synthetic workloads only.
+    """
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -322,6 +332,8 @@ def run_synthetic_trace_replay(
         "request_rate": request_rate,
         "arrival_interval_ms": arrival_interval_ms,
         "arrival_seed": arrival_seed,
+        "random_range_ratio": random_range_ratio,
+        "random_seed": random_seed,
         "turns_per_session": turns_per_session,
         "shared_prefix_ratio": shared_prefix_ratio,
         "num_prefix_groups": num_prefix_groups,

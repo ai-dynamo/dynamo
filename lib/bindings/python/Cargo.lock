@@ -2533,6 +2533,7 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "pythonize",
+ "rand 0.9.4",
  "rmp",
  "rmpv",
  "serde",

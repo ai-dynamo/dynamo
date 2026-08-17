@@ -134,6 +134,43 @@ def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
 
 
 @pytest.mark.timeout(30)
+def test_replay_cli_subprocess_synthetic_random_lengths(tmp_path):
+    report_path = tmp_path / "synthetic_random_report.json"
+    jsonl_path = tmp_path / "synthetic_random_requests.jsonl"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        "--input-tokens",
+        "100",
+        "--output-tokens",
+        "50",
+        "--request-count",
+        "32",
+        "--replay-concurrency",
+        "8",
+        "--random-range-ratio",
+        "0.8",
+        "--random-seed",
+        "7",
+        "--per-request-jsonl",
+        str(jsonl_path),
+        "--report-json",
+        str(report_path),
+        "--extra-engine-args",
+        '{"block_size":16,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    rows = [json.loads(line) for line in jsonl_path.read_text().splitlines()]
+    lengths = {
+        (row["input_length"], row["requested_output_length"]) for row in rows
+    }
+    assert len(report["per_request"]) == 32
+    assert len(lengths) > 1
+    assert all(80 <= isl <= 100 and 40 <= osl <= 50 for isl, osl in lengths)
+
+
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("planner_profile_data_kind", ["dir", "npz"])
 def test_replay_cli_subprocess_synthetic_smoke_accepts_planner_profile_data(
     tmp_path, planner_profile_data_kind

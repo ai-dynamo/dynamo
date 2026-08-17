@@ -22,6 +22,7 @@ use pyo3::{
     prelude::*,
 };
 use pythonize::pythonize;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -1436,7 +1437,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, random_range_ratio=1.0, random_seed=0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1458,6 +1459,8 @@ pub fn run_mocker_synthetic_trace_replay(
     request_rate: Option<f64>,
     arrival_interval_ms: Option<f64>,
     arrival_seed: u64,
+    random_range_ratio: f64,
+    random_seed: u64,
     turns_per_session: usize,
     shared_prefix_ratio: f64,
     num_prefix_groups: usize,
@@ -1527,7 +1530,14 @@ pub fn run_mocker_synthetic_trace_replay(
             || num_prefix_groups > 0
             || inter_turn_delay_ms > 0.0;
 
+        validate_random_range_ratio(random_range_ratio)?;
+
         if use_workload {
+            if random_range_ratio != 1.0 {
+                anyhow::bail!(
+                    "random_range_ratio currently only supports single-turn synthetic replay"
+                );
+            }
             let mut trace = build_synthetic_workload(
                 block_size,
                 input_tokens,
@@ -1653,6 +1663,8 @@ pub fn run_mocker_synthetic_trace_replay(
             output_tokens,
             request_count,
             arrival_timestamps_ms.as_deref(),
+            random_range_ratio,
+            random_seed,
         )?;
 
         match args_selection {
@@ -1908,8 +1920,9 @@ mod tests {
         let poisson_timestamps = ArrivalSpec::PoissonQps { qps: 20.0 }
             .timestamps(8, 42)
             .unwrap();
-        let fixed = build_synthetic_requests(16, 4, 8, Some(&fixed_timestamps)).unwrap();
-        let poisson = build_synthetic_requests(16, 4, 8, Some(&poisson_timestamps)).unwrap();
+        let fixed = build_synthetic_requests(16, 4, 8, Some(&fixed_timestamps), 1.0, 0).unwrap();
+        let poisson =
+            build_synthetic_requests(16, 4, 8, Some(&poisson_timestamps), 1.0, 0).unwrap();
 
         assert_ne!(fixed_timestamps, poisson_timestamps);
         assert_eq!(
@@ -1944,6 +1957,37 @@ mod tests {
                 poisson_request.strict_priority
             );
             assert_eq!(fixed_request.policy_class, poisson_request.policy_class);
+        }
+    }
+
+    #[test]
+    fn synthetic_request_lengths_are_bounded_and_deterministic() {
+        let first = build_synthetic_requests(100, 50, 32, None, 0.8, 7).unwrap();
+        let repeated = build_synthetic_requests(100, 50, 32, None, 0.8, 7).unwrap();
+        let reseeded = build_synthetic_requests(100, 50, 32, None, 0.8, 8).unwrap();
+
+        let lengths = |requests: &[dynamo_mocker::common::protocols::DirectRequest]| {
+            requests
+                .iter()
+                .map(|request| (request.tokens.len(), request.max_output_tokens))
+                .collect::<Vec<_>>()
+        };
+        let first_lengths = lengths(&first);
+
+        assert_eq!(first_lengths, lengths(&repeated));
+        assert_ne!(first_lengths, lengths(&reseeded));
+        assert!(
+            first_lengths
+                .iter()
+                .all(|(isl, osl)| (80..=100).contains(isl) && (40..=50).contains(osl))
+        );
+    }
+
+    #[test]
+    fn synthetic_request_lengths_reject_invalid_ratio() {
+        for ratio in [0.0, -0.1, 1.1, f64::INFINITY, f64::NAN] {
+            let error = build_synthetic_requests(100, 50, 2, None, ratio, 0).unwrap_err();
+            assert!(error.to_string().contains("random_range_ratio"));
         }
     }
 }
@@ -2424,6 +2468,8 @@ fn build_synthetic_requests(
     output_tokens: usize,
     request_count: usize,
     arrival_timestamps_ms: Option<&[f64]>,
+    random_range_ratio: f64,
+    random_seed: u64,
 ) -> anyhow::Result<Vec<DirectRequest>> {
     if input_tokens == 0 {
         anyhow::bail!("input_tokens must be at least 1");
@@ -2434,6 +2480,7 @@ fn build_synthetic_requests(
     if request_count == 0 {
         anyhow::bail!("request_count must be at least 1");
     }
+    validate_random_range_ratio(random_range_ratio)?;
     if let Some(arrival_timestamps_ms) = arrival_timestamps_ms
         && arrival_timestamps_ms.len() != request_count
     {
@@ -2443,14 +2490,23 @@ fn build_synthetic_requests(
         );
     }
 
+    let mut rng = StdRng::seed_from_u64(random_seed);
+    // Follow InferenceX's draw order: sample the complete ISL vector before OSL.
+    let input_lengths =
+        sample_synthetic_lengths(input_tokens, request_count, random_range_ratio, &mut rng)?;
+    let output_lengths =
+        sample_synthetic_lengths(output_tokens, request_count, random_range_ratio, &mut rng)?;
+
     let mut requests = Vec::with_capacity(request_count);
-    for request_idx in 0..request_count {
-        let tokens = (0..input_tokens)
+    for (request_idx, (input_length, output_length)) in
+        input_lengths.into_iter().zip(output_lengths).enumerate()
+    {
+        let tokens = (0..input_length)
             .map(|token_idx| synthetic_token_id(request_idx, token_idx))
             .collect();
         requests.push(DirectRequest {
             tokens,
-            max_output_tokens: output_tokens,
+            max_output_tokens: output_length,
             uuid: Some(Uuid::from_u128((request_idx as u128) + 1)),
             dp_rank: 0,
             arrival_timestamp_ms: arrival_timestamps_ms.map(|values| values[request_idx]),
@@ -2459,6 +2515,35 @@ fn build_synthetic_requests(
     }
 
     Ok(requests)
+}
+
+fn validate_random_range_ratio(random_range_ratio: f64) -> anyhow::Result<()> {
+    if !random_range_ratio.is_finite() || random_range_ratio <= 0.0 || random_range_ratio > 1.0 {
+        anyhow::bail!(
+            "random_range_ratio must be finite and in (0.0, 1.0], got {random_range_ratio}"
+        );
+    }
+    Ok(())
+}
+
+fn sample_synthetic_lengths(
+    upper: usize,
+    count: usize,
+    random_range_ratio: f64,
+    rng: &mut StdRng,
+) -> anyhow::Result<Vec<usize>> {
+    if random_range_ratio == 1.0 {
+        return Ok(vec![upper; count]);
+    }
+    let lower = ((upper as f64) * random_range_ratio) as usize;
+    if lower == 0 {
+        anyhow::bail!(
+            "random_range_ratio={random_range_ratio} gives a zero-token lower bound for length {upper}"
+        );
+    }
+    Ok((0..count)
+        .map(|_| rng.random_range(lower..=upper))
+        .collect())
 }
 
 fn synthetic_token_id(request_idx: usize, token_idx: usize) -> u32 {
