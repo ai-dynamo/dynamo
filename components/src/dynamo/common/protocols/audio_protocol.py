@@ -23,8 +23,12 @@ class AudioNvExt(BaseModel):
     annotations: Optional[list[str]] = None
     """Annotations for SSE stream events."""
 
-    supports_audio_chunking: Optional[bool] = None
-    """Whether the frontend can concatenate incremental audio responses."""
+    frontend_accepts_audio_chunks: Optional[bool] = None
+    """Internal compatibility signal for frontends that accept audio chunks.
+
+    Workers must aggregate when this is absent or false. Remove after v1.4
+    leaves the N-2 compatibility window in v1.7.
+    """
 
 
 class NvCreateAudioSpeechRequest(BaseModel):

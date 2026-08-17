@@ -220,10 +220,11 @@ mod tests {
 
     #[test]
     fn audio_request_chunking_capability_round_trips() {
-        let json = r#"{"input":"hi","nvext":{"supports_audio_chunking":true}}"#;
+        let json = r#"{"input":"hi","nvext":{"frontend_accepts_audio_chunks":true}}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
         assert_eq!(
-            req.nvext.and_then(|nvext| nvext.supports_audio_chunking),
+            req.nvext
+                .and_then(|nvext| nvext.frontend_accepts_audio_chunks),
             Some(true)
         );
     }
