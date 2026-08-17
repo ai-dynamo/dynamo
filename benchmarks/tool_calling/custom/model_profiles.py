@@ -20,8 +20,6 @@ INLINE_CASE_PROFILES = (
 
 def model_case_profile(model: str) -> str:
     normalized = model.lower().replace("_", "-")
-    if "kimi-k3" in normalized:
-        return "kimi_k3"
     if "kimi-k2" in normalized or "kimi-k25" in normalized or "kimi-k26" in normalized:
         return "kimi_k2"
     if "deepseek-v4" in normalized:

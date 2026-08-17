@@ -264,6 +264,70 @@ def test_bfcl_stops_before_evaluation_when_generated_ids_drift(
     assert invoked == ["generate"]
 
 
+def test_bfcl_stops_before_evaluation_when_generation_has_inference_errors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    output_dir = tmp_path / "bfcl"
+    profile, _ = _profile(DEFAULT_PROFILES, "qualification")
+    config = profile["bfcl"]
+    cases = _bfcl_cases(config)
+    failed_id = cases["irrelevance"][0]
+    invoked: list[str] = []
+
+    def fake_run_command(command, **_kwargs):
+        if "generate" in command:
+            invoked.append("generate")
+            result_root = output_dir / "result" / "example_model"
+            result_root.mkdir(parents=True)
+            for category, case_ids in cases.items():
+                path = result_root / f"BFCL_v3_{category}_result.json"
+                path.write_text(
+                    "\n".join(
+                        json.dumps(
+                            {
+                                "id": case_id,
+                                "result": (
+                                    "Error during inference: 500 Server Error"
+                                    if case_id == failed_id
+                                    else []
+                                ),
+                            }
+                        )
+                        for case_id in case_ids
+                    ),
+                    encoding="utf-8",
+                )
+        elif "evaluate" in command:
+            invoked.append("evaluate")
+        return subprocess.CompletedProcess(command, 0, "")
+
+    monkeypatch.setattr(
+        "benchmarks.tool_calling.e2e_verifier.cli._run_command", fake_run_command
+    )
+    args = SimpleNamespace(
+        api_key=None,
+        base_url="http://127.0.0.1:8000/v1",
+        dry_run=False,
+        model="example/model",
+        output_dir=str(output_dir),
+    )
+    result = {"coverage": dict(config), "provenance": {}}
+
+    _run_bfcl(args, config, result)
+
+    assert result["execution_status"] == "incomplete"
+    assert result["verdict"] == "inconclusive"
+    assert result["coverage"]["generation_error_count"] == 1
+    assert result["coverage"]["generation_valid_count"] == 49
+    assert result["summary"]["score"] is None
+    assert result["summary"]["total"] == 50
+    assert invoked == ["generate"]
+    errors = json.loads(
+        (output_dir / "bfcl-generation-errors.json").read_text(encoding="utf-8")
+    )
+    assert errors[0]["case_id"] == failed_id
+
+
 def test_custom_dry_run_uses_realistic_qualification_matrix(tmp_path: Path) -> None:
     output_dir = tmp_path / "custom"
 

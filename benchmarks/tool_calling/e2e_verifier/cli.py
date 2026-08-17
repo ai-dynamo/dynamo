@@ -34,6 +34,8 @@ BFCL_SELECTION_FILE = "bfcl-case-ids.json"
 BFCL_SELECTION_CONTAINER_PATH = (
     "/opt/venv/lib/python3.12/site-packages/test_case_ids_to_generate.json"
 )
+BFCL_GENERATION_ERRORS_FILE = "bfcl-generation-errors.json"
+BFCL_INFERENCE_ERROR_PREFIX = "error during inference"
 BFCL_PREFLIGHT_SCRIPT = """
 import json
 from pathlib import Path
@@ -340,8 +342,6 @@ def _custom_command(
         "--detail-chars",
         "40000",
         "--record-success-raw",
-        "--ai-analysis-mode",
-        "heuristic",
         "--no-root-alias",
         "--fail-on-test-failure",
     ]
@@ -606,6 +606,28 @@ def _bfcl_generated_ids(output_dir: Path) -> list[str]:
     return generated
 
 
+def _bfcl_generation_errors(output_dir: Path) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    for path in output_dir.glob("result/*/BFCL_v3_*_result.json"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            payload = json.loads(line)
+            case_id = payload.get("id")
+            result = payload.get("result")
+            if (
+                isinstance(case_id, str)
+                and isinstance(result, str)
+                and result.strip().casefold().startswith(BFCL_INFERENCE_ERROR_PREFIX)
+            ):
+                errors.append(
+                    {
+                        "case_id": case_id,
+                        "error": result,
+                        "result_file": str(path),
+                    }
+                )
+    return errors
+
+
 def _bfcl_category_counts(output_dir: Path) -> dict[str, tuple[int, int]]:
     counts: dict[str, tuple[int, int]] = {}
     prefix = "BFCL_v3_"
@@ -700,6 +722,50 @@ def _run_bfcl(
                 result["artifacts"] = {
                     "runner_logs": log_parts,
                     "selection": str(output_dir / BFCL_SELECTION_FILE),
+                }
+                return
+            try:
+                generation_errors = _bfcl_generation_errors(output_dir)
+            except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+                result["execution_status"] = "error"
+                result[
+                    "error"
+                ] = f"BFCL could not validate generated inference results: {exc}"
+                result["artifacts"] = {
+                    "runner_logs": log_parts,
+                    "selection": str(output_dir / BFCL_SELECTION_FILE),
+                }
+                return
+            if generation_errors:
+                errors_path = output_dir / BFCL_GENERATION_ERRORS_FILE
+                _write_json(errors_path, generation_errors)
+                failed_ids = [item["case_id"] for item in generation_errors]
+                result["execution_status"] = "incomplete"
+                result["verdict"] = "inconclusive"
+                result["error"] = (
+                    "BFCL generation produced inference errors for "
+                    f"{len(failed_ids)}/{len(expected_ids)} selected cases; "
+                    f"examples={failed_ids[:5]}"
+                )
+                result["summary"] = {
+                    "passed": 0,
+                    "failed": 0,
+                    "total": len(expected_ids),
+                    "completed": 0,
+                    "score": None,
+                }
+                result["coverage"].update(
+                    {
+                        "generation_error_count": len(generation_errors),
+                        "generation_valid_count": len(expected_ids)
+                        - len(generation_errors),
+                    }
+                )
+                result["artifacts"] = {
+                    "runner_logs": log_parts,
+                    "result_root": str(output_dir),
+                    "selection": str(output_dir / BFCL_SELECTION_FILE),
+                    "generation_errors": str(errors_path),
                 }
                 return
     expected_counts = {category: len(case_ids) for category, case_ids in cases.items()}

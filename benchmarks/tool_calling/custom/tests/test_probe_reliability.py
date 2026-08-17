@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT.parent))
 
-import custom_runner  # noqa: E402
 import tool_calling_probe as probe  # noqa: E402
 import tool_calling_static_report as static_report  # noqa: E402
 
@@ -134,35 +133,6 @@ def test_customer_marker_regressions_include_recent_native_formats() -> None:
     assert "<|call|>" in probe.RAW_TOOL_MARKERS
 
 
-def test_qualification_adds_shared_cases_to_a_declarative_profile() -> None:
-    expected_ids = qualification_generic_case_ids()
-    profile_cases = probe.build_cases("kimi_k3")
-    assert all(isinstance(case.regression_prs, tuple) for case in profile_cases)
-
-    combined = custom_runner.add_requested_catalog_cases(
-        profile_cases,
-        expected_ids,
-        probe.build_cases("all"),
-    )
-    selected = probe.select_cases(combined, ",".join(expected_ids))
-
-    assert len(profile_cases) == 76
-    assert tuple(case.case_id for case in selected) == expected_ids
-
-
-def test_declarative_profiles_can_receive_model_specific_catalog_cases() -> None:
-    expected_ids = qualification_case_ids("kimi_k2")
-    combined = custom_runner.add_requested_catalog_cases(
-        probe.build_cases("kimi_k3"),
-        expected_ids,
-        probe.build_cases("all"),
-    )
-
-    selected = probe.select_cases(combined, ",".join(expected_ids))
-
-    assert tuple(case.case_id for case in selected) == expected_ids
-
-
 def test_exclusions_cannot_produce_an_empty_run() -> None:
     case = probe.build_cases("generic")[0]
 
@@ -199,9 +169,39 @@ def test_static_report_applies_the_fixed_qualification_selection() -> None:
     assert report["config"]["exclude_cases"] == ""
 
 
+def test_static_report_writes_the_harness_artifact_contract(tmp_path: Path) -> None:
+    records = [
+        {
+            "case_id": "plain_no_tools",
+            "mode": "nonstream",
+            "pass": True,
+            "errors": [],
+        }
+    ]
+    report = {
+        "title": "qualification",
+        "summary": {"passed": 1, "failed": 0, "total": 1},
+    }
+
+    static_report.write_static_site(
+        report,
+        records,
+        site_dir=tmp_path,
+        model_slug="qualification",
+        root_alias=False,
+    )
+
+    page = tmp_path / "models" / "qualification"
+    assert (page / "index.html").is_file()
+    assert json.loads((page / "artifacts" / "latest.json").read_text()) == report
+    assert (
+        json.loads((page / "artifacts" / "results.public.jsonl").read_text())
+        == records[0]
+    )
+
+
 def test_shared_python_identifiers_are_model_neutral() -> None:
     shared_modules = (
-        ROOT / "case_profile_loader.py",
         ROOT / "model_profiles.py",
         ROOT / "tool_calling_probe.py",
         ROOT / "tool_calling_static_report.py",

@@ -40,38 +40,6 @@ def apply_request_contract(
     return tuple(result)
 
 
-def requested_case_ids(arguments: list[str]) -> tuple[str, ...]:
-    if "--cases" not in arguments:
-        return ()
-    index = arguments.index("--cases")
-    if index + 1 >= len(arguments):
-        raise ValueError("--cases requires a comma-separated value")
-    return tuple(
-        case_id.strip()
-        for case_id in arguments[index + 1].split(",")
-        if case_id.strip()
-    )
-
-
-def add_requested_catalog_cases(
-    cases: Iterable[Any],
-    requested_ids: Iterable[str],
-    catalog_cases: Iterable[Any],
-) -> tuple[Any, ...]:
-    result = list(cases)
-    available_ids = {case.case_id for case in result}
-    missing_ids = set(requested_ids) - available_ids
-    if not missing_ids:
-        return tuple(result)
-    catalog_by_id = {case.case_id: case for case in catalog_cases}
-    result.extend(
-        catalog_by_id[case_id]
-        for case_id in sorted(missing_ids)
-        if case_id in catalog_by_id
-    )
-    return tuple(result)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--custom-root", type=Path, required=True)
@@ -89,44 +57,9 @@ def main(argv: list[str] | None = None) -> int:
     report = importlib.import_module("tool_calling_static_report")
     original_build_cases = report.probe.build_cases
     original_validate_result = report.probe.validate_result
-    declarative_profiles = set(report.probe.available_case_profiles())
-    selected_case_ids = requested_case_ids(report_args)
 
     def contracted_build_cases(profile: str = "generic") -> tuple[Any, ...]:
-        cases = list(
-            add_requested_catalog_cases(
-                original_build_cases(profile),
-                selected_case_ids,
-                original_build_cases("all"),
-            )
-        )
-        if profile not in declarative_profiles and not any(
-            case.case_id == "plain_no_tools_thinking_disabled" for case in cases
-        ):
-            cases.append(
-                report.probe.Case(
-                    case_id="plain_no_tools_thinking_disabled",
-                    description=(
-                        "plain response with thinking disabled must not leak "
-                        "reasoning markers"
-                    ),
-                    messages=(
-                        {
-                            "role": "user",
-                            "content": "What is 2+2? Answer with only the number.",
-                        },
-                    ),
-                    tools=(),
-                    tool_choice=None,
-                    expected_finish_reasons=("stop",),
-                    expect_no_tool_calls=True,
-                    min_tool_calls=0,
-                    expect_content=True,
-                    validate_schema=False,
-                    request_overrides={"chat_template_kwargs": {"thinking": False}},
-                )
-            )
-        return apply_request_contract(cases, contract)
+        return apply_request_contract(original_build_cases(profile), contract)
 
     def validate_with_reasoning_markers(case: Any, result: Any) -> tuple[Any, Any]:
         errors, warnings = original_validate_result(case, result)

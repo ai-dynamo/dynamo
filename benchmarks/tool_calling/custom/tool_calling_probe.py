@@ -42,7 +42,6 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
-from case_profile_loader import available_case_profiles, load_case_profile
 from model_profiles import INLINE_CASE_PROFILES, model_case_profile
 
 DEFAULT_BASE_URL = "https://inference-api.nvidia.com/v1"
@@ -568,10 +567,6 @@ class Case:
 
 
 def build_cases(profile: str = "generic") -> tuple[Case, ...]:
-    declarative_cases = load_case_profile(profile, Case)
-    if declarative_cases is not None:
-        return declarative_cases
-
     book_flight = TOOLS["book_flight"]
     weather = TOOLS["get_weather"]
     calculate = TOOLS["calculate"]
@@ -3969,7 +3964,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(
             "auto",
             *INLINE_CASE_PROFILES,
-            *available_case_profiles(),
             "all",
         ),
         help="Case profile to run. auto infers from --model.",
