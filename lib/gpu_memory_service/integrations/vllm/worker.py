@@ -454,6 +454,12 @@ class GMSWorker(Worker):
                 else RequestedLockType.RW
             )
             adopted = kv_cache_manager.granted_lock_type == GrantedLockType.RW_DATA
+            # Recorded because the grant alone cannot answer this later:
+            # commit_layout() below regrants a *creating* writer to RW_DATA too,
+            # so after wake_up returns both cases look identical. The prefix-index
+            # plugin reads this via collective_rpc to decide whether a predecessor's
+            # index describes these pages or some pages that no longer exist.
+            self._gms_kv_adopted = adopted
             if was_scratch:
                 # Move scratch bookkeeping from _scratch_mappings into _mappings
                 # as preserved-VA records and flip subsequent allocations on
