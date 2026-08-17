@@ -74,10 +74,13 @@ adapters:
       temperature: [0.0]
   dynamo.planner:
     search_space:
-      scaling_policy: [throughput_180_5, throughput_600_5, load_180_5,
-                       load_180_10, hybrid_180_5, hybrid_600_5]
-      load_sensitivity: [aggressive, default, conservative]
-      fpm_sampling: [small, default, large, fine]
+      scaling_policy:
+        preset: [throughput_180_5, throughput_600_5, load_180_5,
+                 load_180_10, hybrid_180_5, hybrid_600_5]
+      load_sensitivity:
+        preset: [aggressive, default, conservative]
+      fpm_sampling:
+        preset: [small, default, large, fine]
 workload:
   trace_path: <toolagent_trace.jsonl>            # open-loop: no replay_concurrency
   trace_format: mooncake
