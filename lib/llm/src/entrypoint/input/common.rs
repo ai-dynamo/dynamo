@@ -365,6 +365,9 @@ pub async fn prepare_engine(
                 watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
             }
             watcher.set_tokenizer_backend(local_model.runtime_config().tokenizer_backend);
+            watcher.set_tokenizer_fallback_enabled(
+                local_model.runtime_config().tokenizer_fallback_enabled,
+            );
             let watch_obj = Arc::new(watcher);
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
@@ -481,7 +484,7 @@ where
         .link(engine)?
         .link(backend.backward_edge())?
         .link(preprocessor.backward_edge())?
-        .link(frontend)?)
+        .link_terminal(frontend)?)
 }
 
 impl<Sel> PreprocessedRouting<Sel>
@@ -529,7 +532,7 @@ where
             .link(token_backend.backward_edge())?
             .link(migration.backward_edge())?
             .link(preprocessor_op.backward_edge())?
-            .link(frontend)?;
+            .link_terminal(frontend)?;
 
         Ok(engine)
     }
@@ -563,7 +566,7 @@ where
             .link(prefill_op.backward_edge())?
             .link(encoder_op.backward_edge())?
             .link(migration.backward_edge())?
-            .link(frontend)?;
+            .link_terminal(frontend)?;
 
         Ok(engine)
     }

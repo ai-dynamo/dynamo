@@ -25,7 +25,7 @@
 //! cancel the request or not.
 //!
 //! The [`ConnectionHandle`] is also used to signal to the client that the request has been cancelled. This is
-//! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "[DONE]".
+//! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "`[DONE]`".
 //!
 
 use axum::response::sse::Event;
@@ -33,6 +33,7 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 use crate::http::service::error::SanitizedError;
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
@@ -214,13 +215,14 @@ pub fn monitor_for_disconnects(
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
-    monitor_for_disconnects_with_timeout_and_error(
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
         context,
         inflight_guard,
         stream_handle,
         backend_stream_timeout(),
         openai_stream_error,
+        None,
     )
 }
 
@@ -231,13 +233,32 @@ pub(crate) fn monitor_for_disconnects_with_error(
     stream_handle: ConnectionHandle,
     error_formatter: StreamErrorFormatter,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
-    monitor_for_disconnects_with_timeout_and_error(
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
         context,
         inflight_guard,
         stream_handle,
         backend_stream_timeout(),
         error_formatter,
+        None,
+    )
+}
+
+pub fn monitor_for_disconnects_with_activity(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    activity_rx: mpsc::UnboundedReceiver<()>,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        openai_stream_error,
+        Some(activity_rx),
     )
 }
 
@@ -249,23 +270,25 @@ fn monitor_for_disconnects_with_timeout(
     stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
-    monitor_for_disconnects_with_timeout_and_error(
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
         context,
         inflight_guard,
         stream_handle,
         inactivity_timeout,
         openai_stream_error,
+        None,
     )
 }
 
-fn monitor_for_disconnects_with_timeout_and_error(
+fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
     error_formatter: StreamErrorFormatter,
+    mut activity_rx: Option<mpsc::UnboundedReceiver<()>>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -280,6 +303,8 @@ fn monitor_for_disconnects_with_timeout_and_error(
         // Recreating it for every token repeatedly clones a receiver and churns Notify state.
         let stopped = context.stopped();
         tokio::pin!(stopped);
+        let mut inactivity_deadline =
+            inactivity_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
         loop {
             tokio::select! {
                 // Drain any ready SSE event before honoring a cancel or the
@@ -291,6 +316,8 @@ fn monitor_for_disconnects_with_timeout_and_error(
                 event = stream.next() => {
                     match event {
                         Some(Ok(event)) => {
+                            inactivity_deadline = inactivity_timeout
+                                .map(|timeout| tokio::time::Instant::now() + timeout);
                             yield event;
                         }
                         Some(Err(err)) => {
@@ -335,15 +362,27 @@ fn monitor_for_disconnects_with_timeout_and_error(
                     );
                     break;
                 }
+                activity = async {
+                    match activity_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending::<Option<()>>().await,
+                    }
+                } => {
+                    if activity.is_some() {
+                        inactivity_deadline = inactivity_timeout
+                            .map(|timeout| tokio::time::Instant::now() + timeout);
+                    } else {
+                        activity_rx = None;
+                    }
+                }
                 // Circuit breaker for zombie backend workers: if the backend holds a live TCP
                 // connection but produces no output for `inactivity_timeout`, kill the engine
                 // context so that InflightGuard::drop() fires and dec() corrects the gauge.
-                // The sleep is re-created each iteration so it acts as an *inactivity* timeout
-                // (resets whenever a token is received), not a hard total-request deadline.
-                // When inactivity_timeout is None the pending() future never resolves.
+                // Only real stream activity resets this deadline. Client heartbeats must not
+                // keep a dead backend alive indefinitely.
                 _ = async {
-                    match inactivity_timeout {
-                        Some(d) => tokio::time::sleep(d).await,
+                    match inactivity_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending::<()>().await,
                     }
                 } => {
@@ -674,6 +713,40 @@ mod tests {
             0,
             "inflight gauge leaked in phase 2"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_activity_signal_resets_inactivity_timeout() {
+        let model = "keep-alive-model";
+        let (metrics, guard, _context, handle) = setup_test(model, "req-keep-alive");
+        let tracked_context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = tracked_context.clone();
+        let (activity_tx, activity_rx) = mpsc::unbounded_channel();
+
+        let monitored = monitor_for_disconnects_with_timeout_error_and_keep_alive(
+            hanging_stream(),
+            engine_context,
+            guard,
+            handle,
+            Some(Duration::from_secs(10)),
+            openai_stream_error,
+            Some(activity_rx),
+        );
+        tokio::pin!(monitored);
+
+        let next = monitored.next();
+        tokio::pin!(next);
+
+        tokio::time::advance(Duration::from_secs(9)).await;
+        activity_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(!tracked_context.is_killed());
+
+        tokio::time::advance(Duration::from_secs(8)).await;
+        assert!(next.await.is_none());
+        assert!(tracked_context.is_killed());
+        assert_eq!(metrics.get_inflight_count(model), 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────

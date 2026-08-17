@@ -200,7 +200,7 @@ impl Drop for Cleanup {
 }
 
 /// Awaitable handle for a stream sender or receiver. Drop without calling
-/// [`into_parts()`] runs the optional cleanup closure, removing the
+/// `into_parts()` runs the optional cleanup closure, removing the
 /// registration from the stream server's maps.
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
@@ -827,7 +827,7 @@ where
         let backend = ServiceBackend::from_engine(engine);
 
         // create the pipeline
-        let pipeline = frontend.link(backend)?.link(frontend)?;
+        let pipeline = frontend.link(backend)?.link_terminal(frontend)?;
 
         let ingress = Ingress::new_with_adapter(payload_adapter);
         ingress.attach(pipeline)?;
