@@ -203,6 +203,13 @@ pub fn validate_response_format(
                     "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
                 );
             }
+            // Reject a literal `false` schema: it is a valid JSON Schema that
+            // matches no value, so it can never be satisfied by any output.
+            if json_schema.schema == Some(serde_json::Value::Bool(false)) {
+                anyhow::bail!(
+                    "`response_format.json_schema.schema` cannot be false because it is unsatisfiable"
+                );
+            }
             Ok(())
         }
     }
