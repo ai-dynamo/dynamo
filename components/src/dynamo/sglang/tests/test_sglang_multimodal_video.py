@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import importlib
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -21,6 +25,7 @@ from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
 )
 from dynamo.sglang.request_handlers.multimodal.worker_handler import (
     EmbeddingsProcessor,
+    MultimodalPrefillWorkerHandler,
     _build_mm_items,
 )
 
@@ -146,6 +151,117 @@ async def test_build_mm_items_routes_video_to_video_data():
         mm_item["second_per_grid_ts"], torch.tensor([0.5], dtype=torch.float32)
     )
     assert mm_item["video_timestamps"] == [[0.25, 0.75]]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_starts_before_returning_bootstrap():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=lambda _: None)
+    events = []
+
+    handler._validate_and_parse_disagg_request = lambda request: request
+    handler._generate_bootstrap_room = lambda: 17
+
+    async def start_prefill(request, bootstrap_room, context=None):
+        events.append(("start", bootstrap_room))
+
+        async def results():
+            events.append(("iterate", None))
+            yield {"meta_info": {"id": "request-id"}}
+
+        return results(), None
+
+    @asynccontextmanager
+    async def cancellation_monitor(request_id_future, context):
+        yield
+
+    handler._start_prefill_generation = start_prefill
+    handler._cancellation_monitor = cancellation_monitor
+
+    stream = handler.generate(object(), SimpleNamespace())
+    bootstrap = json.loads(await anext(stream))
+
+    assert events == [("start", 17), ("iterate", None)]
+    assert bootstrap == {
+        "bootstrap_host": "prefill-host",
+        "bootstrap_port": 1234,
+        "bootstrap_room": 17,
+    }
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert events == [("start", 17), ("iterate", None)]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_releases_embeddings_when_submission_fails(
+    monkeypatch,
+):
+    import dynamo.sglang.request_handlers.multimodal.worker_handler as worker_handler
+
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler.enable_trace = False
+
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+
+    async def build_mm_items(request, embeddings_processor):
+        return [], [], torch.empty(0), 23
+
+    class FailingEngine:
+        async def async_generate(self, **kwargs):
+            raise RuntimeError("submission failed")
+
+    handler.engine = FailingEngine()
+    monkeypatch.setattr(worker_handler, "_build_mm_items", build_mm_items)
+
+    request = SimpleNamespace(
+        request=SimpleNamespace(request=SimpleNamespace(token_ids=[1, 2, 3])),
+        sampling_params={"max_new_tokens": 1},
+    )
+
+    with pytest.raises(RuntimeError, match="submission failed"):
+        await handler._start_prefill_generation(request, 17)
+
+    assert released == [23]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_empty_engine_stream():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+
+    @asynccontextmanager
+    async def cancellation_monitor(request_id_future, context):
+        yield
+
+    handler._cancellation_monitor = cancellation_monitor
+
+    async def empty_results():
+        if False:
+            yield None
+
+    owns_tensor = asyncio.Event()
+    request_started = asyncio.Event()
+
+    with pytest.raises(RuntimeError, match="ended before producing a result"):
+        await handler._consume_results(
+            empty_results(),
+            23,
+            SimpleNamespace(),
+            owns_tensor,
+            request_started,
+        )
+
+    assert owns_tensor.is_set()
+    assert request_started.is_set()
+    assert released == [23]
 
 
 async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
