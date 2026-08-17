@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,14 +50,18 @@ impl Default for RecorderOptions {
 /// A generic recorder for events that streams directly to a JSONL file
 #[derive(Debug)]
 pub struct Recorder<T> {
-    /// A sender for events that can be cloned and shared with producers
-    event_tx: mpsc::Sender<T>,
+    /// A sender for events that can be cloned and shared with producers.
+    /// Only `None` while [`Recorder::close`] drains, and `close` consumes the
+    /// recorder, so no other caller can observe the gap.
+    event_tx: Option<mpsc::Sender<T>>,
     /// A cancellation token for managing shutdown
     cancel: CancellationToken,
     /// Counter for the number of events written
     event_count: Arc<Mutex<usize>>,
     /// Time when the first event was received
     first_event_time: Arc<Mutex<Option<Instant>>>,
+    /// Handle for the background writer task, so a caller can await its final flush
+    writer_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl<T> Recorder<T>
@@ -131,7 +136,7 @@ where
         let file_path = output_path.as_ref().to_path_buf();
 
         // Spawn a task to receive events and write them to the file
-        tokio::spawn(async move {
+        let writer_task = tokio::spawn(async move {
             let start_time = start_time;
             let mut writer = BufWriter::with_capacity(options.buffer_bytes.max(1), file);
             let mut line_count = 0;
@@ -183,7 +188,21 @@ where
                         }
                     }
 
-                    Some(event) = event_rx.recv() => {
+                    event = event_rx.recv() => {
+                        // `recv` yields `None` only once every sender is gone, so every
+                        // queued event has already been written by this point. Matching it
+                        // explicitly (rather than with a refutable `Some(event)` pattern,
+                        // which `select!` would simply disable) is what lets a caller close
+                        // the channel and await the final flush.
+                        let Some(event) = event else {
+                            if let Err(e) = writer.flush().await {
+                                tracing::error!("Failed to flush on channel close: {}", e);
+                            }
+
+                            tracing::debug!("Recorder task shutting down after channel close");
+                            return;
+                        };
+
                         // Update first_event_time if this is the first event
                         {
                             let mut first_time = first_event_time_clone.lock().await;
@@ -279,16 +298,20 @@ where
         });
 
         Ok(Self {
-            event_tx,
+            event_tx: Some(event_tx),
             cancel: token,
             event_count,
             first_event_time,
+            writer_task: Some(writer_task),
         })
     }
 
     /// Get a sender that can be used to send events to the recorder
     pub fn event_sender(&self) -> mpsc::Sender<T> {
-        self.event_tx.clone()
+        self.event_tx
+            .as_ref()
+            .expect("event_tx is only taken by close(), which consumes the recorder")
+            .clone()
     }
 
     /// Get the count of recorded events
@@ -307,9 +330,27 @@ where
         }
     }
 
-    /// Shutdown the recorder
+    /// Shutdown the recorder abruptly: cancel the writer task, which flushes only
+    /// the bytes already buffered and abandons anything still queued. Use
+    /// [`Recorder::close`] when queued events must reach the file.
     pub fn shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    /// Close the recorder gracefully: drop the recorder's own sender and wait for
+    /// the writer task to drain every queued event and flush.
+    ///
+    /// The wait is bounded by the channel rather than by a timeout. Dropping the
+    /// last sender closes the channel, so no further event can be queued and the
+    /// writer task sees `None` after at most the events already accepted.
+    /// Callers holding a clone from [`Recorder::event_sender`] must drop it
+    /// first, otherwise the channel stays open and this call waits for them.
+    pub async fn close(mut self) -> anyhow::Result<()> {
+        drop(self.event_tx.take());
+        if let Some(writer_task) = self.writer_task.take() {
+            writer_task.await.context("recorder writer task panicked")?;
+        }
+        Ok(())
     }
 
     /// Send events from a JSONL file to the provided event sender
