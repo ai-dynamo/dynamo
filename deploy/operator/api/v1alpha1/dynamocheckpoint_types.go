@@ -214,6 +214,10 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
+	// Source describes details to use when configuring a restore pod.
+	// +optional
+	Source *CheckpointSource `json:"source,omitempty"`
+
 	// DEPRECATED: Conditions are deprecated. Use status.phase instead.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -226,6 +230,7 @@ type DynamoCheckpointStatus struct {
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=".spec.identity.backendFramework",description="Backend framework"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the checkpoint"
 // +kubebuilder:printcolumn:name="CheckpointID",type="string",JSONPath=".status.checkpointID",description="Artifact ID of the checkpoint"
+// +kubebuilder:printcolumn:name="Mounts",type="integer",JSONPath=".status.source.mountCount",description="Required source pod mounts"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.identity) || self.spec.identity == oldSelf.spec.identity",message="spec.identity is immutable after creation"
 

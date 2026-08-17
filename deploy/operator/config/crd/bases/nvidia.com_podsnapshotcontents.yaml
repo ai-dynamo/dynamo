@@ -33,6 +33,10 @@ spec:
           jsonPath: .status.conditions[?(@.type=='Ready')].status
           name: Ready
           type: string
+        - description: Required source pod mounts
+          jsonPath: .status.source.mountCount
+          name: Mounts
+          type: integer
         - jsonPath: .metadata.creationTimestamp
           name: Age
           type: date
@@ -200,6 +204,62 @@ spec:
                       - type
                     type: object
                   type: array
+                source:
+                  description: Source describes details to use when configuring a restore pod.
+                  properties:
+                    hardware:
+                      description: Hardware describes the source GPU resources used to choose compatible restore placement.
+                      properties:
+                        gpuCount:
+                          description: GPUCount is the number of GPUs to make available to the restore container.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        gpus:
+                          description: GPUs identifies the source GPUs for checking restore hardware compatibility.
+                          items:
+                            description: CheckpointSourceGPU identifies one source GPU for restore compatibility checks.
+                            properties:
+                              uuid:
+                                description: UUID is the source GPU UUID to compare with available restore hardware.
+                                type: string
+                            type: object
+                          type: array
+                      type: object
+                    mountCount:
+                      description: MountCount is the number of volume mount entries expected on the restore container.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    mounts:
+                      description: Mounts lists the volume mounts to recreate on the restore container.
+                      items:
+                        description: CheckpointSourceMount describes a volume mount to recreate on the restore container.
+                        properties:
+                          path:
+                            description: Path is the mountPath to use in the restore container.
+                            type: string
+                          volume:
+                            description: |-
+                              Volume is the source volume name to correlate with the restore pod volume definition,
+                              for example "model-cache" for spec.volumes[name: model-cache].
+                            type: string
+                          volumeSource:
+                            description: |-
+                              VolumeSource identifies the Kubernetes volume source to reproduce as kind[/identifier].
+                              Kinds are PersistentVolumeClaim, ConfigMap, Secret, HostPath, CSI, NFS,
+                              EmptyDir, Projected, DownwardAPI, Ephemeral, or Volume.
+                            type: string
+                        required:
+                          - path
+                          - volume
+                          - volumeSource
+                        type: object
+                      type: array
+                    node:
+                      description: Node identifies the source node for comparing restore placement dependencies.
+                      type: string
+                  type: object
               type: object
           type: object
           x-kubernetes-validations:
