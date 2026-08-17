@@ -669,8 +669,9 @@ async def handle_non_leader_node(
     native rank-local readiness contract.
     """
     logging.info(
-        f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
-        "Running rank-local readiness and metrics."
+        "Non-leader node detected (node_rank=%s). "
+        "Running rank-local readiness and metrics.",
+        engine.server_args.node_rank,
     )
 
     runtime.set_health_status(True)
@@ -695,6 +696,7 @@ async def handle_non_leader_node(
                 await metrics_task
             except asyncio.CancelledError:
                 pass
-            publisher.cleanup()
+            finally:
+                publisher.cleanup()
         finally:
             runtime.set_health_status(False)
