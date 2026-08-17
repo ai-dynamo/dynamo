@@ -55,24 +55,39 @@ where
         }
     }
 
-    async fn finish(&mut self) {
+    async fn release(&mut self, completed_context_tokens: Option<usize>) {
         if self.freed {
             return;
         }
-        if self.scheduler_tracked
-            && let Err(error) = self
-                .chooser
-                .free_if_worker(&self.context_id, self.worker)
-                .await
-        {
-            tracing::warn!(
-                request_id = %self.context_id,
-                worker = ?self.worker,
-                %error,
-                "Failed to free request"
-            );
+        if self.scheduler_tracked {
+            let result = if let Some(context_tokens) = completed_context_tokens {
+                self.chooser
+                    .complete_if_worker(&self.context_id, self.worker, context_tokens)
+                    .await
+            } else {
+                self.chooser
+                    .abort_if_worker(&self.context_id, self.worker)
+                    .await
+            };
+            if let Err(error) = result {
+                tracing::warn!(
+                    request_id = %self.context_id,
+                    worker = ?self.worker,
+                    %error,
+                    completed = completed_context_tokens.is_some(),
+                    "Failed to release request"
+                );
+            }
         }
         self.freed = true;
+    }
+
+    async fn complete(&mut self, context_tokens: usize) {
+        self.release(Some(context_tokens)).await;
+    }
+
+    async fn abort(&mut self) {
+        self.release(None).await;
     }
 }
 
@@ -97,7 +112,7 @@ where
         let context_id = self.context_id.clone();
         let worker = self.worker;
         handle.spawn(async move {
-            let result = chooser.free_if_worker(&context_id, worker).await;
+            let result = chooser.abort_if_worker(&context_id, worker).await;
             if let Err(error) = result {
                 tracing::warn!(
                     request_id = %context_id,
@@ -227,6 +242,10 @@ struct OutputBlockUpdate {
     decay_fraction: Option<f64>,
 }
 
+fn routing_isl_tokens(request: &PreprocessedRequest) -> usize {
+    request.block_mm_routing_info().0.len()
+}
+
 /// Tracks when streamed output grows into a new scheduler accounting block.
 struct OutputBlockTracker {
     track_output_blocks: bool,
@@ -269,6 +288,10 @@ impl OutputBlockTracker {
             .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
         Some(OutputBlockUpdate { decay_fraction })
     }
+
+    fn context_tokens(&self, cumulative_osl: usize) -> usize {
+        self.isl_tokens.saturating_add(cumulative_osl)
+    }
 }
 
 /// Coordinates scheduler cleanup, observability, and streamed load tracking.
@@ -301,7 +324,7 @@ where
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
         let block_size = chooser.block_size() as usize;
-        let isl_tokens = request.token_ids.len();
+        let isl_tokens = routing_isl_tokens(request);
         let expected_output_tokens = request
             .routing
             .as_ref()
@@ -399,11 +422,14 @@ where
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability.record_metrics();
-        self.cleanup.finish().await;
+        let context_tokens = self
+            .output_blocks
+            .context_tokens(self.observability.cumulative_osl());
+        self.cleanup.complete(context_tokens).await;
     }
 
     pub(super) async fn abort(&mut self) {
-        self.cleanup.finish().await;
+        self.cleanup.abort().await;
     }
 }
 
@@ -414,5 +440,30 @@ where
     fn drop(&mut self) {
         // RequestCleanup drops immediately afterward and performs resource cleanup.
         self.observability.record_metrics();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::preprocessor::MmRoutingInfo;
+
+    #[test]
+    fn terminal_context_uses_multimodal_routing_length() {
+        let request = PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .mm_routing_info(Some(MmRoutingInfo {
+                routing_token_ids: vec![1, 2, 3, 4],
+                block_mm_infos: Vec::new(),
+                expanded_prompt_len: 4,
+            }))
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+
+        assert_eq!(routing_isl_tokens(&request), 4);
     }
 }
