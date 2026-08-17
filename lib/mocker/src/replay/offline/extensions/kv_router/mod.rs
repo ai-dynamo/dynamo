@@ -24,7 +24,7 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
-    SchedulingRequest, SequenceRequest, TrackingHashAlgorithm, TrackingHashContext,
+    SchedulingRequest, SequenceRequest, SessionContext, TrackingHashAlgorithm, TrackingHashContext,
     TrackingHashScope, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
@@ -300,7 +300,10 @@ impl PendingRequest {
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
             policy_class: self.policy_class.clone(),
-            session_id: self.session_id.clone(),
+            session_context: self
+                .session_id
+                .clone()
+                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -423,10 +426,11 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         now_ms: f64,
     ) -> Result<PlacementEffects> {
         let request_metadata = request.metadata();
+        let effective_max_output_tokens = request_metadata.effective_max_output_tokens();
         let max_output_tokens = metadata
             .max_output_tokens_override()
-            .map_or(request_metadata.max_output_tokens, |override_tokens| {
-                request_metadata.max_output_tokens.min(override_tokens)
+            .map_or(effective_max_output_tokens, |override_tokens| {
+                effective_max_output_tokens.min(override_tokens)
             });
         let request_id = request_metadata
             .uuid
@@ -555,7 +559,7 @@ impl OfflineReplayRouter {
     ) -> Result<RouterEffects> {
         self.on_compact_request_arrival_for_session(
             request,
-            request.max_output_tokens,
+            request.effective_max_output_tokens(),
             replay_hashes,
             session_id,
             now_ms,
@@ -1174,7 +1178,13 @@ mod tests {
             .unwrap();
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
 
-        assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
+        assert_eq!(
+            scheduling_request
+                .session_context
+                .as_ref()
+                .map(|context| context.session_id()),
+            Some("session-a")
+        );
     }
 
     #[test]

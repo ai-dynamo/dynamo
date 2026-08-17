@@ -327,6 +327,43 @@ def test_project_scale_to_no_change_returns_none():
     assert adapter._project_scale_to(outcome, wc) is None
 
 
+def test_project_scale_to_raises_baseline_to_component_floors():
+    cfg = _disagg_config_sla_no_budget()
+    cfg.prefill_min_endpoint = 3
+    cfg.decode_min_endpoint = 4
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(ready_num_prefill=1, ready_num_decode=2)
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=1),
+            ComponentTarget(sub_component_type="decode", replicas=2),
+        ],
+        proposed=set(),
+    )
+
+    decision = adapter._project_scale_to(outcome, wc)
+
+    assert decision is not None
+    assert decision.num_prefill == 3
+    assert decision.num_decode == 4
+
+
+def test_project_scale_to_raises_agg_baseline_to_runtime_legacy_floor():
+    cfg = _agg_config_throughput_on()
+    cfg.min_endpoint = 3
+    adapter = OrchestratorEngineAdapter(cfg, _caps())
+    wc = WorkerCounts(ready_num_decode=1)
+    outcome = _apply_outcome(
+        [ComponentTarget(sub_component_type="decode", replicas=1)], proposed=set()
+    )
+
+    decision = adapter._project_scale_to(outcome, wc)
+
+    assert decision is not None
+    assert decision.num_prefill is None
+    assert decision.num_decode == 3
+
+
 def test_project_scale_to_single_component_proposal():
     # Agg-mode proposals mention only decode; prefill stays None (no opinion),
     # decode changed → decision emitted.

@@ -8,16 +8,16 @@
 //! over the engine type so a PyO3-wrapped engine can feed in through the
 //! same `Arc<dyn LLMEngine>` path.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_llm::local_model::LocalModel;
-use dynamo_llm::local_model::LocalModelBuilder;
 use dynamo_llm::local_model::runtime_config::{
     DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagMode, StructuralTagSchemaMode,
-    StructuralTagScope,
+    StructuralTagScope, TOPOLOGY_TAINT_PREFIX,
 };
+use dynamo_llm::local_model::{LocalModel, LocalModelBuilder, update_model_taints};
 use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_llm::preprocessor::media::{MediaDecoder, MediaFetcher};
 use dynamo_llm::worker_type::WorkerType;
@@ -60,11 +60,15 @@ const CLEANUP_RESERVE_S: f64 = 5.0;
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
 const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
 
+/// Runtime-system route for replacing this worker's caller-managed model taints.
+const MODEL_TAINT_UPDATE_NAME: &str = "model_taints";
+const MODEL_TAINT_UPDATE_ROUTE: &str = "update/model_taints";
+
 /// Runtime / transport configuration applied to the process before the
 /// distributed runtime is constructed.
 ///
 /// `dynamo-runtime` reads these from environment variables in
-/// [`DistributedConfig::from_settings`]. We mirror that by setting them
+/// `DistributedConfig::from_settings`. We mirror that by setting them
 /// here before [`Runtime::from_settings`] runs, so a programmatic caller
 /// can override per-process values without poking `std::env::set_var`
 /// from user code.
@@ -749,6 +753,14 @@ impl Worker {
 
         let registry = endpoint.drt().engine_routes();
         let update_count = updates.len();
+        if updates.iter().any(|name| name == MODEL_TAINT_UPDATE_NAME) {
+            return Err(err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                format!(
+                    "engine update '{MODEL_TAINT_UPDATE_NAME}' conflicts with reserved Dynamo route /engine/{MODEL_TAINT_UPDATE_ROUTE}"
+                ),
+            ));
+        }
         for update_name in updates {
             let callback = engine_update_callback(update_name.clone(), self.engine.clone());
             // Namespace update routes under `/engine/update/<name>`.
@@ -756,6 +768,17 @@ impl Worker {
         }
         tracing::info!(update_count, "registered engine management updates");
         Ok(())
+    }
+
+    /// Register the Dynamo-owned model taint update on the runtime system server.
+    ///
+    /// Unlike engine-advertised updates, this mutates the worker's discovery
+    /// metadata and therefore applies uniformly to every engine implementation.
+    fn register_model_taint_update_route(&self, endpoint: &dynamo_runtime::component::Endpoint) {
+        endpoint.drt().engine_routes().register(
+            MODEL_TAINT_UPDATE_ROUTE,
+            model_taint_update_callback(endpoint.clone()),
+        );
     }
 
     /// Full graceful-shutdown orchestrator: discovery unregister →
@@ -876,6 +899,7 @@ impl Worker {
 
         self.register_engine_controls(&endpoint).await?;
         self.register_engine_updates(&endpoint).await?;
+        self.register_model_taint_update_route(&endpoint);
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -1324,6 +1348,48 @@ fn update_request_body_error(body: &serde_json::Value) -> Option<serde_json::Val
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ModelTaintUpdateRequest {
+    taints: Vec<String>,
+}
+
+fn parse_model_taint_update_request(body: serde_json::Value) -> anyhow::Result<HashSet<String>> {
+    if !body.is_object() {
+        anyhow::bail!("request body must be a JSON object");
+    }
+
+    let request: ModelTaintUpdateRequest = serde_json::from_value(body)
+        .map_err(|_| anyhow::anyhow!("'taints' must be a JSON array of strings"))?;
+    if let Some(reserved) = request
+        .taints
+        .iter()
+        .find(|taint| taint.starts_with(TOPOLOGY_TAINT_PREFIX))
+    {
+        anyhow::bail!("taint '{reserved}' uses reserved prefix '{TOPOLOGY_TAINT_PREFIX}'");
+    }
+
+    Ok(request.taints.into_iter().collect())
+}
+
+fn model_taint_update_callback(
+    endpoint: dynamo_runtime::component::Endpoint,
+) -> EngineRouteCallback {
+    Arc::new(move |body| {
+        let endpoint = endpoint.clone();
+        Box::pin(async move {
+            let taints = parse_model_taint_update_request(body)?;
+            update_model_taints(&endpoint, taints.clone()).await?;
+
+            let mut response_taints: Vec<_> = taints.into_iter().collect();
+            response_taints.sort();
+            Ok(serde_json::json!({
+                "status": "ok",
+                "taints": response_taints,
+            }))
+        })
+    })
+}
+
 fn engine_control_callback(control_name: String, engine: EngineKind) -> EngineRouteCallback {
     Arc::new(move |body| {
         let engine = engine.clone();
@@ -1722,6 +1788,56 @@ async fn build_local_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_taint_update_request_deserializes_and_deduplicates() {
+        let taints = parse_model_taint_update_request(serde_json::json!({
+            "taints": ["capacity/fast", "capacity/fast", "region/west"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            taints,
+            HashSet::from(["capacity/fast".to_string(), "region/west".to_string(),])
+        );
+    }
+
+    #[test]
+    fn model_taint_update_request_rejects_invalid_payloads() {
+        let cases = [
+            (serde_json::json!([]), "request body must be a JSON object"),
+            (
+                serde_json::json!({}),
+                "'taints' must be a JSON array of strings",
+            ),
+            (
+                serde_json::json!({"taints": "fast"}),
+                "'taints' must be a JSON array of strings",
+            ),
+            (
+                serde_json::json!({"taints": [1]}),
+                "'taints' must be a JSON array of strings",
+            ),
+        ];
+
+        for (body, expected) in cases {
+            let error = parse_model_taint_update_request(body).unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn model_taint_update_request_rejects_reserved_topology_taints() {
+        let error = parse_model_taint_update_request(serde_json::json!({
+            "taints": ["dynamo.topology/zone=west"]
+        }))
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "taint 'dynamo.topology/zone=west' uses reserved prefix 'dynamo.topology/'"
+        );
+    }
 
     fn error_type_of(result: Result<ModelType, DynamoError>) -> ErrorType {
         result.unwrap_err().error_type()
@@ -2927,6 +3043,7 @@ mod handoff_integration_tests {
     use super::*;
     use crate::engine::PreprocessedRequest;
     use async_trait::async_trait;
+    use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use futures::stream::BoxStream;
     use std::sync::Mutex as StdMutex;
@@ -3089,6 +3206,7 @@ mod handoff_integration_tests {
             .register_engine_updates(&endpoint)
             .await
             .expect("update registration should succeed");
+        worker.register_model_taint_update_route(&endpoint);
 
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
@@ -3109,6 +3227,10 @@ mod handoff_integration_tests {
             routes.get("update/load_lora").is_some(),
             "advertised update must be registered under update/<name>"
         );
+        assert!(
+            routes.get(MODEL_TAINT_UPDATE_ROUTE).is_some(),
+            "model taint updates must be registered for every common worker"
+        );
         // Bare (unprefixed) keys must NOT be registered by the unified Worker.
         assert!(
             routes.get("start_profile").is_none(),
@@ -3118,6 +3240,91 @@ mod handoff_integration_tests {
             routes.get("load_lora").is_none(),
             "update must not be registered under its bare name"
         );
+    }
+
+    #[tokio::test]
+    async fn engine_update_cannot_replace_model_taint_route() {
+        let endpoint = test_endpoint().await;
+        let (engine, _) = HandoffMockEngine::new(
+            false,
+            Vec::new(),
+            vec!["load_lora".to_string(), "model_taints".to_string()],
+        );
+        let worker = Worker::new(engine, WorkerConfig::default());
+
+        let error = worker.register_engine_updates(&endpoint).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with reserved Dynamo route")
+        );
+        let routes = endpoint.drt().engine_routes();
+        assert!(
+            routes.get("update/load_lora").is_none(),
+            "validation must happen before any engine update is registered"
+        );
+        assert!(routes.get(MODEL_TAINT_UPDATE_ROUTE).is_none());
+    }
+
+    #[tokio::test]
+    async fn model_taint_update_route_updates_registered_base_model() {
+        let endpoint = test_endpoint().await;
+        let endpoint_id = endpoint.id();
+        endpoint
+            .drt()
+            .discovery()
+            .register(DiscoverySpec::Model {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+                card_json: serde_json::json!({
+                    "display_name": "mock",
+                    "runtime_config": {
+                        "taints": ["old", "dynamo.topology/zone=west"],
+                        "topology_domains": {"zone": "west"},
+                    },
+                }),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+
+        let worker = Worker::new(Arc::new(DefaultsEngine), WorkerConfig::default());
+        worker.register_model_taint_update_route(&endpoint);
+        let callback = endpoint
+            .drt()
+            .engine_routes()
+            .get(MODEL_TAINT_UPDATE_ROUTE)
+            .unwrap();
+
+        let response = callback(serde_json::json!({
+            "taints": ["capacity/fast", "capacity/fast"]
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            response,
+            serde_json::json!({"status": "ok", "taints": ["capacity/fast"]})
+        );
+
+        let models = endpoint
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+            })
+            .await
+            .unwrap();
+        let [DiscoveryInstance::Model { card_json, .. }] = models.as_slice() else {
+            panic!("expected one registered model");
+        };
+        let taints = card_json["runtime_config"]["taints"].as_array().unwrap();
+        assert!(taints.contains(&serde_json::json!("capacity/fast")));
+        assert!(taints.contains(&serde_json::json!("dynamo.topology/zone=west")));
+        assert!(!taints.contains(&serde_json::json!("old")));
     }
 
     /// A failing `on_endpoint_ready` aborts startup: the `?` in
@@ -3150,6 +3357,10 @@ mod handoff_integration_tests {
         assert!(
             routes.get("update/load_lora").is_none(),
             "no updates should be registered after a fatal handoff"
+        );
+        assert!(
+            routes.get(MODEL_TAINT_UPDATE_ROUTE).is_none(),
+            "model taint updates must not be registered after a fatal handoff"
         );
     }
 }
