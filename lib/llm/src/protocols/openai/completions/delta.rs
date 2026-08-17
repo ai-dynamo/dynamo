@@ -244,7 +244,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             delta.top_logprobs,
         );
 
-        let finish_reason = delta.finish_reason.map(Into::into);
+        // `CompletionFinishReason` has no error variant, so the blanket `From`
+        // would flatten a failed request into `stop` and drop the message.
+        // Returning `Err` makes the postprocessor emit an error annotation the
+        // HTTP layer can answer with a non-2xx, as the chat path already does.
+        let finish_reason = match delta.finish_reason {
+            Some(common::FinishReason::Error(err_msg)) => {
+                return Err(anyhow::anyhow!(err_msg));
+            }
+            other => other.map(Into::into),
+        };
         let stop_reason = delta.stop_reason.clone();
 
         // create choice
@@ -707,6 +716,59 @@ mod tests {
             assert!(
                 nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
                 "engine_data should not appear when backend provides None"
+            );
+        }
+    }
+
+    #[test]
+    fn error_finish_reason_fails_the_choice_and_keeps_the_message() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-error-finish".to_string());
+        let mut output = final_backend_output();
+        output.finish_reason = Some(common::FinishReason::Error(
+            "Invalid prompt_embeds: Failed to decode prompt_embeds as PyTorch tensor".to_string(),
+        ));
+
+        let err = generator
+            .choice_from_postprocessor(output)
+            .expect_err("a backend error must not become a successful completion");
+
+        assert!(
+            err.to_string().contains("Invalid prompt_embeds"),
+            "the worker's message must survive, got: {err}"
+        );
+    }
+
+    #[test]
+    fn non_error_finish_reasons_still_map_to_openai() {
+        use dynamo_protocols::types::CompletionFinishReason;
+
+        for (backend, expected) in [
+            (common::FinishReason::EoS, CompletionFinishReason::Stop),
+            (common::FinishReason::Stop, CompletionFinishReason::Stop),
+            (
+                common::FinishReason::Cancelled,
+                CompletionFinishReason::Stop,
+            ),
+            (common::FinishReason::Length, CompletionFinishReason::Length),
+            (
+                common::FinishReason::ContentFilter,
+                CompletionFinishReason::ContentFilter,
+            ),
+        ] {
+            let request = create_test_request();
+            let mut generator = request.response_generator("req-ok-finish".to_string());
+            let mut output = final_backend_output();
+            output.finish_reason = Some(backend.clone());
+
+            let response = generator
+                .choice_from_postprocessor(output)
+                .unwrap_or_else(|e| panic!("{backend:?} must still succeed, got: {e}"));
+
+            assert_eq!(
+                response.inner.choices[0].finish_reason,
+                Some(expected),
+                "{backend:?} mapped to the wrong OpenAI finish reason"
             );
         }
     }

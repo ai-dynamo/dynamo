@@ -2763,7 +2763,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
         if self.model_config is None:
-            raise ValueError("ModelConfig is unavailable for prompt_embeds validation.")
+            # Not `ValueError`: the bindings map that to `Backend(InvalidArgument)`
+            # -> 400, and a worker without a ModelConfig is our fault, not the
+            # caller's. `RuntimeError` keeps it a 500.
+            raise RuntimeError(
+                "ModelConfig is unavailable for prompt_embeds validation."
+            )
 
         try:
             return safe_load_prompt_embeds(
@@ -2808,7 +2813,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
         mm_processor_kwargs: Dict[str, Any] | None = None,
-    ) -> tuple[TokensPrompt | EmbedsPrompt | None, Dict[str, Any] | None]:
+    ) -> TokensPrompt | EmbedsPrompt | None:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
 
@@ -2820,10 +2825,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             mm_processor_kwargs: Optional multimodal processor kwargs (e.g.
                 use_audio_in_video) forwarded to the vLLM engine.
 
-        Returns:
-            Tuple of (prompt, error_dict) where:
-            - On success: (prompt, None)
-            - On failure: (None, error_dict to yield)
+        Raises:
+            InvalidArgument: `prompt_embeds` was sent to a worker started
+                without `--enable-prompt-embeds`.
+            ValueError: `prompt_embeds` was supplied but could not be decoded.
+                `_decode_prompt_embeds` re-types every decode failure to
+                `ValueError`, so this covers a genuine bad tensor and a
+                resource fault such as OOM alike.
+
+        Both map to `Backend(InvalidArgument)` -> HTTP 400 with the message
+        forwarded verbatim. An in-band `finish_reason` error cannot: it carries
+        no error type, so it decodes as `Unknown` -> 500, and the frontend
+        sanitizes 5xx bodies. The caller would get a bare "Internal server
+        error".
         """
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
@@ -2834,13 +2848,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"Rejected prompt_embeds for {log_prefix.lower().strip() or 'request'} "
                     f"{request_id}: {msg}"
                 )
-                return (
-                    None,
-                    {
-                        "finish_reason": f"error: Invalid prompt_embeds: {msg}",
-                        "token_ids": [],
-                    },
-                )
+                raise InvalidArgument(f"Invalid prompt_embeds: {msg}")
             try:
                 prompt, tensor = self._create_prompt_from_embeddings(
                     request["prompt_embeds"]
@@ -2850,19 +2858,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"dtype={tensor.dtype}, sequence_length={tensor.shape[0]}, "
                     f"request_id={request_id}"
                 )
-                return prompt, None
+                return prompt
             except Exception as e:
                 logger.error(
-                    f"Failed to process prompt_embeds for {log_prefix.lower().strip() or 'request'} "
-                    f"{request_id}: {e}"
+                    "Failed to process prompt_embeds for %s %s: %s",
+                    log_prefix.lower().strip() or "request",
+                    request_id,
+                    e,
                 )
-                return (
-                    None,
-                    {
-                        "finish_reason": f"error: Invalid prompt_embeds: {e}",
-                        "token_ids": [],
-                    },
-                )
+                raise
         # Text-only PD + encoder-worker path.
         # Normal path: use token IDs.
         # Prefer frontend-forwarded mm_hashes for hash consistency with the
@@ -2875,7 +2879,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             multi_modal_data,
             mm_processor_kwargs,
         )
-        return prompt, None
+        return prompt
 
     @staticmethod
     def _build_completion_usage(
@@ -3289,8 +3293,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Firstly extract disaggregated params from prefill result if available
         prefill_result = request.get("prefill_result")
         if prefill_result and isinstance(prefill_result, dict):
-            # `disaggregated_params` may be explicitly None (prefill error path,
-            # or _build_disaggregated_params returning None when empty), so use
+            # `disaggregated_params` may be explicitly None
+            # (`_build_disaggregated_params` returns None when empty), so use
             # `or {}` rather than a .get default — the default only applies when
             # the key is absent, not when it is present-but-None.
             disaggregated_params = prefill_result.get("disaggregated_params") or {}
@@ -3360,27 +3364,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
             if custom_prompt is not None:
                 prompt = custom_prompt
-                error = None
             elif pre_rendered is not None:
                 # pre_rendered is a MultiModalInput dict with "type": "multimodal".
                 # The engine's InputProcessor.process_inputs() will see the "type"
                 # key and skip the HF processor entirely.
                 prompt = pre_rendered
-                error = None
                 logger.debug(
                     "[mm-routing] Request %s: using pre-rendered MultiModalInput",
                     request_id,
                 )
             else:
-                prompt, error = self._build_prompt_from_request(
+                prompt = self._build_prompt_from_request(
                     request,
                     request_id,
                     multi_modal_data,
                     mm_processor_kwargs=mm_processor_kwargs,
                 )
-        if error is not None:
-            yield error
-            return
 
         _apply_nvext_cache_salt(request, prompt)
 
@@ -3675,18 +3674,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         mm_processor_kwargs = prepared_input.mm_processor_kwargs
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
-        prompt, error = self._build_prompt_from_request(
+        prompt = self._build_prompt_from_request(
             request,
             request_id,
             multi_modal_data,
             log_prefix="Prefill ",
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        if error is not None:
-            # Prefill errors need disaggregated_params field
-            error["disaggregated_params"] = None
-            yield error
-            return
 
         _apply_nvext_cache_salt(request, prompt)
 

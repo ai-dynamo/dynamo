@@ -29,7 +29,7 @@ from typing import Generator
 
 import pytest
 import torch
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 from tests.utils.device import detect_target_device
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
@@ -246,13 +246,18 @@ class TestPromptEmbedsE2E:
 
         Non-streaming mode should surface invalid prompt_embeds as an error and
         the OpenAI client should raise an exception.
+
+        The status must be 400. A 5xx body is sanitized to "Internal server
+        error" (lib/llm/src/http/service/openai.rs), which would still satisfy a
+        bare `pytest.raises` and a keyword match on "error" while telling the
+        caller nothing about what they sent.
         """
         # Create data that passes Rust validation (valid base64, >100 bytes)
         # but fails Python torch.load()
         invalid_data = b"this is not a valid pytorch tensor format!" * 10
         invalid_base64 = base64.b64encode(invalid_data).decode("utf-8")
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(BadRequestError) as exc_info:
             dynamo_client.completions.create(
                 model=TEST_MODEL,
                 prompt="",
@@ -263,9 +268,8 @@ class TestPromptEmbedsE2E:
 
         error_msg = str(exc_info.value).lower()
         assert any(
-            keyword in error_msg
-            for keyword in ["pytorch", "tensor", "invalid", "decode", "error"]
-        ), f"Expected tensor decode error, got: {error_msg}"
+            keyword in error_msg for keyword in ["pytorch", "tensor", "decode"]
+        ), f"Expected the worker's decode message, got: {error_msg}"
 
     def test_usage_prompt_tokens_not_zero(self, dynamo_client):
         """
