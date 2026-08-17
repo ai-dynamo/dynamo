@@ -305,7 +305,8 @@ impl LLMEngine for MockerBackend {
             KvEventPublishers::default(),
             Some(self.cancel.clone()),
             FpmPublisher::default(),
-        );
+        )
+        .map_err(|error| engine_shutdown(format!("failed to start Mocker scheduler: {error:#}")))?;
 
         // The `initialized()` check + these `set()` calls are not atomic,
         // so concurrent `start()` callers could both pass the check and
@@ -445,8 +446,16 @@ impl LLMEngine for MockerBackend {
             },
         );
 
+        // Install the guard before enqueueing so a closed compatibility lane
+        // also releases the active entry.
+        let mut guard = ActiveRequestGuard {
+            uuid,
+            active: self.active.clone(),
+            kv_used_blocks: self.kv_used_blocks.clone(),
+            blocks_held: 0,
+        };
+
         if request_tx.send(direct).is_err() {
-            self.active.remove(&uuid);
             return Err(engine_shutdown("scheduler is not accepting requests"));
         }
 
@@ -458,13 +467,7 @@ impl LLMEngine for MockerBackend {
         let blocks_held = prompt_len.div_ceil(block_size) as u64;
         self.kv_used_blocks
             .fetch_add(blocks_held, Ordering::Relaxed);
-
-        let guard = ActiveRequestGuard {
-            uuid,
-            active: self.active.clone(),
-            kv_used_blocks: self.kv_used_blocks.clone(),
-            blocks_held,
-        };
+        guard.blocks_held = blocks_held;
 
         Ok(Box::pin(async_stream::stream! {
             let _guard = guard;
@@ -886,6 +889,29 @@ mod tests {
         );
 
         engine.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_scheduler_queue_cleans_up_pending_request() {
+        let engine = test_engine();
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
+        drop(request_rx);
+        assert!(engine.request_tx.set(request_tx).is_ok());
+
+        let result = engine
+            .generate(request(Some(1)), gen_ctx(Context::new(()).context()))
+            .await;
+        let Err(err) = result else {
+            panic!("closed scheduler queue must reject the request");
+        };
+        assert_eq!(
+            err.error_type(),
+            ErrorType::Backend(BackendError::EngineShutdown)
+        );
+        assert!(
+            engine.active.is_empty(),
+            "failed enqueue must be removed from active state"
+        );
     }
 
     #[tokio::test]
