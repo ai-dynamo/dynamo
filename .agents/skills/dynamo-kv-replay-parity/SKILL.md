@@ -1,6 +1,6 @@
 ---
 name: dynamo-kv-replay-parity
-description: Runs deterministic byte-parity and paired performance campaigns for Dynamo offline KV-aware replay across native vLLM and SGLang configurations plus supported vLLM KVBM offload paths, including forced preemption and offload lifecycles. It is used when validating replay refactors, routing changes, scheduler-event changes, or performance-sensitive offline simulation changes against a baseline revision.
+description: Runs deterministic byte-parity and paired performance campaigns for Dynamo offline KV-aware replay across native vLLM and SGLang configurations, including forced scheduler-pressure lifecycles. It is used when validating replay refactors, routing changes, scheduler-event changes, or performance-sensitive offline simulation changes against a baseline revision.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -8,7 +8,6 @@ metadata:
     - dynamo
     - offline-replay
     - kv-router
-    - kvbm
     - parity
     - performance
 ---
@@ -31,15 +30,14 @@ Resolve and record before running anything:
 - Rust toolchain, build profile, flags, and host characteristics;
 - each artifact's exact Cargo features from the relevant manifests;
 - Mooncake trace path, SHA-256 checksum, and deterministic slice rule;
-- engine, topology, concurrency, worker counts, block sizes, and KVBM capacities;
+- engine, topology, concurrency, worker counts, block sizes, and G1 capacities;
 - the canonical-report exclusion allowlist; and
 - the performance run-order seed, CPU placement, timing scope, and invalidation rules.
 
 Use the project root `.venv/bin/python` for Python analysis and `uv pip` for any approved
 installation. Do not compare against moving branches or reuse a binary after changing its
 checkout. Do not describe the configuration as "all features"; record explicit feature
-names. Typical plumbing includes replay determinism plus KVBM offload, but feature names
-can differ between `dynamo-mocker` and `dynamo-bench`.
+names. Feature names can differ between `dynamo-mocker` and `dynamo-bench`.
 
 ## Stage 1: Pin revisions and artifacts
 
@@ -47,19 +45,23 @@ can differ between `dynamo-mocker` and `dynamo-bench`.
 2. Create isolated checkouts for both revisions using the same host and toolchain.
 3. Apply any temporary determinism correction identically to both revisions. Keep it out
    of the measured semantic delta and record its patch checksum.
-4. For the current `dynamo-bench` harness on Linux, build one feature-superset release
-   artifact per revision with exactly `replay-bench,mocker-kvbm-offload` and no default
-   features. `--canonical-reports-jsonl` requires `replay-bench`, which also selects the
-   seeded router. Compiled KVBM support attaches an offload engine only when runtime
-   arguments provide a positive `--num-g2-blocks` and `--kv-bytes-per-token`; omit
-   `--num-g2-blocks` for native rows.
-5. Reuse that artifact across native and KVBM correctness and performance rows. Do not
-   build separate native, KVBM, or production-routing artifacts. If the named manifest
-   features or runtime opt-in contract no longer exist, stop and report that this protocol
-   needs updating rather than guessing a replacement matrix.
+4. For the current `dynamo-bench` harness, build one release artifact per revision with
+   exactly `replay-bench` and no default features. `--canonical-reports-jsonl` requires
+   `replay-bench`, which also selects the seeded router.
+5. Reuse that artifact across all native correctness and performance rows. Do not build
+   separate topology or production-routing artifacts. If the named manifest feature no
+   longer exists, stop and report that this protocol needs updating rather than guessing a
+   replacement matrix.
 6. Copy the artifacts to a temporary campaign directory. Record exact features, binary
    SHA-256, binary size, and `.text` size.
 7. Return each checkout to its original branch after extracting the binaries.
+
+Build the current benchmark artifact with:
+
+```bash
+cargo build --release -p dynamo-bench --no-default-features \
+  --features replay-bench --bench offline_replay_bench
+```
 
 Never build while collecting performance samples.
 
@@ -73,13 +75,9 @@ evidence for one row on the same node. Use the same prebuilt revision artifacts 
 throughout the campaign, and record the node characteristics and CPU placement for every
 row.
 
-Native replay is normally single-core: pin each native process to one physical core after
-confirming that assumption during preflight. KVBM replay also owns a one-worker Tokio
-runtime for background pipeline and session tasks. Pin each KVBM process to a fixed,
-disjoint CPU set containing at least two physical cores for the main replay thread and the
-background worker. Expand that set if thread inspection shows additional runnable workers.
-Keep the CPU-set size, NUMA placement, and affinity identical between baseline and candidate
-for a row.
+Native replay is normally single-core: pin each process to one physical core after
+confirming that assumption during preflight. Keep the CPU-set size, NUMA placement, and
+affinity identical between baseline and candidate for a row.
 
 For correctness, run the baseline and candidate repetitions for a row concurrently when
 its node has sufficient resources. Pin concurrent processes to disjoint CPU sets, give each
@@ -135,20 +133,27 @@ configuration family when rows genuinely share every relevant parameter. For eac
 configuration, prove that it exercised every applicable path:
 
 - KV-overlap-sensitive routing;
-- immediate and queued placement;
-- a small, bounded number of preemptions at the block-capacity edge;
+- immediate placement, plus queued placement only when queueing is explicitly enabled;
+- the row's bounded preemption or retraction band at the block-capacity edge;
 - disaggregated prefill/decode handoff;
-- terminal cleanup;
-- G1 to G2 eviction on KVBM rows; and
-- G2 to G1 restoration on KVBM rows.
+- terminal cleanup.
 
 Use coverage counters, lifecycle traces, or report evidence rather than inferring these
-paths from successful completion. Target one to three preemptions per configuration. Zero
-means the edge was not exercised; repeated preempt/re-admit cycling, a rapidly growing
-preemption count, or failure to advance virtual time invalidates the fixture. Tune capacity
-or concurrency minimally and identically for baseline and candidate within the row or
-family, and back off rather than accepting a preemption flood. Never tune the revisions
-separately.
+paths from successful completion. Target the bounded pressure band recorded for the
+qualified seed. When no seed exists, start with one to three pressure events to prove the
+lifecycle. For throttle-oriented disaggregated vLLM and SGLang seeds, target 10 to 20 fully
+readmitted pressure events so repeated scheduling is exercised. Zero means the edge was
+not exercised; repeated preempt/re-admit cycling, a rapidly growing pressure count, or
+failure to advance virtual time invalidates the fixture. Tune capacity or concurrency
+minimally and identically for baseline and candidate within the row or family, and back
+off rather than accepting a pressure flood. Never tune the revisions separately.
+
+The offline replay CLI leaves the router queue threshold unset by default. In that mode,
+all route decisions are immediate and zero queued placements are expected; engine-side
+scheduler waiting is not router queue coverage. If queue lifecycle coverage is required,
+enable it through an explicit queue-capable harness or forced fixture and record the exact
+threshold. Account for every route decision, but never relabel scheduler waiting as queued
+placement.
 
 ### Start from qualified internal-polynomial seeds
 
@@ -158,15 +163,17 @@ before searching for capacity edges. Treat those configurations and observed cou
 suggested starting points, not universal constants or substitutes for qualification on the
 pinned baseline. Requalify one frozen configuration identically on both revisions.
 
-Use the reference's expected preemption, retraction, queue, reuse, worker, and handoff
-signals as drift detectors. For KVBM rows, also require deterministic nonzero G1-to-G2 and
-G2-to-G1 activity. Matching lifecycle counts do not waive an unstable canonical digest;
-stop correctness and performance work for that row until both internal determinism and
+Use the reference's expected preemption, retraction, reuse, worker, and handoff signals as
+drift detectors. Treat queue counts as expected signals only when queueing was explicitly
+enabled. Matching lifecycle counts do not waive an unstable canonical digest; stop
+correctness and performance work for that row until both internal determinism and
 cross-revision parity are established.
 
 ## Stage 4: Run byte parity
 
-Run the 5,000-request corpus for this authoritative matrix:
+Run the 5,000-request corpus for this authoritative matrix. Treat both disaggregated rows
+as the primary scheduler and handoff requalification. Keep the aggregated rows as
+secondary parity coverage for the corresponding engine semantics.
 
 | Engine semantics | Topology | Memory path | Routing |
 | --- | --- | --- | --- |
@@ -174,13 +181,8 @@ Run the 5,000-request corpus for this authoritative matrix:
 | vLLM pass-start | Disaggregated | Native G1 | KV-aware |
 | SGLang pass-end | Aggregated | Native G1 | KV-aware |
 | SGLang pass-end | Disaggregated | Native G1 | KV-aware |
-| vLLM pass-start | Aggregated | KVBM G1 to G2 and G2 to G1 | KV-aware |
-| vLLM pass-start | Disaggregated | KVBM G1 to G2 and G2 to G1 | KV-aware |
 
-The current harness supports KVBM offload only for vLLM. Record SGLang plus KVBM as
-`UNSUPPORTED`; do not require an impossible lifecycle and do not count that unsupported
-combination as an authoritative row. Run the two KVBM rows only on supported Linux hosts
-and require the Stage 3 eviction and restoration evidence. For each row:
+For each row:
 
 1. Produce canonical baseline and candidate outputs with the frozen configuration.
 2. Compare their bytes or SHA-256 digests exactly.
@@ -195,7 +197,7 @@ authoritative engine semantic.
 
 Byte mismatch is a review gate, not an instruction to preserve incorrect behavior. Allow
 an intentional mismatch only when the candidate is demonstrably more faithful to the
-specified engine, scheduler, routing, or KVBM semantics.
+specified engine, scheduler, or routing semantics.
 
 For every proposed exception, record:
 
@@ -216,15 +218,13 @@ candidate back to known-wrong behavior just to obtain identical bytes.
 Use small deterministic fixtures only for required paths the long corpus cannot reliably
 trigger:
 
-- single-worker KV-router queueing;
+- single-worker KV-router queueing with an explicit queue threshold;
 - a preemption-edge fixture that targets one to three preemptions and then completes;
 - scale-to-zero followed by scale-up and pending-work release;
-- G1 to G2 eviction followed by G2 to G1 restoration; and
 - backend-specific prefill/decode handoff ordering.
 
 Assert bounded preemption, continued virtual-time progress, and the lifecycle itself. A
-final-completion smoke test does not prove offload, preemption, queueing, or restoration
-occurred.
+final-completion smoke test does not prove preemption or queueing occurred.
 
 ## Stage 7: Measure performance
 
@@ -240,10 +240,9 @@ The primary metric is replay execution time. Start its timer after trace normali
 workload construction, and engine/runtime preparation, immediately before
 `prepared.run(...)`; stop it immediately after that call returns and before collector
 finalization or report aggregation. Emit this value as `replay_execution_ms`. Record setup
-and end-to-end time separately as diagnostics. In particular, do not let KVBM messenger
-initialization or its fixed readiness delay dilute a replay-loop regression. If the harness
-does not expose this exact timing boundary, extend it before running the campaign; do not
-substitute the existing broader `wall_time_ms`.
+and end-to-end time separately as diagnostics. If the harness does not expose this exact
+timing boundary, extend it before running the campaign; do not substitute the existing
+broader `wall_time_ms`.
 
 Stage binaries and trace inputs on node-local storage and verify their checksums before
 warmups. File transfer is campaign setup, not a sample. For each measured invocation, pass

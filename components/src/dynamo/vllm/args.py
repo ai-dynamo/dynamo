@@ -18,6 +18,11 @@ except ImportError:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.common.config_dump import register_encoder
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    parse_worker_router_config,
+    register_worker_router_help,
+)
 from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
@@ -41,7 +46,13 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     request_plane: str
     event_plane: Optional[str] = None
     enable_local_indexer: bool = True
+    # Whether this worker publishes KV events. Distinct from the router-side
+    # `use_kv_events` on `router_advertisement`, which means the router
+    # subscribes to them -- the reason the two live on separate objects.
     use_kv_events: bool
+    # Routing this worker set advertises in its model card; None inherits the
+    # frontend's configuration.
+    router_advertisement: Optional[WorkerRouterConfig] = None
 
     # GMS configuration
     gms_shadow_mode: bool = False
@@ -97,8 +108,17 @@ def parse_args(argv: list[str] | None = None) -> Config:
             continue
         vg._group_actions.append(action)
 
+    # Router advertisement flags are parsed into their own config object rather
+    # than flattened onto Config: the router's --router-kv-events lands on
+    # `use_kv_events`, which Config already uses for "this worker publishes KV
+    # events". Registered here for --help only; parsed below.
+    register_worker_router_help(parser)
+
     args, unknown = parser.parse_known_args(argv)
     dynamo_config = Config.from_cli_args(args)
+
+    # Consume the router flags before the engine parser sees the remainder.
+    dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
 
     # Validate arguments
     dynamo_config.validate()
@@ -117,6 +137,9 @@ def parse_args(argv: list[str] | None = None) -> Config:
     update_engine_config_with_dynamo(dynamo_config, engine_config)
 
     dynamo_config.engine_args = engine_config
+    from .state_agent import validate_state_agent_worker
+
+    validate_state_agent_worker(dynamo_config)
     return dynamo_config
 
 
@@ -229,6 +252,8 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
     """Return the worker role when trace-based FPM activation is unsupported."""
     if dynamo_config.embedding_worker:
         return "embedding"
+    if dynamo_config.classify_worker:
+        return "classify"
     if dynamo_config.headless:
         return "headless"
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -261,11 +286,23 @@ def update_engine_config_with_dynamo(
 ) -> None:
     """Update engine config based on Dynamo config."""
     if engine_config.enable_prefix_caching is None:
-        logger.debug(
-            "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
-            "Defaulting to True (vLLM v1 default behavior)"
-        )
-        engine_config.enable_prefix_caching = True
+        if dynamo_config.embedding_worker or dynamo_config.classify_worker:
+            # Pooling engines never decode, so prefix caching buys nothing —
+            # and force-enabling it crashes models vLLM itself would leave it
+            # off for (e.g. ModernBERT's hybrid local/global attention dies
+            # with "HybridKVCacheCoordinator requires at least two attention
+            # groups"). Match bare `vllm serve`, which does not enable prefix
+            # caching for pooling runners.
+            logger.debug(
+                "Pooling-family worker: defaulting --enable-prefix-caching to False"
+            )
+            engine_config.enable_prefix_caching = False
+        else:
+            logger.debug(
+                "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
+                "Defaulting to True (vLLM v1 default behavior)"
+            )
+            engine_config.enable_prefix_caching = True
 
     if getattr(engine_config, "block_size", None) is None:
         logger.debug(

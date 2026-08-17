@@ -11,7 +11,7 @@
 # NVLink72 (MNNVL) via ComputeDomain, not RoCE/IB.
 #
 # Prerequisites: DRA / ComputeDomain controller installed cluster-wide.
-# Weights: served from the `model-cache` PVC (see ../../model-cache/model-download.yaml).
+# Weights: served from the `model-cache` PVC (see ../../model-cache/model-download-fp8.yaml).
 ---
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain

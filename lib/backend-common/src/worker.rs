@@ -68,7 +68,7 @@ const MODEL_TAINT_UPDATE_ROUTE: &str = "update/model_taints";
 /// distributed runtime is constructed.
 ///
 /// `dynamo-runtime` reads these from environment variables in
-/// [`DistributedConfig::from_settings`]. We mirror that by setting them
+/// `DistributedConfig::from_settings`. We mirror that by setting them
 /// here before [`Runtime::from_settings`] runs, so a programmatic caller
 /// can override per-process values without poking `std::env::set_var`
 /// from user code.

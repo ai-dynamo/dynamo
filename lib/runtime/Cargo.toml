@@ -47,6 +47,7 @@ derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
+fastrand = "2"
 futures = { workspace = true }
 fs4 = { workspace = true }
 humantime = { workspace = true }

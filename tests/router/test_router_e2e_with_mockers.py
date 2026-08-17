@@ -1033,8 +1033,9 @@ async def _wait_for_frontend_to_commit_single_pd_role(
     )
 
 
-async def _wait_for_disagg_worker_ids(
+async def _wait_for_expected_disagg_worker_ids(
     frontend_port: int,
+    expected_worker_ids: dict[str, int],
     timeout: float = 60,
 ) -> dict[str, int]:
     payload = {
@@ -1076,7 +1077,12 @@ async def _wait_for_disagg_worker_ids(
             last_worker_ids = worker_ids
             prefill_worker_id = worker_ids["prefill_worker_id"]
             decode_worker_id = worker_ids["decode_worker_id"]
-            if prefill_worker_id is not None and decode_worker_id is not None:
+            if (
+                prefill_worker_id is not None
+                and decode_worker_id is not None
+                and prefill_worker_id == expected_worker_ids["prefill_worker_id"]
+                and decode_worker_id == expected_worker_ids["decode_worker_id"]
+            ):
                 return {
                     "prefill_worker_id": prefill_worker_id,
                     "decode_worker_id": decode_worker_id,
@@ -1084,8 +1090,8 @@ async def _wait_for_disagg_worker_ids(
             await asyncio.sleep(0.25)
 
     raise AssertionError(
-        f"P/D routing did not become active within {timeout}s; last worker IDs: "
-        f"{last_worker_ids}"
+        f"P/D routing did not converge within {timeout}s; expected worker IDs: "
+        f"{expected_worker_ids}; last worker IDs: {last_worker_ids}"
     )
 
 
@@ -1156,7 +1162,13 @@ def test_mocker_disagg_startup_lifecycle(
                 )
 
         assert frontend is not None
-        actual_worker_ids = asyncio.run(_wait_for_disagg_worker_ids(frontend_port))
+        expected_attribution = {
+            "prefill_worker_id": expected_worker_ids["prefill"],
+            "decode_worker_id": expected_worker_ids["decode"],
+        }
+        actual_worker_ids = asyncio.run(
+            _wait_for_expected_disagg_worker_ids(frontend_port, expected_attribution)
+        )
 
     assert actual_worker_ids["prefill_worker_id"] == expected_worker_ids["prefill"]
     assert actual_worker_ids["decode_worker_id"] == expected_worker_ids["decode"]

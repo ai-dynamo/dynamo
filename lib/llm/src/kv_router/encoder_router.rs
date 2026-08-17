@@ -116,6 +116,22 @@ impl EncoderRouter {
 
     /// Create a router whose endpoint is driven by committed discovery topology.
     pub fn new(model_name: String, namespace: String) -> Arc<Self> {
+        Self::new_inner(model_name, namespace, None)
+    }
+
+    pub(crate) fn new_with_task_guard(
+        model_name: String,
+        namespace: String,
+        task_guard: dynamo_runtime::engine::EngineContextGuard,
+    ) -> Arc<Self> {
+        Self::new_inner(model_name, namespace, Some(task_guard))
+    }
+
+    fn new_inner(
+        model_name: String,
+        namespace: String,
+        task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    ) -> Arc<Self> {
         let cancel_token = CancellationToken::new();
         let (target_tx, target_rx) = watch::channel(None);
         let router = Arc::new(Self {
@@ -128,11 +144,11 @@ impl EncoderRouter {
             namespace,
         });
 
-        tokio::spawn(Self::drive_target(
-            Arc::downgrade(&router),
-            target_rx,
-            cancel_token,
-        ));
+        let router_weak = Arc::downgrade(&router);
+        tokio::spawn(async move {
+            let _task_guard = task_guard;
+            Self::drive_target(router_weak, target_rx, cancel_token).await;
+        });
 
         router
     }
