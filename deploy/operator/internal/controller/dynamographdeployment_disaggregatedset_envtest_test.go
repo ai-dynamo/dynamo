@@ -15,7 +15,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -42,7 +41,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
 
-		reconciler, _ := newEnvtestDSReconcilers()
+		reconciler := newEnvtestDSReconcilers()
 
 		By("creating the initial DisaggregatedSet")
 		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
@@ -75,7 +74,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
 
-		reconciler, _ := newEnvtestDSReconcilers()
+		reconciler := newEnvtestDSReconcilers()
 
 		By("creating a ready baseline DisaggregatedSet revision")
 		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
@@ -132,7 +131,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
 
-		reconciler, _ := newEnvtestDSReconcilers()
+		reconciler := newEnvtestDSReconcilers()
 		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
 		Expect(current.Annotations[consts.KubeAnnotationWorkloadProvider]).To(Equal(consts.WorkloadProviderComponent))
 
@@ -150,7 +149,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
 
-		reconciler, _ := newEnvtestDSReconcilers()
+		reconciler := newEnvtestDSReconcilers()
 
 		By("creating a ready DisaggregatedSet")
 		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
@@ -175,7 +174,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 	})
 })
 
-func newEnvtestDSReconcilers() (*DynamoGraphDeploymentReconciler, *DynamoComponentDeploymentReconciler) {
+func newEnvtestDSReconcilers() *DynamoGraphDeploymentReconciler {
 	runtimeConfig := &commoncontroller.RuntimeConfig{
 		Gate: features.Gates{LWS: true, DisaggregatedSet: true},
 	}
@@ -189,13 +188,7 @@ func newEnvtestDSReconcilers() (*DynamoGraphDeploymentReconciler, *DynamoCompone
 		Config:        operatorConfig,
 		RuntimeConfig: runtimeConfig,
 	}
-	dcdReconciler := &DynamoComponentDeploymentReconciler{
-		Client:        k8sClient,
-		Recorder:      events.NewFakeRecorder(100),
-		Config:        operatorConfig,
-		RuntimeConfig: runtimeConfig,
-	}
-	return reconciler, dcdReconciler
+	return reconciler
 }
 
 func reconcileCurrentDGDProgram(
@@ -301,29 +294,6 @@ func markDisaggregatedSetReady(
 	Expect(k8sClient.Status().Update(ctx, ds)).To(Succeed())
 }
 
-func createComponentServices(
-	ctx context.Context,
-	dcdReconciler *DynamoComponentDeploymentReconciler,
-	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
-	targetReady bool,
-) map[string]types.UID {
-	serviceUIDs := map[string]types.UID{}
-	for i := range dcds {
-		_, err := dcdReconciler.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
-			dynamoComponentDeployment: &dcds[i],
-			serviceTargetReady:        targetReady,
-		})
-		Expect(err).NotTo(HaveOccurred())
-		service := &corev1.Service{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{
-			Name:      dynamo.NormalizeKubeResourceName(dcds[i].Name),
-			Namespace: dcds[i].Namespace,
-		}, service)).To(Succeed())
-		serviceUIDs[service.Name] = service.UID
-	}
-	return serviceUIDs
-}
-
 func ownedEnvtestCutoverDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -337,16 +307,6 @@ func ownedEnvtestCutoverDCDs(
 		}
 	}
 	return owned
-}
-
-func envtestCutoverServiceUIDs(ctx context.Context, namespace string, expected map[string]types.UID) map[string]types.UID {
-	uids := make(map[string]types.UID, len(expected))
-	for name := range expected {
-		service := &corev1.Service{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, service)).To(Succeed())
-		uids[name] = service.UID
-	}
-	return uids
 }
 
 func newEnvtestDSHappyPathDGD(name string) *nvidiacomv1beta1.DynamoGraphDeployment {
