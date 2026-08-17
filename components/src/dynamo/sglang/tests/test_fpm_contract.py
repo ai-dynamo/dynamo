@@ -4,18 +4,9 @@
 """
 Wire-format contract test for Forward Pass Metrics.
 
-Verifies that ForwardPassMetrics encoded by SGLang can be decoded by Dynamo's
-shared schema. Both are plain msgspec.Structs -- neither sets
-array_like=True -- so they encode as maps keyed by field name, and the
-contract that has to hold is that the fields SGLang sends are present in
-Dynamo's schema with the same names and types. Dynamo may carry fields SGLang
-does not: msgspec fills them from their defaults on the way in and ignores
-them on the way out.
-
-Requiring the two field lists to be equal would state a stricter contract than
-the encoding needs, and one this repository cannot keep: SGLang's structs live
-in the installed sglang package, so a backend that grows a metric here could
-not land until an external project shipped the same field.
+Verifies that ForwardPassMetrics encoded by SGLang can be decoded by
+Dynamo's shared schema. Both use msgspec.Struct with positional array
+encoding, so field order and types must match exactly.
 """
 
 import pytest
@@ -121,22 +112,14 @@ def test_sglang_fpm_field_order_matches_dynamo():
 
         sglang_names = [f.name for f in sglang_fields]
         dynamo_names = [f.name for f in dynamo_fields]
-        missing = [n for n in sglang_names if n not in dynamo_names]
-        assert not missing, (
-            f"{name}: Dynamo is missing fields SGLang sends: {missing} "
-            f"(sglang={sglang_names}, dynamo={dynamo_names})"
-        )
+        assert (
+            sglang_names == dynamo_names
+        ), f"{name} field names differ: sglang={sglang_names}, dynamo={dynamo_names}"
 
         # Compare type names (not identity) because sglang and dynamo define
-        # structurally identical but distinct nested struct classes. Only the
-        # shared fields are compared: a field Dynamo alone carries has no
-        # counterpart to disagree with.
-        dynamo_types = {f.name: f.type.__name__ for f in dynamo_fields}
-        mismatched = [
-            (f.name, f.type.__name__, dynamo_types[f.name])
-            for f in sglang_fields
-            if dynamo_types[f.name] != f.type.__name__
-        ]
+        # structurally identical but distinct nested struct classes.
+        sglang_type_names = [f.type.__name__ for f in sglang_fields]
+        dynamo_type_names = [f.type.__name__ for f in dynamo_fields]
         assert (
-            not mismatched
-        ), f"{name} field types differ (field, sglang, dynamo): {mismatched}"
+            sglang_type_names == dynamo_type_names
+        ), f"{name} field types differ: sglang={sglang_type_names}, dynamo={dynamo_type_names}"

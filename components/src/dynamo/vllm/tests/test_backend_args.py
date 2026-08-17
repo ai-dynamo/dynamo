@@ -131,24 +131,6 @@ def test_removed_multimodal_role_flags_are_not_registered(flag):
         parser.parse_args([flag])
 
 
-def test_imbalance_repeats_defaults_to_one_at_the_parser():
-    """The class default is not what a no-flag startup gets. ``from_cli_args``
-    copies the argparse namespace before class defaults are considered, so the
-    parser's own default is the effective one, and the two drifting apart is
-    invisible until a run costs five passes instead of one.
-
-    One pass is what the ordinary generated grid does with a coordinate, and
-    this manifest replaces that grid.
-    """
-    parser = argparse.ArgumentParser()
-    DynamoVllmArgGroup().add_arguments(parser)
-    namespace = parser.parse_args([])
-
-    assert namespace.benchmark_imbalance_repeats == 1
-    config = DynamoVllmConfig.from_cli_args(namespace)
-    assert config.benchmark_imbalance_repeats == 1
-
-
 @pytest.mark.parametrize(
     "env_var",
     [

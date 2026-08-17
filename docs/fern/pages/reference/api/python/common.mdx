@@ -643,7 +643,7 @@ One message is emitted per scheduler iteration (one per forward pass).
 An idle heartbeat (all zeros, wall_time=0) is emitted once when the
 engine transitions from active to idle.
 
-[`components/src/dynamo/common/forward_pass_metrics.py#L198`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L198)
+[`components/src/dynamo/common/forward_pass_metrics.py#L153`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L153)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-generatechunk" title="GenerateChunk (class)">
@@ -1816,7 +1816,7 @@ from dynamo.common.forward_pass_metrics import QueuedRequestMetrics
 All token counts here are raw totals -- prefix cache effects are unknown
 until a request is actually scheduled.
 
-[`components/src/dynamo/common/forward_pass_metrics.py#L167`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L167)
+[`components/src/dynamo/common/forward_pass_metrics.py#L122`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L122)
 </Accordion>
 
 <Accordion id="api-dynamo-common-rl-admin-rladminvalidationerror" title="RLAdminValidationError (class)">
@@ -1999,7 +1999,7 @@ Raised when a ForwardPassMetrics message has an unrecognised version.
 from dynamo.common.forward_pass_metrics import UnsupportedFpmVersionError
 ```
 
-[`components/src/dynamo/common/forward_pass_metrics.py#L245`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L245)
+[`components/src/dynamo/common/forward_pass_metrics.py#L200`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L200)
 </Accordion>
 
 <Accordion id="api-dynamo-common-protocols-video-protocol-videodata" title="VideoData (class)">
@@ -2248,7 +2248,7 @@ Returns None (and logs a warning) if the message cannot be decoded or
 carries a version this code does not understand, so callers can simply
 skip unsupported messages without crashing.
 
-[`components/src/dynamo/common/forward_pass_metrics.py#L249`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L249)
+[`components/src/dynamo/common/forward_pass_metrics.py#L204`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L204)
 </Accordion>
 
 <Accordion id="api-dynamo-common-config-dump-config-dumper-dump-config" title="dump_config (function)">
@@ -2287,7 +2287,7 @@ from dynamo.common.forward_pass_metrics import encode
 encode(metrics: ForwardPassMetrics) -> bytes
 ```
 
-[`components/src/dynamo/common/forward_pass_metrics.py#L241`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L241)
+[`components/src/dynamo/common/forward_pass_metrics.py#L196`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L196)
 </Accordion>
 
 <Accordion id="api-dynamo-common-rl-admin-env-bool" title="env_bool (function)">

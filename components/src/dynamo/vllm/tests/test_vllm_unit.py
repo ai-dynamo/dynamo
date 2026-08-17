@@ -862,9 +862,6 @@ class TestBenchmarkConfig:
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
             "collect_imbalanced": False,
-            "imbalance_repeats": 1,
-            "imbalance_topk": None,
-            "imbalance_manifest_path": None,
         }
 
     def test_benchmark_points_file_is_embedded_in_benchmark_config(
@@ -1542,9 +1539,6 @@ def _make_dynamo_config(**overrides):
         "decode_max_batch_size_samples": 128,
         "prefix_max_batch_size_samples": 3,
         "benchmark_collect_imbalanced": False,
-        "benchmark_imbalance_repeats": 1,
-        "benchmark_imbalance_topk": None,
-        "benchmark_imbalance_manifest_path": None,
         "_benchmark_points": None,
     }
     defaults.update(overrides)

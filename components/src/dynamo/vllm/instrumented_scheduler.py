@@ -93,7 +93,6 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import count
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import msgspec.structs
@@ -114,14 +113,12 @@ from dynamo.common.forward_pass_metrics import (
     encode,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm import benchmark_imbalance
 from dynamo.vllm.benchmark_points import (
     BENCHMARK_MODES,
     BenchmarkMode,
     BenchmarkPoints,
     DecodePointCandidate,
     PrefillPointCandidate,
-    load_benchmark_points_file,
 )
 
 if TYPE_CHECKING:
@@ -161,16 +158,10 @@ class BenchmarkConfig:
     decode_max_batch_size_samples: int = 128
     prefix_max_batch_size_samples: int = 3
     # Measure the manifest's imbalanced prefill points (explicit rows, or a
-    # partition) as well as its uniform ones. See the flag's comment in
-    # backend_args for why this defaults off.
+    # partition) as well as its uniform ones. Those points come from an
+    # explicit --benchmark-points-file; see the flag's comment in backend_args
+    # for why this defaults off.
     collect_imbalanced: bool = False
-    # Repeats per constructed shape. The label is a difference between two
-    # measurements, so its noise is the pair's, not one run's.
-    imbalance_repeats: int = 1
-    # None -> probe the model config; see _bench_imbalance_topk.
-    imbalance_topk: int | None = None
-    # None -> a sibling of output_path.
-    imbalance_manifest_path: str | None = None
 
 
 def _bench_point_is_imbalanced(candidate: PrefillPointCandidate) -> bool:
@@ -1867,13 +1858,7 @@ class InstrumentedScheduler(AsyncScheduler):
         num_prefill = 0
         sum_prefill_tokens = 0
         prefill_lengths = WelfordAccumulator()
-        # The length this forward pass actually attends to, p + s, as opposed to
-        # the prompt's final length. They differ under chunked prefill, and it is
-        # this one the work identity and the topk regime are stated in.
-        prefill_end_lengths = WelfordAccumulator()
-        prefill_kv = WelfordAccumulator()
-        min_prefill_kv = None
-        max_prefill_end_len = 0
+        sum_prefill_kv_tokens = 0
         decode_kv = WelfordAccumulator()
 
         for req in new_reqs:
@@ -1881,34 +1866,18 @@ class InstrumentedScheduler(AsyncScheduler):
                 decode_kv.add(req.num_computed_tokens)
                 continue
             num_prefill += 1
-            scheduled_now = num_scheduled.get(req.req_id, 0)
-            sum_prefill_tokens += scheduled_now
+            sum_prefill_tokens += num_scheduled.get(req.req_id, 0)
             prompt_len = len(req.prompt_token_ids) if req.prompt_token_ids else 0
             prefill_lengths.add(prompt_len)
-            end_len = req.num_computed_tokens + scheduled_now
-            prefill_end_lengths.add(end_len)
-            prefill_kv.add(req.num_computed_tokens)
-            if min_prefill_kv is None or req.num_computed_tokens < min_prefill_kv:
-                min_prefill_kv = req.num_computed_tokens
-            max_prefill_end_len = max(max_prefill_end_len, end_len)
+            sum_prefill_kv_tokens += req.num_computed_tokens
             self._prompt_len_per_req[req.req_id] = prompt_len
 
         for i, req_id in enumerate(cached.req_ids):
             if cached.is_context_phase(req_id):
                 num_prefill += 1
-                scheduled_now = num_scheduled.get(req_id, 0)
-                sum_prefill_tokens += scheduled_now
-                cached_prompt_len = self._prompt_len_per_req.get(req_id, 0)
-                prefill_lengths.add(cached_prompt_len)
-                end_len = cached.num_computed_tokens[i] + scheduled_now
-                prefill_end_lengths.add(end_len)
-                prefill_kv.add(cached.num_computed_tokens[i])
-                if (
-                    min_prefill_kv is None
-                    or cached.num_computed_tokens[i] < min_prefill_kv
-                ):
-                    min_prefill_kv = cached.num_computed_tokens[i]
-                max_prefill_end_len = max(max_prefill_end_len, end_len)
+                sum_prefill_tokens += num_scheduled.get(req_id, 0)
+                prefill_lengths.add(self._prompt_len_per_req.get(req_id, 0))
+                sum_prefill_kv_tokens += cached.num_computed_tokens[i]
             else:
                 decode_kv.add(cached.num_computed_tokens[i])
 
@@ -1916,11 +1885,7 @@ class InstrumentedScheduler(AsyncScheduler):
             num_prefill_requests=num_prefill,
             sum_prefill_tokens=sum_prefill_tokens,
             var_prefill_length=prefill_lengths.variance(),
-            var_prefill_end_length=prefill_end_lengths.variance(),
-            sum_prefill_kv_tokens=prefill_kv.s,
-            var_prefill_kv_tokens=prefill_kv.variance(),
-            min_prefill_kv_tokens=min_prefill_kv or 0,
-            max_prefill_end_length=max_prefill_end_len,
+            sum_prefill_kv_tokens=sum_prefill_kv_tokens,
             num_decode_requests=decode_kv.n,
             sum_decode_kv_tokens=decode_kv.s,
             var_decode_kv_tokens=decode_kv.variance(),
@@ -2076,17 +2041,10 @@ class InstrumentedScheduler(AsyncScheduler):
             "decode_max_kv_read_token_samples",
             "decode_max_batch_size_samples",
             "prefix_max_batch_size_samples",
-            "imbalance_repeats",
         }
         for k in _INT_FIELDS:
             if k in cfg and not isinstance(cfg[k], int):
                 cfg[k] = int(cfg[k])
-        # Optional, so it cannot join the set above: None is a value here, not a
-        # missing key -- it selects the model-config probe.
-        if cfg.get("imbalance_topk") is not None and not isinstance(
-            cfg["imbalance_topk"], int
-        ):
-            cfg["imbalance_topk"] = int(cfg["imbalance_topk"])
         # A bool that arrives as JSON text: "false" is a non-empty string and
         # would otherwise turn the collection on.
         if "collect_imbalanced" in cfg and isinstance(cfg["collect_imbalanced"], str):
@@ -2102,16 +2060,6 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_config = BenchmarkConfig(**config_values)
         if self._bench_config.timeout <= 0:
             raise ValueError("benchmark timeout must be positive")
-        # The env and additional_config paths never went through the CLI
-        # validator, so the bound is enforced here as well: zero repeats writes
-        # a manifest with no prefill rows, which reads as a finished run.
-        if self._bench_config.imbalance_repeats < 1:
-            raise ValueError("benchmark imbalance_repeats must be at least 1")
-        if (
-            self._bench_config.imbalance_topk is not None
-            and self._bench_config.imbalance_topk < 1
-        ):
-            raise ValueError("benchmark imbalance_topk must be positive when set")
         uniform_sample_limits = {
             "prefill_max_new_token_samples": (
                 self._bench_config.prefill_max_new_token_samples
@@ -2449,8 +2397,6 @@ class InstrumentedScheduler(AsyncScheduler):
         explicit_points = self._bench_explicit_points
         if explicit_points is not None:
             self._bench_build_explicit_grid(explicit_points)
-        elif self._bench_config.collect_imbalanced and mode in ("prefill", "agg"):
-            self._bench_build_imbalanced_grid(mode)
         else:
             if mode in ("prefill", "agg"):
                 points_before = len(self._bench_grid)
@@ -2644,101 +2590,6 @@ class InstrumentedScheduler(AsyncScheduler):
             f"{path}: explicit benchmark point is infeasible: "
             f"point={candidate.model_dump()} limits={limits}"
         )
-
-    def _bench_build_imbalanced_grid(self, mode: BenchmarkMode) -> None:
-        """Plan spreads around the ordinary sweep, write the manifest, measure it.
-
-        The manifest is written to disk and then read back through the same
-        loader an explicit ``--benchmark-points-file`` goes through, so what ran
-        is exactly what the file says. Keeping the constructed points only in
-        memory would leave the run unreproducible: the rows are solved from
-        inequalities against ``topk`` and the scheduler's own limits, none of
-        which are recoverable from the results file afterwards.
-        """
-        self._bench_generate_prefill_grid()
-        cells = [
-            (point.batch_size, point.total_prefill_tokens, point.total_kv_read_tokens)
-            for point in self._bench_grid
-            if point.point_type == "prefill"
-        ]
-        self._bench_grid.clear()
-        if not cells:
-            self._bench_missing_phases.append("prefill")
-            logger.warning("Benchmark prefill phase generated no points")
-            return
-
-        topk = self._bench_imbalance_topk()
-        manifest, notes = benchmark_imbalance.build_manifest(
-            cells,
-            topk,
-            repeats=self._bench_config.imbalance_repeats,
-            max_model_len=self.vllm_config.model_config.max_model_len,
-            # The unit the loader validates against, not the cache block: a row
-            # this planner emits is read back through
-            # ``_bench_prefill_kv_read_lengths``, which rejects KV lengths that
-            # are not whole hash blocks. Planning in a different unit lets the
-            # planner build rows its own reader refuses.
-            kv_block=max(1, self._bench_hash_block_size),
-        )
-        for note in notes:
-            # A cell with no constructible spread pins no coefficient. Say so
-            # here: it is invisible in the results file, which only ever shows
-            # the points that did run.
-            logger.info("benchmark imbalance: %s", note)
-
-        path = self._bench_imbalance_manifest_path()
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps(manifest))
-        logger.info(
-            "benchmark imbalance: %d sweep coordinates -> %d forward passes "
-            "(topk=%s, %d repeats), manifest written to %s",
-            len(cells),
-            len(manifest["prefill"]),
-            topk,
-            self._bench_config.imbalance_repeats,
-            path,
-        )
-        self._bench_build_explicit_grid(
-            load_benchmark_points_file(path), generated=True
-        )
-        if mode == "agg":
-            self._bench_generate_decode_grid()
-
-    def _bench_imbalance_manifest_path(self) -> str:
-        """Where this rank writes its constructed manifest.
-
-        Every data-parallel rank builds and reads its own copy, so the path has
-        to carry the rank the same way ``output_path`` does. Sharing one file
-        would have every rank writing it while its neighbours read it back.
-        """
-        configured = self._bench_config.imbalance_manifest_path
-        if configured:
-            out = Path(configured)
-        else:
-            out = Path(self._bench_config.output_path)
-            out = out.with_name(out.stem + "_imbalance_manifest.json")
-        rank = self._fpm_dp_rank
-        if rank > 0:
-            out = out.with_name(f"{out.stem}_dp{rank}{out.suffix}")
-        return str(out)
-
-    def _bench_imbalance_topk(self) -> int:
-        """Index budget above which a request switches to the sparse path.
-
-        Configured value wins. Otherwise probe the model config: a dense model
-        has no such bound, and the unbounded stand-in is correct rather than a
-        fallback -- every request then classifies to the same regime, which is
-        what a model with no indexer actually does.
-        """
-        configured = self._bench_config.imbalance_topk
-        if configured is not None and configured > 0:
-            return int(configured)
-        hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
-        for name in ("index_topk", "sparse_attention_topk", "topk_tokens"):
-            value = getattr(hf_config, name, None)
-            if isinstance(value, int) and value > 0:
-                return value
-        return 1 << 30
 
     def _bench_generate_prefill_grid(self) -> None:
         max_tokens = self._bench_capacity_limit("max_num_scheduled_tokens")

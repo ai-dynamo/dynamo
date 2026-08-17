@@ -384,11 +384,6 @@ def update_engine_config_with_dynamo(
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
             "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
-            "imbalance_repeats": dynamo_config.benchmark_imbalance_repeats,
-            "imbalance_topk": dynamo_config.benchmark_imbalance_topk,
-            "imbalance_manifest_path": (
-                dynamo_config.benchmark_imbalance_manifest_path
-            ),
         }
         explicit_points = dynamo_config._benchmark_points
         if explicit_points is not None:
