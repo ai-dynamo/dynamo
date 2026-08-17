@@ -307,7 +307,7 @@ traffic:
     output_tokens: 128
   load:
     type: concurrency
-    concurrency: 1
+    concurrency: 50
   stop:
     requests: 100
 ```
@@ -334,7 +334,7 @@ source, load, and stop validation applies.
 | `traffic.source.format` | `mooncake` | `x` | `-` | See [Trace Format Compatibility](#trace-format-compatibility). |
 | `traffic.source.block_size` | `512`; embedded for `dynamo` | `x` | `-` | Positive. |
 | `traffic.load.type` | `concurrency` | `x` | `-` | Synthetic: `concurrency`, `poisson`, `constant_rate`, or `kv_capacity_fraction`; trace: `trace_timestamps` or `concurrency`. |
-| `traffic.load.concurrency` | `1` | `-` | `-` | Positive integer; explicit domains are allowed in `recommend`. |
+| `traffic.load.concurrency` | `50` | `-` | `-` | Positive integer; explicit domains are allowed in `recommend`. |
 | `traffic.load.requests_per_second` | `null` | `-` | `-` | Positive; synthetic request open-loop load only. |
 | `traffic.load.sessions_per_second` | `null` | `-` | `-` | Positive; synthetic session open-loop load only. |
 | `traffic.load.seed` | `42` | `x` | `-` | Nonnegative; `poisson` only. |
