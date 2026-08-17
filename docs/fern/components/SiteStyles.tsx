@@ -10,10 +10,13 @@
  * hoists the style element into the document head.
  */
 const SITE_CSS = `
-/* Preserve Fern's footer-aware sticky-sidebar sizing. The NVIDIA theme carries
-   an older !important height that ignores --custom-footer-visible-height. The
-   state/viewport attributes make this rule more specific than both the theme's
-   default and preview-banner sidebar rules. */
+/* Preserve Fern's footer-aware sticky-sidebar sizing. Fern's
+   FooterHeightTracker writes --custom-footer-visible-height on the root element
+   as the footer enters the viewport; the fallback covers SSR and pre-hydration.
+   The NVIDIA theme carries an older !important height that ignores that value.
+   Scope the override to the desktop sticky state so mobile and fixed sidebars
+   retain Fern's native sizing, while still outranking the theme's default and
+   preview-banner sidebar rules. */
 #fern-sidebar[data-viewport="desktop"][data-state="sticky"] {
   height: calc(
     100dvh - var(--header-height) - var(--custom-footer-visible-height, 0px)

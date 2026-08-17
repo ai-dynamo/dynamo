@@ -68,14 +68,11 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 }
 
 /* Product switcher: hide the FontAwesome "code" glyph (</>) placeholder.
-   This rule also lives in SiteStyles, but SiteStyles is injected from the
-   footer and is NOT in the server-rendered HTML (it only applies once the
-   footer hydrates client-side). On this long page that leaves the header
-   product switcher showing the </> placeholder above the fold. RecipeStyles
-   IS server-rendered, so re-declaring the rule here hides the placeholder
-   immediately on recipe/benchmark pages. Scoped to the code glyph via :has()
-   so the version selector keeps its own (Lucide "tag") icon. Same
-   compensate-for-client-only-SiteStyles pattern as the .dark re-bind above. */
+   This rule also lives in main.css and its CustomFooter mirror, but the hosted
+   NVIDIA theme can replace both delivery paths. RecipeStyles is rendered with
+   every recipe and benchmark page, so re-declaring the rule here keeps those
+   pages independent of site-wide theme behavior. Scoped to the code glyph via
+   :has() so the version selector keeps its own (Lucide "tag") icon. */
 .fern-selection-item-icon:has(svg[icon="code"]) {
     display: none !important;
 }
@@ -474,13 +471,11 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
     padding: 10px;
     border: 1px solid var(--border, var(--grayscale-a5));
     border-radius: 8px;
-    /* Literal fallbacks: the --nv-* palette lives in SiteStyles, which is
-       injected from the footer and therefore not applied until the footer
-       renders. Above the fold on this (long) page the card would otherwise
-       resolve to a transparent background, letting the empty-state message
-       painted behind the grid (.dynamo-model-grid::before) bleed through the
-       card text. The fallback keeps the tile opaque regardless of SiteStyles
-       load order. */
+    /* Literal fallbacks: the --nv-* palette comes from main.css or its
+       CustomFooter mirror, both of which the hosted theme can replace. Without
+       a fallback the card can resolve to a transparent background, letting the
+       empty-state message painted behind the grid
+       (.dynamo-model-grid::before) bleed through the card text. */
     background: var(--nv-color-bg-default, #ffffff);
     color: var(--pst-color-text-base);
     text-decoration: none;
@@ -489,7 +484,8 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 /* --nv-color-bg-default does not flip in the dark theme (stays #FFFFFF), so
    in dark mode the card would be a white tile with light text. Flip the
    surface to match the other dark-aware components (chip, search box, etc.).
-   Same fallback rationale as above (SiteStyles may not be loaded yet). */
+   Same fallback rationale as above (site-level palette delivery varies by
+   build and theme). */
 .dark .dynamo-model-card {
     background: var(--nv-dark-grey-2, #1a1a1a);
 }
