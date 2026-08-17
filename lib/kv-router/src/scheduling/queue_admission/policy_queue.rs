@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Host activation lands separately; preserve the internal policy state in this
-// foundation without forcing the public contract through a fake call site.
-#![allow(dead_code)]
-
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashSet};
 
@@ -474,6 +470,10 @@ impl<T> PolicyQueue<T> {
         self
     }
 
+    pub(crate) fn has_admission_policy(&self) -> bool {
+        self.admission_policy.is_some()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn admit_with_admission_policy(
         &mut self,
@@ -668,6 +668,14 @@ impl<T> PolicyQueue<T> {
         debug_assert!(replaced.is_none(), "duplicate queue admission ID");
         self.pending_count += 1;
         Ok(())
+    }
+
+    pub(crate) fn take_deferred(&mut self, id: QueueAdmissionId) -> Option<PolicyQueueEntry<T>> {
+        let deferred = self.deferred.remove(&id)?;
+        let class = &mut self.classes[deferred.entry.class_index];
+        subtract_stats(&mut class.stats, deferred.entry.snapshot);
+        self.pending_count -= 1;
+        Some(deferred.entry)
     }
 
     pub(crate) fn take_if_in_class(

@@ -238,7 +238,7 @@ pub struct RoutingInstanceCounts {
 pub(crate) struct RoutingInstances {
     discovered_ids: Vec<u64>,
     routable_ids: Vec<u64>,
-    overloaded_ids: HashSet<u64>,
+    overloaded_ids: Arc<HashSet<u64>>,
     free_ids: Vec<u64>,
     routable_id_set: Arc<HashSet<u64>>,
     /// True after this client has observed at least one discovered instance.
@@ -273,7 +273,7 @@ impl RoutingInstances {
         Self {
             discovered_ids,
             routable_ids,
-            overloaded_ids,
+            overloaded_ids: Arc::new(overloaded_ids),
             free_ids,
             routable_id_set,
             availability_initialized,
@@ -315,13 +315,17 @@ impl RoutingInstances {
             return None;
         }
 
-        Some(self.overloaded_ids.clone())
+        Some(self.overloaded_ids.as_ref().clone())
+    }
+
+    fn overloaded_ids_snapshot(&self) -> Option<Arc<HashSet<u64>>> {
+        (!self.overloaded_ids.is_empty()).then(|| Arc::clone(&self.overloaded_ids))
     }
 
     fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Self {
         let old_discovered_ids = self.discovered_ids.iter().copied().collect::<HashSet<_>>();
         let new_discovered_ids = discovered_ids.iter().copied().collect::<HashSet<_>>();
-        let mut overloaded_ids = self.overloaded_ids.clone();
+        let mut overloaded_ids = self.overloaded_ids.as_ref().clone();
         overloaded_ids
             .retain(|id| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
 
@@ -345,7 +349,7 @@ impl RoutingInstances {
         Self::from_parts(
             self.discovered_ids.clone(),
             routable_ids,
-            self.overloaded_ids.clone(),
+            self.overloaded_ids.as_ref().clone(),
             self.availability_initialized,
         )
     }
@@ -357,7 +361,7 @@ impl RoutingInstances {
         Self::from_parts(
             self.discovered_ids.clone(),
             routable_ids,
-            self.overloaded_ids.clone(),
+            self.overloaded_ids.as_ref().clone(),
             self.availability_initialized,
         )
     }
@@ -375,7 +379,7 @@ impl RoutingInstances {
     /// backpressure mark). Short-lived: the next metric-driven
     /// `set_overloaded` recompute overwrites the whole set.
     fn mark_overloaded(&self, instance_id: u64) -> Self {
-        let mut overloaded_ids = self.overloaded_ids.clone();
+        let mut overloaded_ids = self.overloaded_ids.as_ref().clone();
         overloaded_ids.insert(instance_id);
         Self::from_parts(
             self.discovered_ids.clone(),
@@ -386,7 +390,7 @@ impl RoutingInstances {
     }
 
     fn clear_overloaded_for_removed(&self, removed_ids: &HashSet<u64>) -> Self {
-        let mut overloaded_ids = self.overloaded_ids.clone();
+        let mut overloaded_ids = self.overloaded_ids.as_ref().clone();
         overloaded_ids.retain(|id| !removed_ids.contains(id));
         Self::from_parts(
             self.discovered_ids.clone(),
@@ -478,6 +482,9 @@ impl RoutingInstancesState {
         self.snapshot().overloaded_ids()
     }
 
+    fn overloaded_ids_snapshot(&self) -> Option<Arc<HashSet<u64>>> {
+        self.snapshot().overloaded_ids_snapshot()
+    }
     fn report_instance_down(&self, instance_id: u64) {
         self.update(|current| current.report_instance_down(instance_id), true);
     }
@@ -491,7 +498,7 @@ impl RoutingInstancesState {
         self.overload_reconciliation_needed
             .store(false, Ordering::Release);
         let current = self.snapshot.load();
-        if current.overloaded_ids == overloaded_ids {
+        if current.overloaded_ids.as_ref() == &overloaded_ids {
             return false;
         }
 
@@ -836,6 +843,13 @@ impl Client {
 
     pub fn overloaded_instance_ids(&self) -> Option<HashSet<u64>> {
         self.routing_instances.overloaded_ids()
+    }
+
+    /// Lock-free shared snapshot of workers reported overloaded.
+    ///
+    /// The returned allocation remains stable until overload state changes.
+    pub fn overloaded_instance_ids_snapshot(&self) -> Option<Arc<HashSet<u64>>> {
+        self.routing_instances.overloaded_ids_snapshot()
     }
 
     /// Workers currently eligible for selection: discovered and not locally
@@ -1276,7 +1290,12 @@ mod tests {
 
         assert!(client.set_overloaded_instances(&[7]));
         assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+        let snapshot = client.overloaded_instance_ids_snapshot().unwrap();
         assert!(!client.set_overloaded_instances(&[7]));
+        assert!(Arc::ptr_eq(
+            &snapshot,
+            &client.overloaded_instance_ids_snapshot().unwrap()
+        ));
 
         assert!(client.set_overloaded_instances(&[]));
         assert_eq!(client.overloaded_instance_ids(), None);

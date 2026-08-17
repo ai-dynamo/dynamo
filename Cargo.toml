@@ -13,6 +13,7 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/router-plugins/catalog",
+    "examples/router/session-aware-queue-admission-policy",
     "examples/router/custom-policy-example/simple-filter-score-pick",
     "examples/router/custom-policy-example/catalog",
     "examples/router/custom-policy-example/disagg-filter-score-pick",

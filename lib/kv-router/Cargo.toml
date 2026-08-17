@@ -97,3 +97,8 @@ harness = false
 [[bench]]
 name = "worker_selection"
 harness = false
+
+[[bench]]
+name = "policy_queue_admission"
+harness = false
+required-features = ["bench"]
