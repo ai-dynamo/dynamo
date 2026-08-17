@@ -16,8 +16,9 @@ environment.
 
 Shared provider Components apply to the backend-neutral `PrefillWorker` and
 `DecodeWorker` service keys. Model-specific images, mounts, and command
-configuration remain in local Components. The EFA leaf Component includes its
-AWS and libfabric parents and names the per-worker EFA request explicitly.
+configuration remain in local Components. The selected EFA instance inherits a
+shared AWS EFA template bundle. Its rendered Component includes the generic AWS
+and libfabric parents and names the per-worker EFA request explicitly.
 
 The vLLM command line reads provider-specific values from environment variables
 so overlays can patch individual values without replacing the shared argument
