@@ -99,6 +99,77 @@ _Appears in:_
 | `Manual` | Deprecated: use checkpointRef to restore an existing checkpoint.<br /> |
 
 
+#### CheckpointSource
+
+
+
+CheckpointSource describes source details to use when configuring a restore pod.
+
+
+
+_Appears in:_
+- [DynamoCheckpointStatus](#dynamocheckpointstatus)
+- [PodSnapshotContentStatus](#podsnapshotcontentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `hardware` _[CheckpointSourceHardware](#checkpointsourcehardware)_ | Hardware describes the source GPU resources used to choose compatible restore placement. |  | Optional: \{\} <br /> |
+| `node` _string_ | Node identifies the source node for comparing restore placement dependencies. |  | Optional: \{\} <br /> |
+| `mounts` _[CheckpointSourceMount](#checkpointsourcemount) array_ | Mounts lists the volume mounts to recreate on the restore container. |  | Optional: \{\} <br /> |
+| `mountCount` _integer_ | MountCount is the number of volume mount entries expected on the restore container. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+
+
+#### CheckpointSourceGPU
+
+
+
+CheckpointSourceGPU identifies one source GPU for restore compatibility checks.
+
+
+
+_Appears in:_
+- [CheckpointSourceHardware](#checkpointsourcehardware)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `uuid` _string_ | UUID is the source GPU UUID to compare with available restore hardware. |  | Optional: \{\} <br /> |
+
+
+#### CheckpointSourceHardware
+
+
+
+CheckpointSourceHardware describes GPU resources to make available to the restore container.
+
+
+
+_Appears in:_
+- [CheckpointSource](#checkpointsource)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `gpuCount` _integer_ | GPUCount is the number of GPUs to make available to the restore container. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `gpus` _[CheckpointSourceGPU](#checkpointsourcegpu) array_ | GPUs identifies the source GPUs for checking restore hardware compatibility. |  | Optional: \{\} <br /> |
+
+
+#### CheckpointSourceMount
+
+
+
+CheckpointSourceMount describes a volume mount to recreate on the restore container.
+
+
+
+_Appears in:_
+- [CheckpointSource](#checkpointsource)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `path` _string_ | Path is the mountPath to use in the restore container. |  |  |
+| `volume` _string_ | Volume is the source volume name to correlate with the restore pod volume definition,<br />for example "model-cache" for spec.volumes[name: model-cache]. |  |  |
+| `volumeSource` _string_ | VolumeSource identifies the Kubernetes volume source to reproduce as kind[/identifier].<br />Kinds are PersistentVolumeClaim, ConfigMap, Secret, HostPath, CSI, NFS,<br />EmptyDir, Projected, DownwardAPI, Ephemeral, or Volume. |  |  |
+
+
 #### CheckpointStartupPolicy
 
 _Underlying type:_ _string_
@@ -371,6 +442,7 @@ _Appears in:_
 | `podSnapshotName` _string_ | PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is<br />the authoritative pointer to the snapshot (which is otherwise located by label, not by<br />reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)<br />from one that was created and later went missing (set, but no longer found). |  | Optional: \{\} <br /> |
 | `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint became ready |  | Optional: \{\} <br /> |
 | `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
+| `source` _[CheckpointSource](#checkpointsource)_ | Source describes details to use when configuring a restore pod. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
 
 
@@ -1290,6 +1362,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions reflect the latest observations of the PodSnapshotContent's state.<br />Standard types are Ready and Failed. |  | Optional: \{\} <br /> |
+| `source` _[CheckpointSource](#checkpointsource)_ | Source describes details to use when configuring a restore pod. |  | Optional: \{\} <br /> |
 
 
 #### PodSnapshotReference

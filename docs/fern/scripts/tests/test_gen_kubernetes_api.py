@@ -44,7 +44,7 @@ EXPECTED_PACKAGES = (
     "operator.config.dynamo.nvidia.com/v1alpha1",
 )
 EXPECTED_TYPE_COUNTS = {
-    "nvidia.com/v1alpha1": 83,
+    "nvidia.com/v1alpha1": 87,
     "nvidia.com/v1beta1": 66,
     "operator.config.dynamo.nvidia.com/v1alpha1": 32,
 }

@@ -10,10 +10,10 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 181 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 185 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">83 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">87 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">66 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
@@ -105,6 +105,88 @@ checkpoint; checkpointRef restores the named checkpoint.
 
 - <Badge intent="note" minimal>Auto</Badge> Deprecated: use checkpoint.enabled=true and omit checkpointRef.
 - <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing checkpoint.
+</Accordion>
+
+<Accordion id="checkpointsource" title="CheckpointSource">
+CheckpointSource describes source details to use when configuring a restore pod.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoCheckpointStatus](#dynamocheckpointstatus), [PodSnapshotContentStatus](#podsnapshotcontentstatus)
+
+<ParamField path="hardware" type="CheckpointSourceHardware">
+Hardware describes the source GPU resources used to choose compatible restore placement.
+See [CheckpointSourceHardware](#checkpointsourcehardware).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="node" type="string">
+Node identifies the source node for comparing restore placement dependencies.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="mounts" type="CheckpointSourceMount array">
+Mounts lists the volume mounts to recreate on the restore container.
+See [CheckpointSourceMount](#checkpointsourcemount).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="mountCount" type="integer">
+MountCount is the number of volume mount entries expected on the restore container.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="checkpointsourcegpu" title="CheckpointSourceGPU">
+CheckpointSourceGPU identifies one source GPU for restore compatibility checks.
+
+
+**Kind:** `type`
+**Appears in:** [CheckpointSourceHardware](#checkpointsourcehardware)
+
+<ParamField path="uuid" type="string">
+UUID is the source GPU UUID to compare with available restore hardware.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="checkpointsourcehardware" title="CheckpointSourceHardware">
+CheckpointSourceHardware describes GPU resources to make available to the restore container.
+
+
+**Kind:** `type`
+**Appears in:** [CheckpointSource](#checkpointsource)
+
+<ParamField path="gpuCount" type="integer">
+GPUCount is the number of GPUs to make available to the restore container.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="gpus" type="CheckpointSourceGPU array">
+GPUs identifies the source GPUs for checking restore hardware compatibility.
+See [CheckpointSourceGPU](#checkpointsourcegpu).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="checkpointsourcemount" title="CheckpointSourceMount">
+CheckpointSourceMount describes a volume mount to recreate on the restore container.
+
+
+**Kind:** `type`
+**Appears in:** [CheckpointSource](#checkpointsource)
+
+<ParamField path="path" type="string">
+Path is the mountPath to use in the restore container.
+</ParamField>
+
+<ParamField path="volume" type="string">
+Volume is the source volume name to correlate with the restore pod volume definition, for example "model-cache" for spec.volumes[name: model-cache].
+</ParamField>
+
+<ParamField path="volumeSource" type="string">
+VolumeSource identifies the Kubernetes volume source to reproduce as kind[/identifier]. Kinds are PersistentVolumeClaim, ConfigMap, Secret, HostPath, CSI, NFS, EmptyDir, Projected, DownwardAPI, Ephemeral, or Volume.
+</ParamField>
 </Accordion>
 
 <Accordion id="checkpointstartuppolicy" title="CheckpointStartupPolicy">
@@ -465,6 +547,12 @@ See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 
 <ParamField path="message" type="string">
 Message provides additional information about the current state
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="source" type="CheckpointSource">
+Source describes details to use when configuring a restore pod.
+See [CheckpointSource](#checkpointsource).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -1873,6 +1961,12 @@ PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
 <ParamField path="conditions" type="Condition array">
 Conditions reflect the latest observations of the PodSnapshotContent's state. Standard types are Ready and Failed.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="source" type="CheckpointSource">
+Source describes details to use when configuring a restore pod.
+See [CheckpointSource](#checkpointsource).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
