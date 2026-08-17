@@ -148,10 +148,60 @@ parallelism:
   preset: default
 ```
 
-The built-in parallelism default preset invokes the existing Sweeper parallel-configuration
-enumeration and projection. It generates feasible complete mappings, then decomposes them into the
-correlated optimizer dimensions used by the Sweeper. The six fields are `replicas`, `tensor`,
-`pipeline`, `attention_data`, `moe_tensor`, and `moe_expert`.
+The built-in default follows the existing Sweeper projection algorithm below. It does not expose the
+six YAML leaves as six independent optimizer parameters.
+
+First, the Sweeper builds the legal configuration pool for each deployment-mode branch. It enumerates
+worker sizes from the current `1, 2, 4, 8, 16` GPU ladder, with pipeline parallelism fixed at `1`, then
+enumerates legal tensor, attention-data, MoE-tensor, and MoE-expert shapes. It applies model-width,
+backend, real-silicon, KV-capacity, GPU-budget, and runner-capability filters. For every surviving
+worker shape, it enumerates positive replica counts that fit the budget. A disaggregated pool contains
+prefill/decode pairs whose combined GPU count fits the same budget. Aggregated and disaggregated modes
+use separate optimizer studies; backend remains a categorical parameter within each study.
+
+Second, each complete mapping is encoded into a smaller latent search space:
+
+| Deployment | Latent Parameter | Optimizer Type | Encoding |
+|---|---|---|---|
+| Both | `used_gpu_ratio` | Continuous float | Total GPUs divided by the branch GPU budget; range is the minimum and maximum ratio in the legal pool, default clamped from `1.0`. |
+| Aggregated | `agg_num_gpus_per_engine_target` | Log-scale discrete | GPUs per worker, `tensor * pipeline * attention_data`; feasible values come from the legal pool and the default is the pool value nearest its geometric midpoint. |
+| Aggregated | `agg_attention_mode` | Categorical | `tp` when attention data parallelism is `1`, otherwise `dp`. |
+| Aggregated MoE | `agg_ffn_mode` | Categorical | `ep` when MoE expert parallelism is greater than `1`, otherwise `tp`. |
+| Disaggregated | `prefill_gpu_share` | Continuous float | Prefill-pool GPUs divided by total candidate GPUs; range comes from the legal pool, default clamped from `0.5`. |
+| Disaggregated | `prefill_num_gpus_per_engine_target` | Log-scale discrete | Prefill GPUs per worker. |
+| Disaggregated | `decode_num_gpus_per_engine_target` | Log-scale discrete | Decode GPUs per worker. |
+| Disaggregated | `prefill_attention_mode`, `decode_attention_mode` | Categorical | Per-role `tp` or `dp`. |
+| Disaggregated MoE | `prefill_ffn_mode`, `decode_ffn_mode` | Categorical | Per-role `ep` or `tp`. |
+
+The latent parameter names retain the existing Sweeper's `engine` wording; in this public schema,
+`num_gpus_per_engine_target` means GPUs per worker.
+
+Only `used_gpu_ratio` and, for disaggregated mode, `prefill_gpu_share` are continuous parallelism
+parameters. GPUs per worker are discrete values sampled on a log scale; attention and FFN modes are
+categorical. Replica count is not sampled directly: together, total GPU ratio and GPUs-per-worker
+targets express the desired replica footprint. Constant latent parameters are omitted from the study
+and injected at their defaults.
+
+Third, every optimizer suggestion is snapped back to one complete mapping from the legal pool:
+
+1. Remove mappings that do not support the suggested backend.
+2. Count categorical mismatches for attention and FFN modes, and retain only mappings with the minimum
+   mismatch count. An exact mode match wins whenever one exists.
+3. Compute normalized squared distance over the numeric latent parameters. Ratios use linear values;
+   each GPUs-per-worker target uses `log2`. Each dimension is normalized by its backend-compatible
+   minimum-to-maximum span, and a constant dimension contributes zero:
+
+   ```text
+   distance = sum(((transform(actual) - transform(requested)) / span) ^ 2)
+   ```
+
+4. Select the mapping with minimum distance. Ties are deterministic: compare
+   `(tensor, pipeline, attention_data, moe_tensor, moe_expert, replicas)` for aggregated mode, or the
+   concatenated prefill tuple followed by the decode tuple for disaggregated mode.
+
+The selected mapping supplies the concrete six YAML fields. Trial metadata records requested latent
+features, actual snapped features, projection distance, whether a categorical mode was projected, and
+the final complete parallel configuration.
 
 A user-provided preset is a list of complete parallelism mappings:
 
