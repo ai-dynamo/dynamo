@@ -4,8 +4,10 @@
 """Unit tests for embedding transfer (local, NIXL write, NIXL read, ring buffer)."""
 
 import asyncio
+import gc
 import logging
 import time
+import weakref
 from random import randint
 
 import pytest
@@ -146,6 +148,70 @@ async def test_nixl_write_receiver_uses_one_completion_progress_loop():
         assert receiver.nixl_agent.notifs == {"sender": []}
     finally:
         await receiver.close()
+
+
+@pytest.mark.gpu_0
+@pytest.mark.asyncio
+async def test_nixl_write_sender_retains_shared_tensor_until_all_writes_complete():
+    class FakeCounter:
+        def __init__(self):
+            self.value = 0
+
+        def get_next_id(self):
+            self.value += 1
+            return self.value
+
+    class FakeNixlAgent:
+        def __init__(self):
+            self.register_calls = 0
+            self.deregistered = []
+
+        def register_memory(self, tensor):
+            del tensor
+            self.register_calls += 1
+            return "registered"
+
+        def deregister_memory(self, descriptor):
+            self.deregistered.append(descriptor)
+
+        def get_xfer_descs(self, tensor):
+            del tensor
+            return "transfer"
+
+    sender = object.__new__(NixlWriteEmbeddingSender)
+    sender.nixl_agent = FakeNixlAgent()
+    sender.id_counter = FakeCounter()
+    sender.transfer_tracker = {}
+    sender.registered_descs = {}
+    sender.transfer_queue = asyncio.Queue()
+    sender.sender_id = "sender"
+    sender.agent_metadata_b64 = "metadata"
+
+    tensor = torch.ones((3, 8), dtype=torch.bfloat16)
+    tensor_ref = weakref.ref(tensor)
+    _, first_completion = await sender.send_embeddings(tensor, stage_embeddings=True)
+    _, second_completion = await sender.send_embeddings(tensor, stage_embeddings=True)
+
+    assert sender.nixl_agent.register_calls == 1
+    assert next(iter(sender.registered_descs.values()))[1] == 2
+    del tensor
+    gc.collect()
+    assert tensor_ref() is not None
+
+    sender._complete_transfer(1)
+    gc.collect()
+    assert first_completion.done()
+    assert not second_completion.done()
+    assert tensor_ref() is not None
+    assert next(iter(sender.registered_descs.values()))[1] == 1
+    assert sender.nixl_agent.deregistered == []
+
+    sender._complete_transfer(2)
+    gc.collect()
+    assert second_completion.done()
+    assert tensor_ref() is None
+    assert sender.registered_descs == {}
+    assert sender.nixl_agent.deregistered == ["registered"]
 
 
 @pytest.mark.asyncio

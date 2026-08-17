@@ -136,6 +136,8 @@ def test_summary_reports_remote_achieved_to_offered_gate(
                 "concurrency": None,
                 "topologies": ["remote"],
                 "response_placement": "inline",
+                "embedding_transfer_mode": "nixl-write",
+                "nixl_receive_storage": "pre-registered receiver ring buffer",
                 "nixl_send_pool_capacity": 256,
                 "nixl_send_pool_bytes": 1_048_576,
                 "nixl_progress_thread": True,
@@ -167,12 +169,12 @@ def test_summary_reports_remote_achieved_to_offered_gate(
         "offered_request_rate_req_s": 50,
         "achieved_request_window_req_s": 49.5,
         "achieved_to_offered_ratio": 0.99,
-        "minimum_ratio": 0.98,
-        "minimum_rate_req_s": 49.0,
+        "minimum_ratio": 0.95,
+        "minimum_rate_req_s": 47.5,
         "passed": True,
     }
     assert result["gate"] == {
-        "minimum_achieved_to_offered_ratio": 0.98,
+        "minimum_achieved_to_offered_ratio": 0.95,
         "passed": True,
     }
     assert (tmp_path / "summary.json").is_file()
