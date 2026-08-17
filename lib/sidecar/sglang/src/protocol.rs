@@ -183,21 +183,6 @@ fn kv_hints_to_proto(request: &PreprocessedRequest) -> Option<pb::KvHints> {
                     })),
                 })
             }
-            KvHintAction::Prefetch {
-                action_id,
-                action_version,
-                ..
-            } if !action_id.is_empty() && action_id.len() <= 512 => Some(pb::KvHintAction {
-                action_id: action_id.clone(),
-                action_type: "kv.prefetch".to_string(),
-                action_version: match action_version {
-                    dynamo_backend_common::KvPrefetchActionVersion::V1_0 => "1.0",
-                }
-                .to_string(),
-                payload: Some(pb::kv_hint_action::Payload::Prefetch(
-                    pb::KvPrefetchPayload {},
-                )),
-            }),
             // This bridge does not implement P2P transfer yet. Dynamo filters
             // it through the selected worker capability before it reaches here.
             _ => None,
@@ -689,22 +674,19 @@ mod tests {
     }
 
     #[test]
-    fn request_maps_session_and_typed_storage_hints() {
+    fn request_maps_session_and_kv_demote_hint() {
         let mut request = request();
         request.agent_context =
             Some(serde_json::from_value(json!({"session_id": "session-a"})).unwrap());
         request.kv_hints = Some(KvHints::new(
             "message-a",
-            vec![
-                KvHintAction::demote(
-                    "demote-a",
-                    KvDemotePayload {
-                        session_id: "session-a".to_string(),
-                        session_generation: Some(7),
-                    },
-                ),
-                KvHintAction::prefetch("prefetch-a"),
-            ],
+            vec![KvHintAction::demote(
+                "demote-a",
+                KvDemotePayload {
+                    session_id: "session-a".to_string(),
+                    session_generation: Some(7),
+                },
+            )],
         ));
 
         let mapped = build_generate_request(
@@ -720,9 +702,8 @@ mod tests {
         let hints = mapped.kv_hints.unwrap();
         assert_eq!(hints.protocol_version, "0.1");
         assert_eq!(hints.message_id, "message-a");
-        assert_eq!(hints.actions.len(), 2);
+        assert_eq!(hints.actions.len(), 1);
         assert_eq!(hints.actions[0].action_type, "kv.demote");
-        assert_eq!(hints.actions[1].action_type, "kv.prefetch");
     }
 
     #[test]

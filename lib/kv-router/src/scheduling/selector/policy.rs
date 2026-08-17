@@ -695,6 +695,7 @@ mod tests {
     use super::super::test_support::*;
     use super::super::{DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector};
     use super::*;
+    use crate::kv_hints::KvDemotePayload;
     use crate::scheduling::WorkerSelectionInputTrigger;
 
     #[test]
@@ -802,10 +803,13 @@ mod tests {
                 _context: &WorkerSelectionContext<'_>,
                 selected_worker: WorkerWithDpRank,
             ) -> Result<Vec<KvHintAction>, WorkerSelectionPolicyError> {
-                Ok(vec![KvHintAction::prefetch(format!(
-                    "prefetch-{}",
-                    selected_worker.worker_id
-                ))])
+                Ok(vec![KvHintAction::demote(
+                    format!("demote-{}", selected_worker.worker_id),
+                    KvDemotePayload {
+                        session_id: "session-a".to_string(),
+                        session_generation: None,
+                    },
+                )])
             }
         }
 
@@ -826,7 +830,13 @@ mod tests {
         assert_eq!(result.worker, worker);
         assert_eq!(
             result.kv_hint_actions,
-            vec![KvHintAction::prefetch("prefetch-7")]
+            vec![KvHintAction::demote(
+                "demote-7",
+                KvDemotePayload {
+                    session_id: "session-a".to_string(),
+                    session_generation: None,
+                },
+            )]
         );
     }
 
