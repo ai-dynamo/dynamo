@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
@@ -12,7 +13,7 @@ use dynamo_kv_router::indexer::{
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT,
 };
 use dynamo_kv_router::protocols::{LocalBlockHash, WorkerWithDpRank};
-use dynamo_runtime::component::{Client, Component};
+use dynamo_runtime::component::{Client, Component, StartedEndpoint};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, RouterMode, SingleIn,
@@ -240,6 +241,13 @@ impl ServedIndexerMode {
 struct ServedIndexerService {
     mode: ServedIndexerMode,
     bindings: Arc<RwLock<HashMap<String, Indexer>>>,
+    /// Set once, under the `bindings` write lock, when the service is retired.
+    /// Terminal: a retired service is never reused, only replaced.
+    retired: AtomicBool,
+    /// The endpoints this service registered in discovery. They must be stopped
+    /// when the service retires, because `verify_service_topology` rejects a new
+    /// mode for as long as the old mode's endpoints are still advertised.
+    endpoints: parking_lot::Mutex<Vec<StartedEndpoint>>,
 }
 
 impl ServedIndexerService {
@@ -247,12 +255,62 @@ impl ServedIndexerService {
         verify_service_topology(&component, mode).await?;
 
         let bindings = Arc::new(RwLock::new(HashMap::new()));
-        start_query_endpoint(component.clone(), bindings.clone())?;
+        let mut endpoints = vec![start_query_endpoint(component.clone(), bindings.clone()).await?];
         if mode == ServedIndexerMode::Approximate {
-            start_record_endpoint(component.clone(), bindings.clone())?;
+            match start_record_endpoint(component.clone(), bindings.clone()).await {
+                Ok(endpoint) => endpoints.push(endpoint),
+                Err(error) => {
+                    // Leaving the query endpoint registered would make every later
+                    // attempt on this component fail topology verification.
+                    shutdown_endpoints(endpoints).await;
+                    return Err(error);
+                }
+            }
         }
 
-        Ok(Arc::new(Self { mode, bindings }))
+        Ok(Arc::new(Self {
+            mode,
+            bindings,
+            retired: AtomicBool::new(false),
+            endpoints: parking_lot::Mutex::new(endpoints),
+        }))
+    }
+
+    /// Marks the service retired if it holds no model bindings, reporting whether
+    /// it did.
+    ///
+    /// The flag is set under the same write lock that guards binding insertion, so
+    /// a concurrent binder either observes the flag and retries against the
+    /// replacement service, or wins the race and keeps this service alive.
+    fn retire_if_unused(&self) -> bool {
+        let bindings = self.bindings.write();
+        if !bindings.is_empty() {
+            return false;
+        }
+        self.retired.store(true, Ordering::SeqCst);
+        true
+    }
+
+    fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::SeqCst)
+    }
+
+    async fn stop_endpoints(&self) {
+        let endpoints = std::mem::take(&mut *self.endpoints.lock());
+        shutdown_endpoints(endpoints).await;
+    }
+}
+
+/// Stops endpoints and waits for their discovery registrations to be withdrawn.
+///
+/// Awaiting matters: a spawned shutdown would leave a window in which discovery
+/// still advertises the retired endpoints and a replacement service in the other
+/// mode would be rejected.
+async fn shutdown_endpoints(endpoints: Vec<StartedEndpoint>) {
+    for endpoint in endpoints {
+        if let Err(error) = endpoint.shutdown().await {
+            tracing::warn!(error = %error, "served indexer endpoint shutdown failed");
+        }
     }
 }
 
@@ -263,6 +321,11 @@ pub struct ServedIndexerHandle {
 
 impl Drop for ServedIndexerHandle {
     fn drop(&mut self) {
+        // Removing the binding is all that happens here. Retiring the service needs
+        // to await endpoint shutdown, which a synchronous drop cannot do, and
+        // spawning would panic when the last handle is dropped during runtime
+        // teardown. Retirement is therefore deferred to `get_or_start_service`,
+        // which already runs on an async path serialized by the creation lock.
         self.service.bindings.write().remove(&self.model_name);
     }
 }
@@ -273,36 +336,64 @@ pub async fn ensure_served_indexer_service(
     model_name: String,
     indexer: Indexer,
 ) -> Result<ServedIndexerHandle> {
-    let service = get_or_start_service(component.clone(), mode).await?;
-
-    if service.mode != mode {
-        anyhow::bail!(
-            "cannot mix {} and {} served indexers under {}.{}",
-            service.mode.topology_label(),
-            mode.topology_label(),
-            component.namespace().name(),
-            component.name()
-        );
+    enum BindOutcome {
+        Bound,
+        AlreadyRegistered,
+        Retired,
     }
 
-    {
-        let mut bindings = service.bindings.write();
-        if bindings.contains_key(&model_name) {
+    // A concurrent mode switch can retire the service between the lookup and the
+    // binding insert. The retired flag is terminal for a given service, so one
+    // retry always lands on a live replacement; a second retirement is reported
+    // rather than looped on.
+    for _ in 0..2 {
+        let service = get_or_start_service(component.clone(), mode).await?;
+
+        if service.mode != mode {
             anyhow::bail!(
+                "cannot mix {} and {} served indexers under {}.{}",
+                service.mode.topology_label(),
+                mode.topology_label(),
+                component.namespace().name(),
+                component.name()
+            );
+        }
+
+        let outcome = {
+            let mut bindings = service.bindings.write();
+            if service.is_retired() {
+                BindOutcome::Retired
+            } else if bindings.contains_key(&model_name) {
+                BindOutcome::AlreadyRegistered
+            } else {
+                bindings.insert(model_name.clone(), indexer.clone());
+                BindOutcome::Bound
+            }
+        };
+
+        match outcome {
+            BindOutcome::Bound => {
+                return Ok(ServedIndexerHandle {
+                    service,
+                    model_name,
+                });
+            }
+            BindOutcome::AlreadyRegistered => anyhow::bail!(
                 "served indexer for model {} is already registered under {}.{}",
                 model_name,
                 component.namespace().name(),
                 component.name(),
-            );
+            ),
+            BindOutcome::Retired => continue,
         }
-
-        bindings.insert(model_name.clone(), indexer);
     }
 
-    Ok(ServedIndexerHandle {
-        service,
-        model_name,
-    })
+    anyhow::bail!(
+        "served indexer service under {}.{} kept being retired while registering model {}",
+        component.namespace().name(),
+        component.name(),
+        model_name
+    )
 }
 
 async fn get_or_start_service(
@@ -310,18 +401,72 @@ async fn get_or_start_service(
     mode: ServedIndexerMode,
 ) -> Result<Arc<ServedIndexerService>> {
     let key = service_key(&component);
-    if let Some(existing) = SERVED_INDEXER_SERVICES.get(&key) {
-        return Ok(existing.clone());
+    // The lock-free path is only valid when the cached mode is the one being asked
+    // for. A mismatch has to reach the slow path so it can be retired.
+    if let Some(existing) = cached_service(&key)
+        && existing.mode == mode
+    {
+        return Ok(existing);
     }
 
     let _guard = SERVICE_CREATION_LOCK.lock().await;
-    if let Some(existing) = SERVED_INDEXER_SERVICES.get(&key) {
-        return Ok(existing.clone());
+    if let Some(existing) = cached_service(&key) {
+        if existing.mode == mode {
+            return Ok(existing);
+        }
+
+        if !existing.retire_if_unused() {
+            // Still in use by another router; the caller reports the conflict.
+            return Ok(existing);
+        }
+
+        existing.stop_endpoints().await;
+        // Bind the removed entry so the shard guard is released before the `Arc` is
+        // dropped, and check identity so a service started by someone else under
+        // this key is left alone.
+        let removed =
+            SERVED_INDEXER_SERVICES.remove_if(&key, |_, entry| Arc::ptr_eq(entry, &existing));
+        drop(removed);
     }
 
-    let service = ServedIndexerService::start(component, mode).await?;
-    SERVED_INDEXER_SERVICES.insert(key, service.clone());
+    let service = ServedIndexerService::start(component.clone(), mode).await?;
+    SERVED_INDEXER_SERVICES.insert(key.clone(), service.clone());
+    spawn_teardown_eviction(&component, key, &service);
     Ok(service)
+}
+
+fn cached_service(key: &ServiceKey) -> Option<Arc<ServedIndexerService>> {
+    SERVED_INDEXER_SERVICES
+        .get(key)
+        .map(|entry| Arc::clone(entry.value()))
+}
+
+/// Drops the registry entry when the owning runtime starts shutting down.
+///
+/// `child_token()` descends from the runtime's phase-1 endpoint shutdown token, so
+/// this fires at the start of `Runtime::shutdown`. `primary_token()` would only
+/// fire in phase 3, behind the graceful drain and its timeout.
+///
+/// The task holds a `Weak`, so a service retired earlier by a mode switch is not
+/// kept alive by it, and the identity check stops it from evicting whatever
+/// replaced that service under the same key.
+fn spawn_teardown_eviction(
+    component: &Component,
+    key: ServiceKey,
+    service: &Arc<ServedIndexerService>,
+) {
+    let token = component.drt().child_token();
+    let service = Arc::downgrade(service);
+    tokio::spawn(async move {
+        token.cancelled().await;
+        let Some(service) = service.upgrade() else {
+            return;
+        };
+        let removed =
+            SERVED_INDEXER_SERVICES.remove_if(&key, |_, entry| Arc::ptr_eq(entry, &service));
+        drop(removed);
+        service.stop_endpoints().await;
+    });
 }
 
 async fn verify_service_topology(component: &Component, mode: ServedIndexerMode) -> Result<()> {
@@ -375,52 +520,40 @@ async fn verify_service_topology(component: &Component, mode: ServedIndexerMode)
     Ok(())
 }
 
-fn start_query_endpoint(
+async fn start_query_endpoint(
     component: Component,
     bindings: Arc<RwLock<HashMap<String, Indexer>>>,
-) -> Result<()> {
+) -> Result<StartedEndpoint> {
     let engine = Arc::new(ServedIndexerQueryEngine { bindings });
     let ingress =
         Ingress::<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>>::for_engine(
             engine,
         )?;
-    tokio::spawn(async move {
-        if let Err(error) = component
-            .endpoint(KV_INDEXER_QUERY_ENDPOINT)
-            .endpoint_builder()
-            .handler(ingress)
-            .graceful_shutdown(true)
-            .start()
-            .await
-        {
-            tracing::error!(error = %error, "served indexer query endpoint failed");
-        }
-    });
-    Ok(())
+    component
+        .endpoint(KV_INDEXER_QUERY_ENDPOINT)
+        .endpoint_builder()
+        .handler(ingress)
+        .graceful_shutdown(true)
+        .start_with_registration()
+        .await
 }
 
-fn start_record_endpoint(
+async fn start_record_endpoint(
     component: Component,
     bindings: Arc<RwLock<HashMap<String, Indexer>>>,
-) -> Result<()> {
+) -> Result<StartedEndpoint> {
     let engine = Arc::new(ServedIndexerRecordEngine { bindings });
     let ingress = Ingress::<
         SingleIn<IndexerRecordRoutingDecisionRequest>,
         ManyOut<IndexerRecordRoutingDecisionResponse>,
     >::for_engine(engine)?;
-    tokio::spawn(async move {
-        if let Err(error) = component
-            .endpoint(KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT)
-            .endpoint_builder()
-            .handler(ingress)
-            .graceful_shutdown(true)
-            .start()
-            .await
-        {
-            tracing::error!(error = %error, "served indexer record endpoint failed");
-        }
-    });
-    Ok(())
+    component
+        .endpoint(KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT)
+        .endpoint_builder()
+        .handler(ingress)
+        .graceful_shutdown(true)
+        .start_with_registration()
+        .await
 }
 
 struct ServedIndexerQueryEngine {
@@ -536,7 +669,226 @@ mod tests {
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, pruning::PruneConfig,
     };
     use dynamo_kv_router::protocols::{StorageTier, WorkerWithDpRank, compute_seq_hash_for_block};
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio_util::sync::CancellationToken;
+
+    /// Builds an isolated in-process runtime plus a component whose namespace is
+    /// unique to the caller, so registry and discovery state cannot leak between
+    /// tests sharing this process.
+    async fn registry_test_component(name: &str) -> (DistributedRuntime, Component) {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let namespace = drt.namespace(format!("served-indexer-ns-{name}")).unwrap();
+        let component = namespace
+            .component(format!("served-indexer-component-{name}"))
+            .unwrap();
+        (drt, component)
+    }
+
+    /// Shuts the runtime down and waits for teardown to finish.
+    ///
+    /// `DistributedRuntime::shutdown` only spawns the three-phase coordination task
+    /// onto the runtime's own handle. Inside `#[tokio::test]` that handle is dropped
+    /// the moment the test returns, so a bare `shutdown()` lets the test race its own
+    /// cleanup: endpoint tasks never unregister and their sockets are left open in the
+    /// process-wide ZMQ context for the rest of the test binary, which slows every
+    /// later event-plane test in the same process. Awaiting the primary token means
+    /// phase 3 has run before the test returns.
+    async fn shutdown_and_settle(drt: DistributedRuntime) {
+        let token = drt.primary_token();
+        drt.shutdown();
+        if tokio::time::timeout(Duration::from_secs(10), token.cancelled())
+            .await
+            .is_err()
+        {
+            panic!("runtime did not finish shutting down");
+        }
+        // Let the endpoint cleanup tasks woken by phase 3 close their sockets.
+        tokio::task::yield_now().await;
+    }
+
+    fn binding_count(key: &ServiceKey) -> usize {
+        SERVED_INDEXER_SERVICES
+            .get(key)
+            .expect("service should still be registered while its runtime is alive")
+            .bindings
+            .read()
+            .len()
+    }
+
+    /// The reported defect: once the final handle is dropped the service has no
+    /// bindings, so a router rebuilt with the opposite `use_kv_events` setting must
+    /// be able to claim the same component.
+    ///
+    /// Both transitions are exercised because they fail for different reasons.
+    /// Evicting the registry entry alone fixes neither: `verify_service_topology`
+    /// rejects `Approximate` while the retired query endpoint is still registered in
+    /// discovery, and rejects `EventDriven` while the retired record endpoint is.
+    #[tokio::test]
+    async fn served_indexer_retires_and_allows_mode_switch() {
+        let (drt, component) = registry_test_component("mode-switch").await;
+        let key = service_key(&component);
+
+        let handle = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::EventDriven,
+            "model-a".to_string(),
+            Indexer::None,
+        )
+        .await
+        .expect("event-driven served indexer should start");
+
+        assert_eq!(binding_count(&key), 1);
+        drop(handle);
+        assert_eq!(
+            binding_count(&key),
+            0,
+            "dropping the final handle must remove its model binding"
+        );
+
+        let handle = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::Approximate,
+            "model-a".to_string(),
+            Indexer::None,
+        )
+        .await
+        .expect("approximate served indexer should start once the event-driven one is retired");
+        drop(handle);
+
+        let handle = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::EventDriven,
+            "model-a".to_string(),
+            Indexer::None,
+        )
+        .await
+        .expect("event-driven served indexer should start once the approximate one is retired");
+        drop(handle);
+
+        shutdown_and_settle(drt).await;
+    }
+
+    /// The guard must not degenerate into "always evict": while a model binding is
+    /// live, a conflicting mode is still a genuine conflict.
+    #[tokio::test]
+    async fn served_indexer_live_binding_rejects_conflicting_mode() {
+        let (drt, component) = registry_test_component("live-binding").await;
+
+        let handle = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::EventDriven,
+            "model-a".to_string(),
+            Indexer::None,
+        )
+        .await
+        .expect("event-driven served indexer should start");
+
+        let error = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::Approximate,
+            "model-b".to_string(),
+            Indexer::None,
+        )
+        .await
+        .err()
+        .expect("a live event-driven binding must reject an approximate indexer");
+        assert!(
+            error.to_string().contains("cannot mix"),
+            "unexpected error: {error}"
+        );
+
+        drop(handle);
+        shutdown_and_settle(drt).await;
+    }
+
+    /// Dropping one of two concurrent users must not retire the shared service.
+    #[tokio::test]
+    async fn served_indexer_survives_partial_handle_drop() {
+        let (drt, component) = registry_test_component("shared-service").await;
+        let key = service_key(&component);
+
+        let handle_a = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::EventDriven,
+            "model-a".to_string(),
+            Indexer::None,
+        )
+        .await
+        .expect("first event-driven served indexer should start");
+        let handle_b = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::EventDriven,
+            "model-b".to_string(),
+            Indexer::None,
+        )
+        .await
+        .expect("second model should share the event-driven service");
+
+        assert_eq!(binding_count(&key), 2);
+        drop(handle_a);
+        assert_eq!(
+            binding_count(&key),
+            1,
+            "dropping one user must leave the other binding intact"
+        );
+
+        let error = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::Approximate,
+            "model-c".to_string(),
+            Indexer::None,
+        )
+        .await
+        .err()
+        .expect("the surviving binding must keep the shared service in event-driven mode");
+        assert!(
+            error.to_string().contains("cannot mix"),
+            "unexpected error: {error}"
+        );
+
+        drop(handle_b);
+        shutdown_and_settle(drt).await;
+    }
+
+    /// The registry is process-global but keyed on the runtime's connection id, so
+    /// nothing else ever reclaims an entry belonging to a stopped runtime.
+    #[tokio::test]
+    async fn served_indexer_registry_evicted_on_runtime_teardown() {
+        let (drt, component) = registry_test_component("teardown").await;
+        let key = service_key(&component);
+
+        let handle = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::EventDriven,
+            "model-a".to_string(),
+            Indexer::None,
+        )
+        .await
+        .expect("event-driven served indexer should start");
+        assert!(SERVED_INDEXER_SERVICES.contains_key(&key));
+
+        let shutdown_complete = drt.primary_token();
+        drt.shutdown();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while SERVED_INDEXER_SERVICES.contains_key(&key) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "registry entry outlived its runtime"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        drop(handle);
+
+        // See `shutdown_and_settle`: leaving teardown unfinished leaks sockets into
+        // the process-wide ZMQ context.
+        let _ = tokio::time::timeout(Duration::from_secs(10), shutdown_complete.cancelled()).await;
+        tokio::task::yield_now().await;
+    }
 
     #[tokio::test]
     async fn query_engine_supports_multiple_model_bindings() {
