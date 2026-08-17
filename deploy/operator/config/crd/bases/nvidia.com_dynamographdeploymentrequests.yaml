@@ -131,7 +131,7 @@ spec:
                         WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
                         This image is used for both temporary DGDs created during online profiling and the final DGD.
                         If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1"
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0"
                       type: string
                   type: object
                 enableGpuDiscovery:
@@ -206,7 +206,7 @@ spec:
                       description: |-
                         ProfilerImage specifies the container image to use for profiling jobs.
                         This image contains the profiler code and dependencies needed for SLA-based profiling.
-                        Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
+                        Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"
                       type: string
                     resources:
                       description: |-
@@ -314,6 +314,14 @@ spec:
                   required:
                     - profilerImage
                   type: object
+                runtimeVersionOverride:
+                  description: |-
+                    RuntimeVersionOverride explicitly sets the Dynamo runtime version for every
+                    component in the generated DynamoGraphDeployment. Set this when
+                    profilingConfig.profilerImage uses a non-semantic-version tag or digest, or
+                    when its tag does not identify the Dynamo runtime version.
+                  pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
+                  type: string
                 useMocker:
                   default: false
                   description: |-
@@ -566,7 +574,7 @@ spec:
                       description: |-
                         Planner contains the raw Planner configuration passed to the Planner service.
                         Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
-                        See https://docs.dynamo.nvidia.com/dynamo/components/planner/planner-guide#plannerconfig-reference.
+                        See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference.
                         DGDR passes this object through without field-level validation; the Planner
                         service validates it at startup.
                         The presence of this field (non-null) enables the planner in the generated DGD.
@@ -690,7 +698,7 @@ spec:
                 image:
                   description: |-
                     Image is the container image reference for the profiling job (planner image).
-                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".
+                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0".
                     For Dynamo < 1.1.0, use dynamo-frontend.
                   type: string
                 model:
@@ -707,7 +715,10 @@ spec:
                     pvcModelPath:
                       description: |-
                         PVCModelPath is the path to the model checkpoint directory within the PVC
-                        (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
+                        (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). It may also be a
+                        container-visible absolute path already under PVCMountPath. Such an absolute
+                        path is interpreted as container-visible; use the relative form without a
+                        leading slash to address the same path prefix within the PVC.
                       type: string
                     pvcMountPath:
                       default: /opt/model-cache
@@ -9228,6 +9239,15 @@ spec:
                         - template
                       type: object
                   type: object
+                runtimeVersionOverride:
+                  description: |-
+                    RuntimeVersionOverride supplies the default Dynamo runtime version for
+                    generated DynamoGraphDeployment components that do not set their own
+                    override. Set this when Image uses a non-semantic-version tag or digest, or
+                    when its tag does not identify the Dynamo runtime version. An explicit
+                    component value in overrides.dgd takes precedence.
+                  pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
+                  type: string
                 searchStrategy:
                   allOf:
                     - enum:
@@ -9270,7 +9290,8 @@ spec:
                     concurrency:
                       description: |-
                         Concurrency is the target concurrency level.
-                        Required (or RequestRate) when the planner is disabled.
+                        Mutually exclusive with the requestRate field. When both fields are omitted and the
+                        planner is disabled, the profiler uses its default maximum-throughput selection.
                       type: number
                     isl:
                       default: 4000
@@ -9285,7 +9306,8 @@ spec:
                     requestRate:
                       description: |-
                         RequestRate is the target request rate (req/s).
-                        Required (or Concurrency) when the planner is disabled.
+                        Mutually exclusive with the concurrency field. When both fields are omitted and the
+                        planner is disabled, the profiler uses its default maximum-throughput selection.
                       type: number
                   type: object
               required:

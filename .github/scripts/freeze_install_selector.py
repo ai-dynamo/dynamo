@@ -5,8 +5,9 @@
 
 Dev docs use the interactive ``<InstallSelector />``, whose data tracks ``main``.
 A versioned release snapshot must be static and pinned, so this replaces the
-marked selector block with ``docker run ...:<version>`` tabs and drops the
-component import. No-op if the marked block is absent (older snapshots).
+marked selector block with pinned NVIDIA container commands plus the Intel XPU
+source-build commands, then drops the component import. No-op if the marked
+block is absent (older snapshots).
 
 Usage:
     freeze_install_selector.py <quickstart.mdx> <version>
@@ -25,19 +26,45 @@ RUNTIMES = [
 
 
 def tabs(version: str) -> str:
-    body = "\n".join(
-        f'  <Tab title="{label}" language="{language}">\n'
-        f"    ```bash\n"
-        f"    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/{image}-runtime:{version}\n"
-        f"    ```\n"
-        f"  </Tab>"
-        for label, image, language in RUNTIMES
+    nvidia = "\n\n".join(
+        f'```bash title="{label}"\n'
+        f"docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/{image}-runtime:{version}\n"
+        f"```"
+        for label, image, _language in RUNTIMES
     )
-    return (
-        "Containers have all dependencies pre-installed. Pick your backend:\n\n<Tabs>\n"
-        + body
-        + "\n</Tabs>"
-    )
+    xpu = r"""```bash title="vLLM"
+git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo
+container/render.py --framework=vllm --device=xpu --target=runtime
+docker build -t dynamo:latest-vllm-xpu-runtime \
+  -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
+container/run.sh --image dynamo:latest-vllm-xpu-runtime --device=xpu -it
+```
+
+```bash title="SGLang"
+git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo
+container/render.py --framework=sglang --device=xpu --target=runtime
+docker build -t dynamo:latest-sglang-xpu-runtime \
+  -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
+container/run.sh --image dynamo:latest-sglang-xpu-runtime --device=xpu -it
+```"""
+    return f"""<Tabs>
+  <Tab title="NVIDIA GPU">
+    Containers have all dependencies pre-installed. Pick your backend:
+
+    <CodeBlocks>
+{nvidia}
+    </CodeBlocks>
+  </Tab>
+  <Tab title="Intel XPU">
+    Intel XPU images are built from source for vLLM and SGLang:
+
+    <CodeBlocks>
+{xpu}
+    </CodeBlocks>
+  </Tab>
+</Tabs>"""
 
 
 def freeze(text: str, version: str) -> str:

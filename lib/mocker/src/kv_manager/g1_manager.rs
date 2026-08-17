@@ -6,13 +6,16 @@
 //! This module is not a third KV manager. It forwards each operation to either
 //! KVBM G1 or vLLM G1, selected when the manager is constructed. Remove this
 //! facade when the KVBM G1 implementation is removed.
+//!
+//! Tracking issue: <https://github.com/ai-dynamo/dynamo/issues/12340> splits
+//! the native lease API from the legacy KVBM signal/offload API so backend
+//! mismatches become unrepresentable instead of panicking at runtime.
 
 #[cfg(feature = "kvbm-offload")]
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "kvbm-offload")]
 use dynamo_tokens::PositionalLineageHash;
-use dynamo_tokens::blocks::UniqueBlock;
 #[cfg(feature = "kvbm-offload")]
 use kvbm_logical::ImmutableBlock;
 use uuid::Uuid;
@@ -22,7 +25,7 @@ use crate::common::protocols::G1;
 use crate::common::protocols::{
     G1Backend, KvEventPublishers, MockerEvictionBackend, MoveBlock, PrefillCost,
 };
-use crate::common::sequence::ActiveSequence;
+use crate::common::sequence::{ActiveSequence, RequestSequence};
 #[cfg(feature = "kvbm-offload")]
 use crate::kvbm_offload::{MockOffloadEngine, OffloadId};
 
@@ -31,7 +34,7 @@ use super::kvbm_backend;
 #[cfg(feature = "kvbm-offload")]
 use super::kvbm_backend::{BatchSwapInOutcome, SwapInRegistrationBlock, SwapInRegistrationOutcome};
 use super::vllm_backend::{
-    NativeDecodeBlockReservation, NativeDestinationReservation, VllmAcquire, VllmBlockLayout,
+    BlockRequestLease, NativeDecodeBlockReservation, NativeDestinationReservation, VllmAcquire,
     VllmKvManager,
 };
 
@@ -40,56 +43,10 @@ enum G1ManagerBackend {
     Native(VllmKvManager),
 }
 
-fn validate_plh_alignment(blocks: &[UniqueBlock], plh_count: usize) {
-    let full_blocks = blocks
-        .iter()
-        .filter(|block| matches!(block, UniqueBlock::FullBlock(_)))
-        .count();
-    assert_eq!(plh_count, full_blocks, "PLHs must align with full blocks");
-}
-
 fn into_g1_acquire<T>(outcome: VllmAcquire<T>) -> G1Acquire<T> {
     match outcome {
         VllmAcquire::Ready(value) => G1Acquire::Ready(value),
         VllmAcquire::CapacityExhausted => G1Acquire::CapacityExhausted,
-    }
-}
-
-fn process_vllm_event(
-    manager: &mut VllmKvManager,
-    owner: Uuid,
-    event: &MoveBlock,
-    reusable_prefix_blocks: usize,
-) -> VllmAcquire<usize> {
-    match event {
-        MoveBlock::Use(blocks, local_hashes, plhs, token_ids, parent) => {
-            validate_plh_alignment(blocks, plhs.len());
-            manager.use_for_request(
-                owner,
-                blocks,
-                local_hashes,
-                token_ids.as_deref(),
-                parent.as_ref(),
-                reusable_prefix_blocks,
-            )
-        }
-        MoveBlock::Deref(blocks) => {
-            assert_eq!(reusable_prefix_blocks, 0);
-            manager.deref_for_request(owner, blocks);
-            VllmAcquire::Ready(1)
-        }
-        MoveBlock::Promote(uuid, hash, parent_hash, local_hash, _plh, token_ids) => {
-            assert_eq!(reusable_prefix_blocks, 0);
-            manager.promote_for_request(
-                owner,
-                *uuid,
-                *hash,
-                *parent_hash,
-                *local_hash,
-                token_ids.clone(),
-            );
-            VllmAcquire::Ready(1)
-        }
     }
 }
 
@@ -100,15 +57,6 @@ pub(crate) struct DecodeBlockReservation {
 enum DecodeBlockReservationBackend {
     Kvbm(kvbm_backend::DecodeBlockReservation),
     Native(NativeDecodeBlockReservation),
-}
-
-impl DecodeBlockReservation {
-    pub(crate) fn len(&self) -> usize {
-        match &self.inner {
-            DecodeBlockReservationBackend::Kvbm(reservation) => reservation.len(),
-            DecodeBlockReservationBackend::Native(reservation) => reservation.len(),
-        }
-    }
 }
 
 pub(crate) struct DestinationReservation {
@@ -211,28 +159,133 @@ impl G1Manager {
         Self { backend }
     }
 
+    pub(crate) fn allocate_native(
+        &mut self,
+        owner: Uuid,
+        lease: &mut BlockRequestLease,
+        cumulative_tokens: usize,
+        reusable_prefix_blocks: usize,
+    ) -> G1Acquire<usize> {
+        let G1ManagerBackend::Native(manager) = &mut self.backend else {
+            panic!("native request lease used with legacy KVBM")
+        };
+        into_g1_acquire(manager.allocate_lease(
+            owner,
+            lease,
+            cumulative_tokens,
+            reusable_prefix_blocks,
+        ))
+    }
+
+    pub(crate) fn finalize_native_computed_prefix(
+        &mut self,
+        owner: Uuid,
+        computed_before: usize,
+        computed_after: usize,
+        sequence: &mut RequestSequence,
+        lease: &mut BlockRequestLease,
+    ) {
+        let G1ManagerBackend::Native(manager) = &mut self.backend else {
+            panic!("native request lease used with legacy KVBM")
+        };
+        manager.finalize_lease_computed_prefix(
+            owner,
+            sequence,
+            lease,
+            computed_before,
+            computed_after,
+        );
+    }
+
+    pub(crate) fn preempt_native(&mut self, owner: Uuid, lease: &mut BlockRequestLease) {
+        let G1ManagerBackend::Native(manager) = &mut self.backend else {
+            panic!("native request lease used with legacy KVBM")
+        };
+        manager.preempt_lease(owner, lease);
+    }
+
+    pub(crate) fn finish_native(&mut self, owner: Uuid, lease: BlockRequestLease) {
+        let G1ManagerBackend::Native(manager) = &mut self.backend else {
+            panic!("native request lease used with legacy KVBM")
+        };
+        manager.finish_lease(owner, lease);
+    }
+
+    pub(crate) fn get_native_prefill_cost(
+        &self,
+        sequence: &RequestSequence,
+        lease: &BlockRequestLease,
+    ) -> PrefillCost {
+        let G1ManagerBackend::Native(manager) = &self.backend else {
+            panic!("native request lease used with legacy KVBM")
+        };
+        manager.get_lease_prefill_cost(sequence, lease)
+    }
+
+    pub(crate) fn reserve_native_destination_at(
+        &mut self,
+        owner: Uuid,
+        sequence: &RequestSequence,
+        lease: &BlockRequestLease,
+        eviction_now_ms: Option<f64>,
+    ) -> G1Acquire<DestinationReservation> {
+        let G1ManagerBackend::Native(manager) = &mut self.backend else {
+            panic!("native request lease used with legacy KVBM")
+        };
+        into_g1_acquire(manager.reserve_destination_lease(owner, sequence, lease, eviction_now_ms))
+            .map(|inner| DestinationReservation {
+                inner: DestinationReservationBackend::Native(inner),
+            })
+    }
+
+    pub(crate) fn activate_native_destination(
+        &mut self,
+        owner: Uuid,
+        sequence: &RequestSequence,
+        lease: &mut BlockRequestLease,
+        reservation: DestinationReservation,
+    ) {
+        let (G1ManagerBackend::Native(manager), DestinationReservationBackend::Native(reservation)) =
+            (&mut self.backend, reservation.inner)
+        else {
+            panic!("destination reservation belongs to a different G1 backend")
+        };
+        manager.activate_destination_lease(owner, sequence, lease, reservation);
+    }
+
+    pub(crate) fn use_native_decode_reservation(
+        &mut self,
+        owner: Uuid,
+        lease: &mut BlockRequestLease,
+        cumulative_tokens: usize,
+        reservation: &mut DecodeBlockReservation,
+    ) {
+        let (G1ManagerBackend::Native(manager), DecodeBlockReservationBackend::Native(reservation)) =
+            (&mut self.backend, &mut reservation.inner)
+        else {
+            panic!("decode reservation belongs to a different G1 backend")
+        };
+        manager.allocate_lease_from_decode_reservation(
+            owner,
+            lease,
+            cumulative_tokens,
+            reservation,
+        );
+    }
+
     /// Make newly allocated full blocks prefix-cache-visible once the current
     /// scheduling decision reaches their complete token range. KVBM retains
     /// its historical eager lifecycle; the native backend mirrors vLLM's
     /// per-request `allocate_slots()` / `cache_blocks()` boundary.
     pub(crate) fn finalize_computed_prefix(
         &mut self,
-        owner: Uuid,
-        computed_before: usize,
-        computed_after: usize,
-        sequence: &mut ActiveSequence,
+        _owner: Uuid,
+        _computed_before: usize,
+        _computed_after: usize,
+        _sequence: &mut ActiveSequence,
     ) {
-        if let G1ManagerBackend::Native(manager) = &mut self.backend {
-            if let Some(promote) = sequence.promote_computed_tail(computed_after) {
-                assert!(
-                    matches!(
-                        process_vllm_event(manager, owner, &promote, 0),
-                        VllmAcquire::Ready(_)
-                    ),
-                    "computed-tail promotion must be infallible"
-                );
-            }
-            manager.finalize_computed_prefix(owner, computed_before, computed_after);
+        if matches!(self.backend, G1ManagerBackend::Native(_)) {
+            panic!("native requests must finalize their attached block lease")
         }
     }
 
@@ -258,18 +311,15 @@ impl G1Manager {
     /// native G1 uses it to address the exact physical request block table.
     pub(crate) fn process_for_request(
         &mut self,
-        owner: Uuid,
+        _owner: Uuid,
         event: &MoveBlock,
-        reusable_prefix_blocks: usize,
+        _reusable_prefix_blocks: usize,
     ) -> G1Acquire<usize> {
         match &mut self.backend {
             G1ManagerBackend::Kvbm(manager) => manager.process(event),
-            G1ManagerBackend::Native(manager) => into_g1_acquire(process_vllm_event(
-                manager,
-                owner,
-                event,
-                reusable_prefix_blocks,
-            )),
+            G1ManagerBackend::Native(_) => {
+                panic!("native requests must use direct block-lease operations")
+            }
         }
     }
 
@@ -309,7 +359,7 @@ impl G1Manager {
 
     pub(crate) fn process_decode_signal_for_request(
         &mut self,
-        owner: Uuid,
+        _owner: Uuid,
         event: &MoveBlock,
         reservation: &mut DecodeBlockReservation,
     ) {
@@ -317,27 +367,8 @@ impl G1Manager {
             (G1ManagerBackend::Kvbm(manager), DecodeBlockReservationBackend::Kvbm(inner)) => {
                 manager.process_decode_signal(event, inner);
             }
-            (G1ManagerBackend::Native(manager), DecodeBlockReservationBackend::Native(inner)) => {
-                match event {
-                    MoveBlock::Use(blocks, local_hashes, plhs, token_ids, parent) => {
-                        validate_plh_alignment(blocks, plhs.len());
-                        manager.use_decode_reservation_for_request(
-                            owner,
-                            blocks,
-                            local_hashes,
-                            token_ids.as_deref(),
-                            parent.as_ref(),
-                            inner,
-                        );
-                    }
-                    _ => assert!(
-                        matches!(
-                            process_vllm_event(manager, owner, event, 0),
-                            VllmAcquire::Ready(_)
-                        ),
-                        "non-Use decode signal must be infallible"
-                    ),
-                }
+            (G1ManagerBackend::Native(_), DecodeBlockReservationBackend::Native(_)) => {
+                panic!("native decode must mutate its attached block lease")
             }
             _ => panic!("decode reservation belongs to a different G1 backend"),
         }
@@ -355,7 +386,7 @@ impl G1Manager {
 
     pub(crate) fn reserve_destination_at(
         &mut self,
-        owner: Uuid,
+        _owner: Uuid,
         sequence: &ActiveSequence,
         eviction_now_ms: Option<f64>,
     ) -> G1Acquire<DestinationReservation> {
@@ -365,25 +396,8 @@ impl G1Manager {
                 .map(|inner| DestinationReservation {
                     inner: DestinationReservationBackend::Kvbm(inner),
                 }),
-            G1ManagerBackend::Native(manager) => {
-                let layout = match sequence.prepare_allocation(sequence.num_input_tokens()) {
-                    None => None,
-                    Some(MoveBlock::Use(blocks, local_hashes, plhs, token_ids, parent)) => {
-                        validate_plh_alignment(&blocks, plhs.len());
-                        Some(VllmBlockLayout::new(
-                            blocks,
-                            local_hashes,
-                            token_ids,
-                            parent,
-                        ))
-                    }
-                    Some(_) => panic!("destination allocation must be a Use signal"),
-                };
-                into_g1_acquire(manager.reserve_destination_at(owner, layout, eviction_now_ms)).map(
-                    |inner| DestinationReservation {
-                        inner: DestinationReservationBackend::Native(inner),
-                    },
-                )
+            G1ManagerBackend::Native(_) => {
+                panic!("native destination must reserve its attached block lease")
             }
         }
     }
@@ -393,8 +407,8 @@ impl G1Manager {
             (G1ManagerBackend::Kvbm(manager), DestinationReservationBackend::Kvbm(inner)) => {
                 manager.activate_destination(inner);
             }
-            (G1ManagerBackend::Native(manager), DestinationReservationBackend::Native(inner)) => {
-                manager.activate_destination(inner);
+            (G1ManagerBackend::Native(_), DestinationReservationBackend::Native(_)) => {
+                panic!("native destination must activate into its attached block lease")
             }
             _ => panic!("destination reservation belongs to a different G1 backend"),
         }
@@ -460,17 +474,21 @@ impl G1Manager {
     }
 
     #[cfg(test)]
-    pub(crate) fn request_block_count(&self, owner: Uuid, sequence: &ActiveSequence) -> usize {
+    pub(crate) fn request_block_count(&self, _owner: Uuid, sequence: &ActiveSequence) -> usize {
         match &self.backend {
             G1ManagerBackend::Kvbm(manager) => manager.active_block_ids(sequence).len(),
-            G1ManagerBackend::Native(manager) => manager.request_block_count(owner),
+            G1ManagerBackend::Native(_) => {
+                panic!("native block counts come from the attached request lease")
+            }
         }
     }
 
     pub fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
         match &self.backend {
             G1ManagerBackend::Kvbm(manager) => manager.get_prefill_cost(sequence),
-            G1ManagerBackend::Native(manager) => manager.get_prefill_cost(sequence),
+            G1ManagerBackend::Native(_) => {
+                panic!("native prefill cost requires an attached block lease")
+            }
         }
     }
 
@@ -487,6 +505,9 @@ impl G1Manager {
         }
     }
 
+    /// Returns whether the legacy KVBM backend has a lower-tier offload
+    /// engine. Native G1 always returns `false`, so native requests cannot
+    /// enter the KVBM swap-in lifecycle.
     #[cfg(feature = "kvbm-offload")]
     pub fn has_offload_engine(&self) -> bool {
         match &self.backend {
@@ -577,21 +598,26 @@ impl G1Manager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use dynamo_kv_router::protocols::KvCacheEventData;
 
     #[test]
-    #[should_panic(expected = "PLHs must align with full blocks")]
-    fn vllm_boundary_rejects_misaligned_lineage_metadata() {
-        let mut manager =
-            G1Manager::new_with_backend(2, 4, KvEventPublishers::default(), 0, G1Backend::Native);
-        let event = MoveBlock::Use(
-            vec![UniqueBlock::FullBlock(7)],
-            vec![107],
-            Vec::new(),
-            None,
-            None,
+    fn native_finalization_publishes_parent_before_promoted_tail() {
+        let stored = crate::replay::native_g1_parent_chain_artifact(4)
+            .kv_events
+            .into_iter()
+            .map(|event| match event.event.data {
+                KvCacheEventData::Stored(stored) => stored,
+                other => panic!("expected Stored event, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].blocks.len(), 2);
+        assert_eq!(stored[0].parent_hash, None);
+        assert_eq!(stored[1].blocks.len(), 1);
+        assert_eq!(
+            stored[1].parent_hash,
+            Some(stored[0].blocks[1].block_hash),
+            "the promoted tail must be published after its parent block"
         );
-
-        let _ = manager.process_for_request(Uuid::from_u128(1), &event, 0);
     }
 }

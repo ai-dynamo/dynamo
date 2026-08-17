@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::{
     ContentProvider,
@@ -15,6 +16,7 @@ use crate::types::TokenIdType;
 pub mod audios;
 pub mod batches;
 pub mod chat_completions;
+pub mod classify;
 pub mod common_ext;
 pub mod completions;
 pub(crate) mod delta_common;
@@ -22,6 +24,7 @@ pub mod embeddings;
 pub mod generate;
 pub mod images;
 pub mod models;
+pub mod pooling;
 pub mod responses;
 pub mod stream_aggregator;
 pub mod tools;
@@ -32,6 +35,14 @@ use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
     TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
 };
+
+/// Side from which prompt tokens are truncated.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTruncationSide {
+    Left,
+    Right,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AnnotatedDelta<R> {
@@ -318,6 +329,7 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
     fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage;
 
     /// Returns the request tracker if available, for accessing worker timing metrics.
+    /// Implementors that own request timing data must override this method.
     fn tracker(&self) -> Option<std::sync::Arc<common::timing::RequestTracker>> {
         None
     }
@@ -337,6 +349,23 @@ pub struct ParsingOptions {
     /// support are checked separately in the aggregator.
     #[serde(default)]
     pub experimental_v2_batch_eligible: bool,
+
+    /// The request's `parallel_tool_calls`. When `Some(false)`, the aggregator
+    /// caps each choice to a single tool call as a post-parse fallback for
+    /// tool_choice modes / engines where generation-time enforcement does not
+    /// fire. `None` / `Some(true)` leave the tool calls untouched.
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
+
+    /// Non-streaming only: when the aggregated message has no non-reasoning
+    /// `content`, move the parsed `reasoning_content` into `content` instead of
+    /// returning empty content. Set by the chat and Anthropic HTTP handlers for
+    /// any request carrying `force_nonempty_content=true` — the caller asked for
+    /// non-empty content, so a reasoning-only turn must surface the reasoning as
+    /// content. Not keyed on the model or its parser. When content was
+    /// generated, reasoning stays in `reasoning_content`.
+    #[serde(default)]
+    pub move_reasoning_to_content_when_empty: bool,
 }
 
 impl ParsingOptions {
@@ -345,6 +374,8 @@ impl ParsingOptions {
             tool_call_parser,
             reasoning_parser,
             experimental_v2_batch_eligible: false,
+            parallel_tool_calls: None,
+            move_reasoning_to_content_when_empty: false,
         }
     }
 
@@ -353,6 +384,22 @@ impl ParsingOptions {
     /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`.
     pub fn with_experimental_v2_batch_eligible(mut self, eligible: bool) -> Self {
         self.experimental_v2_batch_eligible = eligible;
+        self
+    }
+
+    /// Set the request's `parallel_tool_calls`. `Some(false)` caps the aggregated
+    /// response to the first tool call. `None` / `Some(true)` leave tool calls
+    /// untouched.
+    pub fn with_parallel_tool_calls(mut self, parallel_tool_calls: Option<bool>) -> Self {
+        self.parallel_tool_calls = parallel_tool_calls;
+        self
+    }
+
+    /// Set whether a reasoning-only aggregated message should surface its
+    /// `reasoning_content` as `content` (non-streaming force_nonempty_content;
+    /// see the field docs).
+    pub fn with_move_reasoning_to_content_when_empty(mut self, enabled: bool) -> Self {
+        self.move_reasoning_to_content_when_empty = enabled;
         self
     }
 }

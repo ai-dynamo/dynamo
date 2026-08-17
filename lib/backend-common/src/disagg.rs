@@ -58,6 +58,16 @@ impl DisaggregationMode {
         }
     }
 
+    /// Discovery component a worker of this role registers under, so the
+    /// frontend can route the disaggregated prefill/decode handoff separately.
+    /// Prefill registers as `prefill`; decode and aggregated share `backend`.
+    pub fn discovery_component(&self) -> &'static str {
+        match self {
+            Self::Prefill => "prefill",
+            Self::Aggregated | Self::Decode | Self::Encode => "backend",
+        }
+    }
+
     /// `true` when this worker only runs the prefill phase.
     pub fn is_prefill(&self) -> bool {
         matches!(self, Self::Prefill)
@@ -173,6 +183,16 @@ mod tests {
         assert!(!DisaggregationMode::Aggregated.is_prefill());
         assert!(!DisaggregationMode::Aggregated.is_decode());
         assert!(!DisaggregationMode::Aggregated.is_encode());
+    }
+
+    #[test]
+    fn discovery_component_splits_prefill_from_the_rest() {
+        assert_eq!(DisaggregationMode::Prefill.discovery_component(), "prefill");
+        assert_eq!(DisaggregationMode::Decode.discovery_component(), "backend");
+        assert_eq!(
+            DisaggregationMode::Aggregated.discovery_component(),
+            "backend"
+        );
     }
 
     #[test]

@@ -6,16 +6,22 @@
 mod actor;
 mod discovery;
 mod host;
+mod identity;
+mod pool_registry;
 mod resolution;
 
 pub use host::{
     DEFAULT_EXPECTED_UNIQUE_BLOCKS, KvDcRelay, KvDcRelayConfig, KvDcRelayError, KvDcRelayHealth,
 };
-
 #[cfg(feature = "ckf-diagnostics")]
 pub use host::{
     KvDcRelayActorStats, KvDcRelayAggregationStats, KvDcRelayCacheDomainStats,
     KvDcRelayDiagnosticSnapshot, KvDcRelayEndpointStats, KvDcRelayIdentityStats,
     KvDcRelayMemberStats, KvDcRelayMemoryStats, KvDcRelayPublicationStats, KvDcRelayRecoveryStats,
     KvDcRelayStats,
+};
+pub use identity::{
+    CanonicalModelId, CanonicalModelIdError, CanonicalModelRegistration, DcPoolCatalog,
+    DcPoolDescriptor, DcRelayIdentity, ModelAlias, ModelAliasError, ModelTarget,
+    PoolIdentitySources,
 };

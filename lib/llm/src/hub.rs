@@ -160,11 +160,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
         Ok(mut client) => {
             tracing::info!("Successfully connected to ModelExpress server");
             match client
-                .request_model_with_provider_and_fallback(
-                    &model_name,
-                    MxModelProvider::HuggingFace,
-                    ignore_weights,
-                )
+                .request_model(&model_name, MxModelProvider::HuggingFace, ignore_weights)
                 .await
             {
                 Ok(()) => {

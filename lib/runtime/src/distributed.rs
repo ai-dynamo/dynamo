@@ -12,7 +12,7 @@ use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
 use crate::{discovery, system_status_server, transports};
 use crate::{
-    discovery::Discovery,
+    discovery::{Discovery, DiscoverySpec, EndpointRegistrationLease, EndpointRegistrationManager},
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     transports::{etcd, nats, tcp},
@@ -40,8 +40,15 @@ use tokio_util::sync::CancellationToken;
 type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
-/// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
-/// communication protocols and transports.
+/// Distributed [Runtime] providing cluster-wide communication, transport, and discovery resources.
+///
+/// `DistributedRuntime` is not a process singleton. Calling [`DistributedRuntime::new`] more than
+/// once creates independent DRT instances with distinct discovery connection IDs, even when they
+/// share a process. Cloning a DRT continues to share the original instance and connection ID.
+///
+/// Production services should normally treat one DRT per service replica/process as a soft
+/// invariant. Multiple DRTs in one process are primarily supported for single-process test
+/// topologies and for the mocker, which models multiple isolated workers in one process.
 #[derive(Clone)]
 pub struct DistributedRuntime {
     // local runtime
@@ -55,6 +62,7 @@ pub struct DistributedRuntime {
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
+    endpoint_registrations: Arc<EndpointRegistrationManager>,
 
     // Discovery metadata (only used for Kubernetes backend)
     // Shared with system status server to expose via /metadata endpoint
@@ -193,6 +201,11 @@ impl DistributedRuntime {
             request_plane,
         );
 
+        let endpoint_registrations = EndpointRegistrationManager::new(
+            discovery_client.clone(),
+            runtime.secondary(),
+            runtime.primary_token(),
+        );
         let distributed_runtime = Self {
             runtime,
             network_manager: Arc::new(network_manager),
@@ -200,6 +213,7 @@ impl DistributedRuntime {
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
+            endpoint_registrations,
             discovery_metadata,
             component_registry,
             endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -342,6 +356,10 @@ impl DistributedRuntime {
         &self.metadata_artifacts
     }
 
+    /// Returns this DRT instance's discovery identity.
+    ///
+    /// This identifies the DRT, not the operating-system process. Multiple DRTs in one process
+    /// receive distinct connection IDs.
     pub fn connection_id(&self) -> u64 {
         self.discovery_client.instance_id()
     }
@@ -359,6 +377,14 @@ impl DistributedRuntime {
     /// Returns the discovery interface for service registration and discovery
     pub fn discovery(&self) -> Arc<dyn Discovery> {
         self.discovery_client.clone()
+    }
+
+    /// Register an endpoint until the last runtime-wide owner drops its lease.
+    pub async fn register_endpoint_lease(
+        &self,
+        spec: DiscoverySpec,
+    ) -> Result<EndpointRegistrationLease> {
+        self.endpoint_registrations.register(spec).await
     }
 
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {

@@ -13,10 +13,9 @@ use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
 use crate::scheduler::{
-    AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState,
-    SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
-    SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, SchedulerOutputSender,
-    spawn_live_scheduler,
+    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, SchedulerCancellationEnvelope,
+    SchedulerCommand, SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerEventSender,
+    SchedulerHandle, SchedulerLifecycleEvent, SchedulerOutputSender, spawn_live_scheduler,
 };
 
 use super::core::VllmCore;
@@ -105,58 +104,36 @@ impl Scheduler {
         cancellation_token: Option<CancellationToken>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
-        Self::new_internal(
+        let (scheduler, actor) = Self::spawn_with_event_sender(
             args,
             dp_rank,
-            output_tx,
+            output_tx.map(SchedulerEventSender::from),
             kv_event_publishers,
             cancellation_token,
-            None,
             fpm_publisher,
-        )
+        );
+        drop(actor);
+        scheduler
     }
 
-    pub(crate) fn new_with_admission(
+    pub(crate) fn spawn_with_event_sender(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        event_tx: Option<SchedulerEventSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
         fpm_publisher: FpmPublisher,
-    ) -> Self {
-        Self::new_internal(
+    ) -> (Self, tokio::task::JoinHandle<anyhow::Result<()>>) {
+        let (inner, actor) = spawn_live_scheduler(
             args,
             dp_rank,
-            output_tx.map(SchedulerOutputSender::from),
+            event_tx,
             kv_event_publishers,
             cancellation_token,
-            admission_tx,
             fpm_publisher,
-        )
-    }
-
-    fn new_internal(
-        args: MockEngineArgs,
-        dp_rank: u32,
-        output_tx: Option<SchedulerOutputSender>,
-        kv_event_publishers: KvEventPublishers,
-        cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
-        fpm_publisher: FpmPublisher,
-    ) -> Self {
-        Self {
-            inner: spawn_live_scheduler(
-                args,
-                dp_rank,
-                output_tx,
-                kv_event_publishers,
-                cancellation_token,
-                admission_tx,
-                fpm_publisher,
-                VllmCore::new_with_sink,
-            ),
-        }
+            VllmCore::new_with_sink,
+        );
+        (Self { inner }, actor)
     }
 }
 
@@ -238,13 +215,16 @@ impl LiveBoundaryCore for VllmCore {
         }
     }
 
-    fn execute_live_pass(&mut self, scheduler_start: &Instant) -> LivePassExecution {
+    fn execute_live_pass(
+        &mut self,
+        scheduler_start: &Instant,
+    ) -> anyhow::Result<LivePassExecution> {
         // Wall-clock elapsed time drives the PS bandwidth models across
         // vLLM passes; SGLang reports a duration directly from each pass.
         let now_ms = scheduler_start.elapsed().as_secs_f64() * 1000.0;
-        let pass = self.execute_pass_internal(None, now_ms, None);
+        let pass = self.execute_pass_internal(now_ms, None)?;
         let duration = std::time::Duration::from_secs_f64((pass.end_ms - now_ms).max(0.0) / 1000.0);
-        LivePassExecution { pass, duration }
+        Ok(LivePassExecution { pass, duration })
     }
 
     fn output_delivery_failed(&mut self, signals: Vec<OutputSignal>) {

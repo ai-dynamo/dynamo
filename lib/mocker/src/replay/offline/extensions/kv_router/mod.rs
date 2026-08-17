@@ -24,18 +24,18 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
-    SchedulingRequest, SequenceRequest, TrackingHashAlgorithm, TrackingHashContext,
+    SchedulingRequest, SequenceRequest, SessionContext, TrackingHashAlgorithm, TrackingHashContext,
     TrackingHashScope, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
+use serde::Serialize;
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
-use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::components::{KvReplayMetadata, ReplayAdmissionMetadata};
 use crate::replay::offline::core::{
     Placement, PlacementDecision, PlacementEffects, PlacementPolicy, PlannerCacheSample,
@@ -46,6 +46,7 @@ use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector, replay_slots,
     replay_worker_config, replay_workers_with_configs,
 };
+use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
 
 mod composition_agg;
 pub(in crate::replay) use composition_agg::AggRuntime;
@@ -55,6 +56,92 @@ pub(in crate::replay) use composition_disagg::DisaggRuntime;
 pub(in crate::replay::offline) use composition_disagg::{
     derive_decode_router_config, derive_prefill_router_config,
 };
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalReplayRouterMode {
+    RoundRobin,
+    KvRouter,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CanonicalRouterMetadata {
+    pub mode: CanonicalReplayRouterMode,
+    pub config: Option<KvRouterConfig>,
+}
+
+pub(in crate::replay) fn validate_canonical_router_config(config: &KvRouterConfig) -> Result<()> {
+    for (field, value) in [
+        ("overlap_score_credit", Some(config.overlap_score_credit)),
+        (
+            "overlap_score_credit_decay",
+            Some(config.overlap_score_credit_decay),
+        ),
+        ("prefill_load_scale", Some(config.prefill_load_scale)),
+        (
+            "decode_active_request_weight",
+            Some(config.decode_active_request_weight),
+        ),
+        ("host_cache_hit_weight", Some(config.host_cache_hit_weight)),
+        ("disk_cache_hit_weight", Some(config.disk_cache_hit_weight)),
+        ("router_temperature", Some(config.router_temperature)),
+        ("router_ttl_secs", Some(config.router_ttl_secs)),
+        ("router_queue_threshold", config.router_queue_threshold),
+        (
+            "shared_cache_multiplier",
+            Some(config.shared_cache_multiplier),
+        ),
+        (
+            "router_predicted_ttl_secs",
+            config.router_predicted_ttl_secs,
+        ),
+        (
+            "conditional_disagg_eff_isl_ratio_threshold",
+            Some(config.conditional_disagg_eff_isl_ratio_threshold),
+        ),
+        (
+            "conditional_disagg_prefill_busy_threshold",
+            config.conditional_disagg_prefill_busy_threshold,
+        ),
+        (
+            "conditional_disagg_decode_busy_threshold",
+            config.conditional_disagg_decode_busy_threshold,
+        ),
+    ] {
+        if let Some(value) = value {
+            anyhow::ensure!(
+                value.is_finite(),
+                "canonical replay rejects non-finite number at /metadata/router/config/{field}"
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn canonical_router_metadata(
+    mode: ReplayRouterMode,
+    config: Option<&KvRouterConfig>,
+) -> Result<CanonicalRouterMetadata> {
+    if let Some(config) = config {
+        validate_canonical_router_config(config)?;
+        anyhow::ensure!(
+            config.router_tracking_key_file.is_none(),
+            "canonical replay does not support router_tracking_key_file"
+        );
+        anyhow::ensure!(
+            config.router_policy_config.is_none(),
+            "canonical replay does not support router_policy_config"
+        );
+    }
+    let (mode, config) = match mode {
+        ReplayRouterMode::RoundRobin => (CanonicalReplayRouterMode::RoundRobin, None),
+        ReplayRouterMode::KvRouter => (
+            CanonicalReplayRouterMode::KvRouter,
+            Some(config.cloned().unwrap_or_default()),
+        ),
+    };
+    Ok(CanonicalRouterMetadata { mode, config })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WorkerAdmission {
@@ -204,6 +291,8 @@ impl PendingRequest {
                 effective_overlap_blocks,
                 effective_cached_tokens,
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             worker_loads,
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
@@ -211,7 +300,10 @@ impl PendingRequest {
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
             policy_class: self.policy_class.clone(),
-            session_id: self.session_id.clone(),
+            session_context: self
+                .session_id
+                .clone()
+                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -334,10 +426,11 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         now_ms: f64,
     ) -> Result<PlacementEffects> {
         let request_metadata = request.metadata();
+        let effective_max_output_tokens = request_metadata.effective_max_output_tokens();
         let max_output_tokens = metadata
             .max_output_tokens_override()
-            .map_or(request_metadata.max_output_tokens, |override_tokens| {
-                request_metadata.max_output_tokens.min(override_tokens)
+            .map_or(effective_max_output_tokens, |override_tokens| {
+                effective_max_output_tokens.min(override_tokens)
             });
         let request_id = request_metadata
             .uuid
@@ -466,7 +559,7 @@ impl OfflineReplayRouter {
     ) -> Result<RouterEffects> {
         self.on_compact_request_arrival_for_session(
             request,
-            request.max_output_tokens,
+            request.effective_max_output_tokens(),
             replay_hashes,
             session_id,
             now_ms,
@@ -1085,7 +1178,13 @@ mod tests {
             .unwrap();
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
 
-        assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
+        assert_eq!(
+            scheduling_request
+                .session_context
+                .as_ref()
+                .map(|context| context.session_id()),
+            Some("session-a")
+        );
     }
 
     #[test]

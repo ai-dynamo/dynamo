@@ -9,6 +9,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
 
+from dynamo.planner.core.types import TrafficObservation
+
 TraceFormat = Literal["mooncake", "dynamo"]
 TraceRow = Tuple[float, int, int]
 
@@ -242,6 +244,22 @@ def extract_metrics_from_trace(
     if trace_format is None:
         return []
     return _extract_metrics(paths, trace_format, throughput_adjustment_interval_seconds)
+
+
+def extract_traffic_observations_from_trace(
+    dataset: str, throughput_adjustment_interval_seconds: int
+) -> List[TrafficObservation]:
+    return [
+        TrafficObservation(
+            duration_s=throughput_adjustment_interval_seconds,
+            num_req=float(metric["request_count"]),
+            isl=float(metric["avg_isl"]),
+            osl=float(metric["avg_osl"]),
+        )
+        for metric in extract_metrics_from_trace(
+            dataset, throughput_adjustment_interval_seconds
+        )
+    ]
 
 
 def extract_metrics_from_mooncake(

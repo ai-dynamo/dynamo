@@ -1,0 +1,742 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Frontend Configuration Reference
+subtitle: Field reference for the Dynamo Frontend CLI arguments, environment variables, and HTTP endpoints.
+---
+
+This page documents the configuration options for the Dynamo Frontend (`python -m dynamo.frontend`).
+
+Every CLI argument has a corresponding environment variable. The CLI argument takes precedence; the environment variable is the fallback.
+
+<Note>
+  These are the frontend-specific flags. The frontend also parses the shared Dynamo runtime flags (namespace, discovery, planes, parsing) — see [Runtime Configuration](runtime-configuration.mdx). For the router cost model and tuning guidance behind the router flags below, see [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).
+</Note>
+
+## HTTP and networking
+
+<ParamField path="--http-host" type="string" default="0.0.0.0">
+  HTTP listen address.
+
+  Environment variable: `DYN_HTTP_HOST`
+</ParamField>
+
+<ParamField path="--http-port" type="integer" default="8000">
+  HTTP listen port.
+
+  Environment variable: `DYN_HTTP_PORT`
+</ParamField>
+
+<ParamField path="--tls-cert-path" type="string" default="null">
+  TLS certificate path (PEM). Must be paired with `--tls-key-path`.
+
+  Environment variable: `DYN_TLS_CERT_PATH`
+</ParamField>
+
+<ParamField path="--tls-key-path" type="string" default="null">
+  TLS private key path (PEM). Must be paired with `--tls-cert-path`.
+
+  Environment variable: `DYN_TLS_KEY_PATH`
+</ParamField>
+
+The Rust HTTP server also reads these environment variables, which are not exposed as CLI arguments:
+
+<ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="192">
+  Maximum request body size in MB.
+</ParamField>
+
+<ParamField path="DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS" type="integer" default="5">
+  Maximum time the Frontend waits for admitted HTTP response bodies and `/v1/realtime` WebSocket
+  tasks to finish after shutdown begins. New inference requests are rejected while draining.
+</ParamField>
+
+<ParamField path="DYN_HTTP_OVERLOAD_STATUS_CODE" type="integer" default="529">
+  HTTP status returned for overload and admission-control rejection. Use `503` only for clients that
+  cannot handle 529. Values from 200 through 999 are accepted. Informational values from 100 through
+  199, invalid values, and out-of-range values fall back to 529. The value is read and cached on
+  first use.
+</ParamField>
+
+<ParamField path="DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS" type="integer" default="0">
+  Interval in milliseconds between SSE comment frames while a streaming response has no data.
+  Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
+</ParamField>
+
+## Router
+
+This section is the canonical CLI and environment-variable reference for the frontend's embedded
+router. See [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md) for deployment modes and
+[Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md) for behavior and tuning guidance.
+
+### Routing and readiness
+
+<ParamField path="--router-mode" type="string" default="round-robin">
+  Routing strategy. `power-of-two` samples two workers and selects the worker with fewer in-flight
+  requests. In disaggregated prefill mode, `power-of-two` and `least-loaded` use the synchronous
+  prefill fallback path.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>power-of-two</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
+
+  Environment variable: `DYN_ROUTER_MODE`
+</ParamField>
+
+<ParamField path="--router-min-initial-workers" type="integer" default="0">
+  Minimum number of workers required before router startup continues. `0` disables the startup wait.
+
+  Environment variable: `DYN_ROUTER_MIN_INITIAL_WORKERS`
+</ParamField>
+
+<ParamField path="--router-session-affinity-ttl-secs" type="integer" default="null">
+  Enable session affinity with this router-local idle TTL in seconds. Bindings synchronize across
+  router replicas on a best-effort basis. Valid values are `1` through `31536000`; omit the option
+  to disable session affinity. See [Session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity).
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`
+</ParamField>
+
+<ParamField path="--decode-fallback / --no-decode-fallback" type="boolean" default="false">
+  Fall back to aggregated mode when prefill workers are unavailable.
+
+  Environment variable: `DYN_DECODE_FALLBACK`
+</ParamField>
+
+### KV scoring and cache locality
+
+<ParamField path="--load-aware / --no-load-aware" type="boolean" default="false">
+  Preset for KV load-aware routing without cache-reuse signals; implies `--router-mode kv`.
+
+  Environment variable: `DYN_ROUTER_LOAD_AWARE`
+</ParamField>
+
+<ParamField path="--router-kv-overlap-score-credit" type="float" default="1.0">
+  Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative.
+  Values greater than `1.0` give device overlap extra credit, but adjusted prefill cost is
+  clamped at zero. See [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines).
+
+  Environment variable: `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT`
+</ParamField>
+
+<ParamField path="--router-kv-overlap-score-credit-decay" type="float" default="0.0">
+  Decay rate for device-local overlap credit as active prefill load rises above the least-loaded
+  eligible worker. `0` disables decay; `1` halves the credit at one request-equivalent of excess
+  active prefill load.
+
+  Environment variable: `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY`
+</ParamField>
+
+<ParamField path="--router-prefill-load-scale" type="float" default="1.0">
+  Scale applied to adjusted prompt-side prefill load after overlap and lower-tier cache-hit credits
+  are subtracted. The minimum is `0.0`; there is no hard maximum.
+
+  Environment variable: `DYN_ROUTER_PREFILL_LOAD_SCALE`
+</ParamField>
+
+<ParamField path="--router-host-cache-hit-weight" type="float" default="0.75">
+  Credit multiplier from `0.0` through `1.0` for host-pinned, CPU-tier prefix-cache hits.
+
+  Environment variable: `DYN_ROUTER_HOST_CACHE_HIT_WEIGHT`
+</ParamField>
+
+<ParamField path="--router-disk-cache-hit-weight" type="float" default="0.25">
+  Credit multiplier from `0.0` through `1.0` for disk or other lower-tier prefix-cache hits.
+
+  Environment variable: `DYN_ROUTER_DISK_CACHE_HIT_WEIGHT`
+</ParamField>
+
+<ParamField path="--shared-cache-multiplier" type="float" default="0.5">
+  **Experimental.** Credit multiplier from `0.0` through `1.0` for external shared-cache hits.
+
+  Environment variable: `DYN_SHARED_CACHE_MULTIPLIER`
+</ParamField>
+
+<ParamField path="--shared-cache-type" type="string" default="none">
+  **Experimental.** External shared KV-cache implementation.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>none</Badge> <Badge intent="note" minimal>hicache</Badge></span>
+
+  Environment variable: `DYN_SHARED_CACHE_TYPE`
+</ParamField>
+
+<ParamField path="--router-temperature" type="float" default="0.0">
+  Softmax temperature for normalized worker sampling. `0` selects the lowest-cost worker
+  deterministically; higher values add randomness.
+
+  Environment variable: `DYN_ROUTER_TEMPERATURE`
+</ParamField>
+
+### KV state and indexers
+
+<ParamField path="--router-kv-events / --no-router-kv-events" type="boolean" default="true">
+  Consume KV cache state events from workers. Disable this option to predict cache state from routing
+  decisions instead.
+
+  Environment variable: `DYN_ROUTER_USE_KV_EVENTS`
+</ParamField>
+
+<ParamField path="--router-ttl-secs" type="float" default="120.0">
+  Block TTL in seconds for prediction-based routing. Used only with `--no-router-kv-events`.
+
+  Environment variable: `DYN_ROUTER_TTL_SECS`
+</ParamField>
+
+<ParamField path="--router-predicted-ttl-secs" type="float" default="null">
+  Enable a local predict-on-route side indexer with this TTL in seconds. This option requires KV
+  events and is independent of `--router-ttl-secs`, which configures pure approximate mode.
+
+  Environment variable: `DYN_ROUTER_PREDICTED_TTL_SECS`
+</ParamField>
+
+<ParamField path="--router-event-threads" type="integer" default="4">
+  KV indexer worker threads. Values greater than `1` use the concurrent radix tree, including with
+  `--no-router-kv-events`.
+
+  Environment variable: `DYN_ROUTER_EVENT_THREADS`
+</ParamField>
+
+<ParamField path="--use-remote-indexer / --no-use-remote-indexer" type="boolean" default="false">
+  **Experimental.** Query a remote KV indexer served by a worker component instead of maintaining a
+  local primary indexer.
+
+  Environment variable: `DYN_USE_REMOTE_INDEXER`
+</ParamField>
+
+<ParamField path="--serve-indexer / --no-serve-indexer" type="boolean" default="false">
+  Serve this frontend's local KV indexers over the request plane. Requires `--router-mode kv` and is
+  mutually exclusive with `--use-remote-indexer`.
+
+  Environment variable: `DYN_SERVE_INDEXER`
+</ParamField>
+
+<ParamField path="--router-replica-sync / --no-router-replica-sync" type="boolean" default="false">
+  Enable best-effort active-sequence synchronization through the Runtime event plane.
+
+  Environment variable: `DYN_ROUTER_REPLICA_SYNC`
+</ParamField>
+
+<ParamField path="--router-tracking-hash" type="string" default="public-xxh3-v1">
+  Hash function for router-derived active-sequence identities. `keyed-xxh3-v1` is experimental and
+  requires both a tracking key file and key ID.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>public-xxh3-v1</Badge> <Badge intent="note" minimal>keyed-xxh3-v1</Badge></span>
+
+  Environment variable: `DYN_ROUTER_TRACKING_HASH`
+</ParamField>
+
+<ParamField path="--router-tracking-key-file" type="string" default="null">
+  File containing the provider tracking key. Keyed tracking requires exactly 32 raw bytes.
+
+  Environment variable: `DYN_ROUTER_TRACKING_KEY_FILE`
+</ParamField>
+
+<ParamField path="--router-tracking-key-id" type="string" default="null">
+  Nonempty provider-managed key epoch identifier required for keyed tracking.
+
+  Environment variable: `DYN_ROUTER_TRACKING_KEY_ID`
+</ParamField>
+
+### Active load and queueing
+
+<ParamField path="--router-track-active-blocks / --no-router-track-active-blocks" type="boolean" default="true">
+  Track blocks used by in-progress requests for load balancing.
+
+  Environment variable: `DYN_ROUTER_TRACK_ACTIVE_BLOCKS`
+</ParamField>
+
+<ParamField path="--router-assume-kv-reuse / --no-router-assume-kv-reuse" type="boolean" default="true">
+  Assume KV cache reuse when tracking active blocks.
+
+  Environment variable: `DYN_ROUTER_ASSUME_KV_REUSE`
+</ParamField>
+
+<ParamField path="--router-track-output-blocks / --no-router-track-output-blocks" type="boolean" default="false">
+  Track output blocks during generation. With `nvext.agent_hints.osl`, fractional decay applies
+  to output blocks and the structurally exclusive prompt suffix; shared prompt blocks retain full weight.
+
+  Environment variable: `DYN_ROUTER_TRACK_OUTPUT_BLOCKS`
+</ParamField>
+
+<ParamField path="--router-decode-active-request-weight" type="float" default="0.0">
+  **Experimental.** Finite, nonnegative block-equivalent decode cost added for each active request on
+  a candidate worker. Tune this value only when decode step latency depends materially on active batch
+  size.
+
+  Environment variable: `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT`
+</ParamField>
+
+<ParamField path="--router-track-prefill-tokens / --no-router-track-prefill-tokens" type="boolean" default="true">
+  Track prompt-side prefill tokens in worker load accounting.
+
+  Environment variable: `DYN_ROUTER_TRACK_PREFILL_TOKENS`
+</ParamField>
+
+<ParamField path="--router-prefill-load-model" type="string" default="none">
+  Prompt-side load model. `none` keeps static prompt load; `aic` decays the oldest active prefill
+  request using an AIC prediction. See [AIC prefill load model](#aic-prefill-load-model).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>none</Badge> <Badge intent="note" minimal>aic</Badge></span>
+
+  Environment variable: `DYN_ROUTER_PREFILL_LOAD_MODEL`
+</ParamField>
+
+<ParamField path="--router-queue-threshold" type="float" default="null">
+  Queue threshold fraction of prefill capacity. Setting a nonnegative numeric value enables queueing;
+  priority hints affect only requests waiting in this queue.
+
+  Environment variable: `DYN_ROUTER_QUEUE_THRESHOLD`
+</ParamField>
+
+<ParamField path="--router-queue-policy" type="string" default="fcfs">
+  Queue scheduling policy. `fcfs` optimizes tail Time To First Token (TTFT); `wspt` optimizes average
+  TTFT.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fcfs</Badge> <Badge intent="note" minimal>wspt</Badge></span>
+
+  Environment variable: `DYN_ROUTER_QUEUE_POLICY`
+</ParamField>
+
+<ParamField path="--router-policy-config" type="string" default="null">
+  Startup-only YAML for policy-class queues and custom worker-selection instances. When omitted,
+  `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
+  Queueing remains disabled until a threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/advanced-customizations/custom-worker-selection.mdx).
+
+  Environment variable: `DYN_ROUTER_POLICY_CONFIG`
+</ParamField>
+
+<ParamField path="--router-prefill-policy" type="string" default="null">
+  Worker-selection instance for disaggregated prefill workers in the current router process. This
+  option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
+  worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
+
+  Environment variable: `DYN_ROUTER_PREFILL_POLICY`
+</ParamField>
+
+<ParamField path="--router-decode-policy" type="string" default="null">
+  Worker-selection instance for decode workers in the current router process. This option
+  overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
+  model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
+  pool with `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
+
+  Environment variable: `DYN_ROUTER_DECODE_POLICY`
+</ParamField>
+
+## AIC prefill load model
+
+These options apply only when `--router-mode kv` is combined with `--router-prefill-load-model aic`.
+
+When enabled, the frontend's embedded KV router predicts one expected prefill duration per admitted request, using the selected worker's overlap-derived cached prefix, then decays only the oldest active prefill request on each worker for prompt-side load accounting.
+
+<ParamField path="--aic-backend" type="string" default="null">
+  Backend family to model in AIC, for example `vllm` or `sglang`.
+
+  Environment variable: `DYN_AIC_BACKEND`
+</ParamField>
+
+<ParamField path="--aic-system" type="string" default="null">
+  AIC hardware/system identifier, for example `h200_sxm`.
+
+  Environment variable: `DYN_AIC_SYSTEM`
+</ParamField>
+
+<ParamField path="--aic-model-path" type="string" default="null">
+  Model path or model identifier used for AIC perf lookup.
+
+  Environment variable: `DYN_AIC_MODEL_PATH`
+</ParamField>
+
+<ParamField path="--aic-backend-version" type="string" default="backend-specific">
+  Pinned AIC database version. If omitted, Dynamo uses the backend default.
+
+  Environment variable: `DYN_AIC_BACKEND_VERSION`
+</ParamField>
+
+<ParamField path="--aic-tp-size" type="integer" default="1">
+  Tensor-parallel size to model in AIC.
+
+  Environment variable: `DYN_AIC_TP_SIZE`
+</ParamField>
+
+<ParamField path="--aic-moe-tp-size" type="integer" default="null">
+  MoE tensor-parallel size for models that require AIC MoE parallelism.
+
+  Environment variable: `DYN_AIC_MOE_TP_SIZE`
+</ParamField>
+
+<ParamField path="--aic-moe-ep-size" type="integer" default="null">
+  MoE expert-parallel size for models that require AIC MoE parallelism.
+
+  Environment variable: `DYN_AIC_MOE_EP_SIZE`
+</ParamField>
+
+<ParamField path="--aic-attention-dp-size" type="integer" default="null">
+  Attention data-parallel size for models that require AIC MoE parallelism.
+
+  Environment variable: `DYN_AIC_ATTENTION_DP_SIZE`
+</ParamField>
+
+For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--aic-moe-tp-size` to the same value as `--aic-tp-size`, with `--aic-moe-ep-size 1` and `--aic-attention-dp-size 1`.
+
+## Fault tolerance
+
+<ParamField path="--migration-limit" type="integer" default="0">
+  Maximum request migrations per worker disconnect. `0` disables migration.
+
+  Environment variable: `DYN_MIGRATION_LIMIT`
+</ParamField>
+
+<ParamField path="--migration-max-seq-len" type="integer" default="null">
+  Maximum prompt-plus-output sequence length that remains eligible for migration. When a request
+  strictly exceeds the limit, migration and token tracking stop for that request. Must be from `1`
+  through `4294967295`. Unset means no sequence-length limit.
+
+  Environment variable: `DYN_MIGRATION_MAX_SEQ_LEN`
+</ParamField>
+
+<ParamField path="--active-decode-blocks-threshold" type="float" default="null">
+  KV cache utilization fraction from `0.0` through `1.0`. A numeric value independently enables
+  decode-block busy rejection. Decode-block telemetry requires `--router-mode kv`; use
+  `--router-track-output-blocks` when generated tokens should contribute to the observed load.
+
+  Environment variable: `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD`
+</ParamField>
+
+<ParamField path="--active-prefill-tokens-threshold" type="integer" default="null">
+  Absolute active-prefill-token threshold. A numeric value greater than or equal to `0` independently
+  enables this check. Uses OR logic with the fractional prefill threshold.
+
+  Environment variable: `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD`
+</ParamField>
+
+<ParamField path="--active-prefill-tokens-threshold-frac" type="float" default="null">
+  Non-negative fraction of `max_num_batched_tokens` used as the active-prefill-token threshold. A
+  numeric value independently enables this check. Uses OR logic with the absolute prefill threshold.
+
+  Environment variable: `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC`
+</ParamField>
+
+For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fault-tolerance/request-rejection.md) and [Request Migration](../../kubernetes/fault-tolerance/request-migration.md).
+
+## Model discovery
+
+<ParamField path="--namespace" type="string" default="null">
+  Exact namespace for model discovery scoping.
+
+  Environment variable: `DYN_NAMESPACE`
+</ParamField>
+
+<ParamField path="--namespace-prefix" type="string" default="null">
+  Namespace prefix for discovery (for example, `ns` matches `ns`, `ns-abc123`). Takes precedence over `--namespace`.
+
+  Environment variable: `DYN_NAMESPACE_PREFIX`
+</ParamField>
+
+<ParamField path="--model-name" type="string" default="null">
+  Override model name string.
+
+  Environment variable: `DYN_MODEL_NAME`
+</ParamField>
+
+<ParamField path="--model-path" type="string" default="null">
+  Path to a local model directory (for private/custom models).
+
+  Environment variable: `DYN_MODEL_PATH`
+</ParamField>
+
+<ParamField path="--kv-cache-block-size" type="integer" default="null">
+  KV cache block size override.
+
+  Environment variable: `DYN_KV_CACHE_BLOCK_SIZE`
+</ParamField>
+
+## Infrastructure
+
+<ParamField path="--discovery-backend" type="string" default="etcd">
+  Service discovery backend.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>kubernetes</Badge> <Badge intent="note" minimal>etcd</Badge> <Badge intent="note" minimal>file</Badge> <Badge intent="note" minimal>mem</Badge></span>
+
+  Environment variable: `DYN_DISCOVERY_BACKEND`
+</ParamField>
+
+<ParamField path="--request-plane" type="string" default="tcp">
+  Request distribution transport. `tcp` is the fastest.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>nats</Badge></span>
+
+  Environment variable: `DYN_REQUEST_PLANE`
+</ParamField>
+
+<ParamField path="--event-plane" type="string" default="auto">
+  Event publishing transport. Defaults to `zmq` for `file`/`mem` discovery and `nats` for `etcd`/`kubernetes`.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
+
+  Environment variable: `DYN_EVENT_PLANE`
+</ParamField>
+
+## KServe gRPC
+
+<ParamField path="--kserve-grpc-server / --no-kserve-grpc-server" type="boolean" default="false">
+  Start the KServe gRPC v2 server.
+
+  Environment variable: `DYN_KSERVE_GRPC_SERVER`
+</ParamField>
+
+<ParamField path="--grpc-metrics-port" type="integer" default="8788">
+  HTTP metrics port for the gRPC service.
+
+  Environment variable: `DYN_GRPC_METRICS_PORT`
+</ParamField>
+
+The gRPC server also supports optional HTTP/2 flow-control tuning via environment variables:
+
+<ParamField path="DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE" type="integer" default="65536">
+  HTTP/2 connection-level flow control window size in bytes. Default is the tonic default (64 KB).
+</ParamField>
+
+<ParamField path="DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE" type="integer" default="65536">
+  HTTP/2 per-stream flow control window size in bytes. Default is the tonic default (64 KB).
+</ParamField>
+
+See the [Frontend Guide](../../developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md) for KServe message formats, gRPC tuning examples, and integration details.
+
+## Monitoring
+
+<ParamField path="--metrics-prefix" type="string" default="dynamo_frontend">
+  Prefix for frontend Prometheus metrics.
+
+  Environment variable: `DYN_METRICS_PREFIX`
+</ParamField>
+
+<ParamField path="--dump-config-to" type="string" default="null">
+  Dump the resolved config to a file path.
+
+  Environment variable: `DYN_DUMP_CONFIG_TO`
+</ParamField>
+
+## Tokenizer
+
+<ParamField path="--tokenizer" type="string" default="default">
+  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance hybrid encoder; and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge> <Badge intent="note" minimal>basetenkenizer</Badge></span>
+
+  Environment variable: `DYN_TOKENIZER`
+</ParamField>
+
+<ParamField path="--tokenizer-fallback / --no-tokenizer-fallback" type="boolean" default="true">
+  Fall back to HuggingFace when `fastokens` or `basetenkenizer` cannot load the model tokenizer. Use
+  `--no-tokenizer-fallback` to fail model initialization instead. In dynamic mode, discovery retries
+  the load while the frontend continues running.
+
+  <Warning>
+    Automatic tokenizer fallback is deprecated and will be disabled by default in a future release.
+    Set `--no-tokenizer-fallback` to adopt the future behavior now.
+  </Warning>
+
+  Environment variable: `DYN_TOKENIZER_FALLBACK`
+</ParamField>
+
+## Experimental
+
+### Python route extensions
+
+<ParamField path="--frontend-route-extension" type="string" default="[]">
+  Load a trusted HTTP route provider by a name registered in the `dynamo.frontend.routes` entry-point
+  group or by an importable `module:function` path. Repeat the option to load multiple providers.
+  Providers can add static `GET` routes but cannot override built-in routes; invalid or duplicate
+  routes fail startup. Extensions apply only to the HTTP frontend. See
+  [Python Route Extensions](../../developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md) for a packaged and direct-load example.
+
+  Environment variable: `DYN_FRONTEND_ROUTE_EXTENSIONS` accepts whitespace-separated values.
+</ParamField>
+
+#### Handler contract
+
+- **Provider resolution:** A registered `dynamo.frontend.routes` entry-point name takes precedence.
+  If no registered name matches, a value containing `:` is resolved as `module:function`. Unknown
+  names fail startup and report the available registered extensions.
+- **Provider return:** The provider callable returns one `FrontendRoute` or an iterable of routes.
+- **Route shape:** Extensions support static-path `GET` routes only. Path parameters, wildcards,
+  other HTTP methods, asynchronous handlers, and duplicates of built-in routes are rejected.
+- **Handler signature:** A synchronous `handler(ctx: FrontendExtensionContext)` returns a
+  JSON-serializable body for HTTP 200, or `FrontendResponse(status_code, body)` to override the
+  status code.
+- **Live state:** `FrontendExtensionContext` exposes `is_ready()`, `is_cancelled()`,
+  `has_any_ready_model()`, `is_model_ready_to_serve(name)`, `model_display_names()`, and
+  `serving_ready_display_names()`.
+- **Execution limits:** Handlers run in a small dedicated thread pool. A handler that exceeds 30
+  seconds returns 503. A saturated pool rejects new extension requests with the configured overload
+  status code, 529 by default.
+- **Multiple providers:** Repeating the CLI option or listing whitespace-separated environment
+  values loads multiple providers. Duplicate provider names are de-duplicated.
+
+### Other experimental options
+
+<ParamField path="--enable-anthropic-api" type="boolean" default="false">
+  Enable `/v1/messages` (the Anthropic Messages API).
+
+  Environment variable: `DYN_ENABLE_ANTHROPIC_API`
+</ParamField>
+
+<ParamField path="--dyn-chat-processor" type="string" default="dynamo">
+  Chat processor. See [Chat Processors](../../use-cases/tool-calling-and-reasoning/chat-processors.mdx) for how this combines with the parser flags.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>dynamo</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+
+  Environment variable: `DYN_CHAT_PROCESSOR`
+</ParamField>
+
+<ParamField path="--dyn-debug-perf" type="boolean" default="false">
+  Log per-function timing for preprocessing (vllm processor only).
+
+  Environment variable: `DYN_DEBUG_PERF`
+</ParamField>
+
+<ParamField path="--dyn-preprocess-workers" type="integer" default="0">
+  Worker processes for CPU-bound preprocessing. `0` uses the main event loop (vllm processor only).
+
+  Environment variable: `DYN_PREPROCESS_WORKERS`
+</ParamField>
+
+<ParamField path="-i / --interactive" type="boolean" default="false">
+  Interactive text chat mode.
+
+  Environment variable: `DYN_INTERACTIVE`
+</ParamField>
+
+## Host memory allocator
+
+The frontend performs per-request host-memory allocations. Under high CPU load, allocator
+contention can cap frontend throughput before the GPU workers saturate. Dynamo runtime containers
+include jemalloc, but the frontend does not preload it by default.
+
+<ParamField path="LD_PRELOAD" type="string" default="unset">
+  Preload jemalloc for the frontend process. The library path depends on the container architecture:
+
+  ```bash
+  # x86_64
+  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+
+  # arm64
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+  ```
+
+  In Kubernetes, set this variable on the frontend container rather than modifying the image. Locate
+  the installed path with `dpkg -L libjemalloc2 | grep 'libjemalloc.so'` if the image uses a different
+  layout.
+</ParamField>
+
+<ParamField path="MALLOC_CONF" type="string" default="jemalloc defaults">
+  Configure jemalloc when it is preloaded. The best values depend on the request workload and CPU
+  allocation. This is an empirical starting point, not a production default:
+
+  ```bash
+  export MALLOC_CONF="narenas:32,tcache:true,lg_tcache_max:15,dirty_decay_ms:5000,muzzy_decay_ms:5000"
+  ```
+
+  Validate allocator changes with the same AIPerf workload before and after enabling them. See
+  [Advanced Performance Tuning](../../kubernetes/operations/performance-tuning.md).
+</ParamField>
+
+## HTTP endpoints
+
+The frontend exposes the following HTTP endpoints.
+
+### OpenAI-compatible
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/chat/completions` | Chat completions (streaming and non-streaming) |
+| `POST` | `/v1/completions` | Text completions |
+| `POST` | `/v1/embeddings` | Text embeddings |
+| `POST` | `/v1/responses` | Responses API |
+| `POST` | `/v1/images/generations` | Image generation |
+| `POST` | `/v1/videos/generations` | Video generation |
+| `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
+| `GET` | `/v1/models` | List available models |
+
+### Anthropic (Experimental)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
+| `POST` | `/v1/messages/count_tokens` | Token counting for the Anthropic API |
+
+### Infrastructure
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check |
+| `GET` | `/live` | Liveness check |
+| `GET` | `/metrics` | Prometheus metrics |
+| `GET` | `/openapi.json` | OpenAPI specification |
+| `GET` | `/docs` | Swagger UI |
+| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
+| `GET` | `/busy_threshold` | Get stored busy thresholds (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
+
+`POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
+`active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
+only that check. The router reevaluates workers on the next worker-load or runtime-configuration
+update; the call does not synchronously recompute the busy set and does not change startup-only router
+options such as `--router-mode kv` or `--router-track-output-blocks`.
+
+### Frontend feature switches
+
+Environment variables controlling frontend extensions. Extensions are enabled by default. Set a
+truthy value (`1`, `true`, `yes`, or `on`, case-insensitive) to disable the corresponding surface.
+
+<ParamField path="DYN_DISABLE_FRONTEND_NVEXT" type="boolean" default="false">
+  When truthy, the frontend drops `request.nvext` on `/v1/chat/completions`, `/v1/completions`,
+  `/v1/responses`, `/v1/embeddings`, and `/v1/messages`; ignores the
+  `x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
+  `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`, and
+  `x-dynamo-request-strict-priority` routing headers and their compatibility aliases; and ignores
+  the response-side `nvext.extra_fields` opt-in.
+</ParamField>
+
+<ParamField path="DYN_DISABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
+  When truthy, `GET /busy_threshold` and `POST /busy_threshold` are not registered and return 404.
+  Inference, metrics, models, health, and liveness routes are unaffected.
+</ParamField>
+
+### Endpoint path customization
+
+All endpoint paths can be overridden via environment variables:
+
+| Env Var | Default Path |
+|---------|-------------|
+| `DYN_HTTP_SVC_CHAT_PATH_ENV` | `/v1/chat/completions` |
+| `DYN_HTTP_SVC_CMP_PATH_ENV` | `/v1/completions` |
+| `DYN_HTTP_SVC_EMB_PATH_ENV` | `/v1/embeddings` |
+| `DYN_HTTP_SVC_RESPONSES_PATH_ENV` | `/v1/responses` |
+| `DYN_HTTP_SVC_MODELS_PATH_ENV` | `/v1/models` |
+| `DYN_HTTP_SVC_ANTHROPIC_PATH_ENV` | `/v1/messages` |
+| `DYN_HTTP_SVC_HEALTH_PATH_ENV` | `/health` |
+| `DYN_HTTP_SVC_LIVE_PATH_ENV` | `/live` |
+| `DYN_HTTP_SVC_METRICS_PATH_ENV` | `/metrics` |
+
+## Deprecated
+
+<ParamField path="--admission-control" type="string" default="null" deprecated={true}>
+  **Deprecated and ignored.** Configure the three busy thresholds directly. The compatibility flag
+  and `DYN_ADMISSION_CONTROL` are accepted only so older launch commands continue to start.
+
+  Environment variable: `DYN_ADMISSION_CONTROL`
+</ParamField>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Runtime Configuration" href="runtime-configuration.mdx" icon="gear">
+    Shared Dynamo runtime flags parsed by the frontend and every backend.
+  </Card>
+  <Card title="Configuration and Tuning" href="../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md" icon="sliders">
+    Router cost model and tuning guidance behind the router flags on this page.
+  </Card>
+  <Card title="Frontend Guide" href="../../developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md" icon="book">
+    KServe gRPC configuration and integration details.
+  </Card>
+  <Card title="NVIDIA Request Extensions (nvext)" href="../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md" icon="code">
+    Custom per-request fields for routing, preprocessing, and response metadata.
+  </Card>
+</CardGroup>

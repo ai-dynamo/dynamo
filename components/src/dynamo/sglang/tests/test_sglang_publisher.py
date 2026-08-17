@@ -3,6 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -246,6 +247,8 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
             return FakeClient()
 
     server_args = SimpleNamespace(
+        dp_size=2,
+        enable_dp_attention=True,
         nnodes=2,
         node_rank=1,
         dist_timeout=5,
@@ -286,6 +289,55 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
+    resolve_leader = AsyncMock(return_value=1234)
+    kv_event_publisher = Mock()
+    monkeypatch.setattr(
+        publisher_mod,
+        "_resolve_multinode_leader_worker_id",
+        resolve_leader,
+    )
+    monkeypatch.setattr(publisher_mod, "KvEventPublisher", kv_event_publisher)
+
+    server_args = SimpleNamespace(
+        dp_size=1,
+        enable_dp_attention=False,
+        nnodes=2,
+        node_rank=1,
+    )
+    cleanup = Mock()
+    publisher = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(
+            use_kv_events=True,
+        ),
+        generate_endpoint=SimpleNamespace(),
+        init_kv_event_publish=lambda: publisher_mod.KvEventPublisher(),
+        cleanup=cleanup,
+    )
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+    task = asyncio.create_task(
+        handle_non_leader_node(
+            SimpleNamespace(server_args=server_args),
+            publisher,
+            metrics_task,
+        )
+    )
+
+    await asyncio.sleep(0)
+
+    resolve_leader.assert_not_awaited()
+    kv_event_publisher.assert_not_called()
+    assert not task.done()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    cleanup.assert_called_once_with()
     assert metrics_task.cancelled()
 
 
@@ -400,6 +452,7 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     server_args = SimpleNamespace(
         kv_events_config='{"endpoint": "tcp://*:5557"}',
         page_size=16,
+        dcp_size=2,
         dp_size=8,
         enable_dp_attention=True,
         nnodes=2,
@@ -426,6 +479,7 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert len(publishers) == 4
     assert [call["dp_rank"] for call in calls] == [4, 5, 6, 7]
     assert {call["worker_id"] for call in calls} == {1234}
+    assert {call["kv_block_size"] for call in calls} == {32}
 
 
 def test_init_kv_event_publish_uses_effective_kv_event_setting():

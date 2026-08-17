@@ -7,12 +7,10 @@
 //! the pool models occupancy, reference/pin state, and LRU eviction without
 //! reproducing vLLM's numeric block IDs or null block.
 
-use std::collections::BTreeMap;
-
 use dynamo_tokens::SequenceHash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::{SlotMap, new_key_type};
-use smallvec::SmallVec;
+use std::collections::{VecDeque, hash_map::Entry};
 
 new_key_type! {
     pub(crate) struct BlockCopyId;
@@ -21,17 +19,86 @@ new_key_type! {
 #[derive(Debug)]
 enum CopyState {
     Private,
+    /// A cached copy is linked into the inactive LRU if and only if both
+    /// `refs` and `pins` are zero. Any future cached sub-state must preserve or
+    /// explicitly revise that membership invariant.
     Cached {
         hash: SequenceHash,
         refs: usize,
         pins: usize,
-        inactive_at: Option<u64>,
+        inactive_prev: Option<BlockCopyId>,
+        inactive_next: Option<BlockCopyId>,
     },
 }
 
 #[derive(Debug)]
 struct BlockCopy {
     state: CopyState,
+}
+
+struct HashCopies {
+    primary: BlockCopyId,
+    // Keep the common one-copy value to two machine words; duplicate hashes
+    // pay the extra allocation only on the uncommon overflow path.
+    #[allow(clippy::box_collection)]
+    duplicates: Option<Box<VecDeque<BlockCopyId>>>,
+}
+
+enum CopyRemoval {
+    Last,
+    Remaining,
+    Missing,
+}
+
+impl HashCopies {
+    fn new(primary: BlockCopyId) -> Self {
+        Self {
+            primary,
+            duplicates: None,
+        }
+    }
+
+    fn push(&mut self, id: BlockCopyId) {
+        self.duplicates
+            .get_or_insert_with(|| Box::new(VecDeque::new()))
+            .push_back(id);
+    }
+
+    fn remove(&mut self, id: BlockCopyId) -> CopyRemoval {
+        if self.primary == id {
+            let Some(duplicates) = self.duplicates.as_mut() else {
+                return CopyRemoval::Last;
+            };
+            self.primary = duplicates
+                .pop_front()
+                .expect("duplicate-copy queue must not be empty");
+            if duplicates.is_empty() {
+                self.duplicates = None;
+            }
+            return CopyRemoval::Remaining;
+        }
+
+        let Some(duplicates) = self.duplicates.as_mut() else {
+            return CopyRemoval::Missing;
+        };
+        let Some(position) = duplicates.iter().position(|candidate| *candidate == id) else {
+            return CopyRemoval::Missing;
+        };
+        duplicates.remove(position);
+        if duplicates.is_empty() {
+            self.duplicates = None;
+        }
+        CopyRemoval::Remaining
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = BlockCopyId> + '_ {
+        std::iter::once(self.primary).chain(
+            self.duplicates
+                .iter()
+                .flat_map(|duplicates| duplicates.iter().copied()),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -65,10 +132,11 @@ pub(crate) struct ReserveOutcome {
 pub(crate) struct VllmBlockPool {
     capacity: usize,
     copies: SlotMap<BlockCopyId, BlockCopy>,
-    by_hash: FxHashMap<SequenceHash, SmallVec<[BlockCopyId; 1]>>,
-    /// Ordinary LRU: lower timestamp is evicted first.
-    inactive: BTreeMap<u64, BlockCopyId>,
-    next_lru: u64,
+    by_hash: FxHashMap<SequenceHash, HashCopies>,
+    /// Intrusive ordinary LRU: head is evicted first, tail was released last.
+    inactive_head: Option<BlockCopyId>,
+    inactive_tail: Option<BlockCopyId>,
+    inactive_len: usize,
     reserved: usize,
 }
 
@@ -79,8 +147,9 @@ impl VllmBlockPool {
             capacity,
             copies: SlotMap::with_key(),
             by_hash: FxHashMap::default(),
-            inactive: BTreeMap::new(),
-            next_lru: 0,
+            inactive_head: None,
+            inactive_tail: None,
+            inactive_len: 0,
             reserved: 0,
         }
     }
@@ -110,16 +179,79 @@ impl VllmBlockPool {
             return self.reserve_fresh(fresh);
         }
 
-        let hits = prefix
-            .iter()
-            .map(|hash| {
-                let Some(id) = self.first_copy(*hash) else {
-                    panic!("authorized prefix hash {hash} is no longer resident")
-                };
-                (*hash, id)
-            })
-            .collect::<Vec<_>>();
+        self.reserve_exact_prefix(prefix.iter().copied(), prefix.len() + fresh)
+    }
 
+    /// Resolve and pin the longest resident prefix from `candidates`, then
+    /// reserve the remaining entries as fresh capacity in one traversal.
+    pub(crate) fn reserve_resident_prefix(
+        &mut self,
+        candidates: impl IntoIterator<Item = SequenceHash>,
+        total: usize,
+    ) -> Option<ReserveOutcome> {
+        let mut candidates = candidates.into_iter();
+        let Some(first_hash) = candidates.next() else {
+            return self.reserve_fresh(total);
+        };
+        assert!(total > 0, "prefix candidates exceed layout");
+        let Some(first_id) = self.first_copy(first_hash) else {
+            return self.reserve_fresh(total);
+        };
+
+        let mut hits = vec![(first_hash, first_id)];
+        for hash in candidates {
+            assert!(hits.len() < total, "prefix candidates exceed layout");
+            let Some(id) = self.first_copy(hash) else {
+                break;
+            };
+            hits.push((hash, id));
+        }
+        let fresh = total - hits.len();
+        self.reserve_hits(hits, fresh)
+    }
+
+    /// Pin an already-authorized prefix and reserve the remaining entries.
+    ///
+    /// Unlike [`Self::reserve_resident_prefix`], every candidate must still be
+    /// resident. A missing hash means the caller's synchronous prefix
+    /// authorization changed before allocation committed.
+    pub(crate) fn reserve_exact_prefix<I>(
+        &mut self,
+        candidates: I,
+        total: usize,
+    ) -> Option<ReserveOutcome>
+    where
+        I: IntoIterator<Item = SequenceHash>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let mut candidates = candidates.into_iter();
+        let candidate_count = candidates.len();
+        let Some(first_hash) = candidates.next() else {
+            return self.reserve_fresh(total);
+        };
+        assert!(candidate_count <= total, "prefix candidates exceed layout");
+        let Some(first_id) = self.first_copy(first_hash) else {
+            panic!("authorized prefix hash {first_hash} is no longer resident")
+        };
+        let mut hits = Vec::with_capacity(candidate_count);
+        hits.push((first_hash, first_id));
+
+        for hash in candidates {
+            assert!(hits.len() < total, "prefix candidates exceed layout");
+            let Some(id) = self.first_copy(hash) else {
+                panic!("authorized prefix hash {hash} is no longer resident")
+            };
+            hits.push((hash, id));
+        }
+        let fresh = total - hits.len();
+        self.reserve_hits(hits, fresh)
+    }
+
+    fn reserve_hits(
+        &mut self,
+        hits: Vec<(SequenceHash, BlockCopyId)>,
+        fresh: usize,
+    ) -> Option<ReserveOutcome> {
         let free = self.free_capacity();
         let needed_evictions = fresh.saturating_sub(free);
         if needed_evictions > 0 {
@@ -128,7 +260,7 @@ impl VllmBlockPool {
                 .filter_map(|(_, id)| self.is_inactive(*id).then_some(*id))
                 .collect::<FxHashSet<_>>()
                 .len();
-            let evictable_after_pins = self.inactive.len().saturating_sub(inactive_hits);
+            let evictable_after_pins = self.inactive_len.saturating_sub(inactive_hits);
             if needed_evictions > evictable_after_pins {
                 return None;
             }
@@ -158,7 +290,7 @@ impl VllmBlockPool {
     fn reserve_fresh(&mut self, fresh: usize) -> Option<ReserveOutcome> {
         let free = self.free_capacity();
         let needed_evictions = fresh.saturating_sub(free);
-        if needed_evictions > self.inactive.len() {
+        if needed_evictions > self.inactive_len {
             return None;
         }
 
@@ -183,14 +315,12 @@ impl VllmBlockPool {
     pub(crate) fn activate_prefix(
         &mut self,
         reservation: &mut BlockReservation,
-    ) -> Vec<BlockCopyId> {
+    ) -> std::vec::IntoIter<(SequenceHash, BlockCopyId)> {
         let prefix = std::mem::take(&mut reservation.prefix);
-        let mut ids = Vec::with_capacity(prefix.len());
-        for (hash, id) in prefix {
+        for &(hash, id) in &prefix {
             self.activate_pin(id, hash);
-            ids.push(id);
         }
-        ids
+        prefix.into_iter()
     }
 
     pub(crate) fn allocate_private(&mut self, reservation: &mut BlockReservation) -> BlockCopyId {
@@ -219,7 +349,6 @@ impl VllmBlockPool {
     /// Make a request-private computed full block available for prefix reuse.
     /// Returns whether this is the first resident physical copy of `hash`.
     pub(crate) fn cache_private(&mut self, id: BlockCopyId, hash: SequenceHash) -> bool {
-        let became_visible = !self.by_hash.contains_key(&hash);
         let Some(copy) = self.copies.get_mut(id) else {
             panic!("attempted to cache an unknown block copy")
         };
@@ -231,10 +360,19 @@ impl VllmBlockPool {
             hash,
             refs: 1,
             pins: 0,
-            inactive_at: None,
+            inactive_prev: None,
+            inactive_next: None,
         };
-        self.by_hash.entry(hash).or_default().push(id);
-        became_visible
+        match self.by_hash.entry(hash) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().push(id);
+                false
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(HashCopies::new(id));
+                true
+            }
+        }
     }
 
     /// Release one request-owned reference. Private copies return capacity
@@ -278,7 +416,7 @@ impl VllmBlockPool {
     }
 
     pub(crate) fn num_active(&self) -> usize {
-        self.copies.len() - self.inactive.len() + self.reserved
+        self.copies.len() - self.inactive_len + self.reserved
     }
 
     pub(crate) fn num_active_refs(&self) -> usize {
@@ -292,7 +430,7 @@ impl VllmBlockPool {
     }
 
     pub(crate) fn num_inactive(&self) -> usize {
-        self.inactive.len()
+        self.inactive_len
     }
 
     pub(crate) fn capacity(&self) -> usize {
@@ -306,38 +444,28 @@ impl VllmBlockPool {
     }
 
     fn first_copy(&self, hash: SequenceHash) -> Option<BlockCopyId> {
-        self.by_hash
-            .get(&hash)
-            .and_then(|copies| copies.first())
-            .copied()
+        self.by_hash.get(&hash).map(|copies| copies.primary)
     }
 
     fn is_inactive(&self, id: BlockCopyId) -> bool {
-        matches!(
-            &self.copies[id].state,
-            CopyState::Cached {
-                inactive_at: Some(_),
-                ..
-            }
-        )
+        let CopyState::Cached { refs, pins, .. } = &self.copies[id].state else {
+            return false;
+        };
+        *refs == 0 && *pins == 0
     }
 
     fn pin(&mut self, id: BlockCopyId) {
-        let inactive_at = {
-            let CopyState::Cached {
-                pins, inactive_at, ..
-            } = &mut self.copies[id].state
-            else {
-                panic!("prefix hash points to a private copy")
-            };
-            *pins = pins
-                .checked_add(1)
-                .unwrap_or_else(|| panic!("pin count overflow"));
-            inactive_at.take()
-        };
-        if let Some(timestamp) = inactive_at {
-            assert_eq!(self.inactive.remove(&timestamp), Some(id));
+        // Must unlink before bumping pins: list membership is derived from
+        // refs and pins.
+        if self.is_inactive(id) {
+            self.unlink_inactive(id);
         }
+        let CopyState::Cached { pins, .. } = &mut self.copies[id].state else {
+            panic!("prefix hash points to a private copy")
+        };
+        *pins = pins
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("pin count overflow"));
     }
 
     fn activate_pin(&mut self, id: BlockCopyId, expected_hash: SequenceHash) {
@@ -374,48 +502,251 @@ impl VllmBlockPool {
     }
 
     fn insert_inactive(&mut self, id: BlockCopyId) {
-        let timestamp = self.next_lru;
-        self.next_lru = self
-            .next_lru
+        debug_assert!(
+            self.is_inactive(id),
+            "only an unreferenced, unpinned cached copy can enter the inactive LRU"
+        );
+        // A singleton has no links, so head membership is its only
+        // double-insertion signal.
+        debug_assert_ne!(
+            self.inactive_head,
+            Some(id),
+            "copy is already in the inactive LRU"
+        );
+        let previous_tail = self.inactive_tail;
+        {
+            let (prev, next) = self.inactive_links_mut(id);
+            debug_assert!(
+                prev.is_none() && next.is_none(),
+                "copy entering the inactive LRU still has list links"
+            );
+            *prev = previous_tail;
+        }
+        if let Some(tail) = previous_tail {
+            let (_, next) = self.inactive_links_mut(tail);
+            let old_next = next.replace(id);
+            debug_assert!(
+                old_next.is_none(),
+                "inactive LRU tail already has a successor"
+            );
+        } else {
+            let old_head = self.inactive_head.replace(id);
+            debug_assert!(old_head.is_none(), "empty inactive LRU still has a head");
+        }
+        self.inactive_tail = Some(id);
+        self.inactive_len = self
+            .inactive_len
             .checked_add(1)
-            .unwrap_or_else(|| panic!("LRU timestamp overflow"));
-        let CopyState::Cached { inactive_at, .. } = &mut self.copies[id].state else {
-            panic!("private copy cannot enter inactive LRU")
+            .unwrap_or_else(|| panic!("inactive block count overflow"));
+    }
+
+    fn inactive_links_mut(
+        &mut self,
+        id: BlockCopyId,
+    ) -> (&mut Option<BlockCopyId>, &mut Option<BlockCopyId>) {
+        let CopyState::Cached {
+            inactive_prev,
+            inactive_next,
+            ..
+        } = &mut self.copies[id].state
+        else {
+            panic!("inactive LRU link target is not a cached copy")
         };
-        assert!(inactive_at.replace(timestamp).is_none());
-        assert!(self.inactive.insert(timestamp, id).is_none());
+        (inactive_prev, inactive_next)
+    }
+
+    fn unlink_inactive(&mut self, id: BlockCopyId) {
+        debug_assert!(
+            self.is_inactive(id),
+            "only an unreferenced, unpinned cached copy can leave the inactive LRU"
+        );
+        let (previous, next) = {
+            let (previous, next) = self.inactive_links_mut(id);
+            (previous.take(), next.take())
+        };
+
+        if let Some(previous) = previous {
+            let (_, previous_next) = self.inactive_links_mut(previous);
+            let old_next = std::mem::replace(previous_next, next);
+            debug_assert_eq!(
+                old_next,
+                Some(id),
+                "inactive LRU predecessor does not point to the removed copy"
+            );
+        } else {
+            let old_head = std::mem::replace(&mut self.inactive_head, next);
+            debug_assert_eq!(
+                old_head,
+                Some(id),
+                "inactive LRU head does not match the removed copy"
+            );
+        }
+
+        if let Some(next) = next {
+            let (next_previous, _) = self.inactive_links_mut(next);
+            let old_previous = std::mem::replace(next_previous, previous);
+            debug_assert_eq!(
+                old_previous,
+                Some(id),
+                "inactive LRU successor does not point to the removed copy"
+            );
+        } else {
+            let old_tail = std::mem::replace(&mut self.inactive_tail, previous);
+            debug_assert_eq!(
+                old_tail,
+                Some(id),
+                "inactive LRU tail does not match the removed copy"
+            );
+        }
+
+        self.inactive_len = self
+            .inactive_len
+            .checked_sub(1)
+            .unwrap_or_else(|| panic!("inactive block count underflow"));
+    }
+
+    #[cfg(test)]
+    fn assert_lru_consistent(&self) {
+        self.assert_hash_index_consistent();
+
+        let mut linked = FxHashSet::default();
+        let mut previous = None;
+        let mut cursor = self.inactive_head;
+
+        while let Some(id) = cursor {
+            assert!(linked.insert(id), "inactive LRU contains a cycle");
+            let Some(copy) = self.copies.get(id) else {
+                panic!("inactive LRU points to a missing copy")
+            };
+            let CopyState::Cached {
+                refs,
+                pins,
+                inactive_prev,
+                inactive_next,
+                ..
+            } = &copy.state
+            else {
+                panic!("inactive LRU contains a private copy")
+            };
+            assert_eq!(
+                (*refs, *pins),
+                (0, 0),
+                "active copy is linked into the inactive LRU"
+            );
+            assert_eq!(
+                *inactive_prev, previous,
+                "inactive LRU contains a broken back-pointer"
+            );
+            previous = Some(id);
+            cursor = *inactive_next;
+        }
+
+        assert_eq!(
+            linked.len(),
+            self.inactive_len,
+            "inactive LRU length does not match its reachable copies"
+        );
+        assert_eq!(
+            self.inactive_tail, previous,
+            "inactive LRU tail does not match its final reachable copy"
+        );
+        assert_eq!(
+            self.inactive_head.is_none(),
+            self.inactive_tail.is_none(),
+            "inactive LRU head and tail emptiness disagree"
+        );
+
+        for (id, copy) in self.copies.iter() {
+            let CopyState::Cached {
+                refs,
+                pins,
+                inactive_prev,
+                inactive_next,
+                ..
+            } = &copy.state
+            else {
+                assert!(!linked.contains(&id), "private copy is in the inactive LRU");
+                continue;
+            };
+            let should_be_linked = *refs == 0 && *pins == 0;
+            assert_eq!(
+                linked.contains(&id),
+                should_be_linked,
+                "cached copy membership disagrees with its refs and pins"
+            );
+            if !should_be_linked {
+                assert!(
+                    inactive_prev.is_none() && inactive_next.is_none(),
+                    "active cached copy retains inactive LRU links"
+                );
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn assert_hash_index_consistent(&self) {
+        let mut indexed = FxHashSet::default();
+        for (&expected_hash, copies) in &self.by_hash {
+            for id in copies.iter() {
+                assert!(indexed.insert(id), "copy is indexed by multiple hashes");
+                let Some(copy) = self.copies.get(id) else {
+                    panic!("hash index points to a missing copy")
+                };
+                let CopyState::Cached { hash, .. } = &copy.state else {
+                    panic!("hash index points to a private copy")
+                };
+                assert_eq!(*hash, expected_hash, "copy is indexed under the wrong hash");
+            }
+        }
+
+        for (id, copy) in self.copies.iter() {
+            match &copy.state {
+                CopyState::Private => {
+                    assert!(!indexed.contains(&id), "private copy is hash-indexed");
+                }
+                CopyState::Cached { .. } => {
+                    assert!(indexed.contains(&id), "cached copy is not hash-indexed");
+                }
+            }
+        }
     }
 
     /// Evict one physical copy. A hash is returned only on its final copy.
     fn evict_one(&mut self) -> Option<SequenceHash> {
-        let Some((timestamp, id)) = self.inactive.pop_first() else {
+        let Some(id) = self.inactive_head else {
             panic!("prechecked inactive capacity disappeared")
         };
+        let CopyState::Cached { inactive_prev, .. } = &self.copies[id].state else {
+            panic!("inactive LRU points to a private copy")
+        };
+        assert!(
+            inactive_prev.is_none(),
+            "inactive LRU head has a predecessor"
+        );
+        self.unlink_inactive(id);
         let Some(copy) = self.copies.remove(id) else {
             panic!("inactive LRU points to a missing copy")
         };
         let CopyState::Cached {
-            hash,
-            refs,
-            pins,
-            inactive_at,
+            hash, refs, pins, ..
         } = copy.state
         else {
             panic!("inactive LRU points to a private copy")
         };
-        assert_eq!(refs, 0);
-        assert_eq!(pins, 0);
-        assert_eq!(inactive_at, Some(timestamp));
+        assert_eq!(refs, 0, "evicted cached copy still has references");
+        assert_eq!(pins, 0, "evicted cached copy is still pinned");
 
         let remove_hash = {
             let Some(copies) = self.by_hash.get_mut(&hash) else {
                 panic!("evicted cached hash is missing from its index")
             };
-            let Some(position) = copies.iter().position(|candidate| *candidate == id) else {
-                panic!("evicted copy is missing from its hash index")
-            };
-            copies.remove(position);
-            copies.is_empty()
+            match copies.remove(id) {
+                CopyRemoval::Last => true,
+                CopyRemoval::Remaining => false,
+                CopyRemoval::Missing => {
+                    panic!("evicted copy is missing from its hash index")
+                }
+            }
         };
         if remove_hash {
             self.by_hash.remove(&hash);
@@ -436,6 +767,37 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "authorized prefix hash 9 is no longer resident")]
+    fn exact_prefix_reports_missing_hash() {
+        let mut pool = VllmBlockPool::new(1);
+        let _ = pool.reserve_exact_prefix([9], 1);
+    }
+
+    #[test]
+    fn empty_exact_prefix_reserves_fresh_without_prefix_storage() {
+        let mut pool = VllmBlockPool::new(3);
+        let outcome = pool
+            .reserve_exact_prefix(std::iter::empty(), 3)
+            .expect("fresh capacity should fit");
+
+        assert_eq!(outcome.reservation.prefix.capacity(), 0);
+        assert_eq!(outcome.reservation.fresh_len(), 3);
+        pool.cancel(outcome.reservation);
+    }
+
+    #[test]
+    fn cold_resident_prefix_reserves_fresh_without_prefix_storage() {
+        let mut pool = VllmBlockPool::new(3);
+        let outcome = pool
+            .reserve_resident_prefix([7, 8, 9], 3)
+            .expect("fresh capacity should fit");
+
+        assert_eq!(outcome.reservation.prefix.capacity(), 0);
+        assert_eq!(outcome.reservation.fresh_len(), 3);
+        pool.cancel(outcome.reservation);
+    }
+
+    #[test]
     fn duplicate_hashes_consume_distinct_capacity_but_share_visibility() {
         let mut pool = VllmBlockPool::new(2);
         let mut first = reserve(&mut pool, &[], 1).reservation;
@@ -450,6 +812,7 @@ mod tests {
         pool.release(first_id);
         pool.release(second_id);
         assert_eq!(pool.num_inactive(), 2);
+        pool.assert_lru_consistent();
     }
 
     #[test]
@@ -463,27 +826,101 @@ mod tests {
         assert!(pool.reserve(&[9], 1).is_none());
         assert_eq!(pool.num_active(), 0);
         assert_eq!(pool.num_inactive(), 1);
+        pool.assert_lru_consistent();
+    }
+
+    #[test]
+    fn resident_prefix_stops_at_first_miss_and_reserves_fresh_suffix() {
+        let mut pool = VllmBlockPool::new(2);
+        let mut seed = reserve(&mut pool, &[], 1).reservation;
+        let id = pool.allocate_private(&mut seed);
+        assert!(pool.cache_private(id, 7));
+        pool.release(id);
+
+        let outcome = pool
+            .reserve_resident_prefix([7, 9], 2)
+            .expect("one resident prefix plus one fresh block should fit");
+        assert!(outcome.removed.is_empty());
+        assert_eq!(outcome.reservation.len(), 2);
+        assert_eq!(outcome.reservation.fresh_len(), 1);
+        assert_eq!(outcome.reservation.prefix.capacity(), 1);
+        pool.cancel(outcome.reservation);
+        assert_eq!(pool.num_inactive(), 1);
+        pool.assert_lru_consistent();
     }
 
     #[test]
     fn removal_is_reported_only_for_the_last_physical_copy() {
-        let mut pool = VllmBlockPool::new(2);
+        let mut pool = VllmBlockPool::new(4);
         let mut first = reserve(&mut pool, &[], 1).reservation;
         let first_id = pool.allocate_private(&mut first);
         assert!(pool.cache_private(first_id, 3));
-        let mut second = reserve(&mut pool, &[], 1).reservation;
-        let second_id = pool.allocate_private(&mut second);
-        assert!(!pool.cache_private(second_id, 3));
+
+        let mut duplicate_ids = Vec::new();
+        for _ in 0..3 {
+            let mut duplicate = reserve(&mut pool, &[], 1).reservation;
+            let duplicate_id = pool.allocate_private(&mut duplicate);
+            assert!(!pool.cache_private(duplicate_id, 3));
+            duplicate_ids.push(duplicate_id);
+        }
         pool.release(first_id);
-        pool.release(second_id);
+        for &duplicate_id in &duplicate_ids {
+            pool.release(duplicate_id);
+        }
 
         let first_eviction = reserve(&mut pool, &[], 1);
         assert!(first_eviction.removed.is_empty());
         pool.cancel(first_eviction.reservation);
 
-        let second_eviction = reserve(&mut pool, &[], 2);
-        assert_eq!(second_eviction.removed, vec![3]);
-        pool.cancel(second_eviction.reservation);
+        let promoted = pool
+            .reserve_exact_prefix([3], 1)
+            .expect("promoted duplicate should remain reservable");
+        assert_eq!(promoted.reservation.prefix, vec![(3, duplicate_ids[0])]);
+        pool.cancel(promoted.reservation);
+
+        for fresh in [2, 3] {
+            let duplicate_eviction = reserve(&mut pool, &[], fresh);
+            assert!(duplicate_eviction.removed.is_empty());
+            pool.cancel(duplicate_eviction.reservation);
+        }
+
+        let final_eviction = reserve(&mut pool, &[], 4);
+        assert_eq!(final_eviction.removed, vec![3]);
+        pool.cancel(final_eviction.reservation);
+        pool.assert_lru_consistent();
+    }
+
+    #[test]
+    fn evicting_middle_duplicate_preserves_primary_lookup() {
+        let mut pool = VllmBlockPool::new(4);
+        let mut first = reserve(&mut pool, &[], 1).reservation;
+        let first_id = pool.allocate_private(&mut first);
+        assert!(pool.cache_private(first_id, 3));
+
+        let mut duplicate_ids = Vec::new();
+        for _ in 0..3 {
+            let mut duplicate = reserve(&mut pool, &[], 1).reservation;
+            let duplicate_id = pool.allocate_private(&mut duplicate);
+            assert!(!pool.cache_private(duplicate_id, 3));
+            duplicate_ids.push(duplicate_id);
+        }
+        let middle_id = duplicate_ids[1];
+        pool.release(middle_id);
+
+        let pressure = reserve(&mut pool, &[], 1);
+        assert!(pressure.removed.is_empty());
+        pool.cancel(pressure.reservation);
+        assert!(pool.copies.get(middle_id).is_none());
+
+        let primary = pool
+            .reserve_exact_prefix([3], 1)
+            .expect("primary copy should remain reservable");
+        assert_eq!(primary.reservation.prefix, vec![(3, first_id)]);
+        pool.cancel(primary.reservation);
+        pool.release(first_id);
+        pool.release(duplicate_ids[0]);
+        pool.release(duplicate_ids[2]);
+        pool.assert_lru_consistent();
     }
 
     #[test]
@@ -509,5 +946,75 @@ mod tests {
         assert!(pool.prefix_hit(7).is_some());
         assert!(pool.prefix_hit(8).is_none());
         pool.cancel(pressure.reservation);
+        pool.assert_lru_consistent();
+    }
+
+    #[test]
+    fn pinning_middle_inactive_copy_preserves_lru_order() {
+        let mut pool = VllmBlockPool::new(3);
+        let mut seed = reserve(&mut pool, &[], 3).reservation;
+        let first = pool.allocate_private(&mut seed);
+        let middle = pool.allocate_private(&mut seed);
+        let last = pool.allocate_private(&mut seed);
+        assert!(pool.cache_private(first, 1));
+        assert!(pool.cache_private(middle, 2));
+        assert!(pool.cache_private(last, 3));
+        pool.release(first);
+        pool.release(middle);
+        pool.release(last);
+        pool.assert_lru_consistent();
+
+        let pinned = reserve(&mut pool, &[2], 1);
+        assert_eq!(pinned.removed, vec![1]);
+        pool.assert_lru_consistent();
+        pool.cancel(pinned.reservation);
+        pool.assert_lru_consistent();
+
+        let pressure = reserve(&mut pool, &[], 2);
+        assert_eq!(pressure.removed, vec![3]);
+        pool.assert_lru_consistent();
+        pool.cancel(pressure.reservation);
+        pool.assert_lru_consistent();
+    }
+
+    #[test]
+    fn activated_prefix_reenters_inactive_lru_on_release() {
+        let mut pool = VllmBlockPool::new(1);
+        let mut seed = reserve(&mut pool, &[], 1).reservation;
+        let id = pool.allocate_private(&mut seed);
+        assert!(pool.cache_private(id, 7));
+        pool.release(id);
+
+        let mut activation = reserve(&mut pool, &[7], 0).reservation;
+        assert_eq!(
+            pool.activate_prefix(&mut activation).collect::<Vec<_>>(),
+            vec![(7, id)]
+        );
+        pool.cancel(activation);
+        assert_eq!(pool.num_inactive(), 0);
+        pool.assert_lru_consistent();
+
+        pool.release(id);
+        assert_eq!(pool.num_inactive(), 1);
+        pool.assert_lru_consistent();
+
+        let pressure = reserve(&mut pool, &[], 1);
+        assert_eq!(pressure.removed, vec![7]);
+        pool.cancel(pressure.reservation);
+        pool.assert_lru_consistent();
+    }
+
+    #[test]
+    #[should_panic(expected = "inactive LRU head has a predecessor")]
+    fn eviction_rejects_head_with_predecessor() {
+        let mut pool = VllmBlockPool::new(1);
+        let mut seed = reserve(&mut pool, &[], 1).reservation;
+        let id = pool.allocate_private(&mut seed);
+        assert!(pool.cache_private(id, 7));
+        pool.release(id);
+
+        let (previous, _) = pool.inactive_links_mut(id);
+        *previous = Some(id);
+        let _ = pool.evict_one();
     }
 }

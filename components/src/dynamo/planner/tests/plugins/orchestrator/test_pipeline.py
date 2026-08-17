@@ -155,6 +155,35 @@ async def test_propose_output_flows_as_reconcile_baseline(ctx_factory):
     outcome = await orchestrator.tick(PipelineContext(), {PREFILL: 3})
     assert outcome.execute_action == "apply"
     assert outcome.final_proposal.targets[0].replicas == 7
+    assert outcome.proposed_components == frozenset({PREFILL})
+
+
+@pytest.mark.asyncio
+async def test_proposed_component_mask_is_captured_before_later_stage_merges(
+    ctx_factory,
+):
+    ctx = ctx_factory()
+    orchestrator = ctx["orchestrator"]
+    orchestrator.register_internal(
+        plugin_id="propose_prefill",
+        plugin_type="propose",
+        priority=10,
+        instance=StubPlugin(propose=_propose_override(7, "prefill")),
+    )
+    orchestrator.register_internal(
+        plugin_id="reconcile_decode",
+        plugin_type="reconcile",
+        priority=10,
+        instance=StubPlugin(reconcile=_reconcile_override(5, "decode")),
+    )
+
+    outcome = await orchestrator.tick(
+        PipelineContext(),
+        {PREFILL: 3, ComponentKey(sub_component_type="decode"): 2},
+    )
+
+    assert outcome.execute_action == "apply"
+    assert outcome.proposed_components == frozenset({PREFILL})
 
 
 @pytest.mark.asyncio

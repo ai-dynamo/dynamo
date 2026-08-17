@@ -19,7 +19,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
@@ -89,7 +89,7 @@ def test_router_loads_stage_configs_from_model_deploy_config():
     with (
         patch(
             "dynamo.vllm.omni.stage_router.load_and_resolve_stage_configs",
-            return_value=("/deploy/glm_image.yaml", stage_configs),
+            return_value=("/deploy/glm_image.yaml", stage_configs, None),
         ) as load_and_resolve_stage_configs,
         patch("dynamo.vllm.omni.stage_router.OutputFormatter") as output_formatter,
     ):
@@ -99,6 +99,7 @@ def test_router_loads_stage_configs_from_model_deploy_config():
         config.model,
         "/deploy/glm_image.yaml",
         kwargs={},
+        trust_remote_code=False,
     )
     output_formatter.assert_called_once()
     assert router.stage_configs == stage_configs

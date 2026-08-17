@@ -20,7 +20,7 @@ These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-09
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** -- See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** -- See [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 2. **GPU cluster** with 4x H100 80GB (or H200) GPUs
 3. **HuggingFace token** with access to NVIDIA models
 

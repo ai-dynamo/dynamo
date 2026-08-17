@@ -1,6 +1,6 @@
 ---
 name: dynamo-kv-replay-parity
-description: Runs deterministic byte-parity and paired performance campaigns for Dynamo offline KV-aware replay across aggregated and disaggregated vLLM and SGLang configurations, including forced preemption and KVBM offload lifecycles. It is used when validating replay refactors, routing changes, scheduler-event changes, or performance-sensitive offline simulation changes against a baseline revision.
+description: Runs deterministic byte-parity and paired performance campaigns for Dynamo offline KV-aware replay across native vLLM and SGLang configurations, including forced scheduler-pressure lifecycles. It is used when validating replay refactors, routing changes, scheduler-event changes, or performance-sensitive offline simulation changes against a baseline revision.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -8,7 +8,6 @@ metadata:
     - dynamo
     - offline-replay
     - kv-router
-    - kvbm
     - parity
     - performance
 ---
@@ -29,16 +28,16 @@ Resolve and record before running anything:
 
 - immutable baseline and candidate commit SHAs;
 - Rust toolchain, build profile, flags, and host characteristics;
-- exact Cargo features from the relevant manifests;
+- each artifact's exact Cargo features from the relevant manifests;
 - Mooncake trace path, SHA-256 checksum, and deterministic slice rule;
-- engine, topology, concurrency, worker counts, block sizes, and KVBM capacities;
-- the report fields excluded from canonical comparison.
+- engine, topology, concurrency, worker counts, block sizes, and G1 capacities;
+- the canonical-report exclusion allowlist; and
+- the performance run-order seed, CPU placement, timing scope, and invalidation rules.
 
 Use the project root `.venv/bin/python` for Python analysis and `uv pip` for any approved
 installation. Do not compare against moving branches or reuse a binary after changing its
 checkout. Do not describe the configuration as "all features"; record explicit feature
-names. Typical plumbing includes replay determinism plus KVBM offload, but feature names
-can differ between `dynamo-mocker` and `dynamo-bench`.
+names. Feature names can differ between `dynamo-mocker` and `dynamo-bench`.
 
 ## Stage 1: Pin revisions and artifacts
 
@@ -46,11 +45,54 @@ can differ between `dynamo-mocker` and `dynamo-bench`.
 2. Create isolated checkouts for both revisions using the same host and toolchain.
 3. Apply any temporary determinism correction identically to both revisions. Keep it out
    of the measured semantic delta and record its patch checksum.
-4. Build separate release binaries, copy them to a temporary campaign directory, and
-   record binary plus `.text` sizes.
-5. Return each checkout to its original branch after extracting the binary.
+4. For the current `dynamo-bench` harness, build one release artifact per revision with
+   exactly `replay-bench` and no default features. `--canonical-reports-jsonl` requires
+   `replay-bench`, which also selects the seeded router.
+5. Reuse that artifact across all native correctness and performance rows. Do not build
+   separate topology or production-routing artifacts. If the named manifest feature no
+   longer exists, stop and report that this protocol needs updating rather than guessing a
+   replacement matrix.
+6. Copy the artifacts to a temporary campaign directory. Record exact features, binary
+   SHA-256, binary size, and `.text` size.
+7. Return each checkout to its original branch after extracting the binaries.
+
+Build the current benchmark artifact with:
+
+```bash
+cargo build --release -p dynamo-bench --no-default-features \
+  --features replay-bench --bench offline_replay_bench
+```
 
 Never build while collecting performance samples.
+
+## Campaign concurrency
+
+Treat one engine/topology/frozen-configuration comparison row as the unit of node
+placement. When scheduler capacity permits, allocate multiple nodes and assign independent
+rows to them. The nodes do not need to be homogeneous because no individual comparison
+crosses nodes. Keep the baseline, candidate, all determinism repetitions, and lifecycle
+evidence for one row on the same node. Use the same prebuilt revision artifacts and inputs
+throughout the campaign, and record the node characteristics and CPU placement for every
+row.
+
+Native replay is normally single-core: pin each process to one physical core after
+confirming that assumption during preflight. Keep the CPU-set size, NUMA placement, and
+affinity identical between baseline and candidate for a row.
+
+For correctness, run the baseline and candidate repetitions for a row concurrently when
+its node has sufficient resources. Pin concurrent processes to disjoint CPU sets, give each
+process separate output paths, and ensure they do not share mutable state. Keep every
+repetition in a separate process even when several repetitions run at the same time.
+
+For performance, keep the entire row's warmups and 60-pair measurement series on
+its assigned node. Execute only one performance invocation at a time on that node with a
+fixed CPU placement, and keep each randomized baseline/candidate pair adjacent. Different
+performance rows may run concurrently on different nodes, but do not pool one row's pairs
+across heterogeneous nodes. Do not run another replay, build, profiler, or unrelated
+workload concurrently on a node collecting performance samples.
+
+Multi-node and within-node correctness parallelism are campaign throughput optimizations;
+they must not change workload concurrency or weaken performance isolation.
 
 ## Stage 2: Establish deterministic reports
 
@@ -63,7 +105,13 @@ Require the harness to control every known entropy source:
 - recursively sort JSON object keys;
 - sort only explicitly unordered collections such as per-request records;
 - preserve semantically ordered event and lifecycle arrays;
-- exclude only approved real-time fields such as wall time and derived throughput.
+- exclude exactly `/summary/wall_time_ms`, `/summary/processed_tokens_per_s`, and
+  `/summary/processed_output_tokens_per_s`.
+
+This exclusion list is closed: include every other field, and stop for review before adding
+another exclusion. Make semantic fields such as request UUIDs deterministic rather than
+dropping them. Require parity output metadata to report `replay_bench: true`; otherwise the
+seeded routing contract was not active.
 
 Run baseline twice and candidate twice in separate processes. Each revision must produce
 one unique canonical digest. This is an entropy-leak check, not a statistical trial. If a
@@ -80,37 +128,61 @@ checksum. Do not randomly sample rows, duplicate a shorter trace, or silently cl
 The committed `lib/bench/testdata/mooncake_trace_1000.jsonl` fixture is suitable for a
 quick harness preflight, not the authoritative long-corpus campaign.
 
-Tune one shared configuration until the campaign can prove that it exercised:
+Qualify and freeze one configuration per comparison row, or per explicitly named
+configuration family when rows genuinely share every relevant parameter. For each frozen
+configuration, prove that it exercised every applicable path:
 
 - KV-overlap-sensitive routing;
-- immediate and queued placement;
-- a small, bounded number of preemptions at the block-capacity edge;
+- immediate placement, plus queued placement only when queueing is explicitly enabled;
+- the row's bounded preemption or retraction band at the block-capacity edge;
 - disaggregated prefill/decode handoff;
-- terminal cleanup;
-- G1 to G2 eviction; and
-- G2 to G1 restoration.
+- terminal cleanup.
 
 Use coverage counters, lifecycle traces, or report evidence rather than inferring these
-paths from successful completion. Target one to three preemptions per configuration. Zero
-means the edge was not exercised; repeated preempt/re-admit cycling, a rapidly growing
-preemption count, or failure to advance virtual time invalidates the fixture. Tune capacity
-or concurrency minimally and identically for baseline and candidate, and back off rather
-than accepting a preemption flood. Freeze the qualified configuration before the comparison;
-never tune each revision separately.
+paths from successful completion. Target the bounded pressure band recorded for the
+qualified seed. When no seed exists, start with one to three pressure events to prove the
+lifecycle. For throttle-oriented disaggregated vLLM and SGLang seeds, target 10 to 20 fully
+readmitted pressure events so repeated scheduling is exercised. Zero means the edge was
+not exercised; repeated preempt/re-admit cycling, a rapidly growing pressure count, or
+failure to advance virtual time invalidates the fixture. Tune capacity or concurrency
+minimally and identically for baseline and candidate within the row or family, and back
+off rather than accepting a pressure flood. Never tune the revisions separately.
+
+The offline replay CLI leaves the router queue threshold unset by default. In that mode,
+all route decisions are immediate and zero queued placements are expected; engine-side
+scheduler waiting is not router queue coverage. If queue lifecycle coverage is required,
+enable it through an explicit queue-capable harness or forced fixture and record the exact
+threshold. Account for every route decision, but never relabel scheduler waiting as queued
+placement.
+
+### Start from qualified internal-polynomial seeds
+
+For the canonical 5,000-row Mooncake window with the internal polynomial mocker, read
+[internal-polynomial golden points](references/internal-polynomial-golden-points.md)
+before searching for capacity edges. Treat those configurations and observed counters as
+suggested starting points, not universal constants or substitutes for qualification on the
+pinned baseline. Requalify one frozen configuration identically on both revisions.
+
+Use the reference's expected preemption, retraction, reuse, worker, and handoff signals as
+drift detectors. Treat queue counts as expected signals only when queueing was explicitly
+enabled. Matching lifecycle counts do not waive an unstable canonical digest; stop
+correctness and performance work for that row until both internal determinism and
+cross-revision parity are established.
 
 ## Stage 4: Run byte parity
 
-Run the 5,000-request corpus for this authoritative matrix:
+Run the 5,000-request corpus for this authoritative matrix. Treat both disaggregated rows
+as the primary scheduler and handoff requalification. Keep the aggregated rows as
+secondary parity coverage for the corresponding engine semantics.
 
-| Engine semantics | Topology | Routing |
-| --- | --- | --- |
-| vLLM pass-start | Aggregated | KV-aware |
-| vLLM pass-start | Disaggregated | KV-aware |
-| SGLang pass-end | Aggregated | KV-aware |
-| SGLang pass-end | Disaggregated | KV-aware |
+| Engine semantics | Topology | Memory path | Routing |
+| --- | --- | --- | --- |
+| vLLM pass-start | Aggregated | Native G1 | KV-aware |
+| vLLM pass-start | Disaggregated | Native G1 | KV-aware |
+| SGLang pass-end | Aggregated | Native G1 | KV-aware |
+| SGLang pass-end | Disaggregated | Native G1 | KV-aware |
 
-Enable KVBM offload on supported Linux hosts and require the lifecycle evidence from
-Stage 3 for every applicable row. For each row:
+For each row:
 
 1. Produce canonical baseline and candidate outputs with the frozen configuration.
 2. Compare their bytes or SHA-256 digests exactly.
@@ -125,7 +197,7 @@ authoritative engine semantic.
 
 Byte mismatch is a review gate, not an instruction to preserve incorrect behavior. Allow
 an intentional mismatch only when the candidate is demonstrably more faithful to the
-specified engine, scheduler, routing, or KVBM semantics.
+specified engine, scheduler, or routing semantics.
 
 For every proposed exception, record:
 
@@ -146,34 +218,73 @@ candidate back to known-wrong behavior just to obtain identical bytes.
 Use small deterministic fixtures only for required paths the long corpus cannot reliably
 trigger:
 
-- single-worker KV-router queueing;
+- single-worker KV-router queueing with an explicit queue threshold;
 - a preemption-edge fixture that targets one to three preemptions and then completes;
 - scale-to-zero followed by scale-up and pending-work release;
-- G1 to G2 eviction followed by G2 to G1 restoration; and
 - backend-specific prefill/decode handoff ordering.
 
 Assert bounded preemption, continued virtual-time progress, and the lifecycle itself. A
-final-completion smoke test does not prove offload, preemption, queueing, or restoration
-occurred.
+final-completion smoke test does not prove preemption or queueing occurred.
 
 ## Stage 7: Measure performance
 
-Measure the same four engine/topology rows with the frozen KVBM-enabled configuration and
-authoritative production routing behavior. Run seeded matched-routing variants separately
-as diagnostics; do not substitute them for production results.
+Measure every supported row from Stage 4 with its frozen configuration. The authoritative
+gate reuses the `replay-bench` artifacts from byte parity, so routing selection is seeded
+and matched between revisions. Require timing metadata to report `replay_bench: true`.
+Describe the result as seeded matched-routing replay-loop parity, not production-routing
+performance. Production-routing timing is outside the default campaign because it requires
+a separate build without `replay-bench`; add that campaign only when the user explicitly
+requests it.
+
+The primary metric is replay execution time. Start its timer after trace normalization,
+workload construction, and engine/runtime preparation, immediately before
+`prepared.run(...)`; stop it immediately after that call returns and before collector
+finalization or report aggregation. Emit this value as `replay_execution_ms`. Record setup
+and end-to-end time separately as diagnostics. If the harness does not expose this exact
+timing boundary, extend it before running the campaign; do not substitute the existing
+broader `wall_time_ms`.
+
+Stage binaries and trace inputs on node-local storage and verify their checksums before
+warmups. File transfer is campaign setup, not a sample. For each measured invocation, pass
+`--iterations 1` and a unique node-local `--timings-jsonl` path. Do not pass
+`--canonical-reports-jsonl`, `--report-json`, or another full-report output option in a
+gated performance invocation. Run one fresh process per sample so lazy per-request capture,
+report serialization, and in-process iteration state cannot contaminate the metric.
 
 For each row:
 
-1. Run five warmups.
-2. Collect 30 measured baseline/candidate pairs.
-3. Randomize which arm runs first within each pair while keeping the pair adjacent.
-4. Capture one machine-readable internal elapsed sample per process invocation.
-5. With `.venv/bin/python` and SciPy, compute fixed-seed, one-sided 95% bootstrap upper
-   and lower confidence bounds for the median candidate/baseline ratio.
-6. Pass when the upper bound is at most `1.05`.
-7. Fail when the lower bound is greater than `1.05`.
-8. If the interval crosses `1.05`, collect 60 total pairs. A still-inconclusive result
-   blocks a performance-parity claim.
+1. Run five warmups per arm, alternating arms for ten warmups total.
+2. Generate and persist a fixed-seed, balanced 60-pair schedule with 30 baseline-first and
+   30 candidate-first pairs in randomized order.
+3. Collect all 60 measured pairs. Keep the two invocations in each pair adjacent and
+   compute `r_i = candidate_replay_execution_ms / baseline_replay_execution_ms` regardless
+   of run order.
+4. Treat the ratios as independent and identically distributed, or otherwise exchangeable,
+   only when the campaign can justify that sampling assumption; pair adjacency does not
+   establish it. Predeclare thresholds for serial-dependence diagnostics, including lag
+   autocorrelation and pair-order trends against elapsed time and available temperature or
+   frequency telemetry, and record their results.
+5. If the diagnostics breach their thresholds or exchangeability cannot be justified,
+   report `INCONCLUSIVE` or use a predeclared dependence-aware method. Do not apply the
+   order-statistic gate.
+6. Otherwise sort the 60 ratios. Conditional on the sampling assumption, use the 24th order
+   statistic as the exact distribution-free one-sided 95% lower confidence bound for the
+   population median ratio and the 37th order statistic as the corresponding upper bound.
+   Do not use a Wald interval.
+7. Pass when the upper bound is at most `1.05`.
+8. Fail when the lower bound is greater than `1.05`.
+9. Otherwise report `INCONCLUSIVE`; do not add samples adaptively and claim the original
+   confidence level.
+
+Never remove an observation because its value looks like an outlier. Retain every attempted
+sample and its process status. A replay error, assertion failure, malformed timing record,
+or other product failure fails or blocks the row; it is not a discardable sample. Only a
+predeclared environmental condition, such as scheduler eviction, node-health failure,
+affinity violation, or independently detected competing load, may invalidate a sample.
+Invalidate both members of that pair, record the evidence and reason, and rerun the complete
+pair with the same arm order. Never retry or replace a sample silently. A paired bootstrap
+of log ratios may be reported as a secondary effect-size diagnostic, but it does not decide
+the gate.
 
 Also fail release binary or `.text` growth above 5% until the added footprint is explained
 and narrowed.
@@ -213,10 +324,14 @@ The final report must include:
 
 - revision SHAs and determinism-patch checksum, if any;
 - trace checksum and 5,000-request slice specification;
-- full frozen configuration and feature manifest;
-- one row per engine/topology with digests and lifecycle evidence;
+- every artifact's exact feature manifest, binary checksum, and routing-mode assertion;
+- each row's frozen configuration, node characteristics, CPU set, and NUMA placement;
+- one row per engine/topology/memory path with digests and lifecycle evidence;
+- the exact canonical exclusion allowlist;
 - every semantic exception record;
-- paired performance ratios and confidence intervals;
+- performance timing scopes, persisted arm-order schedule, all attempted samples and
+  invalidations, paired ratios, sampling assumption, dependence diagnostics, and conditional
+  order-statistic confidence bounds;
 - binary and `.text` sizes;
 - profiler findings for any investigated regression; and
 - skipped or unsupported coverage without overstating the result.

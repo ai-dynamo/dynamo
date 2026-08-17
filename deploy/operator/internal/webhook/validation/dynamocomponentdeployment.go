@@ -46,8 +46,20 @@ func (v *DynamoComponentDeploymentValidator) Validate(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (admission.Warnings, error) {
+	return v.validate(ctx, dcd, runtimeVersionSourceV1Beta1)
+}
+
+func (v *DynamoComponentDeploymentValidator) validate(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx},
+		sharedValidation: sharedValidation{
+			ctx:                                ctx,
+			runtimeVersionSource:               runtimeVersionSource,
+			allowMissingRuntimeVersionOverride: true,
+		},
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(dcd)
@@ -62,22 +74,42 @@ func (v *DynamoComponentDeploymentValidator) Validate(
 
 // ValidateUpdate performs complete validation of an updated v1beta1 DCD and
 // compares its state with the previous object.
-// ctx, oldDCD, and newDCD must not be nil.
+// ctx, oldDCD, and newDCD must not be nil. runtimeVersionSource identifies the request's source API.
 func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	ctx context.Context,
 	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx},
+		sharedValidation: sharedValidation{
+			ctx:                                ctx,
+			runtimeVersionSource:               runtimeVersionSourceDisabled,
+			allowMissingRuntimeVersionOverride: true,
+		},
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD)
-	alpha, err := alphaDynamoComponentDeploymentForValidation(newDCD)
+	newAlpha, err := alphaDynamoComponentDeploymentForValidation(newDCD)
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha)...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha)...)
+
+	// Re-enable source-version runtime validation for the old/new ratchet.
+	validation.runtimeVersionSource = runtimeVersionSource
+	if validation.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+		oldAlpha, err := alphaDynamoComponentDeploymentForValidation(oldDCD)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
+		}
+		allErrs = append(allErrs, validation.validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
+			&newAlpha.Spec.DynamoComponentDeploymentSharedSpec,
+			&oldAlpha.Spec.DynamoComponentDeploymentSharedSpec,
+			field.NewPath("spec"),
+		)...)
+	}
+
 	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentUpdate(newDCD, oldDCD)...)
 	return validation.warnings, invalidDynamoComponentDeploymentError(newDCD, allErrs)
 }
@@ -99,12 +131,14 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		grovePathway                      = false
 		validateInferencePoolAvailability = false
 	)
-	return v.validateDynamoComponentDeploymentSharedSpec(
+	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
+	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
 		grovePathway,
 		validateInferencePoolAvailability,
-	)
+	)...)
+	return allErrs
 }
 
 // validateDynamoComponentDeploymentUpdate validates an update. newDCD and oldDCD must not be nil.
@@ -127,7 +161,10 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	fldPath *field.Path,
 ) field.ErrorList {
 	// Standalone DCD updates preserve direct replica modification.
-	const canModifyReplicas = true
+	const (
+		canModifyReplicas                = true
+		validateGPUMemoryServiceNewState = false // ValidateUpdate already runs the stateless new-state traversal.
+	)
 
 	allErrs := field.ErrorList{}
 	if newSpec.BackendFramework != oldSpec.BackendFramework {
@@ -145,6 +182,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		fldPath,
 		canModifyReplicas,
 		nvidiacomv1beta1.DynamoComponentDeploymentGVK.GroupKind(),
+		validateGPUMemoryServiceNewState,
 	)...)
 	return allErrs
 }

@@ -139,13 +139,10 @@ fn validate_dynamo_trace_block_size(expected: Option<usize>, embedded: usize) ->
 
 fn single_turn_request_uuid(_request_ordinal: usize) -> Uuid {
     #[cfg(feature = "replay-bench")]
-    {
-        Uuid::from_u128(_request_ordinal as u128 + 1)
+    if crate::replay::canonical_replay_active() {
+        return Uuid::from_u128(_request_ordinal as u128 + 1);
     }
-    #[cfg(not(feature = "replay-bench"))]
-    {
-        Uuid::new_v4()
-    }
+    Uuid::new_v4()
 }
 
 pub(super) fn validate_synthesizable_prompt(

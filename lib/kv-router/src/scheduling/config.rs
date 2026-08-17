@@ -11,6 +11,7 @@ use std::time::Duration;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
+use crate::WorkerType;
 use crate::protocols::{
     BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
     compute_seq_hash_for_block,
@@ -24,6 +25,39 @@ const fn default_track_prefill_tokens() -> bool {
 }
 
 pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
+
+/// Selects a configured custom worker-selection policy instance.
+///
+/// The reserved value `default` selects Dynamo's built-in worker selector.
+pub const DYN_ROUTER_WORKER_SELECTION_POLICY: &str = "DYN_ROUTER_WORKER_SELECTION_POLICY";
+
+/// Selects a configured custom worker-selection policy instance for prefill workers.
+pub const DYN_ROUTER_PREFILL_POLICY: &str = "DYN_ROUTER_PREFILL_POLICY";
+
+/// Selects a configured custom worker-selection policy instance for decode workers.
+pub const DYN_ROUTER_DECODE_POLICY: &str = "DYN_ROUTER_DECODE_POLICY";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerSelectionPolicySelections {
+    pub(crate) aggregated: Option<String>,
+    pub(crate) prefill: Option<String>,
+    pub(crate) decode: Option<String>,
+    pub(crate) encode: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerSelectionPolicyConfigError {
+    #[error("could not read {DYN_ROUTER_WORKER_SELECTION_POLICY}: {source}")]
+    Environment {
+        #[source]
+        source: VarError,
+    },
+    #[error("could not load worker_selection from router_policy_config: {source}")]
+    Config {
+        #[source]
+        source: super::policy_config::RouterPolicyConfigError,
+    },
+}
 
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
@@ -49,6 +83,17 @@ const fn default_disk_cache_hit_weight() -> f64 {
 
 const fn default_prefill_load_scale() -> f64 {
     1.0
+}
+
+const fn default_decode_active_request_weight() -> f64 {
+    0.0
+}
+
+// Default-valued post-v1.3 fields are omitted so v1.3 frontends can read v1.4 MDCs during
+// rolling upgrades. Non-default values still serialize and fail closed on the older frontend.
+// TODO(v1.5): Remove these compatibility skips when v1.3 falls outside the N-1 window.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    value == &T::default()
 }
 
 const fn default_overlap_score_credit_decay() -> f64 {
@@ -121,6 +166,7 @@ fn log_env_config(config: &KvRouterConfig) {
         overlap_score_credit = config.overlap_score_credit,
         overlap_score_credit_decay = config.overlap_score_credit_decay,
         prefill_load_scale = config.prefill_load_scale,
+        decode_active_request_weight = config.decode_active_request_weight,
         router_temperature = config.router_temperature,
         use_kv_events = config.use_kv_events,
         router_replica_sync = config.router_replica_sync,
@@ -132,6 +178,8 @@ fn log_env_config(config: &KvRouterConfig) {
         router_tracking_key_id = ?config.router_tracking_key_id,
         router_queue_threshold = ?config.router_queue_threshold,
         router_policy_config = ?config.router_policy_config,
+        router_prefill_policy = ?config.router_prefill_policy,
+        router_decode_policy = ?config.router_decode_policy,
         conditional_disagg_enabled = config.conditional_disagg_enabled,
         conditional_disagg_policy = ?config.conditional_disagg_policy,
         conditional_disagg_eff_isl_threshold = config.conditional_disagg_eff_isl_threshold,
@@ -169,6 +217,9 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREFILL_LOAD_SCALE") {
         config.prefill_load_scale = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT") {
+        config.decode_active_request_weight = value;
     }
     for key in [
         "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
@@ -219,6 +270,12 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = get_env("DYN_ROUTER_POLICY_CONFIG") {
         config.router_policy_config = Some(value);
+    }
+    if let Some(value) = get_env(DYN_ROUTER_PREFILL_POLICY) {
+        config.router_prefill_policy = Some(value);
+    }
+    if let Some(value) = get_env(DYN_ROUTER_DECODE_POLICY) {
+        config.router_decode_policy = Some(value);
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_CONDITIONAL_DISAGG") {
         config.conditional_disagg_enabled = value;
@@ -502,11 +559,17 @@ struct KvRouterConfigSerde {
     overlap_score_credit: f64,
     overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
+    decode_active_request_weight: f64,
     overlap_score_weight: Option<f64>,
     host_cache_hit_weight: f64,
     disk_cache_hit_weight: f64,
     router_temperature: f64,
     use_kv_events: bool,
+    // Compatibility with v1.3 MDCs during v1.4 rolling upgrades. These fields remain private
+    // because the removed JetStream behavior is not supported by the current router.
+    // TODO(v1.5): Remove when v1.3 falls outside the N-1 window.
+    #[serde(rename = "durable_kv_events")]
+    legacy_durable_kv_events: bool,
     router_replica_sync: bool,
     router_track_active_blocks: bool,
     router_track_output_blocks: bool,
@@ -516,6 +579,10 @@ struct KvRouterConfigSerde {
     router_tracking_key_file: Option<PathBuf>,
     router_tracking_key_id: Option<String>,
     router_prefill_load_model: RouterPrefillLoadModel,
+    #[serde(rename = "router_snapshot_threshold")]
+    _legacy_router_snapshot_threshold: Option<u32>,
+    #[serde(rename = "router_reset_states")]
+    _legacy_router_reset_states: bool,
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
     #[serde(default)]
@@ -545,11 +612,13 @@ impl Default for KvRouterConfigSerde {
             overlap_score_credit: config.overlap_score_credit,
             overlap_score_credit_decay: config.overlap_score_credit_decay,
             prefill_load_scale: config.prefill_load_scale,
+            decode_active_request_weight: config.decode_active_request_weight,
             overlap_score_weight: None,
             host_cache_hit_weight: config.host_cache_hit_weight,
             disk_cache_hit_weight: config.disk_cache_hit_weight,
             router_temperature: config.router_temperature,
             use_kv_events: config.use_kv_events,
+            legacy_durable_kv_events: false,
             router_replica_sync: config.router_replica_sync,
             router_track_active_blocks: config.router_track_active_blocks,
             router_track_output_blocks: config.router_track_output_blocks,
@@ -559,6 +628,8 @@ impl Default for KvRouterConfigSerde {
             router_tracking_key_file: config.router_tracking_key_file,
             router_tracking_key_id: config.router_tracking_key_id,
             router_prefill_load_model: config.router_prefill_load_model,
+            _legacy_router_snapshot_threshold: None,
+            _legacy_router_reset_states: false,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
             router_policy_config: config.router_policy_config,
@@ -601,6 +672,12 @@ pub struct KvRouterConfig {
     /// prefill load. Defaults to 1.0.
     pub prefill_load_scale: f64,
 
+    /// Block-equivalent cost added for each active request on a candidate
+    /// worker. This can balance decode batch size when per-request decode
+    /// compute matters more than resident KV footprint. Defaults to 0.0.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub decode_active_request_weight: f64,
+
     #[serde(default = "default_host_cache_hit_weight")]
     pub host_cache_hit_weight: f64,
 
@@ -633,12 +710,15 @@ pub struct KvRouterConfig {
     pub router_track_prefill_tokens: bool,
 
     /// Hash algorithm used for router-derived active-sequence identities.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub router_tracking_hash: TrackingHashAlgorithm,
 
     /// File containing the 32-byte provider key used by keyed tracking mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_tracking_key_file: Option<PathBuf>,
 
     /// Provider-managed epoch identifier mixed into keyed tracking scope derivation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_tracking_key_id: Option<String>,
 
     /// Optional model for estimating effective prompt-side prefill load over time.
@@ -653,9 +733,21 @@ pub struct KvRouterConfig {
     /// Disabled by default. Must be >= 0. Use 0.0 for maximum queueing sensitivity.
     pub router_queue_threshold: Option<f64>,
 
-    /// Optional startup-only YAML policy-class configuration.
+    /// Optional startup-only YAML configuration for policy-class queues and custom worker selection.
     #[serde(default)]
     pub router_policy_config: Option<String>,
+
+    /// Optional prefill worker-selection instance override.
+    ///
+    /// This process-local value is not serialized into worker model cards.
+    #[serde(skip)]
+    pub router_prefill_policy: Option<String>,
+
+    /// Optional decode worker-selection instance override.
+    ///
+    /// This process-local value is not serialized into worker model cards.
+    #[serde(skip)]
+    pub router_decode_policy: Option<String>,
 
     /// Run-level model selector used by offline and online replay.
     #[serde(skip)]
@@ -710,29 +802,35 @@ pub struct KvRouterConfig {
 
     /// Enable conditional-disagg bypass. When true, the `PrefillRouter`
     /// may short-circuit selected requests to prefill+decode on a decode worker.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub conditional_disagg_enabled: bool,
 
     /// Which conditional-disagg policy to run.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub conditional_disagg_policy: ConditionalDisaggPolicyKind,
 
     /// `IslBoundingPolicy` absolute effective-ISL cutoff in tokens.
-    #[serde(default = "default_conditional_disagg_eff_isl_threshold")]
+    #[serde(
+        default = "default_conditional_disagg_eff_isl_threshold",
+        skip_serializing_if = "is_default_conditional_disagg_eff_isl_threshold"
+    )]
     pub conditional_disagg_eff_isl_threshold: usize,
 
     /// `IslBoundingPolicy` effective-ISL/prompt-token ratio cutoff.
-    #[serde(default = "default_conditional_disagg_eff_isl_ratio_threshold")]
+    #[serde(
+        default = "default_conditional_disagg_eff_isl_ratio_threshold",
+        skip_serializing_if = "is_default_conditional_disagg_eff_isl_ratio_threshold"
+    )]
     pub conditional_disagg_eff_isl_ratio_threshold: f64,
 
     /// `PrefillLoadPolicy` busy-line fraction for the chosen prefill worker.
     /// When unset, the prefill-load condition falls back to `router_queue_threshold`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditional_disagg_prefill_busy_threshold: Option<f64>,
 
     /// Decode-busy guard fraction for the chosen decode worker. When unset,
     /// the guard is disabled.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditional_disagg_decode_busy_threshold: Option<f64>,
 }
 
@@ -744,12 +842,21 @@ fn default_conditional_disagg_eff_isl_ratio_threshold() -> f64 {
     crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD
 }
 
+fn is_default_conditional_disagg_eff_isl_threshold(value: &usize) -> bool {
+    *value == default_conditional_disagg_eff_isl_threshold()
+}
+
+fn is_default_conditional_disagg_eff_isl_ratio_threshold(value: &f64) -> bool {
+    *value == default_conditional_disagg_eff_isl_ratio_threshold()
+}
+
 impl Default for KvRouterConfig {
     fn default() -> Self {
         Self {
             overlap_score_credit: 1.0,
             overlap_score_credit_decay: default_overlap_score_credit_decay(),
             prefill_load_scale: default_prefill_load_scale(),
+            decode_active_request_weight: default_decode_active_request_weight(),
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
@@ -766,6 +873,8 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_queue_threshold: None,
             router_policy_config: None,
+            router_prefill_policy: None,
+            router_decode_policy: None,
             policy_model_name: None,
             policy_config_cache: OnceLock::new(),
             router_event_threads: 4,
@@ -791,6 +900,10 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
     type Error = String;
 
     fn try_from(compat: KvRouterConfigSerde) -> Result<Self, Self::Error> {
+        if compat.legacy_durable_kv_events {
+            return Err("durable_kv_events=true is not supported by this runtime".to_string());
+        }
+
         let mut overlap_score_credit = compat.overlap_score_credit;
         let mut prefill_load_scale = compat.prefill_load_scale;
 
@@ -806,6 +919,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             overlap_score_credit,
             overlap_score_credit_decay: compat.overlap_score_credit_decay,
             prefill_load_scale,
+            decode_active_request_weight: compat.decode_active_request_weight,
             host_cache_hit_weight: compat.host_cache_hit_weight,
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
@@ -822,6 +936,8 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
             router_policy_config: compat.router_policy_config,
+            router_prefill_policy: None,
+            router_decode_policy: None,
             policy_model_name: None,
             policy_config_cache: OnceLock::new(),
             router_event_threads: compat.router_event_threads,
@@ -885,20 +1001,20 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
             (Some(threshold), _) => {
                 tracing::info!(
                     busy_threshold = threshold,
-                    "conditional_disagg prefill-load condition using --router-conditional-disagg-prefill-busy-threshold"
+                    "conditional_disagg prefill-load condition using --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}}"
                 );
             }
             (None, Some(threshold)) => {
                 tracing::info!(
                     inherited_threshold = threshold,
-                    "conditional_disagg prefill-load condition using --router-queue-threshold because --router-conditional-disagg-prefill-busy-threshold is unset"
+                    "conditional_disagg prefill-load condition using --router-queue-threshold because --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}} is unset"
                 );
             }
             (None, None) => {
-                tracing::warn!(
-                    policy = ?config.conditional_disagg_policy,
-                    "conditional_disagg prefill-load condition disabled: set --router-conditional-disagg-prefill-busy-threshold or --router-queue-threshold, or use policy=isl_bounding"
-                );
+                return Err(format!(
+                    "conditional_disagg policy={:?} needs prefill_busy_threshold, but neither --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}} nor --router-queue-threshold is set",
+                    config.conditional_disagg_policy
+                ));
             }
         }
     }
@@ -951,6 +1067,162 @@ impl KvRouterConfig {
         ))
     }
 
+    /// Return the custom worker-selection configuration from `router_policy_config`, if any.
+    pub fn worker_selection_config(
+        &self,
+    ) -> Result<
+        Option<&super::policy_config::WorkerSelectionConfig>,
+        super::policy_config::RouterPolicyConfigError,
+    > {
+        Ok(self
+            .loaded_policy_config()?
+            .and_then(super::policy_config::RouterPolicyConfig::worker_selection))
+    }
+
+    /// Return one configured custom worker-selection instance, if any.
+    ///
+    /// `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the role-specific YAML selections. The
+    /// reserved value `default`, and an absent selection, both use Dynamo's built-in worker
+    /// selector. This method also reports a stage-specific instance so stock builds can reject
+    /// unsupported custom policy configuration instead of silently ignoring it.
+    pub fn selected_worker_selection_policy_instance(
+        &self,
+    ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
+        };
+        let selected = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok(selected
+            .aggregated
+            .or(selected.prefill)
+            .or(selected.decode)
+            .or(selected.encode))
+    }
+
+    /// Return the custom worker-selection instance selected for one explicit worker role.
+    ///
+    /// Prefill and decode overrides take precedence over the global environment override. The
+    /// global override takes precedence over all YAML role selections.
+    pub fn selected_worker_selection_policy_instance_for(
+        &self,
+        worker_type: WorkerType,
+    ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
+        };
+        let selected = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok(match worker_type {
+            WorkerType::Aggregated => selected.aggregated,
+            WorkerType::Prefill => selected.prefill,
+            WorkerType::Decode => selected.decode,
+            WorkerType::Encode => selected.encode,
+        })
+    }
+
+    /// Return whether a custom stage-specific worker-selection setting was configured.
+    ///
+    /// Standalone hosts use this to warn that prefill, decode, and encode settings only apply to
+    /// typed worker pools in the embedded frontend.
+    pub fn has_explicit_stage_worker_selection_policy(
+        &self,
+    ) -> Result<bool, WorkerSelectionPolicyConfigError> {
+        fn is_custom(value: Option<&str>) -> bool {
+            value.is_some_and(|name| {
+                let name = name.trim();
+                !name.is_empty() && name != "default"
+            })
+        }
+
+        let policy_config = self
+            .worker_selection_config()
+            .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
+        Ok(is_custom(self.router_prefill_policy.as_deref())
+            || is_custom(self.router_decode_policy.as_deref())
+            || policy_config.is_some_and(|config| config.has_explicit_stage_selection()))
+    }
+
+    #[cfg(test)]
+    fn selected_worker_selection_policy_instance_from(
+        &self,
+        selected: Result<Option<String>, VarError>,
+    ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
+        let selected = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok(selected
+            .aggregated
+            .or(selected.prefill)
+            .or(selected.decode)
+            .or(selected.encode))
+    }
+
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+    pub(crate) fn selected_worker_selection_policy_instances(
+        &self,
+    ) -> Result<WorkerSelectionPolicySelections, WorkerSelectionPolicyConfigError> {
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
+        };
+        self.selected_worker_selection_policy_instances_from(selected)
+    }
+
+    fn selected_worker_selection_policy_instances_from(
+        &self,
+        selected: Result<Option<String>, VarError>,
+    ) -> Result<WorkerSelectionPolicySelections, WorkerSelectionPolicyConfigError> {
+        fn normalized(value: Option<&str>) -> Option<String> {
+            value
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        }
+
+        fn custom_only(selected: Option<String>) -> Option<String> {
+            selected.filter(|name| name != "default")
+        }
+
+        let policy_config = self
+            .worker_selection_config()
+            .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
+        let global = selected
+            .map_err(|source| WorkerSelectionPolicyConfigError::Environment { source })?
+            .and_then(|name| normalized(Some(&name)));
+        let yaml_aggregated = policy_config
+            .and_then(|config| config.aggregated_instance())
+            .map(str::to_owned);
+        let aggregated = global.clone().or(yaml_aggregated);
+        let prefill = normalized(self.router_prefill_policy.as_deref())
+            .or_else(|| global.clone())
+            .or_else(|| {
+                policy_config
+                    .and_then(|config| config.prefill_instance())
+                    .map(str::to_owned)
+            });
+        let decode = normalized(self.router_decode_policy.as_deref())
+            .or_else(|| global.clone())
+            .or_else(|| {
+                policy_config
+                    .and_then(|config| config.decode_instance())
+                    .map(str::to_owned)
+            });
+        let encode = global.or_else(|| {
+            policy_config
+                .and_then(|config| config.encode_instance())
+                .map(str::to_owned)
+        });
+
+        Ok(WorkerSelectionPolicySelections {
+            aggregated: custom_only(aggregated),
+            prefill: custom_only(prefill),
+            decode: custom_only(decode),
+            encode: custom_only(encode),
+        })
+    }
+
     pub fn with_policy_model_name(mut self, model_name: Option<String>) -> Self {
         self.policy_model_name = model_name;
         self
@@ -975,6 +1247,12 @@ impl KvRouterConfig {
             0.0,
         )?;
         validate_min("prefill_load_scale", self.prefill_load_scale, 0.0)?;
+        validate_range(
+            "decode_active_request_weight",
+            self.decode_active_request_weight,
+            0.0,
+            f64::MAX,
+        )?;
         validate_range(
             "host_cache_hit_weight",
             self.host_cache_hit_weight,
@@ -1023,8 +1301,15 @@ impl KvRouterConfig {
         const DEFAULT_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
         const PREFILL_LOAD_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
 
+        // `validate_config` parses router_policy_config at startup. Preserve the old
+        // conservative behavior if this helper is called before validation, but do
+        // not treat a worker-selection-only document as a queue policy profile.
+        let has_routing_profiles = self.policy_config_cache.get().map_or(
+            self.router_policy_config.is_some(),
+            super::policy_config::RouterPolicyConfig::has_routing_profiles,
+        );
         if self.router_prefill_load_model.is_enabled()
-            && (self.router_policy_config.is_some() || self.router_queue_threshold.is_some())
+            && (has_routing_profiles || self.router_queue_threshold.is_some())
         {
             return PREFILL_LOAD_RECHECK_INTERVAL;
         }
@@ -1197,6 +1482,7 @@ mod tests {
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY", "0.75"),
             ("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"),
+            ("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", "32"),
             ("DYN_ROUTER_TEMPERATURE", "0.7"),
             ("DYN_USE_KV_EVENTS", "false"),
             ("DYN_ROUTER_REPLICA_SYNC", "yes"),
@@ -1211,11 +1497,16 @@ mod tests {
             ),
             ("DYN_ROUTER_TRACKING_KEY_ID", "2026-01"),
             ("DYN_ROUTER_QUEUE_THRESHOLD", "4.5"),
+            (DYN_ROUTER_PREFILL_POLICY, "prefill-cli"),
+            (DYN_ROUTER_DECODE_POLICY, "decode-cli"),
         ]);
 
         assert_eq!(config.overlap_score_credit, 0.25);
         assert_eq!(config.overlap_score_credit_decay, 0.75);
         assert_eq!(config.prefill_load_scale, 2.5);
+        assert_eq!(config.router_prefill_policy.as_deref(), Some("prefill-cli"));
+        assert_eq!(config.router_decode_policy.as_deref(), Some("decode-cli"));
+        assert_eq!(config.decode_active_request_weight, 32.0);
         assert_eq!(config.router_temperature, 0.7);
         assert!(!config.use_kv_events);
         assert!(config.router_replica_sync);
@@ -1279,6 +1570,10 @@ mod tests {
             let invalid_credit =
                 config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", value)]);
             assert!(invalid_credit.validate_config().is_err());
+
+            let invalid_active_request_weight =
+                config_from_values(&[("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", value)]);
+            assert!(invalid_active_request_weight.validate_config().is_err());
         }
 
         let error = try_config_from_values(&[("DYN_ROUTER_TRACKING_HASH", "mystery")]).unwrap_err();
@@ -1474,6 +1769,169 @@ mod tests {
     }
 
     #[test]
+    fn selected_worker_selection_policy_instance_uses_override_or_yaml_aggregated() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: custom
+  instances:
+    - name: custom
+      type: acme
+      parameters: {}
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instances_from(Ok(None))
+                .unwrap(),
+            WorkerSelectionPolicySelections {
+                aggregated: Some("custom".to_string()),
+                prefill: None,
+                decode: None,
+                encode: None,
+            }
+        );
+
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_from(Ok(None))
+                .unwrap(),
+            Some("custom".to_string())
+        );
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_from(Ok(Some("default".to_string())))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_from(Ok(Some("".to_string())))
+                .unwrap(),
+            Some("custom".to_string())
+        );
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_from(Ok(Some("override".to_string())))
+                .unwrap(),
+            Some("override".to_string())
+        );
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_from(Ok(Some(" override ".to_string())))
+                .unwrap(),
+            Some("override".to_string())
+        );
+    }
+
+    #[test]
+    fn selected_worker_selection_policy_instances_apply_stage_precedence() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: yaml-aggregated
+  prefill: yaml-prefill
+  decode: yaml-decode
+  encode: yaml-encode
+  instances:
+    - name: yaml-aggregated
+      type: acme
+    - name: yaml-prefill
+      type: acme
+    - name: yaml-decode
+      type: acme
+    - name: yaml-encode
+      type: acme
+    - name: global
+      type: acme
+    - name: cli-prefill
+      type: acme
+"#,
+        )
+        .unwrap();
+        let mut config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instances_from(Ok(None))
+                .unwrap(),
+            WorkerSelectionPolicySelections {
+                aggregated: Some("yaml-aggregated".to_string()),
+                prefill: Some("yaml-prefill".to_string()),
+                decode: Some("yaml-decode".to_string()),
+                encode: Some("yaml-encode".to_string()),
+            }
+        );
+
+        config.router_prefill_policy = Some("cli-prefill".to_string());
+        config.router_decode_policy = Some("default".to_string());
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instances_from(Ok(Some("global".to_string())))
+                .unwrap(),
+            WorkerSelectionPolicySelections {
+                aggregated: Some("global".to_string()),
+                prefill: Some("cli-prefill".to_string()),
+                decode: None,
+                encode: Some("global".to_string()),
+            }
+        );
+
+        assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
+
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_for(WorkerType::Encode)
+                .unwrap(),
+            Some("yaml-encode".to_string())
+        );
+
+        config.router_policy_config = None;
+        assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
+        assert!(
+            !KvRouterConfig::default()
+                .has_explicit_stage_worker_selection_policy()
+                .unwrap()
+        );
+
+        let default_policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            default_policy_file.path(),
+            r#"
+worker_selection:
+  prefill: default
+  decode: default
+  encode: default
+"#,
+        )
+        .unwrap();
+        let default_config = KvRouterConfig {
+            router_policy_config: Some(default_policy_file.path().display().to_string()),
+            router_prefill_policy: Some(" default ".to_string()),
+            router_decode_policy: Some("default".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            !default_config
+                .has_explicit_stage_worker_selection_policy()
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn removed_missing_isl_queue_config_is_rejected_as_unknown() {
         for value in [
             serde_json::json!(null),
@@ -1494,6 +1952,51 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    #[test]
+    fn kv_router_config_preserves_v1_3_wire_compatibility() {
+        let _: KvRouterConfig = serde_json::from_value(serde_json::json!({
+            "durable_kv_events": false,
+            "router_snapshot_threshold": 1_000_000,
+            "router_reset_states": false,
+        }))
+        .unwrap();
+
+        let value = serde_json::to_value(KvRouterConfig::default()).unwrap();
+        for post_v1_3_field in [
+            "decode_active_request_weight",
+            "router_tracking_hash",
+            "router_tracking_key_file",
+            "router_tracking_key_id",
+            "conditional_disagg_enabled",
+            "conditional_disagg_policy",
+            "conditional_disagg_eff_isl_threshold",
+            "conditional_disagg_eff_isl_ratio_threshold",
+            "conditional_disagg_prefill_busy_threshold",
+            "conditional_disagg_decode_busy_threshold",
+        ] {
+            assert!(value.get(post_v1_3_field).is_none(), "{post_v1_3_field}");
+        }
+
+        let frontend_config = KvRouterConfig {
+            router_prefill_policy: Some("prefill-policy".to_string()),
+            router_decode_policy: Some("decode-policy".to_string()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(frontend_config).unwrap();
+        assert!(value.get("router_prefill_policy").is_none());
+        assert!(value.get("router_decode_policy").is_none());
+
+        let error = serde_json::from_value::<KvRouterConfig>(serde_json::json!({
+            "durable_kv_events": true,
+        }))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("durable_kv_events=true is not supported")
+        );
     }
 
     #[test]
@@ -1549,6 +2052,34 @@ mod tests {
         assert_eq!(
             config.router_queue_recheck_interval(),
             Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn worker_selection_only_config_uses_default_recheck_interval() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: custom
+  instances:
+    - name: custom
+      type: acme
+      parameters: {}
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        config.validate_config().unwrap();
+        assert_eq!(
+            config.router_queue_recheck_interval(),
+            Duration::from_secs(60)
         );
     }
 
@@ -1803,12 +2334,6 @@ models:
             };
             assert!(invalid.validate().is_err());
         }
-    }
-
-    #[test]
-    fn test_kv_router_config_defaults_are_disabled() {
-        assert_eq!(KvRouterConfig::default().router_queue_threshold, None);
-        assert_eq!(KvRouterConfig::default().shared_cache_multiplier, 0.0);
     }
 
     #[test]

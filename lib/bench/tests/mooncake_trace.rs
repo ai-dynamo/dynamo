@@ -25,8 +25,8 @@ use dc_ckf_parity::{DirectCkfParityConfig, DirectCkfParityIndexer, DirectCkfPari
 #[cfg(feature = "mocker-kvbm-offload")]
 use dynamo_bench::kv_router_common::replay::generate_g2_replay_artifacts_with_capacity;
 use dynamo_bench::kv_router_common::replay::{
-    WorkerReplayArtifacts, generate_replay_artifacts,
-    generate_replay_artifacts_with_args_and_visibility, process_mooncake_trace,
+    WorkerReplayArtifacts, generate_replay_artifacts, generate_replay_artifacts_with_args,
+    process_mooncake_trace,
 };
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
@@ -39,7 +39,7 @@ use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
 use dynamo_mocker::loadgen::{ReplayRequestHashes, SessionTrace, Trace, TurnTrace};
 use dynamo_mocker::replay::{
-    ReplayKvEventVisibility, ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts,
+    ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts, native_g1_parent_chain_artifact,
 };
 use mooncake_open_loop::{
     MooncakeOperationPayload, OpenLoopConfig, PreparedMooncakeCorpus, prepare_mooncake_corpus,
@@ -111,13 +111,6 @@ impl MockEngineParityKind {
             Self::Vllm => EngineType::Vllm,
             Self::Sglang => EngineType::Sglang,
             Self::Trtllm => EngineType::Trtllm,
-        }
-    }
-
-    fn kv_event_visibility_override(self) -> Option<ReplayKvEventVisibility> {
-        match self {
-            Self::Sglang => Some(ReplayKvEventVisibility::PassStart),
-            Self::Vllm | Self::Trtllm => None,
         }
     }
 
@@ -213,13 +206,8 @@ async fn generate_mock_engine_parity_artifacts(
         MockEngineParityKind::Sglang,
         MockEngineParityKind::Trtllm,
     ] {
-        let artifacts = generate_replay_artifacts_with_args_and_visibility(
-            traces,
-            engine.mock_engine_args()?,
-            None,
-            engine.kv_event_visibility_override(),
-        )
-        .await?;
+        let artifacts =
+            generate_replay_artifacts_with_args(traces, engine.mock_engine_args()?, None).await?;
         assert_no_removed_kv_events(engine.name(), &artifacts);
         artifact_sets.push(MockEngineReplayArtifacts {
             engine_name: engine.name(),
@@ -1200,6 +1188,54 @@ async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Re
     );
     assert_eq!(result.queue_depth_at_stop.len(), 2);
     assert!(result.update_scheduled_to_finished.max_ns > 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_g1_parent_chain_replays_across_indexer_variants() -> anyhow::Result<()> {
+    let artifacts = vec![native_g1_parent_chain_artifact(BLOCK_SIZE as usize)];
+    let stored = artifacts[0]
+        .kv_events
+        .iter()
+        .filter_map(|event| match &event.event.data {
+            KvCacheEventData::Stored(stored) => Some(stored),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(
+        stored.iter().map(|event| event.blocks.len()).sum::<usize>(),
+        3,
+        "fixture must publish two prefix blocks plus the promoted tail"
+    );
+
+    let variants = [
+        MooncakeIndexerConfig::radix_tree(),
+        MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
+    ];
+
+    for config in &variants {
+        let label = config.short_name();
+        let (scores, metrics) =
+            collect_prepared_corpus_overlap_scores_with_metrics(config, &artifacts).await?;
+
+        assert_eq!(
+            support::stored_parent_not_found_count(metrics.as_ref()),
+            0,
+            "{label} rejected a Native G1 Stored event before its parent was visible"
+        );
+        assert_eq!(scores.len(), 1, "{label} should resolve the fixture query");
+        assert_eq!(scores[0].query_len, 3);
+        assert_eq!(
+            scores[0].scores.values().copied().max(),
+            Some(3),
+            "{label} should index the complete three-block parent chain"
+        );
+    }
+
     Ok(())
 }
 

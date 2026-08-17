@@ -24,18 +24,22 @@ use crate::kv_router::{
     metrics::KvPublisherMetrics,
 };
 
+mod attachment_owner;
 mod batching;
 mod dedup;
 mod event_processor;
 mod multimodal_embedding_cache;
 mod sinks;
+mod state_agent;
+mod state_agent_host;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
 
-#[cfg(test)]
-use batching::BatchingState;
+pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
+
+pub use crate::discovery::kv_state_agent::KvStateIngressProtocol;
 #[cfg(test)]
 use dedup::EventDedupFilter;
 #[cfg(test)]
@@ -46,6 +50,13 @@ pub use multimodal_embedding_cache::{
     MultimodalEmbeddingCacheUpdate,
 };
 use sinks::EventPlanePublisher;
+pub use state_agent::{
+    KvStateAgent, KvStateAgentAttachmentConfig, KvStateAgentConfig, KvStateAgentSlotConfig,
+    KvStateAgentVllmSource, resolve_stable_dp_slot_id,
+};
+pub use state_agent_host::{
+    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, KvStateAgentHost, KvStateAgentHostConfig,
+};
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
 
@@ -171,6 +182,11 @@ impl KvEventSource {
 }
 
 /// A publisher of KV events.
+///
+/// The engine-side publisher lifetime is coupled to this Dynamo publisher and its advertised
+/// publisher ID. Restarting the engine publisher independently while this value survives is not
+/// supported. Future independent restart support must either emit an ordered rank-scoped
+/// `Cleared` event before the new stream or create a new Dynamo publisher ID.
 pub struct KvEventPublisher {
     /// The size of the KV block.
     kv_block_size: u32,

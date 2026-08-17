@@ -10,8 +10,14 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use dynamo_kv_router::protocols::KvTransferEnforcement;
-use dynamo_runtime::protocols::EndpointId;
+use dynamo_kv_router::{
+    protocols::{KvTransferEnforcement, RouterHintWorkerMetadata},
+    router_hint::{
+        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
+    },
+};
+use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
 /// directly without type duplication.
@@ -19,6 +25,23 @@ pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
+
+/// Runtime-data key for an engine-published token-overflow contract.
+pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
+
+/// Describes which request-token overflows the frontend may reject early.
+///
+/// The combined limit already accounts for engine-reserved tokens. A false
+/// flag delegates that overflow dimension to the backend, which remains
+/// responsible for any clamping, truncation, or rejection.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenBudget {
+    pub combined_limit: u32,
+    #[serde(default)]
+    pub reject_prompt_overflow: bool,
+    #[serde(default)]
+    pub reject_total_overflow: bool,
+}
 
 /// Canonical worker-taint form for topology metadata.
 ///
@@ -47,6 +70,7 @@ pub enum StructuralTagScope {
 }
 
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
+pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 
 /// Worker-advertised support for Dynamo's vLLM-compatible
 /// `POST /inference/v1/generate` adapter.
@@ -56,12 +80,21 @@ pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
+/// adapter.
+///
+/// Keep this separate from [`VLLM_INFERENCE_V1_GENERATE_CAPABILITY`] so a
+/// mixed-backend frontend never forwards one engine's opaque request envelope
+/// to the other engine.
+pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerBackend {
     Default,
     Fastokens,
+    Basetenkenizer,
 }
 
 impl TokenizerBackend {
@@ -69,6 +102,7 @@ impl TokenizerBackend {
         match self {
             Self::Default => "default",
             Self::Fastokens => "fastokens",
+            Self::Basetenkenizer => "basetenkenizer",
         }
     }
 
@@ -79,11 +113,12 @@ impl TokenizerBackend {
     pub fn from_env_or_default() -> Self {
         match std::env::var(ENV_TOKENIZER_BACKEND) {
             Ok(v) if v == "fastokens" => Self::Fastokens,
+            Ok(v) if v == "basetenkenizer" => Self::Basetenkenizer,
             Ok(v) if v == "default" || v.is_empty() => Self::Default,
             Ok(v) => {
                 tracing::warn!(
                     value = %v,
-                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
+                    "Unrecognized DYN_TOKENIZER value, expected 'default', 'fastokens', or 'basetenkenizer'; falling back to default"
                 );
                 Self::Default
             }
@@ -99,8 +134,9 @@ impl FromStr for TokenizerBackend {
         match value {
             "default" => Ok(Self::Default),
             "fastokens" => Ok(Self::Fastokens),
+            "basetenkenizer" => Ok(Self::Basetenkenizer),
             _ => Err(format!(
-                "invalid tokenizer backend '{value}' (expected 'default' or 'fastokens')"
+                "invalid tokenizer backend '{value}' (expected 'default', 'fastokens', or 'basetenkenizer')"
             )),
         }
     }
@@ -113,6 +149,19 @@ pub struct DisaggregatedEndpoint {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_port: Option<u16>,
+}
+
+/// Controls how historical `function.arguments` are serialized before being
+/// passed to the MiniJinja chat template.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallArgumentsFormat {
+    /// Preserve arguments as a raw JSON string (default, backward-compatible).
+    #[default]
+    JsonString,
+    /// Parse arguments into a JSON object before rendering.  Required for
+    /// templates that iterate over key-value pairs (e.g. GLM-5.2).
+    JsonObject,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Validate)]
@@ -138,10 +187,24 @@ pub struct ModelRuntimeConfig {
 
     pub reasoning_parser: Option<String>,
 
+    /// Controls how historical `function.arguments` are presented to the MiniJinja
+    /// chat template.  `JsonString` (default) preserves the raw JSON string, which
+    /// is backward-compatible with all models.  `JsonObject` normalizes the string
+    /// to a parsed object before rendering; required for models whose template
+    /// iterates over argument key-value pairs (e.g. GLM-5.2).
+    /// Also set to `JsonObject` automatically when `tool_call_parser` is `"glm47"`.
+    #[serde(default)]
+    pub tool_call_arguments_format: ToolCallArgumentsFormat,
+
     /// Frontend tokenizer backend override. When unset, direct Rust callers can still use
     /// `DYN_TOKENIZER`; when set, this explicit value wins over process environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_backend: Option<TokenizerBackend>,
+
+    /// Frontend tokenizer fallback override. When unset, direct Rust callers can still use
+    /// `DYN_TOKENIZER_FALLBACK`; when set, this explicit value wins over process environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_fallback_enabled: Option<bool>,
 
     /// Whether structural tag guided decoding is enabled for tool calls.
     #[serde(default)]
@@ -176,6 +239,14 @@ pub struct ModelRuntimeConfig {
     /// `None` indicates a legacy worker that does not declare this capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_publishing_enabled: Option<bool>,
+
+    /// Immutable KV event source mode for this worker lifecycle.
+    ///
+    /// Accepted values are `framework_v1` and `state_agent_v2`. Missing means the
+    /// legacy Worker-only source. Unknown explicit values must disable KV-aware
+    /// routing rather than falling back within the same worker lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_event_source_mode: Option<String>,
 
     /// Endpoint whose event sources describe this worker's KV state.
     ///
@@ -274,7 +345,9 @@ impl Default for ModelRuntimeConfig {
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
+            tool_call_arguments_format: ToolCallArgumentsFormat::JsonString,
             tokenizer_backend: None,
+            tokenizer_fallback_enabled: None,
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
@@ -283,6 +356,7 @@ impl Default for ModelRuntimeConfig {
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
             kv_event_publishing_enabled: None,
+            kv_event_source_mode: None,
             kv_state_endpoint: None,
             runtime_data: HashMap::new(),
             disaggregated_endpoint: None,
@@ -295,6 +369,29 @@ impl Default for ModelRuntimeConfig {
             kv_transfer_preferred_weight: None,
             max_gpu_lora_count: None,
         }
+    }
+}
+
+impl ModelRuntimeConfig {
+    fn router_hints_enabled(&self) -> bool {
+        match self.runtime_data.get(ROUTER_HINT_RUNTIME_CAPABILITY_KEY) {
+            Some(serde_json::Value::Bool(true)) => true,
+            // Python ModelRuntimeConfig.set_engine_specific currently stores
+            // engine-specific values as strings.
+            Some(serde_json::Value::String(value)) => is_truthy(value),
+            _ => false,
+        }
+    }
+
+    fn router_hint_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
+        let dp_rank = dp_rank.to_string();
+        let endpoint = self
+            .runtime_data
+            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
+            .as_object()?
+            .get(&dp_rank)?
+            .as_str()?;
+        (!endpoint.is_empty()).then_some(endpoint)
     }
 }
 
@@ -313,6 +410,28 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
 
     fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    fn router_hint_metadata_for_dp_rank(
+        &self,
+        dp_rank: u32,
+    ) -> Option<RouterHintWorkerMetadata<'_>> {
+        if !self.router_hints_enabled() {
+            return None;
+        }
+
+        let worker_type = self
+            .runtime_data
+            .get(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY)?
+            .as_str()?;
+        if worker_type.is_empty() {
+            return None;
+        }
+
+        Some(RouterHintWorkerMetadata {
+            worker_type,
+            source_control_endpoint: self.router_hint_endpoint_for_dp_rank(dp_rank),
+        })
     }
 
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
@@ -470,6 +589,32 @@ impl ModelRuntimeConfig {
             .unwrap_or_else(TokenizerBackend::from_env_or_default)
     }
 
+    pub fn is_tokenizer_fallback_enabled(&self) -> anyhow::Result<bool> {
+        let enabled = if let Some(enabled) = self.tokenizer_fallback_enabled {
+            enabled
+        } else {
+            match std::env::var(ENV_TOKENIZER_FALLBACK) {
+                Ok(value) => dynamo_runtime::config::parse_bool(&value)
+                    .map_err(|error| anyhow::anyhow!("{ENV_TOKENIZER_FALLBACK}: {error}"))?,
+                Err(std::env::VarError::NotPresent) => true,
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    anyhow::bail!("{ENV_TOKENIZER_FALLBACK} must contain valid UTF-8")
+                }
+            }
+        };
+
+        if enabled && self.effective_tokenizer_backend() != TokenizerBackend::Default {
+            static TOKENIZER_FALLBACK_DEPRECATION_WARNED: std::sync::Once = std::sync::Once::new();
+            TOKENIZER_FALLBACK_DEPRECATION_WARNED.call_once(|| {
+                tracing::warn!(
+                    "Automatic tokenizer fallback is deprecated and will be disabled by default in a future release. Set tokenizer fallback to false (`--no-tokenizer-fallback` in the frontend) to adopt the future behavior now."
+                );
+            });
+        }
+
+        Ok(enabled)
+    }
+
     /// Resolve the KV-state endpoint, preserving the serving endpoint as the compatibility
     /// default for workers that do not advertise an explicit mapping.
     pub fn effective_kv_state_endpoint(&self, serving_endpoint: &EndpointId) -> EndpointId {
@@ -483,6 +628,11 @@ impl ModelRuntimeConfig {
         tokenizer_backend: Option<TokenizerBackend>,
     ) -> &mut Self {
         self.tokenizer_backend = tokenizer_backend;
+        self
+    }
+
+    pub fn set_tokenizer_fallback_enabled(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.tokenizer_fallback_enabled = enabled;
         self
     }
 
@@ -683,6 +833,14 @@ mod tests {
             );
         });
 
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("basetenkenizer"))], || {
+            let cfg = ModelRuntimeConfig::default();
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Basetenkenizer
+            );
+        });
+
         temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("default"))], || {
             let cfg = ModelRuntimeConfig::default();
             assert_eq!(cfg.effective_tokenizer_backend(), TokenizerBackend::Default);
@@ -715,18 +873,102 @@ mod tests {
                 TokenizerBackend::Fastokens
             );
         });
+
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("fastokens"))], || {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(TokenizerBackend::Basetenkenizer),
+                ..Default::default()
+            };
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Basetenkenizer
+            );
+        });
     }
 
     #[test]
     fn tokenizer_backend_roundtrips_through_serde_json() {
-        let cfg = ModelRuntimeConfig {
-            tokenizer_backend: Some(TokenizerBackend::Fastokens),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
-        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
+        for backend in [
+            TokenizerBackend::Default,
+            TokenizerBackend::Fastokens,
+            TokenizerBackend::Basetenkenizer,
+        ] {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(backend),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&cfg).unwrap();
+            assert!(json.contains(&format!("\"tokenizer_backend\":\"{}\"", backend.as_str())));
+            let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.tokenizer_backend, Some(backend));
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tokenizer_fallback_env_default_and_explicit_config_precedence() {
+        temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("false"))], || {
+            let config = ModelRuntimeConfig::default();
+            assert!(!config.is_tokenizer_fallback_enabled().unwrap());
+
+            let config = ModelRuntimeConfig {
+                tokenizer_fallback_enabled: Some(true),
+                ..Default::default()
+            };
+            assert!(config.is_tokenizer_fallback_enabled().unwrap());
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("true"))], || {
+            let config = ModelRuntimeConfig {
+                tokenizer_fallback_enabled: Some(false),
+                ..Default::default()
+            };
+            assert!(!config.is_tokenizer_fallback_enabled().unwrap());
+        });
+
+        temp_env::with_vars_unset([ENV_TOKENIZER_FALLBACK], || {
+            let config = ModelRuntimeConfig::default();
+            assert!(config.is_tokenizer_fallback_enabled().unwrap());
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("flase"))], || {
+            let config = ModelRuntimeConfig::default();
+            let error = config.is_tokenizer_fallback_enabled().unwrap_err();
+            assert!(error.to_string().contains(ENV_TOKENIZER_FALLBACK));
+        });
+    }
+
+    #[test]
+    fn tokenizer_fallback_roundtrips_through_serde_json() {
+        for enabled in [true, false] {
+            let config = ModelRuntimeConfig {
+                tokenizer_fallback_enabled: Some(enabled),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            assert!(json.contains(&format!("\"tokenizer_fallback_enabled\":{enabled}")));
+            let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.tokenizer_fallback_enabled, Some(enabled));
+        }
+
+        let json = serde_json::to_string(&ModelRuntimeConfig::default()).unwrap();
+        assert!(!json.contains("tokenizer_fallback_enabled"));
+        let legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.tokenizer_fallback_enabled, None);
+    }
+
+    #[test]
+    fn tokenizer_backend_string_values_are_strict() {
+        for backend in [
+            TokenizerBackend::Default,
+            TokenizerBackend::Fastokens,
+            TokenizerBackend::Basetenkenizer,
+        ] {
+            assert_eq!(backend.as_str().parse(), Ok(backend));
+        }
+
+        let error = "baseten".parse::<TokenizerBackend>().unwrap_err();
+        assert!(error.contains("basetenkenizer"));
     }
 
     #[test]
@@ -742,6 +984,59 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
+    }
+
+    #[test]
+    fn router_hint_support_requires_explicit_true() {
+        use dynamo_kv_router::WorkerConfigLike;
+
+        let mut config = ModelRuntimeConfig::default();
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+
+        config
+            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, true)
+            .unwrap();
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+
+        config
+            .set_engine_specific(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "prefill")
+            .unwrap();
+        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        assert_eq!(info.worker_type, "prefill");
+        assert!(info.source_control_endpoint.is_none());
+
+        config
+            .set_engine_specific(
+                ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                serde_json::json!({"0": "tcp://127.0.0.1:23280"}),
+            )
+            .unwrap();
+        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        assert_eq!(info.worker_type, "prefill");
+        assert_eq!(info.source_control_endpoint, Some("tcp://127.0.0.1:23280"));
+        assert_eq!(
+            config
+                .router_hint_metadata_for_dp_rank(1)
+                .unwrap()
+                .source_control_endpoint,
+            None
+        );
+
+        config
+            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
+            .unwrap();
+        assert_eq!(
+            config
+                .router_hint_metadata_for_dp_rank(0)
+                .unwrap()
+                .worker_type,
+            "prefill"
+        );
+
+        config
+            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "false")
+            .unwrap();
+        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]
@@ -764,7 +1059,8 @@ mod tests {
             "max_num_seqs": 32,
             "max_num_batched_tokens": null,
             "tool_call_parser": null,
-            "reasoning_parser": null
+            "reasoning_parser": null,
+            "tool_call_arguments_format": "json_string"
         }"#;
 
         let config: ModelRuntimeConfig = serde_json::from_str(json).unwrap();
