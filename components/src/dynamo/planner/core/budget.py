@@ -97,7 +97,8 @@ def proportional_clamp_pair(
     d_gpu: int,
     min_gpus: int,
     max_gpus: int,
-    min_endpoint: int,
+    prefill_min_endpoint: int,
+    decode_min_endpoint: Optional[int] = None,
 ) -> tuple[int, int]:
     """Clamp ``(num_p, num_d)`` so total GPUs lands in the budget band.
 
@@ -114,9 +115,12 @@ def proportional_clamp_pair(
     Negative ``min_gpus`` or ``max_gpus`` disables the corresponding bound.
     Returns ``(num_p, num_d)`` unchanged if both are disabled or if either
     per-replica GPU count is non-positive (caller hasn't initialized
-    capabilities yet). Returns ``(0, 0)`` when even ``min_endpoint`` of each
-    pool would overshoot the hard ceiling (configuration is infeasible).
+    capabilities yet). Returns ``(0, 0)`` when the component-specific minimum
+    footprint would overshoot the hard ceiling (configuration is infeasible).
     """
+    if decode_min_endpoint is None:
+        decode_min_endpoint = prefill_min_endpoint
+
     if min_gpus < 0 and max_gpus < 0:
         return num_p, num_d
     if p_gpu <= 0 or d_gpu <= 0:
@@ -132,19 +136,19 @@ def proportional_clamp_pair(
         return num_p, num_d
 
     # Ceiling path — strict shrink. ``max_gpus`` is a hard cap; if even
-    # min_endpoint of each pool overshoots it, the deployment is infeasible
+    # component-specific minimum footprint overshoots it, the deployment is infeasible
     # and we zero out (the caller is responsible for surfacing the config
     # error). Otherwise proportionally shrink to fit under ``max_gpus``.
     if max_gpus >= 0 and total > max_gpus:
-        min_req = min_endpoint * p_gpu + min_endpoint * d_gpu
+        min_req = prefill_min_endpoint * p_gpu + decode_min_endpoint * d_gpu
         if max_gpus < min_req:
             return 0, 0
         target = max_gpus
         scale = target / total
-        max_p = math.floor((target - min_endpoint * d_gpu) / p_gpu)
-        new_p = max(min_endpoint, min(max_p, math.floor(num_p * scale)))
+        max_p = math.floor((target - decode_min_endpoint * d_gpu) / p_gpu)
+        new_p = max(prefill_min_endpoint, min(max_p, math.floor(num_p * scale)))
         remaining = target - new_p * p_gpu
-        new_d = max(min_endpoint, math.floor(remaining / d_gpu))
+        new_d = max(decode_min_endpoint, math.floor(remaining / d_gpu))
         return new_p, new_d
 
     # Floor path — proportional grow toward min_gpus.
@@ -152,14 +156,14 @@ def proportional_clamp_pair(
     if total <= 0:
         # No prior allocation — split the floor roughly evenly across the
         # two pools, biasing the remainder toward decode.
-        new_p = max(min_endpoint, math.ceil(floor / 2 / p_gpu))
+        new_p = max(prefill_min_endpoint, math.ceil(floor / 2 / p_gpu))
         remaining = max(0, floor - new_p * p_gpu)
-        new_d = max(min_endpoint, math.ceil(remaining / d_gpu))
+        new_d = max(decode_min_endpoint, math.ceil(remaining / d_gpu))
     else:
         scale = floor / total
-        new_p = max(min_endpoint, math.ceil(num_p * scale))
+        new_p = max(prefill_min_endpoint, math.ceil(num_p * scale))
         remaining = max(0, floor - new_p * p_gpu)
-        new_d = max(min_endpoint, math.ceil(remaining / d_gpu))
+        new_d = max(decode_min_endpoint, math.ceil(remaining / d_gpu))
 
     # If the floor push would blow past the strict ceiling, the configuration
     # is infeasible (tight bounds incompatible with the step sizes). Best
@@ -281,21 +285,25 @@ def _is_opposing_rebalance(
 
 def minimum_power_footprint_fits(
     total_budget: int,
-    min_endpoint: int,
+    prefill_min_endpoint: int,
     p_watts: Optional[int],
     d_watts: Optional[int],
+    decode_min_endpoint: Optional[int] = None,
 ) -> bool:
-    """True when ``min_endpoint`` replicas of every present role fit the budget.
+    """True when every present role's minimum replicas fit the budget.
 
     Startup feasibility gate: if even the minimum footprint overshoots the
     total power budget the deployment can never satisfy the ceiling, so the
     planner must fail closed rather than clamp to an impossible target.
     """
+    if decode_min_endpoint is None:
+        decode_min_endpoint = prefill_min_endpoint
+
     required = 0
     if p_watts is not None:
-        required += min_endpoint * p_watts
+        required += prefill_min_endpoint * p_watts
     if d_watts is not None:
-        required += min_endpoint * d_watts
+        required += decode_min_endpoint * d_watts
     return required <= total_budget
 
 
@@ -323,7 +331,8 @@ def apply_power_budget(
     p_watts: Optional[int],
     d_watts: Optional[int],
     total_budget: int,
-    min_endpoint: int,
+    prefill_min_endpoint: int,
+    decode_min_endpoint: Optional[int] = None,
 ) -> tuple[Optional[int], Optional[int], Optional[str]]:
     """Clamp proposed replica counts so projected power fits ``total_budget``.
 
@@ -355,6 +364,9 @@ def apply_power_budget(
         if capped_p or capped_d:
             return new_p, new_d, "power_rebalance_staged"
 
+    if decode_min_endpoint is None:
+        decode_min_endpoint = prefill_min_endpoint
+
     eff_p = proposed_p if proposed_p is not None else current_p
     eff_d = proposed_d if proposed_d is not None else current_d
     if project_watts(eff_p, eff_d, p_watts, d_watts) <= total_budget:
@@ -364,7 +376,13 @@ def apply_power_budget(
         assert proposed_p is not None and proposed_d is not None
         assert p_watts is not None and d_watts is not None
         new_p, new_d = _shrink_pair(
-            proposed_p, proposed_d, p_watts, d_watts, total_budget, min_endpoint
+            proposed_p,
+            proposed_d,
+            p_watts,
+            d_watts,
+            total_budget,
+            prefill_min_endpoint,
+            decode_min_endpoint,
         )
         # Ceiling never raises a proposed count (decode-no-upscale invariant).
         new_p = min(new_p, proposed_p)
@@ -395,7 +413,11 @@ def apply_power_budget(
             assert proposed_p is not None and p_watts is not None
             fixed = eff_d * d_watts if (eff_d is not None and d_watts) else 0
             new_p, suppressed = _shrink_single(
-                proposed_p, current_p, p_watts, total_budget - fixed, min_endpoint
+                proposed_p,
+                current_p,
+                p_watts,
+                total_budget - fixed,
+                prefill_min_endpoint,
             )
             if new_p == proposed_p:
                 return new_p, proposed_d, None
@@ -408,7 +430,11 @@ def apply_power_budget(
         assert proposed_d is not None and d_watts is not None
         fixed = eff_p * p_watts if (eff_p is not None and p_watts) else 0
         new_d, suppressed = _shrink_single(
-            proposed_d, current_d, d_watts, total_budget - fixed, min_endpoint
+            proposed_d,
+            current_d,
+            d_watts,
+            total_budget - fixed,
+            decode_min_endpoint,
         )
         if new_d == proposed_d:
             return proposed_p, new_d, None
@@ -428,30 +454,35 @@ def _shrink_pair(
     p_watts: int,
     d_watts: int,
     budget: int,
-    min_endpoint: int,
+    prefill_min_endpoint: int,
+    decode_min_endpoint: Optional[int] = None,
 ) -> tuple[int, int]:
     """Proportionally shrink a disagg pair so watts fit the budget ceiling."""
+    if decode_min_endpoint is None:
+        decode_min_endpoint = prefill_min_endpoint
     projected = num_p * p_watts + num_d * d_watts
     if projected <= budget:
         return num_p, num_d
     # minimum_power_footprint_fits() at startup guarantees this is unreachable
     # in a correctly configured deployment. Use RuntimeError (not assert) so
     # the guard is never stripped by -O optimized-mode Python.
-    if budget < min_endpoint * (p_watts + d_watts):
+    minimum_watts = prefill_min_endpoint * p_watts + decode_min_endpoint * d_watts
+    if budget < minimum_watts:
         raise RuntimeError(
-            f"Power budget infeasible: {budget=} < {min_endpoint=} "
-            f"* ({p_watts=} + {d_watts=}); startup validation missed this"
+            f"Power budget infeasible: {budget=} < {minimum_watts=} "
+            f"({prefill_min_endpoint=} * {p_watts=} + "
+            f"{decode_min_endpoint=} * {d_watts=}); startup validation missed this"
         )
     scale = budget / projected
-    max_p = math.floor((budget - min_endpoint * d_watts) / p_watts)
-    new_p = max(min_endpoint, min(max_p, math.floor(num_p * scale)))
+    max_p = math.floor((budget - decode_min_endpoint * d_watts) / p_watts)
+    new_p = max(prefill_min_endpoint, min(max_p, math.floor(num_p * scale)))
     remaining = budget - new_p * p_watts
     # Cap new_d at num_d: when p_watts >> d_watts the proportional shrink lands
-    # new_p near min_endpoint, leaving a large remaining budget that would push
-    # floor(remaining / d_watts) above num_d. Callers guarantee num_d >=
-    # min_endpoint, so min(num_d, max(min_endpoint, ...)) returns <= num_d
+    # new_p near the prefill minimum, leaving a large remaining budget that
+    # would push floor(remaining / d_watts) above num_d. Callers guarantee num_d >=
+    # decode minimum, so min(num_d, max(decode_min_endpoint, ...)) returns <= num_d
     # while still respecting the floor for valid inputs.
-    new_d = min(num_d, max(min_endpoint, math.floor(remaining / d_watts)))
+    new_d = min(num_d, max(decode_min_endpoint, math.floor(remaining / d_watts)))
     return new_p, new_d
 
 

@@ -26,9 +26,10 @@ pub use error::SelectionError;
 pub use input::PromptRequest;
 pub use pending::SelectionCacheConfig;
 pub use policy_registry::{
-    DYN_ROUTER_WORKER_SELECTION_POLICY, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProvider, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistry, WorkerSelectionPolicyRegistryError,
+    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
+    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
+    WorkerSelectionPolicyRegistryError,
 };
 pub use server::{AppState, run_server, run_server_with_service};
 pub use service::{SelectionService, SelectionServiceBuilder};

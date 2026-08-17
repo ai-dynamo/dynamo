@@ -13,10 +13,10 @@
 //! the signal handler used to trap `SIGINT` and `SIGTERM` signals and trigger a graceful shutdown.
 //!
 //! On termination, the user application is given a graceful shutdown period of controlled by
-//! the [DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT] environment variable. If the application does not
+//! the `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` environment variable. If the application does not
 //! shutdown in time, the worker will terminate the application with an exit code of 911.
 //!
-//! The default values of [DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT] differ between the development
+//! The default values of `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` differ between the development
 //! and release builds. In development, the default is [DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG] and
 //! in release, the default is [DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE].
 

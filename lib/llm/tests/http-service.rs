@@ -816,7 +816,58 @@ async fn test_sse_keep_alive_emits_comments_during_idle_stream() {
 }
 
 #[tokio::test]
-async fn test_batch_api_skeleton_routes_return_not_implemented() {
+async fn test_disabled_batch_api_routes_are_hidden() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://localhost:{port}");
+    let openapi: serde_json::Value = client
+        .get(format!("{base}/openapi.json"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    for path in [
+        "/v1/files",
+        "/v1/files/{file_id}/content",
+        "/v1/batches",
+        "/v1/batches/{batch_id}",
+    ] {
+        assert!(
+            openapi["paths"].get(path).is_none(),
+            "disabled Batch API route is documented: {path}"
+        );
+    }
+
+    for (method, path) in [
+        (reqwest::Method::POST, "/v1/files"),
+        (reqwest::Method::GET, "/v1/files/file-123/content"),
+        (reqwest::Method::POST, "/v1/batches"),
+        (reqwest::Method::GET, "/v1/batches/batch-123"),
+    ] {
+        let response = client
+            .request(method, format!("{base}{path}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_enabled_batch_api_routes_are_documented_and_return_not_implemented() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
@@ -831,6 +882,26 @@ async fn test_batch_api_skeleton_routes_return_not_implemented() {
 
     let client = reqwest::Client::new();
     let base = format!("http://localhost:{port}");
+    let openapi: serde_json::Value = client
+        .get(format!("{base}/openapi.json"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    for path in [
+        "/v1/files",
+        "/v1/files/{file_id}/content",
+        "/v1/batches",
+        "/v1/batches/{batch_id}",
+    ] {
+        assert!(
+            openapi["paths"].get(path).is_some(),
+            "enabled Batch API route is missing from OpenAPI: {path}"
+        );
+    }
 
     let response = client
         .post(format!("{base}/v1/files"))
@@ -1594,7 +1665,9 @@ impl
 async fn test_audio_speech_backend_invalid_argument_returns_4xx() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true);
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true)
+        .unwrap();
 
     let state = service.state_clone();
     let manager = state.manager();
@@ -1700,7 +1773,9 @@ impl
 async fn test_audio_speech_failed_status_meters_as_client_error() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true);
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true)
+        .unwrap();
 
     let state = service.state_clone();
     let manager = state.manager();
@@ -1804,8 +1879,12 @@ impl
 async fn test_classify_and_pooling_validation_errors_are_metered() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Classify, true);
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Pooling, true);
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Classify, true)
+        .unwrap();
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Pooling, true)
+        .unwrap();
 
     let state = service.state_clone();
     let manager = state.manager();

@@ -19,10 +19,13 @@ use std::sync::{Arc, RwLock};
 
 use crate::indexer::{
     KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
-    ThreadPoolIndexer, WireTieredMatchDetails,
+    ThreadPoolIndexer, WireTieredMatchDetails, record_unsupported_residency_event,
 };
-use crate::protocols::{LocalBlockHash, StorageTier, WorkerWithDpRank};
+use crate::protocols::{
+    LocalBlockHash, ResidencyProjection, RouterEvent, StorageTier, WorkerWithDpRank,
+};
 use crate::router_hint::RouterHintRootCandidates;
+use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
 
 /// Holds one per-tier [`ThreadPoolIndexer<LowerTierIndexer>`] for every
@@ -32,6 +35,7 @@ pub struct LowerTierIndexers {
     metrics: Option<Arc<KvIndexerMetrics>>,
     num_threads: usize,
     block_size: u32,
+    projection: Arc<ArcSwap<ResidencyProjection>>,
     indexers: Arc<RwLock<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
 }
 
@@ -59,8 +63,16 @@ impl LowerTierIndexers {
             num_threads,
             block_size,
             metrics,
+            projection: Arc::new(ArcSwap::from_pointee(ResidencyProjection::default())),
             indexers: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Replace the immutable owner-to-worker projection used by future
+    /// lookups. Discovery and liveness reconciliation happen outside this
+    /// crate; the indexer only consumes the already-resolved snapshot.
+    pub fn set_residency_projection(&self, projection: ResidencyProjection) {
+        self.projection.store(Arc::new(projection));
     }
 
     /// Return the per-tier indexer for `storage_tier`, lazily allocating it
@@ -105,12 +117,20 @@ impl LowerTierIndexers {
             .collect()
     }
 
+    fn is_empty(&self) -> bool {
+        self.indexers.read().unwrap().is_empty()
+    }
+
     /// Lookup without allocation; returns `None` if the tier is unseen.
     pub fn get(
         &self,
         storage_tier: StorageTier,
     ) -> Option<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
         self.indexers.read().unwrap().get(&storage_tier).cloned()
+    }
+
+    pub fn record_unsupported_residency_event(&self, event: &RouterEvent) {
+        record_unsupported_residency_event(self.metrics.as_deref(), event);
     }
 }
 
@@ -266,14 +286,26 @@ pub fn query_lower_tiers_with_options(
     device_matches: &MatchDetails,
     options: LowerTierQueryOptions,
 ) -> HashMap<StorageTier, LowerTierMatchDetails> {
-    // No lower-tier indexers are allocated, so there is no continuation
-    // work to perform. Return before validating device score/hash lockstep;
-    // that invariant only matters when a lower tier will consume the
-    // continuations.
-    if indexers.indexers.read().unwrap().is_empty() {
+    if indexers.is_empty() {
         return HashMap::new();
     }
+    let projection = indexers.projection.load();
+    query_lower_tiers_with_options_and_projection(
+        indexers,
+        sequence,
+        device_matches,
+        options,
+        &projection,
+    )
+}
 
+pub fn query_lower_tiers_with_options_and_projection(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
+    projection: &ResidencyProjection,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
     let mut continuations = LowerTierMatchDetails::default().next_continuations;
     for (worker, matched_blocks) in &device_matches.overlap_scores.scores {
         let Some(last_hash) = device_matches.last_matched_hashes.get(worker).copied() else {
@@ -298,7 +330,7 @@ pub fn query_lower_tiers_with_options(
         };
 
         if let Some(&first_hash) = sequence.first() {
-            let root_workers: Vec<_> = indexer.backend().root_workers(first_hash);
+            let root_workers: Vec<_> = indexer.backend().root_workers(first_hash, projection);
             for worker in root_workers.iter() {
                 continuations
                     .entry(*worker)
@@ -308,11 +340,14 @@ pub fn query_lower_tiers_with_options(
 
         let retain_router_hint_chain =
             options.retain_router_hint_chain && storage_tier == StorageTier::HostPinned;
-        let mut tier_matches = indexer.backend().query_match_details_with_options(
-            sequence,
-            &continuations,
-            retain_router_hint_chain,
-        );
+        let mut tier_matches = indexer
+            .backend()
+            .query_match_details_with_options_and_projection(
+                sequence,
+                &continuations,
+                retain_router_hint_chain,
+                projection,
+            );
         if retain_router_hint_chain {
             tier_matches.router_hint_root_candidates = merge_router_hint_tier_candidates(
                 device_matches.router_hint_root_candidates.as_ref(),
@@ -336,15 +371,32 @@ pub fn query_lower_tiers_with_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
     use crate::indexer::KvIndexerInterface;
     use crate::protocols::{
-        ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
-        OverlapScores, WorkerWithDpRank,
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
     };
     use crate::test_utils::{router_event, stored_blocks_with_sequence_hashes};
 
     fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
         values.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    fn cache_owner_id() -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
+        )
     }
 
     fn store_event(
@@ -368,6 +420,74 @@ mod tests {
                 ),
             }),
         )
+    }
+
+    #[tokio::test]
+    async fn cache_owner_lane_survives_worker_reprojection_and_clears_once() {
+        let owner = cache_owner_id();
+        let indexers = LowerTierIndexers::new(2, 4);
+        let lower = indexers.get_or_create(StorageTier::HostPinned);
+        let store =
+            |worker_id: u64, event_id: u64, parent_hash: Option<u64>, local: u64, external: u64| {
+                RouterEvent::with_cache_owner(
+                    worker_id,
+                    KvCacheEvent {
+                        event_id,
+                        dp_rank: 3,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                            start_position: None,
+                            blocks: stored_blocks_with_sequence_hashes(
+                                &[LocalBlockHash(local)],
+                                &[external],
+                            ),
+                        }),
+                    },
+                    StorageTier::HostPinned,
+                    owner,
+                )
+            };
+
+        lower
+            .apply_event_and_wait(store(17, 1, None, 11, 101))
+            .await
+            .unwrap();
+        lower
+            .apply_event_and_wait(store(29, 2, Some(101), 12, 102))
+            .await
+            .unwrap();
+
+        let dumped = lower.dump_events().await.unwrap();
+        assert!(dumped.iter().all(|event| event.state_source == Some(owner)));
+
+        let replacement = WorkerWithDpRank::new(29, 3);
+        let projection = ResidencyProjection::new([(owner, replacement)]).unwrap();
+        assert_eq!(
+            lower
+                .backend()
+                .root_workers(LocalBlockHash(11), &projection),
+            vec![replacement]
+        );
+
+        lower
+            .apply_event_and_wait(RouterEvent::with_cache_owner(
+                replacement.worker_id,
+                KvCacheEvent {
+                    event_id: 3,
+                    dp_rank: replacement.dp_rank,
+                    data: KvCacheEventData::Cleared,
+                },
+                StorageTier::HostPinned,
+                owner,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            lower
+                .backend()
+                .root_workers(LocalBlockHash(11), &projection)
+                .is_empty()
+        );
     }
 
     #[test]
