@@ -106,6 +106,16 @@ def ensure_sglang_tensor_image_size() -> None:
     BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
 
 
+def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
+    """Apply a post-resolution SGLang configuration update.
+
+    SGLang 0.5.17 makes ``ServerArgs`` unconditionally read-only after
+    resolution. Both supported releases expose ``ServerArgs.override`` as the
+    audited mutation API, so Dynamo must use it instead of assigning fields.
+    """
+    server_args.override(source, **fields)
+
+
 @lru_cache(maxsize=32)
 def _get_async_generate_supported_kwarg_names(
     async_generate: Any,
@@ -177,5 +187,6 @@ __all__ = [
     "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
+    "override_server_args",
     "require_reasoning_kwargs",
 ]
