@@ -30,6 +30,10 @@ _INITIAL_MODEL_LOAD_TARGET = (
 _INIT_ALL_CUDA_GRAPHS_TARGET = (
     "sglang.srt.managers.scheduler.Scheduler.init_all_cuda_graphs"
 )
+_RELEASE_MEMORY_OCCUPATION_TARGET = (
+    "sglang.srt.managers.scheduler_components.weight_updater."
+    "SchedulerWeightUpdaterManager.release_memory_occupation"
+)
 _CREATE_DSA_INDEX_BUFFERS_TARGET = (
     "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers"
 )
@@ -55,6 +59,8 @@ def test_sglang_hooks_capture_models_and_delegate_memory_control(monkeypatch):
     adapter._client = client
     adapter._models = []
     monkeypatch.setattr(plugin, "_adapter", lambda: adapter)
+    barrier = Mock()
+    monkeypatch.setattr(plugin.torch.distributed, "barrier", barrier)
     monkeypatch.setenv("DYN_GMS_USE_V1", "true")
 
     plugin.register_gms_v1_plugin()
@@ -65,6 +71,7 @@ def test_sglang_hooks_capture_models_and_delegate_memory_control(monkeypatch):
         _FACTORY_TARGET,
         _CREATE_DSA_INDEX_BUFFERS_TARGET,
         _LAYER_SPLIT_DSA_INDEX_BUFFERS_TARGET,
+        _RELEASE_MEMORY_OCCUPATION_TARGET,
     }
     assert hook_types[_INIT_ALL_CUDA_GRAPHS_TARGET] is HookType.BEFORE
     target, draft = object(), object()
@@ -92,3 +99,8 @@ def test_sglang_hooks_capture_models_and_delegate_memory_control(monkeypatch):
     ]
     client.suspend.assert_called_once_with()
     client.resume.assert_called_once_with()
+
+    release = hooks[_RELEASE_MEMORY_OCCUPATION_TARGET]
+    manager, release_result = Mock(tp_cpu_group=object()), object()
+    assert release(release_result, manager, Mock()) is release_result
+    barrier.assert_called_once_with(group=manager.tp_cpu_group)

@@ -81,6 +81,12 @@ def register_gms_v1_plugin() -> None:
         with _adapter().region("kv_cache"):
             return original(*args, **kwargs)
 
+    def after_release_memory_occupation(result, manager, *args, **kwargs):
+        # Fence the TP group: ranks that finish releasing early must not race
+        # ahead of ranks still unmapping their share of the weights.
+        torch.distributed.barrier(group=manager.tp_cpu_group)
+        return result
+
     HookRegistry.register(
         "sglang.srt.model_executor.model_runner_components.load_model_utils."
         "load_model_with_memory_saver",
@@ -96,6 +102,12 @@ def register_gms_v1_plugin() -> None:
         "sglang.srt.utils.torch_memory_saver_adapter.TorchMemorySaverAdapter.create",
         lambda _original, *_args, **_kwargs: _adapter(),
         HookType.AROUND,
+    )
+    HookRegistry.register(
+        "sglang.srt.managers.scheduler_components.weight_updater."
+        "SchedulerWeightUpdaterManager.release_memory_occupation",
+        after_release_memory_occupation,
+        HookType.AFTER,
     )
     HookRegistry.register(
         "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers",
