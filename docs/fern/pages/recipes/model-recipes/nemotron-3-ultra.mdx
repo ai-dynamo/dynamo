@@ -63,20 +63,26 @@ The target picker covers the original Day-0 vLLM deployments of Nemotron-3-Ultra
 
 ## Refresh Profiles
 
-Refresh profiles are aggregated agentic deployments with two workers, KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and Expert Parallelism disabled. The 256K profiles use five-token MTP; the 1M profiles run without MTP.
+Refresh profiles include two-worker aggregated and 1P1D disaggregated agentic deployments with KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and Expert Parallelism disabled. Aggregated 256K profiles use five-token MTP; aggregated 1M and all 1P1D profiles run without MTP.
 
 <Info>
 The Refresh manifests use the pinned `vllm-runtime:1.4.0-rc.4` image digest shown in the source recipe. Review the image and cluster-specific placement before deployment.
 </Info>
 
-| GPU | Context | Worker shape | Reference concurrency | Manifest |
-|---|---:|---:|---:|---|
-| B200 | 256K | 2 × TP4 | 94 | `vllm/agg-b200-agentic-256k-2w-kv/deploy.yaml` |
-| B200 | 1M | 2 × TP4 | 46 | `vllm/agg-b200-agentic-1m-2w-kv/deploy.yaml` |
-| GB200 | 256K | 2 × TP4 | 96 | `vllm/agg-gb200-agentic-256k-2w-kv/deploy.yaml` |
-| GB200 | 1M | 2 × TP4 | 48 | `vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml` |
-| H200 | 256K | 2 × TP8 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
-| H200 | 1M | 2 × TP8 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
+| GPU | Context | Topology | Worker shape | Reference concurrency | Manifest |
+|---|---:|---|---:|---:|---|
+| B200 | 256K | Aggregated | 2 × TP4 | 94 | `vllm/agg-b200-agentic-256k-2w-kv/deploy.yaml` |
+| B200 | 1M | Aggregated | 2 × TP4 | 46 | `vllm/agg-b200-agentic-1m-2w-kv/deploy.yaml` |
+| GB200 | 256K | Aggregated | 2 × TP4 | 96 | `vllm/agg-gb200-agentic-256k-2w-kv/deploy.yaml` |
+| GB200 | 1M | Aggregated | 2 × TP4 | 48 | `vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml` |
+| H200 | 256K | Aggregated | 2 × TP8 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
+| H200 | 1M | Aggregated | 2 × TP8 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
+| B200 | 256K | Disaggregated | 1P TP4 + 1D TP4 | 72 | `vllm/disagg-b200-agentic-256k-1p1d/deploy.yaml` |
+| B200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 24 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
+| GB200 | 256K | Disaggregated | 1P TP4 + 1D TP4 | 64 | `vllm/disagg-gb200-agentic-256k-1p1d/deploy.yaml` |
+| GB200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 24 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
+| H200 | 256K | Disaggregated | 1P TP8 + 1D TP8 | 36 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
+| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | 16 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
 
 Deploy a Refresh profile by selecting the GPU and context length:
 
@@ -91,7 +97,17 @@ kubectl apply \
   -n ${NAMESPACE}
 ```
 
-All six profiles share one benchmark Job and runner:
+For a disaggregated profile, select the same GPU and context length:
+
+```bash
+PROFILE=disagg-${GPU}-agentic-${CONTEXT}-1p1d
+
+kubectl apply \
+  -f recipes/nemotron-3-ultra/vllm/${PROFILE}/deploy.yaml \
+  -n ${NAMESPACE}
+```
+
+All Refresh profiles share one benchmark Job and runner:
 
 ```bash
 # Edit the env block for the selected target first.
