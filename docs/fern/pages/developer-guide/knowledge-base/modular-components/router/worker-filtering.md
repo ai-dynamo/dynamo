@@ -48,14 +48,15 @@ which dispatchable class runs next. For credit accumulation, blocked-class
 behavior, and oversized-request bulk credit, see
 [Deficit Round Robin Queue Scheduling](deficit-round-robin.md).
 
-## Scoring Signals
+## Default Selection and Scoring
 
-These signals affect candidate scoring, not hard filtering:
+The default selector returns a live, eligible session-affinity target before scoring. Custom policies receive the target as a preference alongside all eligible candidates and may migrate it.
+
+Without an eligible affinity target, these signals affect candidate scoring:
 
 - KV cache overlap on device, host-pinned memory, disk, or shared cache
 - Active decode blocks, active-request count, and prompt-side prefill load
 - `preferred_taints`, which multiply the worker cost when present
-- Session affinity, which supplies a preferred worker without removing other eligible candidates
 - `router_temperature`, which samples among eligible candidates when non-zero
 - `overlap_score_credit`, `prefill_load_scale`, `decode_active_request_weight`, and shared-cache weighting
 
