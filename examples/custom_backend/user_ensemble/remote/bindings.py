@@ -53,10 +53,7 @@ def compile_remote_workflow(
         DeploymentSpec(
             {
                 "classifier": RemoteBinding(CLASSIFIER_ENDPOINT),
-                "generator": GenerateEndpointBinding(
-                    GENERATOR_ENDPOINT,
-                    tensor_carrier=None,
-                ),
+                "generator": GenerateEndpointBinding(GENERATOR_ENDPOINT),
                 "response": response_binding,
             }
         ),

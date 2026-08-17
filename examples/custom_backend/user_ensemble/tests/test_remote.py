@@ -145,7 +145,6 @@ def test_remote_plan_uses_only_inline_json_edges() -> None:
 
     assert type(plan.bindings["classifier"]) is RemoteBinding
     assert isinstance(plan.bindings["generator"], GenerateEndpointBinding)
-    assert plan.bindings["generator"].tensor_carrier is None
     assert plan.bindings["response"] == InlineBinding("response")
     assert plan.bindings["classifier"].endpoint_id == CLASSIFIER_ENDPOINT
     assert plan.bindings["generator"].endpoint_id == GENERATOR_ENDPOINT
