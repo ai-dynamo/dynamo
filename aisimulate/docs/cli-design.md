@@ -9,10 +9,6 @@ This document proposes one public command-line interface (CLI) for AISimulate pr
 configuration recommendation. It unifies the user-facing concepts currently split across Replay and
 Sweeper while keeping execution-stack details out of the configuration schema.
 
-> [!WARNING]
-> **Design draft.** This document defines a CLI contract for review. It is not an implementation plan
-> and does not commit the project to compatibility before the design is approved.
-
 ## Scope
 
 The design covers:
