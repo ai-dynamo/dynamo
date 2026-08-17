@@ -1219,6 +1219,88 @@ mod core_behavior {
     }
 
     #[test]
+    fn higher_dynamo_priority_overtakes_lower_priority_waiting_request() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(4))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let low = Uuid::from_u128(60_001);
+        let high = Uuid::from_u128(60_002);
+        core.receive(DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 2,
+            uuid: Some(low),
+            priority: -2,
+            ..Default::default()
+        });
+        core.receive(DirectRequest {
+            tokens: vec![2; 4],
+            max_output_tokens: 2,
+            uuid: Some(high),
+            priority: 7,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert_eq!(
+            pass.admissions
+                .iter()
+                .map(|admission| admission.uuid)
+                .collect::<Vec<_>>(),
+            vec![high]
+        );
+        assert_eq!(core.state.requests[&high].priority, 7);
+        assert_eq!(core.state.waiting.front().copied(), Some(low));
+    }
+
+    #[test]
+    fn equal_dynamo_priority_preserves_waiting_arrival_order() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(8)
+            .max_num_batched_tokens(Some(4))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let first = Uuid::from_u128(60_011);
+        let second = Uuid::from_u128(60_012);
+        for uuid in [first, second] {
+            core.receive(DirectRequest {
+                tokens: vec![1; 4],
+                max_output_tokens: 2,
+                uuid: Some(uuid),
+                priority: 3,
+                ..Default::default()
+            });
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert_eq!(
+            pass.admissions
+                .iter()
+                .map(|admission| admission.uuid)
+                .collect::<Vec<_>>(),
+            vec![first]
+        );
+        assert_eq!(core.state.waiting.front().copied(), Some(second));
+    }
+
+    #[test]
     fn test_running_requests_consume_budget_before_waiting() {
         let args = MockEngineArgs::builder()
             .block_size(4)
@@ -1417,6 +1499,7 @@ mod core_behavior {
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
+                priority: 5,
                 ..Default::default()
             });
         }
@@ -1436,6 +1519,7 @@ mod core_behavior {
         assert_eq!(request.status, RequestStatus::Preempted);
         assert_eq!(request.num_computed_tokens, 0);
         assert_eq!(request.num_preemptions, 1);
+        assert_eq!(request.priority, 5);
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
         assert_eq!(preemptions_before, 1);
     }
@@ -1627,6 +1711,8 @@ mod core_behavior {
             uuid,
             VllmRequestState {
                 sequence: RequestKvState::kvbm(sequence),
+                priority: 0,
+                arrival_order: 0,
                 status: RequestStatus::Running,
                 num_computed_tokens: 9,
                 num_preemptions: 1,
@@ -3156,6 +3242,8 @@ mod offload {
             uuid,
             VllmRequestState {
                 sequence: RequestKvState::kvbm(sequence),
+                priority: 0,
+                arrival_order: 0,
                 status: RequestStatus::Running,
                 num_computed_tokens,
                 num_preemptions: 0,
@@ -4012,11 +4100,10 @@ mod offload {
         );
     }
 
-    /// Completed swap-ins have just paid G2→G1 bandwidth and registered their
-    /// blocks into G1 inactive. They must re-enter at the front, before cold
-    /// requests can allocate and evict those freshly onboarded blocks.
+    /// Completed swap-ins retain their original priority and arrival order.
+    /// Equal-priority cold requests that arrived later must not overtake them.
     #[tokio::test]
-    async fn completed_swap_ins_reenter_front_preserving_order() {
+    async fn completed_swap_ins_reenter_in_stable_priority_order() {
         let args = MockEngineArgs::builder()
             .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(2)
@@ -4099,9 +4186,9 @@ mod offload {
         );
 
         // Both 1 MB transfers share a 2 GB/s link, so each receives
-        // 1 GB/s and finishes at 1 ms. On promotion they should be
-        // admitted before the cold request, preserving their original
-        // parking order.
+        // 1 GB/s and finishes at 1 ms. On promotion they should be admitted
+        // before the equal-priority cold request, preserving original arrival
+        // order across the parking lifecycle.
         let pass2 = core.execute_pass(&mut collector, 1.0);
         let admitted: Vec<_> = pass2
             .admissions
@@ -4111,7 +4198,7 @@ mod offload {
         assert_eq!(
             admitted,
             vec![first_hit, second_hit],
-            "completed swap-ins should re-enter ahead of cold requests in order"
+            "completed swap-ins should retain stable priority order after parking"
         );
     }
 

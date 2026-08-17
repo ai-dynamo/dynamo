@@ -6,6 +6,7 @@ pub(crate) use crate::replay::normalize_trace_requests;
 pub(crate) mod agg;
 mod canonical;
 pub(crate) mod components;
+mod controlled;
 pub(crate) mod core;
 pub(crate) mod disagg;
 mod entrypoints;
@@ -26,6 +27,12 @@ pub use canonical::{
     CanonicalReplayRecord, CanonicalReplayTopology, CanonicalSemanticFeatures,
     CanonicalSlaMetadata, CanonicalSyntheticSpec, CanonicalWorkloadMetadata,
     canonical_engine_pool_metadata, canonical_topology,
+};
+pub use controlled::{
+    ControlledReplayOptions, ReplayWorkSource, ReplayWorkSourceContext, ReplayWorkSubmission,
+    simulate_controlled_aggregated, simulate_controlled_aggregated_kv_router_with_options,
+    simulate_controlled_aggregated_with_options,
+    simulate_controlled_heterogeneous_aggregated_kv_router_with_options,
 };
 pub use entrypoints::run_offline_handoff_conformance;
 pub(crate) use entrypoints::{

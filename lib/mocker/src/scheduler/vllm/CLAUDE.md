@@ -23,5 +23,6 @@ TRT-LLM. `EngineType::Trtllm` uses the same `VllmCore` with a different
   admission path.
 - Discount only active cached prefix blocks from physical capacity. Inactive
   cached blocks must consume capacity when reactivated.
-- Preserve FIFO waiting behavior. A candidate that cannot be admitted now must
-  remain queued without preempting running work.
+- Preserve stable priority waiting behavior: higher Dynamo priorities run
+  first, with FIFO arrival order within each priority. A candidate that cannot
+  be admitted now must remain queued without preempting running work.

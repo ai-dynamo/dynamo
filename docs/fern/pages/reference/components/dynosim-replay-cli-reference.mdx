@@ -103,9 +103,10 @@ Example:
 {"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3]}
 ```
 
-Rows without `session_id` are independent requests. Priority fields affect only pending requests
-when `--router-mode kv_router` is active; they do not change round-robin routing or execution order
-inside a selected engine.
+Rows without `session_id` are independent requests. `priority` affects pending requests when
+`--router-mode kv_router` is active and execution order inside a selected vLLM mocker engine; higher
+values run first. `strict_priority` affects the KV router pending queue only. Neither field changes
+round-robin routing.
 
 ### Multi-turn sessions
 

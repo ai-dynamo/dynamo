@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::common::protocols::MockEngineArgs;
@@ -33,6 +34,7 @@ pub(super) struct ReplayWorkerConfig {
     pub(super) total_kv_blocks: u64,
     pub(super) data_parallel_start_rank: u32,
     pub(super) data_parallel_size: u32,
+    pub(super) taints: HashSet<String>,
 }
 
 impl WorkerConfigLike for ReplayWorkerConfig {
@@ -51,6 +53,10 @@ impl WorkerConfigLike for ReplayWorkerConfig {
     fn total_kv_blocks(&self) -> Option<u64> {
         Some(self.total_kv_blocks)
     }
+
+    fn taints(&self) -> &HashSet<String> {
+        &self.taints
+    }
 }
 
 pub(super) type ReplayScheduler =
@@ -65,6 +71,7 @@ pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWo
         total_kv_blocks: args.num_gpu_blocks as u64,
         data_parallel_start_rank: 0,
         data_parallel_size: args.dp_size.max(1),
+        taints: HashSet::new(),
     }
 }
 
@@ -74,12 +81,42 @@ pub(super) fn replay_workers_with_configs(
 ) -> HashMap<WorkerId, ReplayWorkerConfig> {
     let worker_config = replay_worker_config(args);
     (0..num_workers)
-        .map(|worker_idx| (worker_idx as WorkerId, worker_config.clone()))
+        .map(|worker_idx| {
+            let mut config = worker_config.clone();
+            config.taints = args
+                .worker_taints
+                .get(worker_idx)
+                .cloned()
+                .unwrap_or_default();
+            (worker_idx as WorkerId, config)
+        })
+        .collect()
+}
+
+pub(super) fn replay_workers_with_heterogeneous_configs(
+    worker_args: &[MockEngineArgs],
+    worker_taints: &[HashSet<String>],
+) -> HashMap<WorkerId, ReplayWorkerConfig> {
+    worker_args
+        .iter()
+        .enumerate()
+        .map(|(worker_idx, args)| {
+            let mut config = replay_worker_config(args);
+            config.taints = worker_taints.get(worker_idx).cloned().unwrap_or_default();
+            (worker_idx as WorkerId, config)
+        })
         .collect()
 }
 
 pub(super) fn replay_slots(
     args: &MockEngineArgs,
+    workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
+) -> Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>> {
+    replay_slots_with_block_size(args.block_size, workers_with_configs)
+}
+
+pub(super) fn replay_slots_with_block_size(
+    block_size: usize,
     workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
 ) -> Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>> {
     let dp_range = workers_with_configs
@@ -98,7 +135,7 @@ pub(super) fn replay_slots(
     // not mask replay dead ends by expiring requests that are still live in virtual time.
     Arc::new(ActiveSequencesMultiWorker::new_without_expiry(
         ReplayNoopPublisher,
-        args.block_size,
+        block_size,
         dp_range,
         false,
         0,
@@ -107,11 +144,13 @@ pub(super) fn replay_slots(
 }
 
 pub(super) fn replay_selector(config: &KvRouterConfig) -> DefaultWorkerSelector {
+    // The opt-in replay-bench feature promises repeatable offline experiments,
+    // including externally controlled replays that do not enter the canonical
+    // report guard. Normal builds retain the production selector below.
     #[cfg(feature = "replay-bench")]
-    if super::canonical_replay_active() {
-        return DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", 0xD1A0_5EED);
-    }
+    return DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", 0xD1A0_5EED);
 
+    #[cfg(not(feature = "replay-bench"))]
     DefaultWorkerSelector::new(Some(config.clone()), "replay")
 }
 

@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
+use dynamo_kv_router::approx::BlockEntry;
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(test)]
 pub(in crate::replay) use dynamo_kv_router::config::RouterQueuePolicy;
+use dynamo_kv_router::indexer::RoutingDecisionHashes;
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, RoutingConstraints,
-    WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+    BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
+    KvCacheStoreData, KvCacheStoredBlockData, OverlapScores, PrefillLoadHint, RouterEvent,
+    RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
@@ -44,7 +47,8 @@ use crate::replay::offline::core::{
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector, replay_slots,
-    replay_worker_config, replay_workers_with_configs,
+    replay_slots_with_block_size, replay_worker_config, replay_workers_with_configs,
+    replay_workers_with_heterogeneous_configs,
 };
 use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
 
@@ -191,32 +195,61 @@ pub(crate) struct OfflineRouterSnapshot {
 }
 
 struct SyncReplayIndexer {
-    block_size: u32,
     tree: RadixTree,
+    predicted: Option<SyncPredictedIndexer>,
 }
 
 impl SyncReplayIndexer {
-    fn new(block_size: u32) -> Self {
-        Self {
-            block_size,
+    fn new(predicted_ttl_secs: Option<f64>) -> Result<Self> {
+        let predicted = predicted_ttl_secs
+            .map(|ttl_secs| {
+                anyhow::ensure!(
+                    ttl_secs.is_finite() && ttl_secs > 0.0,
+                    "router predicted TTL must be finite and greater than zero"
+                );
+                Ok(SyncPredictedIndexer::new(Duration::from_secs_f64(ttl_secs)))
+            })
+            .transpose()?;
+        Ok(Self {
             tree: RadixTree::new(),
+            predicted,
+        })
+    }
+
+    fn predicted_enabled(&self) -> bool {
+        self.predicted.is_some()
+    }
+
+    fn find_matches_for_hashes(
+        &mut self,
+        local_block_hashes: &[LocalBlockHash],
+        now_ms: f64,
+    ) -> OverlapScores {
+        let mut scores = self.tree.find_matches(local_block_hashes.to_vec(), false);
+        if let Some(predicted) = self.predicted.as_mut() {
+            for (worker, predicted_score) in
+                predicted.find_matches(local_block_hashes, now_ms).scores
+            {
+                scores
+                    .scores
+                    .entry(worker)
+                    .and_modify(|score| *score = (*score).max(predicted_score))
+                    .or_insert(predicted_score);
+            }
         }
+        scores
     }
 
-    fn find_matches_for_request(&self, tokens: &[u32], lora_name: Option<&str>) -> OverlapScores {
-        let sequence = compute_block_hash_for_seq(
-            tokens,
-            self.block_size,
-            BlockHashOptions {
-                lora_name,
-                ..Default::default()
-            },
-        );
-        self.tree.find_matches(sequence, false)
-    }
-
-    fn find_matches_for_hashes(&self, local_block_hashes: Vec<LocalBlockHash>) -> OverlapScores {
-        self.tree.find_matches(local_block_hashes, false)
+    fn record_routing_decision(
+        &mut self,
+        worker: WorkerWithDpRank,
+        hashes: Option<RoutingDecisionHashes>,
+        now_ms: f64,
+    ) -> Result<()> {
+        if let (Some(predicted), Some(hashes)) = (self.predicted.as_mut(), hashes) {
+            predicted.record(worker, hashes, now_ms)?;
+        }
+        Ok(())
     }
 
     fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
@@ -225,6 +258,13 @@ impl SyncReplayIndexer {
             return Ok(());
         }
         self.tree.apply_event(event).map_err(Into::into)
+    }
+
+    fn remove_worker(&mut self, worker_id: WorkerId) {
+        self.tree.remove_worker(worker_id);
+        if let Some(predicted) = self.predicted.as_mut() {
+            predicted.remove_worker(worker_id);
+        }
     }
 
     #[cfg(test)]
@@ -245,9 +285,138 @@ impl SyncReplayIndexer {
     }
 }
 
+/// Logical-time equivalent of Dynamo's short-TTL predict-on-route side indexer.
+/// The primary replay tree continues to receive engine KV events; this tree only
+/// carries route-time predictions and is merged with primary overlap by max.
+struct SyncPredictedIndexer {
+    ttl_ms: f64,
+    tree: RadixTree,
+    live_expiries: HashMap<BlockEntry, u64>,
+    expiries: BTreeMap<u64, Vec<BlockEntry>>,
+    event_id: u64,
+}
+
+impl SyncPredictedIndexer {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            ttl_ms: ttl.as_secs_f64() * 1_000.0,
+            tree: RadixTree::new(),
+            live_expiries: HashMap::new(),
+            expiries: BTreeMap::new(),
+            event_id: 0,
+        }
+    }
+
+    fn time_key(now_ms: f64) -> u64 {
+        (now_ms.max(0.0) * 1_000.0).floor() as u64
+    }
+
+    fn expiry_key(&self, now_ms: f64) -> u64 {
+        ((now_ms.max(0.0) + self.ttl_ms) * 1_000.0).ceil() as u64
+    }
+
+    fn find_matches(&mut self, local_hashes: &[LocalBlockHash], now_ms: f64) -> OverlapScores {
+        self.expire(now_ms);
+        self.tree.find_matches(local_hashes.to_vec(), false)
+    }
+
+    fn record(
+        &mut self,
+        worker: WorkerWithDpRank,
+        hashes: RoutingDecisionHashes,
+        now_ms: f64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            hashes.local_hashes.len() == hashes.sequence_hashes.len(),
+            "routing-decision local and sequence hash counts differ"
+        );
+        self.expire(now_ms);
+        self.event_id = self.event_id.saturating_add(1);
+        let blocks = hashes
+            .local_hashes
+            .iter()
+            .zip(&hashes.sequence_hashes)
+            .map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
+                tokens_hash: *local_hash,
+                block_hash: ExternalSequenceBlockHash(*sequence_hash),
+                mm_extra_info: None,
+            })
+            .collect();
+        self.tree.apply_event(RouterEvent::new(
+            worker.worker_id,
+            KvCacheEvent {
+                event_id: self.event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks,
+                }),
+                dp_rank: worker.dp_rank,
+            },
+        ))?;
+
+        let expiry = self.expiry_key(now_ms);
+        let entries = hashes
+            .sequence_hashes
+            .into_iter()
+            .enumerate()
+            .map(|(seq_position, hash)| BlockEntry {
+                key: ExternalSequenceBlockHash(hash),
+                worker,
+                seq_position,
+            })
+            .collect::<Vec<_>>();
+        for entry in &entries {
+            self.live_expiries.insert(*entry, expiry);
+        }
+        self.expiries.entry(expiry).or_default().extend(entries);
+        Ok(())
+    }
+
+    fn expire(&mut self, now_ms: f64) {
+        let now = Self::time_key(now_ms);
+        let mut due_by_worker = BTreeMap::<WorkerWithDpRank, Vec<BlockEntry>>::new();
+        while self
+            .expiries
+            .first_key_value()
+            .is_some_and(|(&expiry, _)| expiry <= now)
+        {
+            let (expiry, entries) = self.expiries.pop_first().expect("entry exists");
+            for entry in entries {
+                if self.live_expiries.get(&entry).copied() == Some(expiry) {
+                    self.live_expiries.remove(&entry);
+                    due_by_worker.entry(entry.worker).or_default().push(entry);
+                }
+            }
+        }
+
+        for (worker, mut entries) in due_by_worker {
+            entries.sort_unstable_by_key(|entry| entry.seq_position);
+            self.event_id = self.event_id.saturating_add(1);
+            let _ = self.tree.apply_event(RouterEvent::new(
+                worker.worker_id,
+                KvCacheEvent {
+                    event_id: self.event_id,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: entries.into_iter().map(|entry| entry.key).collect(),
+                    }),
+                    dp_rank: worker.dp_rank,
+                },
+            ));
+        }
+    }
+
+    fn remove_worker(&mut self, worker_id: WorkerId) {
+        self.tree.remove_worker(worker_id);
+        self.live_expiries
+            .retain(|entry, _| entry.worker.worker_id != worker_id);
+    }
+}
+
 struct PendingRequest {
     uuid: Uuid,
     token_seq: Option<Vec<SequenceHash>>,
+    routing_decision_hashes: Option<RoutingDecisionHashes>,
     isl_tokens: usize,
     overlaps: OverlapScores,
     track_prefill_tokens: bool,
@@ -256,6 +425,8 @@ struct PendingRequest {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    pinned_worker: Option<WorkerWithDpRank>,
+    routing_constraints: RoutingConstraints,
 }
 
 impl PendingRequest {
@@ -305,13 +476,19 @@ impl PendingRequest {
                 .clone()
                 .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
-            pinned_worker: None,
+            pinned_worker: self.pinned_worker,
             allowed_worker_ids: None,
-            routing_constraints: RoutingConstraints::default(),
+            routing_constraints: self.routing_constraints.clone(),
             shared_cache_hits: None,
             resp_tx: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OfflineSessionAffinity {
+    worker: WorkerWithDpRank,
+    expires_at_ms: f64,
 }
 
 pub(crate) struct OfflineReplayRouter {
@@ -321,11 +498,14 @@ pub(crate) struct OfflineReplayRouter {
     profile: PolicyProfile,
     worker_config_template: ReplayWorkerConfig,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
+    scheduler_ids_by_worker: HashMap<WorkerId, Vec<usize>>,
     slots: Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>>,
     selector: DefaultWorkerSelector,
     pending: PolicyQueue<PendingRequest>,
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    session_affinity_ttl: Option<Duration>,
+    session_affinity: HashMap<String, OfflineSessionAffinity>,
     decay_time_epoch: Instant,
     tracking_hash: TrackingHashContext,
 }
@@ -341,12 +521,47 @@ impl KvRouterPlacement {
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
     ) -> Result<Self> {
+        Self::new_with_session_affinity(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            None,
+        )
+    }
+
+    pub(in crate::replay) fn new_with_session_affinity(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        num_workers: usize,
+        session_affinity_ttl: Option<Duration>,
+    ) -> Result<Self> {
         Ok(Self {
-            router: OfflineReplayRouter::new(
+            router: OfflineReplayRouter::new_with_session_affinity(
                 args,
                 router_config,
                 prefill_load_estimator,
                 num_workers,
+                session_affinity_ttl,
+            )?,
+        })
+    }
+
+    pub(in crate::replay) fn new_heterogeneous_with_session_affinity(
+        worker_args: &[MockEngineArgs],
+        worker_taints: &[HashSet<String>],
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        session_affinity_ttl: Option<Duration>,
+    ) -> Result<Self> {
+        Ok(Self {
+            router: OfflineReplayRouter::new_heterogeneous_with_session_affinity(
+                worker_args,
+                worker_taints,
+                router_config,
+                prefill_load_estimator,
+                session_affinity_ttl,
             )?,
         })
     }
@@ -381,6 +596,7 @@ trait PlacementRequestView {
     fn metadata(&self) -> &DirectRequest;
     fn input_length(&self) -> usize;
     fn prompt_tokens(&self) -> Cow<'_, [u32]>;
+    fn routing_constraints(&self) -> RoutingConstraints;
 }
 
 impl PlacementRequestView for DirectRequest {
@@ -394,6 +610,10 @@ impl PlacementRequestView for DirectRequest {
 
     fn prompt_tokens(&self) -> Cow<'_, [u32]> {
         Cow::Borrowed(&self.tokens)
+    }
+
+    fn routing_constraints(&self) -> RoutingConstraints {
+        RoutingConstraints::default()
     }
 }
 
@@ -411,6 +631,10 @@ impl PlacementRequestView for ReplayRequestPayload {
             Some(tokens) => Cow::Borrowed(tokens),
             None => Cow::Owned(ReplayRequestPayload::prompt_tokens(self)),
         }
+    }
+
+    fn routing_constraints(&self) -> RoutingConstraints {
+        self.routing_constraints().clone()
     }
 }
 
@@ -503,16 +727,55 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
 }
 
 impl OfflineReplayRouter {
+    #[cfg(test)]
     pub(crate) fn new(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
     ) -> Result<Self> {
+        Self::new_with_session_affinity(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_session_affinity(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        num_workers: usize,
+        session_affinity_ttl: Option<Duration>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            session_affinity_ttl.is_none_or(|ttl| !ttl.is_zero()),
+            "session affinity TTL must be greater than zero"
+        );
+        anyhow::ensure!(
+            args.worker_taints.is_empty() || args.worker_taints.len() == num_workers,
+            "worker_taints must be empty or contain exactly one entry per replay worker: got {} for {} workers",
+            args.worker_taints.len(),
+            num_workers,
+        );
         let config = replay_router_config(args, router_config);
+        let predicted_ttl_secs = config.router_predicted_ttl_secs;
         let tracking_hash = TrackingHashContext::from_config(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
+        let dp_size = args.dp_size.max(1);
+        let scheduler_ids_by_worker = (0..num_workers)
+            .map(|worker_id| {
+                (
+                    worker_id as WorkerId,
+                    (0..dp_size as usize)
+                        .map(|dp_rank| worker_id * dp_size as usize + dp_rank)
+                        .collect(),
+                )
+            })
+            .collect();
         let slots = replay_slots(args, &workers_with_configs);
         let selector = replay_selector(&config);
         let profile = config
@@ -522,18 +785,98 @@ impl OfflineReplayRouter {
         Ok(Self {
             config,
             block_size: args.block_size as u32,
-            dp_size: args.dp_size.max(1),
+            dp_size,
             profile: profile.clone(),
             worker_config_template,
             workers_with_configs,
+            scheduler_ids_by_worker,
             slots,
             selector,
             pending: PolicyQueue::new(profile),
-            indexer: SyncReplayIndexer::new(args.block_size as u32),
+            indexer: SyncReplayIndexer::new(predicted_ttl_secs)?,
             prefill_load_estimator,
+            session_affinity_ttl,
+            session_affinity: HashMap::new(),
             // This is only a base Instant for converting replay `now_ms` values into
             // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
             // time derived from this epoch, not wall-clock progression.
+            decay_time_epoch: Instant::now(),
+            tracking_hash,
+        })
+    }
+
+    pub(crate) fn new_heterogeneous_with_session_affinity(
+        worker_args: &[MockEngineArgs],
+        worker_taints: &[HashSet<String>],
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        session_affinity_ttl: Option<Duration>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            session_affinity_ttl.is_none_or(|ttl| !ttl.is_zero()),
+            "session affinity TTL must be greater than zero"
+        );
+        anyhow::ensure!(
+            !worker_args.is_empty(),
+            "heterogeneous router requires at least one worker"
+        );
+        anyhow::ensure!(
+            worker_taints.is_empty() || worker_taints.len() == worker_args.len(),
+            "worker_taints must be empty or contain exactly one entry per replay worker: got {} for {} workers",
+            worker_taints.len(),
+            worker_args.len(),
+        );
+        let args = &worker_args[0];
+        anyhow::ensure!(
+            worker_args
+                .iter()
+                .all(|worker_args| worker_args.block_size == args.block_size),
+            "heterogeneous router workers must use a common block size"
+        );
+        let config = replay_router_config(args, router_config);
+        let predicted_ttl_secs = config.router_predicted_ttl_secs;
+        let tracking_hash = TrackingHashContext::from_config(&config)?;
+        let worker_config_template = replay_worker_config(args);
+        let workers_with_configs =
+            replay_workers_with_heterogeneous_configs(worker_args, worker_taints);
+        let slots = replay_slots_with_block_size(args.block_size, &workers_with_configs);
+        let selector = replay_selector(&config);
+        let profile = config
+            .configured_policy_profile()
+            .map_err(anyhow::Error::from)?;
+        let dp_size = worker_args
+            .iter()
+            .map(|worker_args| worker_args.dp_size.max(1))
+            .max()
+            .unwrap_or(1);
+        let mut next_scheduler_id = 0;
+        let scheduler_ids_by_worker = worker_args
+            .iter()
+            .enumerate()
+            .map(|(worker_id, worker_args)| {
+                let rank_count = worker_args.dp_size.max(1) as usize;
+                let scheduler_ids =
+                    (next_scheduler_id..next_scheduler_id + rank_count).collect::<Vec<_>>();
+                next_scheduler_id += rank_count;
+                (worker_id as WorkerId, scheduler_ids)
+            })
+            .collect();
+
+        Ok(Self {
+            config,
+            block_size: args.block_size as u32,
+            dp_size,
+            profile: profile.clone(),
+            worker_config_template,
+            workers_with_configs,
+            scheduler_ids_by_worker,
+            slots,
+            selector,
+            pending: PolicyQueue::new(profile),
+            indexer: SyncReplayIndexer::new(predicted_ttl_secs)?,
+            prefill_load_estimator,
+            session_affinity_ttl,
+            session_affinity: HashMap::new(),
             decay_time_epoch: Instant::now(),
             tracking_hash,
         })
@@ -574,8 +917,13 @@ impl OfflineReplayRouter {
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let pending =
-            self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
+        let pending = self.build_pending_request(
+            request,
+            max_output_tokens,
+            replay_hashes,
+            session_id,
+            now_ms,
+        )?;
         let decay_now = self.decay_now(now_ms);
         let (class_index, snapshot) = match self
             .profile
@@ -689,11 +1037,23 @@ impl OfflineReplayRouter {
         {
             return Err(anyhow!("router worker {worker_id} already exists"));
         }
+        let next_scheduler_id = self
+            .scheduler_ids_by_worker
+            .values()
+            .flatten()
+            .copied()
+            .max()
+            .map_or(0, |scheduler_id| scheduler_id + 1);
+        self.scheduler_ids_by_worker.insert(
+            wid,
+            (next_scheduler_id..next_scheduler_id + self.dp_size as usize).collect(),
+        );
         if let Err(error) = self
             .slots
             .upsert_worker(WorkerDpRange::new(wid, 0, self.dp_size))
         {
             self.workers_with_configs.remove(&wid);
+            self.scheduler_ids_by_worker.remove(&wid);
             return Err(error.into());
         }
 
@@ -712,6 +1072,8 @@ impl OfflineReplayRouter {
     pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
         self.workers_with_configs.remove(&wid);
+        self.session_affinity
+            .retain(|_, affinity| affinity.worker.worker_id != wid);
         Ok(())
     }
 
@@ -722,7 +1084,8 @@ impl OfflineReplayRouter {
         self.slots
             .unregister_worker(wid)
             .map_err(anyhow::Error::from)?;
-        self.indexer.tree.remove_worker(wid);
+        self.indexer.remove_worker(wid);
+        self.scheduler_ids_by_worker.remove(&wid);
         Ok(())
     }
 
@@ -795,11 +1158,12 @@ impl OfflineReplayRouter {
     }
 
     fn build_pending_request<Request: PlacementRequestView>(
-        &self,
+        &mut self,
         request_view: &Request,
         max_output_tokens: usize,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
+        now_ms: f64,
     ) -> Result<PendingRequest> {
         let request = request_view.metadata();
         let input_length = request_view.input_length();
@@ -807,11 +1171,18 @@ impl OfflineReplayRouter {
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
         let (priority_jump, strict_priority) = request.router_priorities();
-        let (overlaps, token_seq) = match replay_hashes {
+        let (overlaps, token_seq, routing_decision_hashes) = match replay_hashes {
             Some(replay_hashes) => {
                 let overlaps = self
                     .indexer
-                    .find_matches_for_hashes(replay_hashes.local_block_hashes);
+                    .find_matches_for_hashes(&replay_hashes.local_block_hashes, now_ms);
+                let routing_decision_hashes =
+                    self.indexer
+                        .predicted_enabled()
+                        .then(|| RoutingDecisionHashes {
+                            local_hashes: replay_hashes.local_block_hashes.clone(),
+                            sequence_hashes: replay_hashes.sequence_hashes.clone(),
+                        });
                 let token_seq = if !self.config.router_track_active_blocks {
                     None
                 } else if self.config.router_assume_kv_reuse
@@ -832,11 +1203,20 @@ impl OfflineReplayRouter {
                         None,
                     )
                 };
-                (overlaps, token_seq)
+                (overlaps, token_seq, routing_decision_hashes)
             }
             None => {
                 let tokens = request_view.prompt_tokens();
-                let overlaps = self.indexer.find_matches_for_request(&tokens, None);
+                let local_hashes = compute_block_hash_for_seq(
+                    &tokens,
+                    self.block_size,
+                    BlockHashOptions::default(),
+                );
+                let overlaps = self.indexer.find_matches_for_hashes(&local_hashes, now_ms);
+                let routing_decision_hashes = self
+                    .indexer
+                    .predicted_enabled()
+                    .then(|| RoutingDecisionHashes::from_local_hashes(local_hashes));
                 let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
                     &self.tracking_hash,
                     self.tracking_hash_scope(),
@@ -845,13 +1225,18 @@ impl OfflineReplayRouter {
                     BlockHashOptions::default(),
                     None,
                 );
-                (overlaps, token_seq)
+                (overlaps, token_seq, routing_decision_hashes)
             }
         };
+
+        let routing_constraints = request_view.routing_constraints();
+        let pinned_worker =
+            self.resolve_session_affinity(session_id.as_deref(), &routing_constraints, now_ms);
 
         Ok(PendingRequest {
             uuid,
             token_seq,
+            routing_decision_hashes,
             isl_tokens: input_length,
             overlaps,
             track_prefill_tokens: self.config.router_track_prefill_tokens,
@@ -863,7 +1248,60 @@ impl OfflineReplayRouter {
             strict_priority,
             policy_class: request.policy_class.clone(),
             session_id,
+            pinned_worker,
+            routing_constraints,
         })
+    }
+
+    fn resolve_session_affinity(
+        &mut self,
+        session_id: Option<&str>,
+        routing_constraints: &RoutingConstraints,
+        now_ms: f64,
+    ) -> Option<WorkerWithDpRank> {
+        let ttl = self.session_affinity_ttl?;
+        let session_id = session_id?;
+        let affinity = self.session_affinity.get(session_id).copied()?;
+        let worker_valid = affinity.expires_at_ms > now_ms
+            && self
+                .workers_with_configs
+                .get(&affinity.worker.worker_id)
+                .is_some_and(|config| {
+                    let start = config.data_parallel_start_rank();
+                    let end = start.saturating_add(config.data_parallel_size());
+                    (start..end).contains(&affinity.worker.dp_rank)
+                        && routing_constraints.is_compatible_with_worker_taints(config.taints())
+                });
+        if !worker_valid {
+            self.session_affinity.remove(session_id);
+            return None;
+        }
+        self.session_affinity.insert(
+            session_id.to_string(),
+            OfflineSessionAffinity {
+                worker: affinity.worker,
+                expires_at_ms: now_ms + ttl.as_secs_f64() * 1000.0,
+            },
+        );
+        Some(affinity.worker)
+    }
+
+    fn bind_session_affinity(
+        &mut self,
+        session_id: Option<&str>,
+        worker: WorkerWithDpRank,
+        now_ms: f64,
+    ) {
+        let (Some(ttl), Some(session_id)) = (self.session_affinity_ttl, session_id) else {
+            return;
+        };
+        self.session_affinity.insert(
+            session_id.to_string(),
+            OfflineSessionAffinity {
+                worker,
+                expires_at_ms: now_ms + ttl.as_secs_f64() * 1000.0,
+            },
+        );
     }
 
     fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
@@ -878,6 +1316,11 @@ impl OfflineReplayRouter {
         request: PendingRequest,
         decay_now: Instant,
     ) -> Result<AdmitOutcome> {
+        let now_ms = decay_now
+            .checked_duration_since(self.decay_time_epoch)
+            .unwrap_or_default()
+            .as_secs_f64()
+            * 1000.0;
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
@@ -889,15 +1332,21 @@ impl OfflineReplayRouter {
             eligibility,
             self.block_size,
         )?;
+        let session_id = request.session_id.clone();
         let worker_id = usize::try_from(selection.worker.worker_id)
             .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
         let dp_rank = usize::try_from(selection.worker.dp_rank)
             .map_err(|_| anyhow!("selected dp rank does not fit into usize"))?;
-        let worker_idx = worker_id
-            .checked_mul(self.dp_size as usize)
-            .and_then(|base| base.checked_add(dp_rank))
-            .ok_or_else(|| anyhow!("selected worker/rank index overflow"))?;
+        let worker_idx = self
+            .scheduler_ids_by_worker
+            .get(&selection.worker.worker_id)
+            .and_then(|scheduler_ids| scheduler_ids.get(dp_rank))
+            .copied()
+            .ok_or_else(|| {
+                anyhow!("selected worker {worker_id} has no DP rank {dp_rank} scheduler")
+            })?;
         let request_id = request.request_id();
+        let routing_decision_hashes = request.routing_decision_hashes;
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
             selection.cached_tokens,
@@ -922,6 +1371,9 @@ impl OfflineReplayRouter {
                 decay_now,
             )
             .map_err(anyhow::Error::from)?;
+        self.indexer
+            .record_routing_decision(selection.worker, routing_decision_hashes, now_ms)?;
+        self.bind_session_affinity(session_id.as_deref(), selection.worker, now_ms);
 
         Ok(AdmitOutcome {
             worker_idx,
@@ -1039,14 +1491,17 @@ mod tests {
     use dynamo_kv_router::protocols::{
         BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
         KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        WorkerId,
+        WorkerId, WorkerWithDpRank,
     };
     use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
     use rustc_hash::FxHashMap;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 
-    use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
+    use super::{
+        OfflineReplayRouter, ReplayRequestHashes, RoutingDecisionHashes, SyncReplayIndexer,
+        WorkerAdmission,
+    };
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
 
@@ -1166,7 +1621,7 @@ mod tests {
 
     #[test]
     fn session_identity_reaches_scheduling_request() {
-        let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         let request = request(1, 7);
         let pending = router
             .build_pending_request(
@@ -1174,6 +1629,7 @@ mod tests {
                 request.max_output_tokens,
                 None,
                 Some("session-a".to_string()),
+                0.0,
             )
             .unwrap();
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
@@ -1188,6 +1644,52 @@ mod tests {
     }
 
     #[test]
+    fn session_affinity_pins_until_logical_idle_ttl_expires() {
+        let mut router = OfflineReplayRouter::new_with_session_affinity(
+            &replay_args(),
+            None,
+            None,
+            2,
+            Some(Duration::from_secs(10)),
+        )
+        .unwrap();
+
+        let first = router
+            .on_request_arrival_for_session(
+                &request(1, 7),
+                None,
+                Some("session-a".to_string()),
+                0.0,
+            )
+            .unwrap()
+            .admissions[0]
+            .worker_idx;
+        let before_expiry = router
+            .on_request_arrival_for_session(
+                &request(2, 8),
+                None,
+                Some("session-a".to_string()),
+                1_000.0,
+            )
+            .unwrap()
+            .admissions[0]
+            .worker_idx;
+        let after_expiry = router
+            .on_request_arrival_for_session(
+                &request(3, 9),
+                None,
+                Some("session-a".to_string()),
+                11_001.0,
+            )
+            .unwrap()
+            .admissions[0]
+            .worker_idx;
+
+        assert_eq!(before_expiry, first);
+        assert_ne!(after_expiry, first);
+    }
+
+    #[test]
     fn keyed_replay_hashes_derive_tracking_identities_from_tokens() {
         let mut key_file = NamedTempFile::new().unwrap();
         key_file.write_all(&[0x39; 32]).unwrap();
@@ -1197,7 +1699,7 @@ mod tests {
             router_tracking_key_id: Some("2026-01".to_string()),
             ..Default::default()
         };
-        let router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();
+        let mut router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();
         let request = request(1, 7);
         let replay_hashes = ReplayRequestHashes::from_tokens(&request.tokens, router.block_size);
         let expected = router.config.compute_seq_hashes_for_tracking_with_context(
@@ -1215,6 +1717,7 @@ mod tests {
                 request.max_output_tokens,
                 Some(replay_hashes.clone()),
                 None,
+                0.0,
             )
             .unwrap();
 
@@ -1224,7 +1727,7 @@ mod tests {
 
     #[test]
     fn lower_tier_events_do_not_enter_offline_primary_index() {
-        let mut indexer = SyncReplayIndexer::new(64);
+        let mut indexer = SyncReplayIndexer::new(None).unwrap();
 
         indexer
             .apply_event(store_event(7, 1, 101, StorageTier::HostPinned))
@@ -1235,6 +1738,42 @@ mod tests {
             .apply_event(store_event(7, 2, 101, StorageTier::Device))
             .unwrap();
         assert_eq!(indexer.debug_snapshot().total_cached_blocks, 1);
+    }
+
+    #[test]
+    fn predicted_route_overlap_expires_in_logical_time() {
+        let mut indexer = SyncReplayIndexer::new(Some(5.0)).unwrap();
+        let local_hashes = vec![LocalBlockHash(101), LocalBlockHash(102)];
+        let worker = WorkerWithDpRank::new(7, 0);
+
+        assert!(
+            indexer
+                .find_matches_for_hashes(&local_hashes, 0.0)
+                .scores
+                .is_empty()
+        );
+        indexer
+            .record_routing_decision(
+                worker,
+                Some(RoutingDecisionHashes::from_local_hashes(
+                    local_hashes.clone(),
+                )),
+                0.0,
+            )
+            .unwrap();
+        assert_eq!(
+            indexer
+                .find_matches_for_hashes(&local_hashes, 4_999.0)
+                .scores
+                .get(&worker),
+            Some(&2)
+        );
+        assert!(
+            indexer
+                .find_matches_for_hashes(&local_hashes, 5_001.0)
+                .scores
+                .is_empty()
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ use anyhow::{Context, Result, bail};
 use dynamo_kv_hashing::{Request, compute_hash_v2, compute_next_sequence_hash};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -61,6 +62,17 @@ pub struct MooncakeRow {
     pub strict_priority: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_constraints: Option<MooncakeRoutingConstraints>,
+}
+
+/// Request-level worker-taint constraints used by KV-router replay.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MooncakeRoutingConstraints {
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub required_taints: HashSet<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub preferred_taints: HashMap<String, f32>,
 }
 
 /// One row of an agentic Mooncake replay trace.
@@ -98,6 +110,8 @@ pub struct AgenticMooncakeRow {
     pub strict_priority: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_constraints: Option<MooncakeRoutingConstraints>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
