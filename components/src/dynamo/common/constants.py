@@ -5,7 +5,7 @@
 
 from enum import Enum
 
-# TODO(DYN-3877): Rename these constants and wire values with the matching KVCC names.
+# TODO: Rename these constants and wire values with the matching KVCC names.
 KV_HINT_TRANSFER_CAPABILITY_KEY = "router_hint"
 KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY = "router_hint_worker_type"
 KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY = (

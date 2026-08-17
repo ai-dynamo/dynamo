@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.
-// TODO(DYN-3877): Rename these constants and wire values with the matching KVCC names.
+// TODO: Rename these constants and wire values with the matching KVCC names.
 pub const KV_HINT_TRANSFER_CAPABILITY_KEY: &str = "router_hint";
 
 /// Worker runtime-data keys used to build transfer hints.
