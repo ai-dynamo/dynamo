@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
 use std::io::Write;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
@@ -13,7 +11,7 @@ use async_nats::jetstream;
 use async_trait::async_trait;
 use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
 use dynamo_runtime::transports::nats;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::telemetry::jsonl::{JsonlSinkOptions, JsonlWriter};
@@ -24,7 +22,26 @@ use super::{
     otel_sink::OtelRequestTraceSink,
 };
 
-static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
+/// One live set of sink workers. Every worker of the generation holds a clone of
+/// the `Arc`, so the generation is alive exactly while at least one worker is
+/// still running: the last worker to finish drops the final strong reference and
+/// `stopped` fires. The registry below keeps only a `Weak`, so a generation that
+/// has wound down cannot block the next one from starting.
+struct WorkerGeneration {
+    stopped: CancellationToken,
+}
+
+impl Drop for WorkerGeneration {
+    fn drop(&mut self) {
+        self.stopped.cancel();
+    }
+}
+
+static GENERATION: OnceLock<Mutex<Weak<WorkerGeneration>>> = OnceLock::new();
+
+fn generation() -> &'static Mutex<Weak<WorkerGeneration>> {
+    GENERATION.get_or_init(|| Mutex::new(Weak::new()))
+}
 
 #[async_trait]
 pub trait RequestTraceSink: Send + Sync {
@@ -224,28 +241,49 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTraceSink>>
 }
 
 pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Result<()> {
-    if WORKERS_STARTED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
+    spawn_generation(shutdown, parse_sinks_from_env).await
+}
+
+/// Start one generation of sink workers unless a generation is already live.
+///
+/// The lock is held across sink construction so that an initialization
+/// overlapping a slow sink connect waits for, and reports, the real outcome
+/// instead of being told success while the first one is still connecting.
+async fn spawn_generation<F, Fut>(shutdown: CancellationToken, make_sinks: F) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = anyhow::Result<Vec<Arc<dyn RequestTraceSink>>>>,
+{
+    let mut live = generation().lock().await;
+    if live.upgrade().is_some() {
         return Ok(());
     }
 
-    if let Err(error) = spawn_workers(shutdown).await {
-        WORKERS_STARTED.store(false, Ordering::Release);
-        return Err(error);
-    }
+    let generation = Arc::new(WorkerGeneration {
+        stopped: CancellationToken::new(),
+    });
+    // On error nothing is stored, so the next initialization retries.
+    let sinks = make_sinks().await?;
+    spawn_workers(shutdown, sinks, &generation);
+    *live = Arc::downgrade(&generation);
     Ok(())
 }
 
-async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
-    let sinks = parse_sinks_from_env().await?;
+fn spawn_workers(
+    shutdown: CancellationToken,
+    sinks: Vec<Arc<dyn RequestTraceSink>>,
+    generation: &Arc<WorkerGeneration>,
+) {
     let sink_count = sinks.len();
     for sink in sinks {
         let name = sink.name();
         let mut receiver: broadcast::Receiver<RequestTraceRecord> = super::subscribe();
         let worker_shutdown = shutdown.clone();
+        let generation = Arc::clone(generation);
         tokio::spawn(async move {
+            // Named binding on purpose: a bare `_` would drop the handle here
+            // and release the generation while this worker is still draining.
+            let _generation = generation;
             loop {
                 tokio::select! {
                     biased;
@@ -287,15 +325,28 @@ async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
         tracing::warn!("request trace is enabled but no valid request trace sinks were configured");
     }
     tracing::info!(sinks = sink_count, "Request trace sinks ready");
-    Ok(())
+}
+
+/// Clone of the live generation's `stopped` token, for tests that need to await
+/// a generation winding down. It must never hand out the `Arc` itself: an
+/// awaiting caller holding one would keep the generation alive forever.
+#[cfg(test)]
+async fn live_generation_stopped() -> Option<CancellationToken> {
+    generation()
+        .lock()
+        .await
+        .upgrade()
+        .map(|generation| generation.stopped.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Read;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use flate2::read::MultiGzDecoder;
     use tempfile::tempdir;
+    use tokio::sync::mpsc;
 
     use crate::request_trace::RequestReplayMetrics;
     use crate::telemetry::jsonl_gz::segment_path;
@@ -339,6 +390,214 @@ mod tests {
             tool: None,
             payload: None,
         }
+    }
+
+    fn record_with_request_id(request_id: &str) -> RequestTraceRecord {
+        let mut record = sample_record();
+        if let Some(request) = record.request.as_mut() {
+            request.request_id = request_id.to_string();
+        }
+        record
+    }
+
+    /// The generation registry is process-global, so the tests that drive it end
+    /// to end must not overlap with each other.
+    static GENERATION_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+    struct RecordingSink {
+        emitted: mpsc::UnboundedSender<RequestTraceRecord>,
+        shutdowns: Arc<AtomicUsize>,
+    }
+
+    impl RecordingSink {
+        fn new() -> (
+            Arc<Self>,
+            mpsc::UnboundedReceiver<RequestTraceRecord>,
+            Arc<AtomicUsize>,
+        ) {
+            let (emitted, records) = mpsc::unbounded_channel();
+            let shutdowns = Arc::new(AtomicUsize::new(0));
+            let sink = Arc::new(Self {
+                emitted,
+                shutdowns: Arc::clone(&shutdowns),
+            });
+            (sink, records, shutdowns)
+        }
+    }
+
+    #[async_trait]
+    impl RequestTraceSink for RecordingSink {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        async fn emit(&self, record: &RequestTraceRecord) {
+            let _ = self.emitted.send(record.clone());
+        }
+
+        async fn shutdown(&self) {
+            self.shutdowns.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Wait for one specific record. The trace bus is process-global and other
+    /// tests in this binary publish to it, so a sink cannot assume the first
+    /// record it sees is the one its own test published.
+    async fn await_record(
+        records: &mut mpsc::UnboundedReceiver<RequestTraceRecord>,
+        request_id: &str,
+    ) -> bool {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(record) = records.recv().await {
+                if record
+                    .request
+                    .as_ref()
+                    .is_some_and(|request| request.request_id == request_id)
+                {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    async fn shutdown_generation(shutdown: CancellationToken) {
+        shutdown.cancel();
+        if let Some(stopped) = live_generation_stopped().await {
+            tokio::time::timeout(Duration::from_secs(5), stopped.cancelled())
+                .await
+                .expect("generation did not release after its shutdown token fired");
+        }
+    }
+
+    #[tokio::test]
+    async fn sink_workers_restart_after_generation_shutdown() {
+        let _serialized = GENERATION_TEST_LOCK.lock().await;
+        crate::request_trace::init_bus_for_test(64);
+
+        let (sink_one, mut records_one, shutdowns_one) = RecordingSink::new();
+        let token_one = CancellationToken::new();
+        spawn_generation(token_one.clone(), || async move {
+            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_one];
+            Ok(sinks)
+        })
+        .await
+        .unwrap();
+
+        crate::request_trace::publish(record_with_request_id("restart-generation-one"));
+        assert!(
+            await_record(&mut records_one, "restart-generation-one").await,
+            "the first generation's sink never received its record"
+        );
+
+        let stopped = live_generation_stopped()
+            .await
+            .expect("the first generation is live");
+        token_one.cancel();
+        tokio::time::timeout(Duration::from_secs(5), stopped.cancelled())
+            .await
+            .expect("the first generation did not release after its shutdown token fired");
+        assert_eq!(
+            shutdowns_one.load(Ordering::Acquire),
+            1,
+            "the first generation released before its sink was shut down"
+        );
+
+        let (sink_two, mut records_two, _shutdowns_two) = RecordingSink::new();
+        let token_two = CancellationToken::new();
+        spawn_generation(token_two.clone(), || async move {
+            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_two];
+            Ok(sinks)
+        })
+        .await
+        .unwrap();
+
+        crate::request_trace::publish(record_with_request_id("restart-generation-two"));
+        assert!(
+            await_record(&mut records_two, "restart-generation-two").await,
+            "the second generation's sink never received its record"
+        );
+
+        shutdown_generation(token_two).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_initializers_share_one_generation() {
+        let _serialized = GENERATION_TEST_LOCK.lock().await;
+        crate::request_trace::init_bus_for_test(64);
+
+        let (sink_one, mut records_one, _shutdowns_one) = RecordingSink::new();
+        let token = CancellationToken::new();
+        spawn_generation(token.clone(), || async move {
+            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_one];
+            Ok(sinks)
+        })
+        .await
+        .unwrap();
+
+        let (sink_two, mut records_two, _shutdowns_two) = RecordingSink::new();
+        let second_generation_builds = Arc::new(AtomicUsize::new(0));
+        let builds = Arc::clone(&second_generation_builds);
+        spawn_generation(CancellationToken::new(), move || async move {
+            builds.fetch_add(1, Ordering::AcqRel);
+            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_two];
+            Ok(sinks)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            second_generation_builds.load(Ordering::Acquire),
+            0,
+            "an initialization overlapping a live generation built a second set of sinks"
+        );
+
+        crate::request_trace::publish(record_with_request_id("shared-generation"));
+        assert!(
+            await_record(&mut records_one, "shared-generation").await,
+            "the live generation's sink stopped receiving records"
+        );
+        // No worker was ever spawned for the second sink, so this cannot race
+        // with a delivery still in flight.
+        assert!(
+            records_two.try_recv().is_err(),
+            "a duplicate worker emitted into the overlapping initializer's sink"
+        );
+
+        shutdown_generation(token).await;
+    }
+
+    #[tokio::test]
+    async fn generation_with_no_sinks_does_not_latch() {
+        let _serialized = GENERATION_TEST_LOCK.lock().await;
+        crate::request_trace::init_bus_for_test(64);
+
+        spawn_generation(CancellationToken::new(), || async { Ok(Vec::new()) })
+            .await
+            .unwrap();
+        assert!(
+            live_generation_stopped().await.is_none(),
+            "a generation with no workers stayed live"
+        );
+
+        let (sink, mut records, _shutdowns) = RecordingSink::new();
+        let token = CancellationToken::new();
+        spawn_generation(token.clone(), || async move {
+            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink];
+            Ok(sinks)
+        })
+        .await
+        .unwrap();
+
+        crate::request_trace::publish(record_with_request_id("after-empty-generation"));
+        assert!(
+            await_record(&mut records, "after-empty-generation").await,
+            "a generation configured with no sinks latched the guard"
+        );
+
+        shutdown_generation(token).await;
     }
 
     #[tokio::test]
