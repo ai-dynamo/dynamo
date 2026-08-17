@@ -284,10 +284,14 @@ ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_
 # --frontend-decoding -- silently falls back to stub mode. Expose the same
 # stable prefix vLLM uses (cf. templates/vllm_runtime.Dockerfile).
 #
-# Select the wheel by CUDA major rather than assuming a single one is
-# installed: the nixl meta package can pull more than one nixl-cu* alongside
-# each other, and picking the wrong one would put a mismatched NIXL on the
-# loader path. The installer fails the build if that wheel is not laid out as
+# Select the wheel by CUDA major rather than globbing. In THIS image a glob
+# would in fact be unambiguous -- discover_nixl_ucx_layout.py, run by the
+# compat step above, already exits non-zero on more than one nixl-cu*
+# distribution ("expected one nixl-cu* distribution, found N"). Naming the
+# major is still the better contract: it keeps one interface with vLLM
+# (cf. templates/vllm_runtime.Dockerfile), and it states which NIXL this image
+# is meant to load instead of inferring it from whatever happens to be
+# installed. The installer fails the build if that wheel is not laid out as
 # expected, which is what a CUDA-major bump should do -- not produce an image
 # that hangs at startup.
 ARG CUDA_MAJOR
