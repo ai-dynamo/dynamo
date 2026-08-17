@@ -43,6 +43,7 @@ use crate::DistributedRuntime;
 use crate::component::{Component, Endpoint, Namespace};
 use crate::discovery::{
     Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
+    MAX_JSON_SAFE_PUBLISHER_ID,
 };
 use crate::protocols::EndpointId;
 use crate::traits::DistributedRuntimeProvider;
@@ -259,6 +260,11 @@ impl Stream for DeduplicatingStream {
     }
 }
 
+/// Keep publisher IDs exactly representable in float64-backed JSON metadata.
+fn discovery_safe_publisher_id(random_id: u64) -> u64 {
+    random_id & MAX_JSON_SAFE_PUBLISHER_ID
+}
+
 /// Event publisher for a specific topic.
 pub struct EventPublisher {
     transport_kind: EventTransportKind,
@@ -387,9 +393,11 @@ impl EventPublisher {
         // can host multiple publishers for the same scope/topic, each with its
         // own ZMQ endpoint and sequence space, so the process ID is not unique
         // enough here.
-        let publisher_id = rand::rngs::OsRng
-            .try_next_u64()
-            .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?;
+        let publisher_id = discovery_safe_publisher_id(
+            rand::rngs::OsRng
+                .try_next_u64()
+                .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?,
+        );
         let discovery = Some(drt.discovery());
         let runtime_handle = drt.runtime().secondary();
         let subject = scope.subject(&topic);
@@ -916,6 +924,27 @@ mod tests {
     use crate::config::environment_names::zmq_broker as broker_env;
 
     #[test]
+    fn publisher_ids_survive_a_json_number_round_trip() {
+        // This historical full-range ID is not JSON-safe. It was observed
+        // rounding to 13584172880116488000 after a discovery round trip.
+        let unsafe_id: u64 = 13_584_172_880_116_487_724;
+        assert!(unsafe_id > MAX_JSON_SAFE_PUBLISHER_ID);
+        assert_ne!(unsafe_id as f64 as u64, unsafe_id);
+
+        for random_id in [0, 1, u64::MAX, unsafe_id, 6_633_287_539_119_378] {
+            let publisher_id = discovery_safe_publisher_id(random_id);
+            assert!(
+                publisher_id <= MAX_JSON_SAFE_PUBLISHER_ID,
+                "publisher ID {publisher_id} exceeds the JSON-safe integer range"
+            );
+            assert_eq!(
+                publisher_id as f64 as u64, publisher_id,
+                "publisher ID {publisher_id} must survive an f64 round trip"
+            );
+        }
+    }
+
+    #[test]
     fn direct_zmq_topology_selection_is_narrow() {
         let lookup = |url: Option<&str>, enabled: Option<&str>| {
             let url = url.map(std::ffi::OsString::from);
@@ -1106,6 +1135,12 @@ mod tests {
                             publisher_b.publisher_id(),
                         ])
                     );
+                    for publisher_id in [publisher_a.publisher_id(), publisher_b.publisher_id()] {
+                        assert!(
+                            publisher_id <= MAX_JSON_SAFE_PUBLISHER_ID,
+                            "publisher ID {publisher_id} exceeds the JSON-safe integer range"
+                        );
+                    }
                 };
                 tokio::time::timeout(std::time::Duration::from_secs(5), receive)
                     .await

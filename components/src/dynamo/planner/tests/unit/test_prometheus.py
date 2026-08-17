@@ -48,7 +48,12 @@ class _FixedPrefillCapacity:
 
 class _ThroughputScalingHarness(ThroughputScalingMixin):
     def __init__(self, engine_rps: float):
-        self._config = SimpleNamespace(ttft_ms=200.0, min_endpoint=1)
+        self._config = SimpleNamespace(
+            ttft_ms=200.0,
+            min_endpoint=1,
+            prefill_min_endpoint=None,
+            decode_min_endpoint=None,
+        )
         self._prefill_regression = _FixedPrefillCapacity(engine_rps)
         self._diag_throughput_reason = None
         self._diag_engine_rps_prefill = None

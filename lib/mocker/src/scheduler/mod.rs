@@ -11,12 +11,13 @@ mod source_holds;
 pub mod vllm;
 
 pub use crate::common::protocols::ForwardPassSnapshot;
-use crate::common::protocols::{DirectRequest, FpmPublisher, KvEventPublishers, OutputSignal};
+use crate::common::protocols::{DirectRequest, OutputSignal};
 use dynamo_kv_router::protocols::RouterEvent;
 pub(crate) use kv_event_sink::{CapturedRouterEventBuffer, capture_router_event_sink};
 pub(crate) use live_boundary::{
     LiveBoundaryCore, LivePassExecution, LiveSchedulerState, spawn_live_scheduler,
 };
+use rustc_hash::FxHashSet;
 pub(crate) use source_holds::{
     ActiveHandoffRequests, DestinationHolds, PendingDestinations, RemovedSource, SourceCompletion,
     SourceHolds,
@@ -25,7 +26,6 @@ pub use source_holds::{
     SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent,
 };
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[cfg(feature = "kvbm-offload")]
@@ -124,9 +124,9 @@ pub(crate) fn build_fpm_snapshot(
     }
 }
 
-/// Return (visible output tokens, request-forwards) for accept-length
-/// accounting. A signal with a token corresponds to one visible token; multiple
-/// token signals with the same UUID in a pass are an MTP/spec-decode burst.
+/// Recompute (visible output tokens, request-forwards) for debug validation
+/// and the cold live-output suppression path. Ordinary pass execution carries
+/// these counters directly from decode.
 pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, usize) {
     let visible_tokens = output_signals
         .iter()
@@ -140,9 +140,25 @@ pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, u
         .iter()
         .filter(|signal| !signal.rejected && signal.token_id.is_some())
         .map(|signal| signal.uuid)
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<FxHashSet<_>>()
         .len();
     (visible_tokens, request_forwards)
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AcceptLengthSample {
+    pub(crate) output_tokens: usize,
+    pub(crate) decode_forwards: usize,
+}
+
+impl AcceptLengthSample {
+    pub(crate) fn record_forward(&mut self, output_tokens: usize) {
+        if output_tokens == 0 {
+            return;
+        }
+        self.output_tokens += output_tokens;
+        self.decode_forwards += 1;
+    }
 }
 
 pub(crate) use sglang::SglangCore;
@@ -159,6 +175,9 @@ pub(crate) struct AdmissionEvent {
 #[derive(Debug, Clone)]
 pub(crate) struct EnginePassResult {
     pub(crate) end_ms: f64,
+    /// Rank-local token completion boundary before non-model wakeups (such as
+    /// KVBM stall-advance) can extend `end_ms`.
+    pub(crate) token_completion_ms: f64,
     pub(crate) completed_requests: usize,
     pub(crate) output_signals: Vec<OutputSignal>,
     pub(crate) admissions: Vec<AdmissionEvent>,
@@ -287,22 +306,17 @@ impl EngineCore {
         }
     }
 
-    pub(crate) fn execute_pass(
-        &mut self,
-        collector: &mut crate::replay::TraceCollector,
-        now_ms: f64,
-    ) -> EnginePassResult {
+    pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
         match self {
-            Self::Vllm(core) => core.execute_pass(collector, now_ms),
-            Self::Sglang(core) => core.execute_pass(collector, now_ms),
+            Self::Vllm(core) => core.try_execute_pass(now_ms),
+            Self::Sglang(core) => core.try_execute_pass(now_ms),
         }
     }
 
-    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
-        match self {
-            Self::Vllm(core) => core.execute_hidden_pass(now_ms),
-            Self::Sglang(core) => core.execute_hidden_pass(now_ms),
-        }
+    #[cfg(test)]
+    pub(crate) fn execute_pass_unrecorded(&mut self, now_ms: f64) -> EnginePassResult {
+        self.try_execute_pass(now_ms)
+            .expect("engine scheduler pass failed")
     }
 
     #[cfg(feature = "kvbm-offload")]
@@ -336,96 +350,6 @@ impl EngineCore {
     }
 }
 
-#[derive(Clone)]
-pub(crate) enum EngineScheduler {
-    Vllm(Scheduler),
-    Sglang(SglangScheduler),
-}
-
-impl EngineScheduler {
-    pub(crate) fn new_with_admission(
-        args: crate::common::protocols::MockEngineArgs,
-        dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
-        kv_event_publishers: KvEventPublishers,
-        cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
-        fpm_publisher: FpmPublisher,
-    ) -> Self {
-        match args.engine_type {
-            // TRT-LLM reuses the vLLM scheduler; the GUARANTEED_NO_EVICT
-            // policy is carried in `args` and read by `VllmCore` per pass.
-            crate::common::protocols::EngineType::Vllm
-            | crate::common::protocols::EngineType::Trtllm => {
-                Self::Vllm(Scheduler::new_with_admission(
-                    args,
-                    dp_rank,
-                    output_tx,
-                    kv_event_publishers,
-                    cancellation_token,
-                    admission_tx,
-                    fpm_publisher,
-                ))
-            }
-            crate::common::protocols::EngineType::Sglang => {
-                Self::Sglang(SglangScheduler::new_with_admission(
-                    args,
-                    dp_rank,
-                    output_tx,
-                    kv_event_publishers,
-                    cancellation_token,
-                    admission_tx,
-                    fpm_publisher,
-                ))
-            }
-        }
-    }
-}
-
-impl SchedulerHandle for EngineScheduler {
-    fn receive(&self, request: DirectRequest) {
-        match self {
-            Self::Vllm(scheduler) => scheduler.receive(request),
-            Self::Sglang(scheduler) => scheduler.receive(request),
-        }
-    }
-
-    fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
-        match self {
-            Self::Vllm(scheduler) => scheduler.request_sender(),
-            Self::Sglang(scheduler) => scheduler.request_sender(),
-        }
-    }
-
-    fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
-        match self {
-            Self::Vllm(scheduler) => scheduler.metrics_receiver(),
-            Self::Sglang(scheduler) => scheduler.metrics_receiver(),
-        }
-    }
-
-    fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope> {
-        match self {
-            Self::Vllm(scheduler) => scheduler.command_sender(),
-            Self::Sglang(scheduler) => scheduler.command_sender(),
-        }
-    }
-
-    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
-        match self {
-            Self::Vllm(scheduler) => scheduler.cancellation_sender(),
-            Self::Sglang(scheduler) => scheduler.cancellation_sender(),
-        }
-    }
-
-    fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
-        match self {
-            Self::Vllm(scheduler) => scheduler.take_lifecycle_receiver(),
-            Self::Sglang(scheduler) => scheduler.take_lifecycle_receiver(),
-        }
-    }
-}
-
 pub struct SchedulerCommandEnvelope {
     pub command: SchedulerCommand,
     pub reply: oneshot::Sender<anyhow::Result<SchedulerCommandEffects>>,
@@ -433,21 +357,15 @@ pub struct SchedulerCommandEnvelope {
 
 /// Output channel used by a live scheduler.
 ///
-/// Existing replay callers use the unbounded variant. Network-facing adapters
-/// use the bounded variant to cap scheduler-to-dispatcher accumulation. The
-/// live adapter also uses fixed-capacity request streams and cancels consumers
-/// that cannot keep up.
 #[derive(Clone)]
 pub(crate) enum SchedulerOutputSender {
     Unbounded(mpsc::UnboundedSender<Vec<OutputSignal>>),
-    Bounded(mpsc::Sender<Vec<OutputSignal>>),
 }
 
 impl SchedulerOutputSender {
     pub(crate) async fn send(&self, signals: Vec<OutputSignal>) -> Result<(), Vec<OutputSignal>> {
         match self {
             Self::Unbounded(tx) => tx.send(signals).map_err(|error| error.0),
-            Self::Bounded(tx) => tx.send(signals).await.map_err(|error| error.0),
         }
     }
 }
@@ -455,6 +373,73 @@ impl SchedulerOutputSender {
 impl From<mpsc::UnboundedSender<Vec<OutputSignal>>> for SchedulerOutputSender {
     fn from(tx: mpsc::UnboundedSender<Vec<OutputSignal>>) -> Self {
         Self::Unbounded(tx)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum LiveEngineEvent {
+    Admissions(Vec<AdmissionEvent>),
+    Outputs(Vec<OutputSignal>),
+}
+
+#[derive(Clone)]
+pub(crate) enum SchedulerEventSender {
+    Outputs(SchedulerOutputSender),
+    Ordered {
+        tx: mpsc::Sender<LiveEngineEvent>,
+        forward_admissions: bool,
+    },
+}
+
+pub(crate) enum SchedulerEventSendError {
+    OutputClosed(Vec<OutputSignal>),
+    OrderedLaneClosed,
+}
+
+impl SchedulerEventSender {
+    pub(crate) async fn send_admissions(
+        &self,
+        admissions: &[AdmissionEvent],
+    ) -> Result<(), SchedulerEventSendError> {
+        if admissions.is_empty() {
+            return Ok(());
+        }
+        match self {
+            Self::Outputs(_) => {
+                // Legacy output-only consumers do not have an admission event sink.
+                Ok(())
+            }
+            Self::Ordered {
+                forward_admissions: false,
+                ..
+            } => Ok(()),
+            Self::Ordered { tx, .. } => tx
+                .send(LiveEngineEvent::Admissions(admissions.to_vec()))
+                .await
+                .map_err(|_| SchedulerEventSendError::OrderedLaneClosed),
+        }
+    }
+
+    pub(crate) async fn send_outputs(
+        &self,
+        signals: Vec<OutputSignal>,
+    ) -> Result<(), SchedulerEventSendError> {
+        match self {
+            Self::Outputs(tx) => tx
+                .send(signals)
+                .await
+                .map_err(SchedulerEventSendError::OutputClosed),
+            Self::Ordered { tx, .. } => tx
+                .send(LiveEngineEvent::Outputs(signals))
+                .await
+                .map_err(|_| SchedulerEventSendError::OrderedLaneClosed),
+        }
+    }
+}
+
+impl From<SchedulerOutputSender> for SchedulerEventSender {
+    fn from(tx: SchedulerOutputSender) -> Self {
+        Self::Outputs(tx)
     }
 }
 
@@ -519,26 +504,28 @@ pub async fn init_kvbm_live(
     kv_manager: &mut crate::kv_manager::G1Manager,
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
-    use crate::kvbm_offload::KvbmOffloadConfig;
+    use crate::kvbm_offload::{KvbmDriveMode, KvbmOffloadConfig};
     let Some(config) = KvbmOffloadConfig::from_args(args)? else {
         return Ok(None);
     };
-    let engine = std::thread::spawn(move || build_owned_offload_engine(config))
-        .join()
-        .map_err(|_| anyhow::anyhow!("kvbm-offload live init thread panicked"))??;
+    let engine =
+        std::thread::spawn(move || build_owned_offload_engine(config, KvbmDriveMode::Live))
+            .join()
+            .map_err(|_| anyhow::anyhow!("kvbm-offload live init thread panicked"))??;
     Ok(Some(kv_manager.attach_new_offload_engine(engine)))
 }
 
 /// Attach a [`crate::kvbm_offload::MockOffloadEngine`] driven by
-/// virtual `now_ms` supplied by offline replay. The same engine hot path is
-/// used for live and offline; only the caller's clock source differs.
+/// virtual `now_ms` supplied by offline replay. Offline construction enables
+/// an explicit completion/settlement boundary; live construction retains its
+/// eager best-effort behavior.
 #[cfg(feature = "kvbm-offload")]
 pub fn init_kvbm_offline(
     args: &crate::common::protocols::MockEngineArgs,
     kv_manager: &mut crate::kv_manager::G1Manager,
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
-    use crate::kvbm_offload::KvbmOffloadConfig;
+    use crate::kvbm_offload::{KvbmDriveMode, KvbmOffloadConfig};
     let Some(config) = KvbmOffloadConfig::from_args(args)? else {
         return Ok(None);
     };
@@ -555,7 +542,7 @@ pub fn init_kvbm_offline(
         bw_g4_to_g2_gbps = config.bandwidth_g4_to_g2_gbps,
         "kvbm-offload: init_kvbm_offline attaching engine"
     );
-    let engine = build_owned_offload_engine(config)?;
+    let engine = build_owned_offload_engine(config, KvbmDriveMode::OfflineDeterministic)?;
     Ok(Some(kv_manager.attach_new_offload_engine(engine)))
 }
 
@@ -567,12 +554,15 @@ pub fn init_kvbm_offline(
 #[cfg(feature = "kvbm-offload")]
 fn build_owned_offload_engine(
     config: crate::kvbm_offload::KvbmOffloadConfig,
+    drive_mode: crate::kvbm_offload::KvbmDriveMode,
 ) -> anyhow::Result<crate::kvbm_offload::MockOffloadEngine> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()?;
-    let mut engine = rt.block_on(crate::kvbm_offload::MockOffloadEngine::new(config))?;
+    let mut engine = rt.block_on(crate::kvbm_offload::MockOffloadEngine::new_with_drive_mode(
+        config, drive_mode,
+    ))?;
     engine.attach_runtime(rt);
     Ok(engine)
 }
@@ -660,7 +650,7 @@ mod tests {
             let mut running_request = request(running_id, (100..108).collect());
             running_request.max_output_tokens = 32;
             core.receive(running_request);
-            core.execute_hidden_pass(0.0);
+            core.execute_pass_unrecorded(0.0);
             assert_eq!(request_metrics(&core).running_requests, 1);
             let active_blocks_before_cancel = request_metrics(&core).active_decode_blocks;
             assert!(
@@ -702,6 +692,7 @@ mod tests {
                 token_id: None,
                 completed: true,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: None,
             },
             OutputSignal {
@@ -709,6 +700,7 @@ mod tests {
                 token_id: Some(7),
                 completed: false,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: None,
             },
             OutputSignal {
@@ -716,6 +708,7 @@ mod tests {
                 token_id: Some(8),
                 completed: true,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: None,
             },
             OutputSignal {
@@ -723,11 +716,23 @@ mod tests {
                 token_id: Some(9),
                 completed: true,
                 rejected: true,
+                cached_tokens: None,
                 handoff_delay_ms: None,
             },
         ];
 
         assert_eq!(accept_length_sample(&signals), (2, 1));
+    }
+
+    #[test]
+    fn accept_length_counters_count_tokens_and_forwards() {
+        let mut sample = AcceptLengthSample::default();
+        sample.record_forward(3);
+        sample.record_forward(0);
+        sample.record_forward(1);
+
+        assert_eq!(sample.output_tokens, 4);
+        assert_eq!(sample.decode_forwards, 2);
     }
 
     #[test]
@@ -804,7 +809,7 @@ mod tests {
                 .unwrap();
             let mut now_ms = 0.0;
             for _ in 0..8 {
-                let pass = source.execute_hidden_pass(now_ms);
+                let pass = source.execute_pass_unrecorded(now_ms);
                 now_ms = pass.end_ms;
                 if source.is_empty() {
                     break;
@@ -958,13 +963,13 @@ mod tests {
             assert!(blocked.lifecycle_events.is_empty());
             assert!(destination.is_empty());
             assert!(!destination.is_drained());
-            let pending_only = destination.execute_hidden_pass(0.0);
+            let pending_only = destination.execute_pass_unrecorded(0.0);
             assert_eq!(pending_only.end_ms, 0.0);
             assert!(pending_only.admissions.is_empty());
             assert!(pending_only.output_signals.is_empty());
 
             destination.receive(request(fresh_request, (300..304).collect()));
-            let pass = destination.execute_hidden_pass(0.0);
+            let pass = destination.execute_pass_unrecorded(0.0);
             assert!(pass.admissions.is_empty());
             assert!(pass.output_signals.is_empty());
             assert_eq!(pass.end_ms, 0.0);
@@ -983,7 +988,7 @@ mod tests {
                     .unwrap(),
                 SchedulerCommandResult::Applied
             );
-            let materialized = destination.execute_hidden_pass(0.0);
+            let materialized = destination.execute_pass_unrecorded(0.0);
             assert!(
                 materialized
                     .admissions
@@ -1013,7 +1018,7 @@ mod tests {
                     .unwrap(),
                 SchedulerCommandResult::Applied
             );
-            let fresh = destination.execute_hidden_pass(1.0);
+            let fresh = destination.execute_pass_unrecorded(1.0);
             assert!(
                 fresh
                     .admissions
@@ -1136,7 +1141,7 @@ mod tests {
             .unwrap();
         assert!(pending.lifecycle_events.is_empty());
 
-        let first_pass = destination.execute_hidden_pass(0.0);
+        let first_pass = destination.execute_pass_unrecorded(0.0);
         assert!(
             first_pass
                 .admissions
@@ -1152,7 +1157,7 @@ mod tests {
 
         let mut reservation_events = Vec::new();
         for now_ms in 1..=4 {
-            destination.execute_hidden_pass(f64::from(now_ms));
+            destination.execute_pass_unrecorded(f64::from(now_ms));
             reservation_events.extend(destination.retry_pending_destinations());
             if !reservation_events.is_empty() {
                 break;
@@ -1207,7 +1212,7 @@ mod tests {
                 uuid: Some(Uuid::from_u128(38_200 + case as u128)),
                 ..Default::default()
             });
-            let pass = destination.execute_hidden_pass(0.0);
+            let pass = destination.execute_pass_unrecorded(0.0);
             assert_eq!(pass.admissions.len(), 1);
             let before_activation = match &destination {
                 EngineCore::Vllm(core) => core.mocker_metrics().active_decode_blocks,
@@ -1280,6 +1285,7 @@ mod offload_init_tests {
     use super::{init_kvbm_live, init_kvbm_offline};
     use crate::common::protocols::{KvEventPublishers, MockEngineArgs};
     use crate::kv_manager::G1Manager;
+    use crate::kvbm_offload::KvbmDriveMode;
 
     fn make_kv_manager() -> G1Manager {
         G1Manager::new_with_event_sink(8, 4, KvEventPublishers::default(), 0)
@@ -1310,6 +1316,7 @@ mod offload_init_tests {
         // Returned Arc shares the same engine as the one on kv_manager;
         // earliest_offload_deadline reflects an idle engine.
         assert!(engine.lock().unwrap().earliest_pending_deadline().is_none());
+        assert_eq!(engine.lock().unwrap().drive_mode(), KvbmDriveMode::Live);
         assert!(kv.earliest_offload_deadline().is_none());
     }
 
@@ -1360,6 +1367,10 @@ mod offload_init_tests {
         assert!(kv.has_offload_engine());
         // Engine is still callable post-init — no runtime-dropped hang.
         engine.lock().unwrap().tick(100.0);
+        assert_eq!(
+            engine.lock().unwrap().drive_mode(),
+            KvbmDriveMode::OfflineDeterministic
+        );
         assert!(kv.earliest_offload_deadline().is_none());
     }
 

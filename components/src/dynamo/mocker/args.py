@@ -7,6 +7,10 @@ import os
 import tempfile
 from pathlib import Path
 
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    add_worker_router_arguments,
+)
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
@@ -257,9 +261,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--g1-backend",
         choices=["kvbm", "native"],
-        default="kvbm",
-        help="G1 manager for the shared vLLM/TRT-LLM scheduler (default: "
-        "kvbm). Use 'native' for the self-contained physical block-pool model.",
+        default=None,
+        help="G1 manager for the shared vLLM/TRT-LLM scheduler. When unset, "
+        "native is used unless KVBM G2/G3/G4 offloading selects KVBM. Explicit "
+        "native cannot be combined with KVBM offloading. Ignored for SGLang.",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -322,8 +327,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-perf-model",
         action="store_true",
         default=False,
-        help="Use direct AIC SDK calls for latency prediction. "
-        "Requires aiconfigurator SDK installed.",
+        help="Use aiconfigurator-core directly for latency prediction. "
+        "Requires aiconfigurator-core installed.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -605,7 +610,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=non_negative_int,
         default=None,
         help="Enable KVBM mock offload with this many per-worker G2 host blocks. "
-        "Set to 0 to disable.",
+        "This automatically selects the KVBM G1 backend. Set to 0 to disable.",
     )
     parser.add_argument(
         "--num-g3-blocks",
@@ -698,7 +703,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "for etcd/kubernetes).",
     )
 
+    # Same flags the frontend and engine backends expose, so a mocker can stand
+    # in for a real worker set when exercising per-role routing.
+    add_worker_router_arguments(parser)
+
     args = parser.parse_args(argv)
+    # Collect them into their own config object, matching the backends.
+    args.router_advertisement = WorkerRouterConfig.from_cli_args(args)
+
+    kvbm_offload_enabled = (
+        (args.num_g2_blocks or 0) > 0
+        or (args.num_g3_blocks or 0) > 0
+        or args.enable_g4_storage
+    )
+    if (
+        args.engine_type in ("vllm", "trtllm")
+        and args.g1_backend == "native"
+        and kvbm_offload_enabled
+    ):
+        parser.error(
+            "--g1-backend native cannot be combined with KVBM G2/G3/G4 "
+            "offload; omit --g1-backend to select KVBM automatically or set "
+            "--g1-backend kvbm explicitly"
+        )
+
     validate_worker_type_args(args)
 
     # Validate num_workers

@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::components::ReplayWorkerCore;
+use super::evidence::{WorkerPool, attach_pressure_references, with_engine_evidence_context};
 use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::WorkloadDriver;
-use crate::replay::{ReplayTerminalStatus, TraceCollector};
+use crate::replay::{ReplayRequestPool, ReplayTerminalStatus, TraceCollector};
 use anyhow::{Context, bail};
 use std::collections::VecDeque;
 use uuid::Uuid;
@@ -178,10 +179,13 @@ impl SingleRuntime {
 
     fn record_arrival(&mut self, request: DirectRequest, arrival_ms: f64) -> Uuid {
         let input_length = request.tokens.len();
-        let output_length = request.max_output_tokens;
+        let output_length = request.effective_max_output_tokens();
         let uuid = self.worker.receive(request);
         self.collector
             .on_arrival(uuid, arrival_ms, input_length, output_length);
+        self.collector.on_decode_assigned(uuid, 0);
+        self.collector
+            .on_route_immediate(uuid, ReplayRequestPool::Agg, 0, 0, 0, 0);
         uuid
     }
 
@@ -210,9 +214,20 @@ impl SingleRuntime {
     fn drive_worker(&mut self, admit_arrivals_between_steps: bool) -> anyhow::Result<()> {
         let pass_start_ms = self.current_time_ms;
         let requests_before = self.worker.num_requests();
-        let pass = self
-            .worker
-            .execute_pass(&mut self.collector, self.current_time_ms);
+        let pass =
+            with_engine_evidence_context(self.current_time_ms, WorkerPool::Agg, 0, 0, || {
+                self.worker
+                    .execute_pass(&mut self.collector, self.current_time_ms)
+            })?;
+        attach_pressure_references(&mut self.collector);
+        for admission in &pass.admissions {
+            self.collector.on_pool_admission(
+                admission.uuid,
+                ReplayRequestPool::Agg,
+                self.current_time_ms,
+                admission.reused_input_tokens,
+            );
+        }
         self.current_time_ms = pass.end_ms;
         let made_progress = self.current_time_ms > pass_start_ms
             || self.worker.num_requests() < requests_before
@@ -383,7 +398,7 @@ mod tests {
                 .arrival_timestamp_ms
                 .expect("trace replay requests must have an arrival timestamp");
             let input_length = request.tokens.len();
-            let output_length = request.max_output_tokens;
+            let output_length = request.effective_max_output_tokens();
             let uuid = worker.receive(request);
             collector.on_arrival(uuid, arrival_ms, input_length, output_length);
         }
@@ -403,7 +418,7 @@ mod tests {
 
             request.arrival_timestamp_ms = Some(current_time_ms);
             let input_length = request.tokens.len();
-            let output_length = request.max_output_tokens;
+            let output_length = request.effective_max_output_tokens();
             let uuid = worker.receive(request);
             collector.on_arrival(uuid, current_time_ms, input_length, output_length);
         }
@@ -545,7 +560,9 @@ mod tests {
                 continue;
             }
 
-            let pass = worker.execute_pass(&mut collector, current_time_ms);
+            let pass = worker
+                .execute_pass(&mut collector, current_time_ms)
+                .unwrap();
             record_manual_terminals(&mut collector, &pass);
             if first_decode_end_ms == 0.0 && !pass.output_signals.is_empty() {
                 first_decode_end_ms = pass.end_ms;
@@ -599,7 +616,9 @@ mod tests {
                 break;
             }
 
-            let pass = worker.execute_pass(&mut collector, current_time_ms);
+            let pass = worker
+                .execute_pass(&mut collector, current_time_ms)
+                .unwrap();
             record_manual_terminals(&mut collector, &pass);
             current_time_ms = pass.end_ms;
         }

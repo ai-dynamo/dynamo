@@ -22,6 +22,9 @@ use crate::Endpoint;
 use clap::Parser;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::TrackingHashAlgorithm;
+#[cfg(feature = "custom-policy")]
+use dynamo_kv_router::WorkerSelectionPolicy;
+use dynamo_kv_router::WorkerSelectionPolicyFactory;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
@@ -42,7 +45,15 @@ use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
-use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
+use llm_rs::kv_router::KvPushRouter;
+#[cfg(not(feature = "custom-policy"))]
+type RsKvPushRouter = KvPushRouter;
+#[cfg(feature = "custom-policy")]
+type RsKvPushRouter = KvPushRouter<WorkerSelectionPolicy>;
+#[cfg(not(feature = "custom-policy"))]
+type RsKvRouter = llm_rs::kv_router::KvRouter;
+#[cfg(feature = "custom-policy")]
+type RsKvRouter = llm_rs::kv_router::KvRouter<WorkerSelectionPolicy>;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -430,57 +441,68 @@ mod select_service_cli_tests {
     }
 }
 
+#[cfg(not(feature = "select-service"))]
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
-    #[cfg(feature = "select-service")]
-    {
-        let cli = SelectServiceCli::try_parse_from(
-            std::iter::once(OsString::from("python -m dynamo.select_service"))
-                .chain(args.into_iter().map(Into::into)),
-        )?;
+    let _ = args;
+    anyhow::bail!(
+        "dynamo.select_service is not available in this build; reinstall with --features select-service"
+    )
+}
 
-        init_standalone_logging();
+#[cfg(feature = "select-service")]
+pub(crate) fn run_select_service_cli_with_worker_selection_policy_factory<I, T, F>(
+    args: I,
+    resolve_policy: F,
+) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+    F: FnOnce(&KvRouterConfig) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>>,
+{
+    let cli = SelectServiceCli::try_parse_from(
+        std::iter::once(OsString::from("python -m dynamo.select_service"))
+            .chain(args.into_iter().map(Into::into)),
+    )?;
 
-        let rt = tokio::runtime::Runtime::new()?;
-        let mut kv_router_config =
-            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-        if let Some(assume_kv_reuse) = cli.router_assume_kv_reuse_override() {
-            kv_router_config.router_assume_kv_reuse = assume_kv_reuse;
-        }
-        if let Some(algorithm) = cli.router_tracking_hash {
-            kv_router_config.router_tracking_hash = algorithm;
-        }
-        if let Some(key_file) = cli.router_tracking_key_file {
-            kv_router_config.router_tracking_key_file = Some(key_file);
-        }
-        if let Some(key_id) = cli.router_tracking_key_id {
-            kv_router_config.router_tracking_key_id = Some(key_id);
-        }
-        rt.block_on(selection::run_server(SelectionServiceConfig {
-            port: cli.port,
-            threads: cli.threads,
-            indexer_peers: cli.indexer_peers,
-            replica_sync_port: cli.replica_sync_port,
-            replica_sync_peers: cli.replica_sync_peers,
-            kv_router_config,
-            selection_cache: selection_cache_config_from_overrides(
-                cli.selection_cache_ttl_secs,
-                cli.selection_cache_max_entries,
-                cli.selection_cache_max_bytes,
-            ),
-        }))
+    init_standalone_logging();
+
+    let mut kv_router_config =
+        try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+    if let Some(assume_kv_reuse) = cli.router_assume_kv_reuse_override() {
+        kv_router_config.router_assume_kv_reuse = assume_kv_reuse;
     }
-
-    #[cfg(not(feature = "select-service"))]
-    {
-        let _ = args;
-        anyhow::bail!(
-            "dynamo.select_service is not available in this build; reinstall with --features select-service"
-        )
+    if let Some(algorithm) = cli.router_tracking_hash {
+        kv_router_config.router_tracking_hash = algorithm;
     }
+    if let Some(key_file) = cli.router_tracking_key_file {
+        kv_router_config.router_tracking_key_file = Some(key_file);
+    }
+    if let Some(key_id) = cli.router_tracking_key_id {
+        kv_router_config.router_tracking_key_id = Some(key_id);
+    }
+    let config = SelectionServiceConfig {
+        port: cli.port,
+        threads: cli.threads,
+        indexer_peers: cli.indexer_peers,
+        replica_sync_port: cli.replica_sync_port,
+        replica_sync_peers: cli.replica_sync_peers,
+        kv_router_config,
+        selection_cache: selection_cache_config_from_overrides(
+            cli.selection_cache_ttl_secs,
+            cli.selection_cache_max_entries,
+            cli.selection_cache_max_bytes,
+        ),
+    };
+    let builder = config
+        .service_builder()
+        .resolved_worker_selection_policy_factory(resolve_policy(&config.kv_router_config)?);
+    let rt = tokio::runtime::Runtime::new()?;
+    let service = rt.block_on(builder.build())?;
+    rt.block_on(selection::run_server_with_service(config.port, service))
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
@@ -575,10 +597,13 @@ impl SelectionService {
         }
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
+        let factory = crate::standalone_worker_selection_policy_factory(&kv_router_config)
+            .map_err(to_pyerr)?;
         let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
-            .selection_cache(selection_cache.unwrap_or_default().inner);
+            .selection_cache(selection_cache.unwrap_or_default().inner)
+            .resolved_worker_selection_policy_factory(factory);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
@@ -1056,7 +1081,7 @@ fn depythonize_kv_event_inputs(events: &Bound<'_, PyAny>) -> PyResult<Vec<KvEven
 impl KvEventPublisher {
     /// Wrap an already-constructed Rust publisher as the Python pyclass.
     ///
-    /// Used by the unified-backend bridge (`crate::backend`) so the Worker
+    /// Used by the Backend SDK bridge (`crate::backend`) so the Worker
     /// can hand a publisher built from a [`PushSource`] back to the Python
     /// engine without going through the Python-side `__init__` (which
     /// requires an `Endpoint` and rebuilds the publisher from scratch).
@@ -1070,9 +1095,8 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
-            // The unified backend does not run TRT-LLM multimodal, so this bridge
-            // carries no image marker; the non-unified path sets it via the
-            // constructor.
+            // This bridge has no image-token configuration. Python callers can
+            // set one through the public constructor when needed.
             image_token_id: None,
         }
     }
@@ -1597,47 +1621,102 @@ impl Drop for RadixTree {
     }
 }
 
-/// Helper function to create a KV router from an endpoint using the ModelManager
-/// to ensure proper etcd registration.
-/// Infers worker type using endpoint naming and router config:
-/// - If endpoint name/component contains "prefill", treat as prefill
-/// - If router_track_active_blocks is disabled, treat as prefill
-/// - Otherwise, default to decode
+/// Preserve the standalone Python router's historical metric and LoRA classification.
+fn infer_metric_worker_type(
+    namespace: &str,
+    component: &str,
+    endpoint: &str,
+    track_active_blocks: bool,
+) -> &'static str {
+    let endpoint_is_prefill = namespace.to_lowercase().contains("prefill")
+        || component.to_lowercase().contains("prefill")
+        || endpoint.to_lowercase().contains("prefill");
+    if endpoint_is_prefill || !track_active_blocks {
+        llm_rs::discovery::WORKER_TYPE_PREFILL
+    } else {
+        llm_rs::discovery::WORKER_TYPE_DECODE
+    }
+}
+
+/// Keep the advertised role for existing router metadata and require the same explicit role for
+/// custom-policy dispatch. Legacy cards are ambiguous between decode and aggregated workers.
+fn advertised_and_policy_worker_roles(
+    card: &llm_rs::model_card::ModelDeploymentCard,
+) -> (
+    Option<llm_rs::worker_type::WorkerType>,
+    Option<llm_rs::worker_type::WorkerType>,
+) {
+    (card.worker_type, card.worker_type)
+}
+
+#[cfg(test)]
+mod metric_worker_type_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_prefill_fallback_before_discovery() {
+        assert_eq!(
+            infer_metric_worker_type("prod", "prefill-workers", "generate", true),
+            llm_rs::discovery::WORKER_TYPE_PREFILL
+        );
+        assert_eq!(
+            infer_metric_worker_type("prod", "workers", "generate", false),
+            llm_rs::discovery::WORKER_TYPE_PREFILL
+        );
+        assert_eq!(
+            infer_metric_worker_type("prod", "decode-workers", "generate", true),
+            llm_rs::discovery::WORKER_TYPE_DECODE
+        );
+    }
+
+    #[test]
+    fn requires_explicit_policy_role_for_legacy_cards() {
+        let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only("legacy");
+        let (advertised, policy) = advertised_and_policy_worker_roles(&card);
+        assert_eq!(advertised, None);
+        assert_eq!(policy, None);
+
+        card.worker_type = Some(llm_rs::worker_type::WorkerType::Decode);
+        let (advertised, policy) = advertised_and_policy_worker_roles(&card);
+        assert_eq!(advertised, Some(llm_rs::worker_type::WorkerType::Decode));
+        assert_eq!(policy, Some(llm_rs::worker_type::WorkerType::Decode));
+    }
+}
+
+/// Create a KV router from an endpoint using the ModelManager for registration.
+/// Custom policies use the discovered model card's typed worker role for selection.
 async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
     kv_router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
-) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+) -> Result<Arc<RsKvRouter>, PyErr> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let endpoint_id = endpoint.inner.id();
-    let namespace = endpoint_id.namespace.to_lowercase();
-    let component = endpoint_id.component.to_lowercase();
-    let name = endpoint_id.name.to_lowercase();
-    let endpoint_is_prefill =
-        namespace.contains("prefill") || component.contains("prefill") || name.contains("prefill");
     let track_active_blocks = kv_router_config
         .as_ref()
-        .map(|cfg| cfg.router_track_active_blocks)
+        .map(|config| config.router_track_active_blocks)
         .unwrap_or(true);
-    let worker_type = if endpoint_is_prefill || !track_active_blocks {
-        llm_rs::discovery::WORKER_TYPE_PREFILL
-    } else {
-        llm_rs::discovery::WORKER_TYPE_DECODE
-    };
+    let metric_worker_type = infer_metric_worker_type(
+        &endpoint_id.namespace,
+        &endpoint_id.component,
+        &endpoint_id.name,
+        track_active_blocks,
+    );
 
-    // Look up the worker's model card so we can derive both model_name (required
-    // for remote/served indexer) and Eagle routing semantics. When the model_name
-    // is required but no worker has registered yet, wait via the discovery watch
-    // stream until one appears so we don't race worker startup. Bounded by
-    // `DYN_ROUTER_MODEL_CARD_WAIT_SECS` (default 600s).
+    // A linked policy requires the worker's typed role, and remote/served indexing
+    // requires the model name. Wait for a model card only for those cases. Stock
+    // routers retain the non-blocking discovery snapshot used for Eagle semantics.
+    // The blocking path is bounded by `DYN_ROUTER_MODEL_CARD_WAIT_SECS` (default 600s).
     let needs_model_name = kv_router_config
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
-    let (model_name, enable_eagle) = {
-        let maybe_card = if needs_model_name {
+    let needs_policy_role = worker_selection_policy_factory.is_some();
+    let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role) = {
+        let maybe_card = if needs_model_name || needs_policy_role {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1647,7 +1726,9 @@ async fn create_kv_router_from_endpoint(
                 component = %endpoint_id.component,
                 endpoint = %endpoint_id.name,
                 wait_secs,
-                "Waiting for worker model card in discovery (required for remote/served indexer)"
+                needs_model_name,
+                needs_policy_role,
+                "Waiting for worker model card in discovery"
             );
             llm_rs::discovery::wait_for_endpoint_model_card(
                 &endpoint.inner,
@@ -1657,8 +1738,6 @@ async fn create_kv_router_from_endpoint(
             .await
             .map_err(to_pyerr)?
         } else {
-            // Non-blocking snapshot — used only to detect Eagle routing semantics
-            // when a card happens to already be registered.
             let discovery = endpoint.inner.component().drt().discovery();
             let instances = discovery
                 .list(rs::discovery::DiscoveryQuery::EndpointModels {
@@ -1668,8 +1747,9 @@ async fn create_kv_router_from_endpoint(
                 })
                 .await
                 .map_err(to_pyerr)?;
-            instances.into_iter().find_map(|inst| {
-                inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+            instances.into_iter().find_map(|instance| {
+                instance
+                    .deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
                     .ok()
             })
         };
@@ -1677,32 +1757,88 @@ async fn create_kv_router_from_endpoint(
         match maybe_card {
             Some(card) => {
                 let model_name = needs_model_name.then(|| card.display_name.clone());
-                (model_name, card.runtime_config.enable_eagle)
+                let (worker_role, policy_worker_role) = advertised_and_policy_worker_roles(&card);
+                if needs_policy_role && policy_worker_role.is_none() {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "worker-selection policy requires a discovered model card with an explicit typed worker role",
+                    ));
+                }
+                (
+                    model_name,
+                    Some(card.display_name.clone()),
+                    card.runtime_config.enable_eagle,
+                    worker_role,
+                    policy_worker_role,
+                )
             }
             None => {
+                if needs_policy_role {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "worker-selection policy requires a discovered model card with an explicit typed worker role",
+                    ));
+                }
                 tracing::warn!(
                     namespace = %endpoint_id.namespace,
                     component = %endpoint_id.component,
                     endpoint = %endpoint_id.name,
                     "No model card found in discovery; defaulting to non-Eagle routing semantics"
                 );
-                (None, false)
+                (None, None, false, None, None)
             }
         }
     };
+    #[cfg(not(feature = "custom-policy"))]
+    let _ = (policy_model_name, policy_worker_role);
 
+    #[cfg(not(feature = "custom-policy"))]
     let kv_router = model_manager
-        .kv_chooser_for(
+        .kv_chooser_for_with_worker_role(
             &endpoint.inner,
             block_size as u32,
             kv_router_config,
             prefill_load_estimator,
-            worker_type,
+            worker_role,
+            metric_worker_type,
             model_name,
             enable_eagle,
         )
         .await
         .map_err(to_pyerr)?;
+
+    #[cfg(feature = "custom-policy")]
+    let kv_router = {
+        let effective_config = kv_router_config.clone().unwrap_or_default();
+        let selector = worker_selection_policy_factory.map_or_else(
+            || WorkerSelectionPolicy::default(effective_config.clone(), metric_worker_type),
+            |factory| {
+                let policy_worker_role = policy_worker_role.expect(
+                    "a configured worker-selection policy waits for a typed model card above",
+                );
+                factory(
+                    &effective_config,
+                    policy_worker_role,
+                    dynamo_kv_router::RoutingPartitionRef::new(
+                        policy_model_name.as_deref().unwrap_or_default(),
+                        dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+                    ),
+                )
+            },
+        );
+        model_manager
+            .kv_chooser_for_with_selector(
+                &endpoint.inner,
+                block_size as u32,
+                selector,
+                kv_router_config,
+                prefill_load_estimator,
+                worker_role,
+                metric_worker_type,
+                model_name,
+                enable_eagle,
+            )
+            .await
+            .map_err(to_pyerr)?
+    };
 
     Ok(kv_router)
 }
@@ -1789,22 +1925,20 @@ impl KvRouter {
                         inject_timing_from_tracker(data, tracker);
                     }
 
-                    let py_response = Python::with_gil(|py| {
-                        pythonize(py, &response.data)
-                            .map(|obj| obj.unbind())
-                            .map_err(|e| e.to_string())
+                    let response = response.map_data(|data| {
+                        Python::with_gil(|py| {
+                            pythonize(py, &data)
+                                .map(|obj| obj.unbind())
+                                .map_err(|error| error.to_string())
+                        })
                     });
+                    let is_error = response.is_error();
 
-                    match py_response {
-                        Ok(obj) => {
-                            if tx.send(RsAnnotated::from_data(obj)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to pythonize response: {}", e);
-                            break;
-                        }
+                    if tx.send(response).await.is_err() {
+                        break;
+                    }
+                    if is_error {
+                        break;
                     }
                 }
 
@@ -1844,11 +1978,11 @@ impl KvRouter {
     /// * `block_size` - KV cache block size for routing decisions
     /// * `kv_router_config` - Configuration for the KV router
     ///
-    /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
-    /// (contains "prefill") or by `router_track_active_blocks` being disabled.
+    /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
     #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
     fn new(
+        py: Python<'_>,
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
@@ -1860,6 +1994,9 @@ impl KvRouter {
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
+        let kv_router_config = kv_router_config.inner();
+        let worker_selection_policy_factory =
+            crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
         let prefill_load_estimator = aic_perf_config
             .map(|config| {
                 Python::with_gil(|py| {
@@ -1886,41 +2023,46 @@ impl KvRouter {
             .transpose()
             .map_err(to_pyerr)?;
 
+        // The initial-worker wait can be unbounded. Releasing the GIL makes it
+        // supervisable from another thread, but not cancellable.
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async move {
-            let client = endpoint.inner.client().await.map_err(to_pyerr)?;
+        py.allow_threads(|| {
+            runtime.block_on(async move {
+                let client = endpoint.inner.client().await.map_err(to_pyerr)?;
 
-            // Create PushRouter with KV router mode
-            let push_router = rs::pipeline::PushRouter::<
-                llm_rs::protocols::common::preprocessor::PreprocessedRequest,
-                rs::protocols::annotated::Annotated<
-                    llm_rs::protocols::common::llm_backend::LLMEngineOutput,
-                >,
-            >::from_client(
-                client,
-                rs::pipeline::network::egress::push_router::RouterMode::KV,
-            )
-            .await
-            .map_err(to_pyerr)?;
+                // Create PushRouter with KV router mode
+                let push_router = rs::pipeline::PushRouter::<
+                    llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+                    rs::protocols::annotated::Annotated<
+                        llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+                    >,
+                >::from_client(
+                    client,
+                    rs::pipeline::network::egress::push_router::RouterMode::KV,
+                )
+                .await
+                .map_err(to_pyerr)?;
 
-            // Create KvRouter using helper function (ensures etcd registration)
-            let kv_router = create_kv_router_from_endpoint(
-                endpoint,
-                block_size,
-                Some(kv_router_config.inner()),
-                prefill_load_estimator,
-            )
-            .await?;
+                // Create KvRouter using helper function (ensures etcd registration)
+                let kv_router = create_kv_router_from_endpoint(
+                    endpoint,
+                    block_size,
+                    Some(kv_router_config),
+                    prefill_load_estimator,
+                    worker_selection_policy_factory,
+                )
+                .await?;
 
-            let kv_push_router = RsKvPushRouter::new(
-                push_router,
-                kv_router,
-                session_affinity_ttl_secs.map(Duration::from_secs),
-            )
-            .map_err(to_pyerr)?;
+                let kv_push_router = RsKvPushRouter::new(
+                    push_router,
+                    kv_router,
+                    session_affinity_ttl_secs.map(Duration::from_secs),
+                )
+                .map_err(to_pyerr)?;
 
-            Ok(Self {
-                inner: Arc::new(kv_push_router),
+                Ok(Self {
+                    inner: Arc::new(kv_push_router),
+                })
             })
         })
     }

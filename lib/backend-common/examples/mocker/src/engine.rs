@@ -353,6 +353,7 @@ impl LLMEngine for MockerBackend {
         Ok(EngineConfig {
             model: self.model_name.clone(),
             served_model_name: Some(self.model_name.clone()),
+            model_aliases: Vec::new(),
             runtime_data: Default::default(),
             llm: Some(LlmRegistration {
                 context_length: Some(self.context_length),

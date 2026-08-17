@@ -8,27 +8,24 @@ import shlex
 from typing import Tuple
 from uuid import uuid4
 
-import yaml
-
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
     Config,
     append_argument,
     break_arguments,
-    get_service_name_by_type,
-    get_worker_service_from_config,
+    get_component_by_name,
+    get_component_name_by_type,
+    get_main_container,
+    get_worker_component_from_config,
     parse_override_engine_args,
     remove_valued_arguments,
-    setup_worker_service_resources,
+    setup_worker_component_resources,
     update_image,
     validate_and_get_worker_args,
 )
 from dynamo.profiler.utils.config_modifiers.protocol import BaseConfigModifier
-from dynamo.profiler.utils.defaults import (
-    DYNAMO_RUN_DEFAULT_PORT,
-    EngineType,
-    resolve_deploy_path,
-)
+from dynamo.profiler.utils.defaults import DYNAMO_RUN_DEFAULT_PORT, EngineType
+from dynamo.profiler.utils.dgd_template import load_dgd_template
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -39,13 +36,6 @@ formatter = logging.Formatter(
 )
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
-
-DEFAULT_TRTLLM_DISAGG_CONFIG_PATH = resolve_deploy_path(
-    "examples/backends/trtllm/deploy/disagg.yaml"
-)
-DEFAULT_TRTLLM_AGG_CONFIG_PATH = resolve_deploy_path(
-    "examples/backends/trtllm/deploy/agg.yaml"
-)
 
 _CHUNKED_PREFILL_FLAG = "--trtllm.enable_chunked_prefill"
 _OVERRIDE_ENGINE_ARGS_FLAG = "--override-engine-args"
@@ -118,8 +108,7 @@ def _enable_chunked_prefill_in_shell_command(command: str) -> str:
     leading_space = " " if prefix else ""
     trailing_space = " " if suffix and not suffix[0].isspace() else ""
     return (
-        f"{prefix}{leading_space}{_CHUNKED_PREFILL_FLAG} true"
-        f"{trailing_space}{suffix}"
+        f"{prefix}{leading_space}{_CHUNKED_PREFILL_FLAG} true{trailing_space}{suffix}"
     )
 
 
@@ -209,17 +198,27 @@ def enable_trtllm_chunked_prefill(config: dict) -> dict:
     worker uses explicit ``--override-engine-args``, enable chunked prefill in
     that JSON representation instead of mixing it with ``--trtllm.*`` flags.
     """
-    services = config.get("spec", {}).get("services", {})
-    if not isinstance(services, dict):
+    components = config.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
         return config
 
-    for service in services.values():
-        if not isinstance(service, dict) or service.get("componentType") != "worker":
+    for component in components:
+        if not isinstance(component, dict):
             continue
-        if service.get("subComponentType") == "encode":
+        if component.get("type") not in {"worker", "prefill", "decode"}:
             continue
 
-        main_container = service.get("extraPodSpec", {}).get("mainContainer")
+        containers = (
+            component.get("podTemplate", {}).get("spec", {}).get("containers", [])
+        )
+        main_container = next(
+            (
+                container
+                for container in containers
+                if isinstance(container, dict) and container.get("name") == "main"
+            ),
+            None,
+        )
         if not isinstance(main_container, dict):
             continue
 
@@ -265,17 +264,11 @@ class TrtllmConfigModifier(BaseConfigModifier):
 
     @classmethod
     def load_default_config(cls, mode: str = "disagg") -> dict:
-        path = (
-            DEFAULT_TRTLLM_AGG_CONFIG_PATH
-            if mode == "agg"
-            else DEFAULT_TRTLLM_DISAGG_CONFIG_PATH
-        )
-        with open(path, "r") as f:
-            return yaml.safe_load(f)
+        return load_dgd_template(cls.BACKEND, mode)
 
     @classmethod
     def update_image(cls, config, image: str) -> dict:
-        """Update container image for all DGD services (frontend, planner, workers)."""
+        """Update container image for all DGD components."""
         return update_image(config, image)
 
     @classmethod
@@ -295,30 +288,35 @@ class TrtllmConfigModifier(BaseConfigModifier):
         # set metadata name
         cfg.metadata.name = f"trtllm-agg-{uuid4().hex[:8]}"
 
-        # disable planner
-        if "Planner" in cfg.spec.services:
-            del cfg.spec.services["Planner"]
+        cfg.spec.components = [
+            component
+            for component in cfg.spec.components
+            if component.component_type != "planner"
+        ]
 
         if target == EngineType.PREFILL:
-            # Get service names by inferring from subComponentType first
-            prefill_service_name = get_service_name_by_type(
+            prefill_component_name = get_component_name_by_type(
                 cfg, "trtllm", SubComponentType.PREFILL
             )
-            decode_service_name = get_service_name_by_type(
+            decode_component_name = get_component_name_by_type(
                 cfg, "trtllm", SubComponentType.DECODE
             )
 
-            # Convert to prefill-only aggregated setup
-            # Rename prefill worker to decode worker name
-            cfg.spec.services[decode_service_name] = cfg.spec.services[
-                prefill_service_name
-            ]
-            del cfg.spec.services[prefill_service_name]
+            prefill_component = get_component_by_name(cfg, prefill_component_name)
+            if prefill_component is None:
+                raise ValueError(
+                    f"Missing prefill component {prefill_component_name!r}"
+                )
+            if prefill_component_name != decode_component_name:
+                cfg.spec.components = [
+                    component
+                    for component in cfg.spec.components
+                    if component.name != decode_component_name
+                ]
+            prefill_component.name = decode_component_name
+            prefill_component.component_type = "decode"
 
-            # Set subComponentType for aggregated mode (using decode worker for prefill-only)
-            cfg.spec.services[decode_service_name].subComponentType = "decode"
-
-            worker_service = get_worker_service_from_config(
+            worker_service = get_worker_component_from_config(
                 cfg,
                 backend="trtllm",
                 sub_component_type=SubComponentType.DECODE,
@@ -339,26 +337,29 @@ class TrtllmConfigModifier(BaseConfigModifier):
                 },
             )
 
-            worker_service.extraPodSpec.mainContainer.args = args
+            get_main_container(worker_service).args = args
 
         elif target == EngineType.DECODE:
-            # Get service names by inferring from subComponentType first
-            prefill_service_name = get_service_name_by_type(
+            prefill_component_name = get_component_name_by_type(
                 cfg, "trtllm", SubComponentType.PREFILL
             )
-            decode_service_name = get_service_name_by_type(
+            decode_component_name = get_component_name_by_type(
                 cfg, "trtllm", SubComponentType.DECODE
             )
 
-            # Convert to decode-only aggregated setup
-            # Remove prefill worker if exists
-            del cfg.spec.services[prefill_service_name]
-
-            # Set subComponentType for aggregated decode-only mode
-            cfg.spec.services[decode_service_name].subComponentType = "decode"
+            if prefill_component_name != decode_component_name:
+                cfg.spec.components = [
+                    component
+                    for component in cfg.spec.components
+                    if component.name != prefill_component_name
+                ]
+            decode_component = get_component_by_name(cfg, decode_component_name)
+            if decode_component is None:
+                raise ValueError(f"Missing decode component {decode_component_name!r}")
+            decode_component.component_type = "decode"
 
             # Decode worker already has the correct name
-            worker_service = get_worker_service_from_config(
+            worker_service = get_worker_component_from_config(
                 cfg,
                 backend="trtllm",
                 sub_component_type=SubComponentType.DECODE,
@@ -378,15 +379,19 @@ class TrtllmConfigModifier(BaseConfigModifier):
                 },
             )
 
-            worker_service.extraPodSpec.mainContainer.args = args
+            get_main_container(worker_service).args = args
 
         # Set num workers to 1
         # Use the inferred decode service name
-        final_decode_service_name = get_service_name_by_type(
+        final_decode_component_name = get_component_name_by_type(
             cfg, "trtllm", SubComponentType.DECODE
         )
-        worker_config = cfg.spec.services[final_decode_service_name]
-        worker_config.replicas = 1
+        decode_component = get_component_by_name(cfg, final_decode_component_name)
+        if decode_component is None:
+            raise ValueError(
+                f"Missing decode component {final_decode_component_name!r}"
+            )
+        decode_component.replicas = 1
 
         return cfg.model_dump()
 
@@ -401,12 +406,12 @@ class TrtllmConfigModifier(BaseConfigModifier):
 
         # Get the worker service using helper function
         # This assumes convert_config has been called, so the service is named decode_worker_k8s_name
-        worker_service = get_worker_service_from_config(
+        worker_service = get_worker_component_from_config(
             cfg, backend="trtllm", sub_component_type=component_type
         )
 
         # Set up resources
-        setup_worker_service_resources(worker_service, tp_size)
+        setup_worker_component_resources(worker_service, tp_size)
 
         # Validate and get args
         args = validate_and_get_worker_args(worker_service, backend="trtllm")
@@ -416,7 +421,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
 
         args = _merge_overrides_into_args(args, {"tensor_parallel_size": tp_size})
 
-        worker_service.extraPodSpec.mainContainer.args = args
+        get_main_container(worker_service).args = args
 
         return cfg.model_dump()
 
@@ -447,7 +452,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
     @classmethod
     def get_model_name(cls, config: dict) -> Tuple[str, str]:
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(cfg, backend="trtllm")
+        worker_service = get_worker_component_from_config(cfg, backend="trtllm")
         args = validate_and_get_worker_args(worker_service, backend="trtllm")
         args = break_arguments(args)
         return cls._get_model_name_and_path_from_args(args)
@@ -455,14 +460,11 @@ class TrtllmConfigModifier(BaseConfigModifier):
     @classmethod
     def get_port(cls, config: dict) -> int:
         cfg = Config.model_validate(config)
-        frontend_service = cfg.spec.services.get("Frontend")
-        if (
-            not frontend_service
-            or not frontend_service.extraPodSpec
-            or not frontend_service.extraPodSpec.mainContainer
-        ):
+        frontend_component = get_component_by_name(cfg, "Frontend")
+        if frontend_component is None:
             logger.warning(
-                f"Frontend service or container not found, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                "Frontend component not found, using default port: %s",
+                DYNAMO_RUN_DEFAULT_PORT,
             )
             return DYNAMO_RUN_DEFAULT_PORT
 
@@ -531,7 +533,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
         - max_num_tokens
         """
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(
+        worker_service = get_worker_component_from_config(
             cfg, backend="trtllm", sub_component_type=component_type
         )
         args = validate_and_get_worker_args(worker_service, backend="trtllm")
@@ -545,5 +547,5 @@ class TrtllmConfigModifier(BaseConfigModifier):
             },
         )
 
-        worker_service.extraPodSpec.mainContainer.args = args
+        get_main_container(worker_service).args = args
         return cfg.model_dump()

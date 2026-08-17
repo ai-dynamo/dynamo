@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow};
@@ -138,6 +140,10 @@ pub(crate) struct KvReplayRouter {
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     indexer: ReplayIndexer,
     tracking_hash: TrackingHashContext,
+    #[cfg(test)]
+    fail_mark_prefill: AtomicBool,
+    #[cfg(test)]
+    fail_free: AtomicBool,
 }
 
 impl KvReplayRouter {
@@ -169,12 +175,12 @@ impl KvReplayRouter {
             prefill_load_estimator,
             None,
             None,
+            None,
             config.router_queue_recheck_interval(),
             config.router_track_prefill_tokens,
             scheduler_cancel.clone(),
             "replay",
             false,
-            Default::default(),
         )?);
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();
@@ -194,6 +200,10 @@ impl KvReplayRouter {
             event_task: Mutex::new(Some(event_task)),
             indexer,
             tracking_hash,
+            #[cfg(test)]
+            fail_mark_prefill: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_free: AtomicBool::new(false),
         })
     }
 
@@ -277,6 +287,10 @@ impl KvReplayRouter {
     }
 
     async fn mark_prefill_completed(&self, uuid: Uuid) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_mark_prefill.load(Ordering::Acquire) {
+            return Err(anyhow!("injected mark-prefill failure"));
+        }
         self.scheduler
             .mark_prefill_completed(&uuid.to_string())
             .await
@@ -284,6 +298,10 @@ impl KvReplayRouter {
     }
 
     async fn free(&self, uuid: Uuid) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_free.load(Ordering::Acquire) {
+            return Err(anyhow!("injected free failure"));
+        }
         self.scheduler
             .free(&uuid.to_string())
             .await
@@ -314,6 +332,16 @@ impl KvReplayRouter {
             std::collections::HashMap::new(),
             track_prefill_tokens,
         )
+    }
+
+    #[cfg(test)]
+    fn fail_mark_prefill(&self) {
+        self.fail_mark_prefill.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn fail_free(&self) {
+        self.fail_free.store(true, Ordering::Release);
     }
 }
 
@@ -399,6 +427,20 @@ impl ReplayRouter {
         match self {
             Self::RoundRobin(_) => Vec::new(),
             Self::Kv(router) => router.debug_potential_loads(isl_tokens, track_prefill_tokens),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_mark_prefill(&self) {
+        if let Self::Kv(router) = self {
+            router.fail_mark_prefill();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_free(&self) {
+        if let Self::Kv(router) = self {
+            router.fail_free();
         }
     }
 }

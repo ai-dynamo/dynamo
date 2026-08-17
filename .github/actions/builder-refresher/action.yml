@@ -37,8 +37,7 @@ inputs:
     default: '400Gi'
   namespace:
     description: 'Kubernetes namespace for buildkit fallback pods'
-    required: false
-    default: 'buildkit'
+    required: true
   replicas:
     description: 'Number of buildkit fallback replicas'
     required: false

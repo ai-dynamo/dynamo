@@ -24,18 +24,22 @@ use crate::kv_router::{
     metrics::KvPublisherMetrics,
 };
 
+mod attachment_owner;
 mod batching;
 mod dedup;
 mod event_processor;
 mod multimodal_embedding_cache;
 mod sinks;
+mod state_agent;
+mod state_agent_host;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
 
-#[cfg(test)]
-use batching::BatchingState;
+pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
+
+pub use crate::discovery::kv_state_agent::KvStateIngressProtocol;
 #[cfg(test)]
 use dedup::EventDedupFilter;
 #[cfg(test)]
@@ -46,6 +50,13 @@ pub use multimodal_embedding_cache::{
     MultimodalEmbeddingCacheUpdate,
 };
 use sinks::EventPlanePublisher;
+pub use state_agent::{
+    KvStateAgent, KvStateAgentAttachmentConfig, KvStateAgentConfig, KvStateAgentSlotConfig,
+    KvStateAgentVllmSource, resolve_stable_dp_slot_id,
+};
+pub use state_agent_host::{
+    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, KvStateAgentHost, KvStateAgentHostConfig,
+};
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
 
@@ -68,8 +79,41 @@ pub enum KvEventSourceConfig {
 
 enum KvEventSource {
     Zmq {
-        zmq_handle: tokio::task::JoinHandle<()>,
+        listener_abort_handle: tokio::task::AbortHandle,
+        supervisor_handle: tokio::task::JoinHandle<bool>,
     },
+}
+
+async fn supervise_zmq_listener(
+    listener_handle: tokio::task::JoinHandle<()>,
+    endpoint: String,
+    topic: String,
+    cancellation_token: CancellationToken,
+) -> bool {
+    let result = listener_handle.await;
+    if cancellation_token.is_cancelled() {
+        return false;
+    }
+
+    match result {
+        Ok(()) => {
+            tracing::error!(
+                %endpoint,
+                %topic,
+                "ZMQ listener terminated unexpectedly; stopping KV event publisher"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                %endpoint,
+                %topic,
+                %error,
+                "ZMQ listener task failed unexpectedly; stopping KV event publisher"
+            );
+        }
+    }
+    cancellation_token.cancel();
+    true
 }
 
 impl KvEventSource {
@@ -88,36 +132,61 @@ impl KvEventSource {
                 topic,
                 image_token_id,
             } => {
-                let zmq_handle = component
-                    .drt()
-                    .runtime()
-                    .secondary()
-                    .spawn(start_zmq_listener(
-                        endpoint,
-                        topic,
-                        worker_id,
-                        tx,
-                        cancellation_token.clone(),
-                        kv_block_size,
-                        next_event_id,
-                        image_token_id,
-                    ));
+                let listener_handle =
+                    component
+                        .drt()
+                        .runtime()
+                        .secondary()
+                        .spawn(start_zmq_listener(
+                            endpoint.clone(),
+                            topic.clone(),
+                            worker_id,
+                            tx,
+                            cancellation_token.clone(),
+                            kv_block_size,
+                            next_event_id,
+                            image_token_id,
+                        ));
+                let listener_abort_handle = listener_handle.abort_handle();
+                let supervisor_handle =
+                    component
+                        .drt()
+                        .runtime()
+                        .secondary()
+                        .spawn(supervise_zmq_listener(
+                            listener_handle,
+                            endpoint,
+                            topic,
+                            cancellation_token,
+                        ));
 
-                Ok(KvEventSource::Zmq { zmq_handle })
+                Ok(KvEventSource::Zmq {
+                    listener_abort_handle,
+                    supervisor_handle,
+                })
             }
         }
     }
 
     fn shutdown(&self) {
         match self {
-            KvEventSource::Zmq { zmq_handle } => {
-                zmq_handle.abort();
+            KvEventSource::Zmq {
+                listener_abort_handle,
+                supervisor_handle,
+            } => {
+                listener_abort_handle.abort();
+                supervisor_handle.abort();
             }
         }
     }
 }
 
 /// A publisher of KV events.
+///
+/// The engine-side publisher lifetime is coupled to this Dynamo publisher and its advertised
+/// publisher ID. Restarting the engine publisher independently while this value survives is not
+/// supported. Future independent restart support must either emit an ordered rank-scoped
+/// `Cleared` event before the new stream or create a new Dynamo publisher ID.
 pub struct KvEventPublisher {
     /// The size of the KV block.
     kv_block_size: u32,
@@ -331,6 +400,13 @@ impl KvEventPublisher {
             } else {
                 None
             };
+
+            if cancellation_token_clone.is_cancelled() {
+                if let Some(endpoint) = recovery_endpoint {
+                    let _ = endpoint.shutdown().await;
+                }
+                return;
+            }
 
             let source = DiscoveredKvEventSource {
                 kv_state_endpoint: kv_state_endpoint.clone(),

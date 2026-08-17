@@ -30,13 +30,15 @@ except ImportError as exc:
 def test_materialize_dgd_applies_transforms_once_in_fixed_order(monkeypatch) -> None:
     blueprint = {
         "spec": {
-            "services": {
-                "Worker": {
-                    "extraPodSpec": {
-                        "mainContainer": {"args": ["base"]},
-                    }
+            "components": [
+                {
+                    "name": "Worker",
+                    "type": "worker",
+                    "podTemplate": {
+                        "spec": {"containers": [{"name": "main", "args": ["base"]}]}
+                    },
                 }
-            }
+            ]
         }
     }
     original = copy.deepcopy(blueprint)
@@ -44,7 +46,7 @@ def test_materialize_dgd_applies_transforms_once_in_fixed_order(monkeypatch) -> 
 
     def _append_step(config: dict, step: str) -> dict:
         result = copy.deepcopy(config)
-        result["spec"]["services"]["Worker"]["extraPodSpec"]["mainContainer"][
+        result["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0][
             "args"
         ].append(step)
         events.append(step)
@@ -82,14 +84,16 @@ def test_materialize_dgd_applies_transforms_once_in_fixed_order(monkeypatch) -> 
     )
 
     assert events == ["override", "runtime", "tolerations"]
-    assert materialized["spec"]["services"]["Worker"]["extraPodSpec"]["mainContainer"][
-        "args"
-    ] == ["base", "override", "runtime", "tolerations"]
+    assert materialized["spec"]["components"][0]["podTemplate"]["spec"]["containers"][
+        0
+    ]["args"] == ["base", "override", "runtime", "tolerations"]
     assert blueprint == original
 
 
 def test_materialize_dgd_copies_blueprint_without_transforms() -> None:
-    blueprint = {"spec": {"services": {"Worker": {"replicas": 1}}}}
+    blueprint = {
+        "spec": {"components": [{"name": "Worker", "type": "worker", "replicas": 1}]}
+    }
 
     materialized = materialize_dgd(
         blueprint,
@@ -103,7 +107,7 @@ def test_materialize_dgd_copies_blueprint_without_transforms() -> None:
 
 def test_materialize_dgd_only_changes_last_document(monkeypatch) -> None:
     config_map = {"apiVersion": "v1", "kind": "ConfigMap", "data": {"key": "value"}}
-    dgd = {"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoGraphDeployment"}
+    dgd = {"apiVersion": "nvidia.com/v1beta1", "kind": "DynamoGraphDeployment"}
     final_config = [config_map, dgd]
 
     def _apply_override(config: dict, _override: dict) -> dict:
@@ -126,7 +130,7 @@ def test_materialize_dgd_only_changes_last_document(monkeypatch) -> None:
     assert materialized == [
         config_map,
         {
-            "apiVersion": "nvidia.com/v1alpha1",
+            "apiVersion": "nvidia.com/v1beta1",
             "kind": "DynamoGraphDeployment",
             "metadata": {"name": "materialized"},
         },

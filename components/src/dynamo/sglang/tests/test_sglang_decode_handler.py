@@ -1,13 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
 from dynamo.common.metadata_upload import MetadataUploader
+from dynamo.llm import HttpError
+from dynamo.sglang.engine_generate import (
+    build_native_generate_request,
+    native_generate_stream,
+)
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
@@ -21,11 +25,11 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     raise_if_unextracted_multimodal,
 )
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
-from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -220,6 +224,342 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
     return handler
 
 
+def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
+    request = {
+        "rid": "resolved-request",
+        "sampling_params": {
+            "max_new_tokens": 32,
+            "n": 1,
+            "sampling_seed": 17,
+            "custom_params": {"future_engine_control": True},
+        },
+        "return_logprob": True,
+        "return_text_in_logprobs": True,
+        "token_ids_logprob": [11],
+        "return_routed_experts": True,
+        "routed_experts_start_len": 4,
+        "session_id": "session-1",
+        "bootstrap_host": "client.example",
+        "routed_dp_rank": 7,
+    }
+
+    native = build_native_generate_request(
+        request,
+        input_ids=[7, 8],
+        fallback_rid="fallback-request",
+        priority=9,
+        sampling_overrides={"n": 1, "max_new_tokens": 1},
+        bootstrap_host="prefill.internal",
+        routed_dp_rank=3,
+    )
+
+    assert native.rid == "resolved-request"
+    assert native.input_ids == [7, 8]
+    assert native.stream is True
+    assert native.priority == 9
+    assert native.session_id == "session-1"
+    assert native.return_logprob is True
+    assert native.return_text_in_logprobs is True
+    assert native.token_ids_logprob == [11]
+    assert native.return_routed_experts is True
+    assert native.routed_experts_start_len == 4
+    assert native.bootstrap_host == "prefill.internal"
+    assert native.routed_dp_rank == 3
+    assert native.sampling_params == {
+        "max_new_tokens": 1,
+        "n": 1,
+        "sampling_seed": 17,
+        "custom_params": {"future_engine_control": True},
+    }
+
+
+def test_engine_generate_requires_object_sampling_params_for_prefill_override():
+    request = {"sampling_params": [1, 2]}
+
+    with pytest.raises(ValueError, match="sampling_params must be an object"):
+        build_native_generate_request(
+            request,
+            input_ids=[1],
+            fallback_rid="prefill-request",
+            priority=None,
+            sampling_overrides={"max_new_tokens": 1},
+        )
+
+
+def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
+
+    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
+        build_native_generate_request(
+            {"return_logprob": True, "top_logprobs_num": 1},
+            input_ids=[1],
+            fallback_rid="request",
+            priority=None,
+        )
+
+
+def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+
+    native = build_native_generate_request(
+        {"return_logprob": True, "top_logprobs_num": 2},
+        input_ids=[1],
+        fallback_rid="request",
+        priority=None,
+    )
+
+    assert native.top_logprobs_num == 2
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_forwards_only_opaque_response():
+    native_response = {
+        "output_ids": [101],
+        "meta_info": {
+            "id": "request-1",
+            "output_token_logprobs": [(-0.1, 101, "a")],
+        },
+    }
+
+    class TokenizerManager:
+        async def generate_request(self, request, request_context):
+            assert request == "native-request"
+            assert request_context is None
+            yield native_response
+
+    engine = SimpleNamespace(tokenizer_manager=TokenizerManager())
+    handler = _new_decode_handler()
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            native_generate_stream(engine, "native-request"),
+            _Context(),
+        )
+    )
+
+    assert chunks == [
+        {"token_ids": [], "engine_data": {"sglang_response": native_response}}
+    ]
+    assert chunks[0]["engine_data"]["sglang_response"] is native_response
+
+
+def _new_token_input_handler(maximum_input_token_id: int = 151935):
+    handler = _new_decode_handler()
+    handler._max_input_token_id = maximum_input_token_id
+    handler.input_param_manager = SimpleNamespace(
+        get_input_param=lambda request, use_tokenizer: request.get("token_ids")
+    )
+    return handler
+
+
+def test_resolve_max_input_token_id_uses_model_vocabulary():
+    tokenizer = SimpleNamespace(get_vocab=lambda: {"base": 0, "added": 151668})
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=tokenizer,
+            model_config=SimpleNamespace(
+                vocab_size=151936,
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_rejects_tokenizer_only_vocabulary():
+    tokenizer = SimpleNamespace(get_vocab=lambda: {"base": 0, "added": 151940})
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=tokenizer,
+            model_config=SimpleNamespace(
+                vocab_size=151936,
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_supports_hf_text_config_fallback():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=SimpleNamespace(),
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(vocab_size=151936)
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_supports_missing_tokenizer():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=None,
+            model_config=SimpleNamespace(
+                vocab_size=151936,
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_supports_missing_tokenizer_metadata():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=SimpleNamespace(),
+            model_config=SimpleNamespace(
+                vocab_size=151936,
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_supports_missing_model_metadata():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=SimpleNamespace(),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) is None
+
+
+def test_nvext_token_data_accepts_maximum_valid_token_id():
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": [1, 151935],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [1, 151935]}
+
+
+def test_nvext_token_data_allows_only_llava_image_token_with_image():
+    handler = _new_token_input_handler(maximum_input_token_id=31999)
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            mm_processor=SimpleNamespace(),
+            model_config=SimpleNamespace(image_token_id=32000),
+        )
+    )
+    request = {
+        "token_ids": [1, 32000],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [1, 32000]}
+
+    request["token_ids"].append(2**32 - 1)
+    with pytest.raises(HttpError, match="4294967295"):
+        handler._get_input_param(request)
+
+
+def test_nvext_token_data_handles_missing_multimodal_metadata():
+    handler = _new_token_input_handler()
+    handler.engine = SimpleNamespace(tokenizer_manager=SimpleNamespace())
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [1]}
+
+
+@pytest.mark.parametrize("invalid_token_id", [151936, 2**32 - 1])
+def test_nvext_token_data_rejects_out_of_vocabulary_token_id(invalid_token_id):
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": [1, invalid_token_id],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(
+        HttpError,
+        match=rf"Token id {invalid_token_id} is out of vocabulary",
+    ) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+def test_nvext_token_data_accepts_empty_token_list():
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": [],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": []}
+
+
+def test_nvext_token_data_rejects_marked_string_payload():
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": "not-token-ids",
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(
+        HttpError,
+        match=r"nvext\.token_data must resolve to a token ID list",
+    ) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+def test_nvext_token_data_skips_validation_when_model_bound_is_unavailable():
+    handler = _new_token_input_handler()
+    handler._max_input_token_id = None
+    request = {
+        "token_ids": [2**32 - 1],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
+
+
+def test_nvext_token_data_without_model_bound_rejects_locally_invalid_token_id():
+    handler = _new_token_input_handler()
+    handler._max_input_token_id = None
+    request = {
+        "token_ids": [True],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(HttpError) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+@pytest.mark.parametrize("invalid_token_id", [True, 1.5, "1"])
+def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": [invalid_token_id],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(HttpError) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+def test_nvext_token_data_validation_skips_ordinary_token_input():
+    handler = _new_token_input_handler()
+    request = {"token_ids": [2**32 - 1]}
+
+    assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
+
+
 async def _stream(items):
     for item in items:
         yield item
@@ -295,6 +635,33 @@ def test_build_sampling_params_maps_guided_decoding_to_json_schema():
     assert sampling_params["json_schema"] == (
         '{"type": "object", "properties": {"city": {"type": "string"}}}'
     )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "#"},
+        {
+            "$defs": {
+                "A": {"$ref": "#/$defs/B"},
+                "B": {"$ref": "#/$defs/A"},
+            },
+            "$ref": "#/$defs/A",
+        },
+    ],
+)
+def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    with pytest.raises(HttpError) as error:
+        handler._build_sampling_params(
+            {
+                "sampling_options": {"guided_decoding": {"json": schema}},
+                "stop_conditions": {"max_tokens": 8},
+            }
+        )
+
+    assert error.value.code == 400
 
 
 def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
@@ -433,12 +800,12 @@ def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch)
 
 
 def test_extract_logprobs_formats_top_tokens_as_token_ids():
-    log_probs, top_logprobs, total = DecodeWorkerHandler._extract_logprobs(
+    log_probs, top_logprobs = DecodeWorkerHandler._extract_logprobs(
         {
             "output_token_logprobs": [(-0.1, 101, "a")],
             "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
         },
-        0,
+        1,
         return_tokens_as_token_ids=True,
     )
 
@@ -449,7 +816,6 @@ def test_extract_logprobs_formats_top_tokens_as_token_ids():
             {"rank": 2, "token_id": 102, "token": "token_id:102", "logprob": -0.2},
         ]
     ]
-    assert total == 1
 
 
 def test_metadata_uploader_parses_extra_args_nvext():
@@ -612,7 +978,51 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
 
 
 @pytest.mark.asyncio
-async def test_process_token_stream_tracks_logprobs_per_choice_index():
+async def test_process_token_stream_accepts_incremental_logprob_arrays():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "text": "a",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "output_token_logprobs": [(-0.1, 101, "")],
+                        },
+                        "engine_data": {"native_chunk": 1},
+                    },
+                    {
+                        "index": 0,
+                        "output_ids": [102],
+                        "text": "c",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "output_token_logprobs": [(-0.3, 102, "")],
+                        },
+                        "engine_data": {"native_chunk": 2},
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[101], [102]]
+    assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.3]]
+    assert all("text" not in chunk for chunk in chunks)
+    assert all("tokens" not in chunk for chunk in chunks)
+    assert [chunk["engine_data"]["native_chunk"] for chunk in chunks] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_passes_through_encoded_routed_experts():
+    """Preserve SGLang's base64 routed-experts payload without re-encoding."""
     handler = _new_decode_handler()
 
     chunks = await _collect(
@@ -625,39 +1035,16 @@ async def test_process_token_stream_tracks_logprobs_per_choice_index():
                         "meta_info": {
                             "id": "request-1",
                             "finish_reason": None,
-                            "output_token_logprobs": [(-0.1, 101, "a")],
+                            "routed_experts": "AQIDBA==",
                         },
-                    },
-                    {
-                        "index": 1,
-                        "output_ids": [201],
-                        "meta_info": {
-                            "id": "request-1",
-                            "finish_reason": None,
-                            "output_token_logprobs": [(-0.2, 201, "b")],
-                        },
-                    },
-                    {
-                        "index": 0,
-                        "output_ids": [102],
-                        "meta_info": {
-                            "id": "request-1",
-                            "finish_reason": None,
-                            "output_token_logprobs": [
-                                (-0.1, 101, "a"),
-                                (-0.3, 102, "c"),
-                            ],
-                        },
-                    },
+                    }
                 ]
             ),
             _Context(),
         )
     )
 
-    assert [chunk["index"] for chunk in chunks] == [0, 1, 0]
-    assert [chunk["token_ids"] for chunk in chunks] == [[101], [201], [102]]
-    assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.2], [-0.3]]
+    assert chunks[0]["engine_data"]["routed_experts"] == "AQIDBA=="
 
 
 @pytest.mark.asyncio
@@ -897,6 +1284,33 @@ async def test_process_text_stream_stop_reason_requires_nvext_extra_field():
 
 
 @pytest.mark.asyncio
+async def test_process_text_stream_passes_through_encoded_routed_experts():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "routed_experts": "AQIDBA==",
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+            request={"nvext": {"extra_fields": ["routed_experts"]}},
+        )
+    )
+
+    assert chunks[0]["nvext"]["routed_experts"] == "AQIDBA=="
+
+
+@pytest.mark.asyncio
 async def test_process_text_stream_uploads_routed_experts(tmp_path):
     handler = _new_decode_handler(use_sglang_tokenizer=True)
     uploader = MetadataUploader(url=(tmp_path / "metadata/rollout-8").as_uri())
@@ -957,53 +1371,6 @@ async def test_process_token_stream_suppresses_hidden_stop_token_reason():
     )
 
     assert "stop_reason" not in chunks[0]
-
-
-@pytest.mark.asyncio
-async def test_multimodal_stream_keeps_reading_after_one_choice_finishes():
-    chunks = await _collect(
-        StreamProcessor.process_sglang_stream(
-            _stream(
-                [
-                    {
-                        "index": 0,
-                        "output_ids": [101],
-                        "text": "a",
-                        "meta_info": {"finish_reason": None},
-                    },
-                    {
-                        "index": 1,
-                        "output_ids": [201],
-                        "text": "b",
-                        "meta_info": {"finish_reason": None},
-                    },
-                    {
-                        "index": 0,
-                        "output_ids": [],
-                        "text": "a",
-                        "meta_info": {"finish_reason": {"type": "stop"}},
-                    },
-                    {
-                        "index": 1,
-                        "output_ids": [],
-                        "text": "b",
-                        "meta_info": {"finish_reason": {"type": "stop"}},
-                    },
-                ]
-            )
-        )
-    )
-
-    outputs = [json.loads(chunk) for chunk in chunks]
-
-    assert [output["index"] for output in outputs] == [0, 1, 0, 1]
-    assert [output["finished"] for output in outputs] == [False, False, True, True]
-    assert [output.get("finish_reason") for output in outputs] == [
-        None,
-        None,
-        "stop",
-        "stop",
-    ]
 
 
 async def _collect(stream):

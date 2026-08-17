@@ -9,11 +9,17 @@ from dataclasses import dataclass, field
 import pytest
 import yaml
 
+from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
+)
+from tests.serve.conftest import (
+    MULTIMODAL_VIDEO_EXPECTED,
+    MULTIMODAL_VIDEO_H264_URL,
+    MULTIMODAL_VIDEO_H265_URL,
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
@@ -24,6 +30,7 @@ from tests.utils.payload_builder import (
     chat_payload_default,
     completion_payload,
     completion_payload_default,
+    image_token_metrics_payload,
     metric_payload_default,
     multimodal_payload_default,
     router_selection_chat_payload_default,
@@ -43,6 +50,11 @@ class TRTLLMConfig(EngineConfig):
 trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/trtllm"
 )
+
+# Evaluated once at collection: NVDEC needs the container's driver "video"
+# capability, which CI runners do not grant.
+_NVDEC_UNAVAILABLE = not nvdec_available()
+
 qwen3_vl_engine_config_dir = os.path.join(
     WORKSPACE_DIR,
     "examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct",
@@ -307,6 +319,57 @@ trtllm_configs = {
             )
         ],
     ),
+    "aggregated_multimodal_video_nvdec": TRTLLMConfig(
+        # The only serve-level cover for video input on this backend. TensorRT-LLM
+        # supports video for the Qwen-VL families, and multimodal_processor routes
+        # video_url through NVDEC for H.264/H.265, but nothing exercised it
+        # end-to-end: the NVDEC VideoData transform was verified only by mocked
+        # unit tests and by hand on GPU hardware.
+        #
+        # Installs no decoder: NVDEC is the only video decoder in the shipped
+        # image, so this is what a deployment actually gets. Both codecs run
+        # against one deployment to avoid a second model load.
+        name="aggregated_multimodal_video_nvdec",
+        directory=trtllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            # CI runners lack the driver "video" capability libnvcuvid needs, so
+            # this skips there and is exercised on GPU hardware instead.
+            pytest.mark.skipif(
+                _NVDEC_UNAVAILABLE,
+                reason=(
+                    "NVDEC/PyNvVideoCodec unavailable; needs the driver "
+                    "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                ),
+            ),
+            pytest.mark.post_merge,
+            pytest.mark.profiled_vram_gib(12.0),
+            pytest.mark.requested_trtllm_kv_tokens(32768),
+            pytest.mark.timeout(960),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=60,
+        # The clips are served from localhost by the image_server fixture.
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {"type": "video_url", "video_url": {"url": url}},
+                ],
+                repeat_count=1,
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
+                temperature=0.0,
+                max_tokens=100,
+            )
+            for url in (MULTIMODAL_VIDEO_H264_URL, MULTIMODAL_VIDEO_H265_URL)
+        ],
+    ),
     # TensorRT-LLM EPD (Encode-Prefill-Decode) multimodal test for pre-merge CI
     # Uses Qwen3-VL-2B-Instruct model with 1 GPU (all workers share same GPU)
     #
@@ -351,11 +414,12 @@ trtllm_configs = {
             pytest.mark.pre_merge,
             pytest.mark.profiled_vram_gib(15.0),
             pytest.mark.requested_trtllm_kv_tokens(1056),
+            pytest.mark.timeout(360),  # 3x measured 118s CI runtime
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
-        timeout=900,
-        delayed_start=120,
+        timeout=300,
+        health_check_workers=True,
         request_payloads=[
             multimodal_payload_default(
                 text="Describe what you see in this image.",
@@ -365,6 +429,9 @@ trtllm_configs = {
         env={
             "PREFILL_CUDA_VISIBLE_DEVICES": "0",
             "DECODE_CUDA_VISIBLE_DEVICES": "0",
+            # Make worker /health readiness depend on a successful one-token
+            # engine canary instead of the system-status server alone.
+            "DYN_HEALTH_CHECK_ENABLED": "true",
         },
     ),
     "e_pd_multimodal": TRTLLMConfig(
@@ -600,7 +667,8 @@ trtllm_configs = {
             multimodal_payload_default(
                 text="Describe what you see in this image.",
                 expected_response=["mountain", "rock", "trees", "road"],
-            )
+            ),
+            image_token_metrics_payload(),
         ],
         env={
             "AGG_ENGINE_ARGS": "/workspace/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml",
@@ -788,6 +856,8 @@ def test_aggregated_health_check_priority(
         delayed_start=base.delayed_start,
         timeout=base.timeout,
         health_check_workers=True,
+        # This test allocates a single system port (num_system_ports=[1]).
+        health_check_worker_count=1,
         env={
             "DYN_HEALTH_CHECK_ENABLED": "true",
             "DYN_CANARY_WAIT_TIME": "2",

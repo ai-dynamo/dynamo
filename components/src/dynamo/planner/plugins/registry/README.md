@@ -1,10 +1,10 @@
 # PluginRegistry
 
 The registry tracks every plugin that can participate in a planner
-pipeline, gates every Register through auth + protocol checks, evicts
-stale plugins via heartbeat liveness, and coordinates with the circuit
+pipeline, gates every Register through auth + protocol checks, records
+heartbeat timestamps, and coordinates with the circuit
 breaker and scheduler so HOLD_LAST caches stay consistent with registry
-state.
+state. Automatic heartbeat monitoring and eviction are not currently wired.
 
 ## Architecture
 
@@ -72,8 +72,13 @@ Each row has a dedicated must-pass test in
                                NEVER use in production)
 ```
 
-`AuthConfig.trusted_sources=[]` is fail-closed — the registry refuses
-every token at startup. You must opt in explicitly.
+The standalone `build_auth_validator` factory treats
+`AuthConfig.trusted_sources=[]` as fail-closed. The Planner orchestrator keeps a
+legacy compatibility fallback: an empty list installs
+`AllowUnauthenticatedAuth` and logs a warning. This fallback is **DEV ONLY**;
+do not rely on it as an intentional configuration. Select
+`allow_unauthenticated` explicitly for development. Production configurations
+must select `static_secret`.
 
 ## Protocol versioning
 

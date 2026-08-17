@@ -11,7 +11,7 @@ requests. It wraps Dynamo's native KV router and adds a program-level scheduler
 with tool-boundary pause/resume, porting the scheduler from the ThunderAgent
 paper.
 
-**Conceptual docs live in [docs/agents/thunderagent-router.md](/docs/agents/thunderagent-router.md)** — the scheduler model, tool-boundary pause/resume semantics, the utilization-driven control loop, and observability. This README contains the source build and the complete Harbor/Pi A/B walkthrough.
+**Conceptual docs live in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md)** — the scheduler model, tool-boundary pause/resume semantics, the utilization-driven control loop, and observability. This README contains the source build and the complete Harbor/Pi A/B walkthrough.
 
 ## Install
 
@@ -36,6 +36,7 @@ uv pip install -e .
 # 1. Start your Dynamo workers (vLLM example, with KV events on)
 python -m dynamo.vllm \
     --model <model> --tensor-parallel-size <N> \
+    --endpoint-types none \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events",
                          "endpoint":"tcp://*:20080",
                          "enable_kv_cache_events":true}'
@@ -51,9 +52,15 @@ python -m dynamo.thunderagent_router \
 python -m dynamo.frontend --router-mode round-robin
 ```
 
+Use `--endpoint-types none` on workers wrapped by ThunderAgent so they register
+only for topology and readiness. ThunderAgent registers the public
+chat/completions surface; if the wrapped backend also advertises that surface
+for the same model, the frontend may route requests directly to the backend and
+bypass ThunderAgent lifecycle handling such as `x-dynamo-session-final`.
+
 The control-loop knobs (`--pause-threshold`, `--pause-target`,
 `--resume-hysteresis`, `--scheduler-interval-seconds`, …) and their defaults are
-documented in [docs/agents/thunderagent-router.md](/docs/agents/thunderagent-router.md#utilization-driven-control-loop).
+documented in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md#utilization-driven-control-loop).
 All `KvRouter` flags from `dynamo.router` (`--router-temperature`,
 `--use-kv-events`, `--router-track-output-blocks`, …) are also accepted and
 forwarded.
@@ -83,7 +90,7 @@ socket with `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` when the harness
 publishes explicit tool spans. Override sink behavior with
 `DYN_REQUEST_TRACE_SINKS` (e.g. `jsonl`, `stderr`) and
 `DYN_REQUEST_TRACE_OUTPUT_PATH`.
-See [Agent Tracing](/docs/agents/agent-tracing.md) for the record schema.
+See [Agent Tracing](../../../../docs/fern/pages/use-cases/agents/agent-tracing.md) for the record schema.
 
 Every LLM call then lands a `request_end` record carrying `session_id`,
 `input_tokens`, `output_tokens`, `cached_tokens`,
@@ -236,8 +243,8 @@ ThunderAgent paper:
 
 ## References
 
-- Conceptual docs: [docs/agents/thunderagent-router.md](/docs/agents/thunderagent-router.md)
+- Conceptual docs: [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md)
 - ThunderAgent paper: <https://arxiv.org/abs/2602.13692>
 - Upstream ThunderAgent reference: <https://github.com/HaoKang-Timmy/ThunderAgent>
 - Pi Dynamo provider: <https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin>
-- Dynamo KV router: [Router Guide](/docs/components/router/router-guide.md)
+- Dynamo KV router: [Router Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/router-guide.md)

@@ -22,8 +22,10 @@ impl OpenAIPreprocessor {
     /// Apply guided decoding for OpenAI tool-choice requests.
     ///
     /// Structural tags are preferred when enabled and supported by the configured
-    /// tool-call parser. Forced tool-choice requests fall back to the legacy
-    /// JSON-schema constraint when structural tags are not applied.
+    /// tool-call parser. Named K3 requests always use their native XTML structural
+    /// tag because generic JSON cannot represent K3 tool calls. Other forced
+    /// tool-choice requests fall back to the legacy JSON-schema constraint when
+    /// structural tags are not applied.
     pub(super) fn apply_tool_choice_guided_decoding(
         &self,
         request: &NvCreateChatCompletionRequest,
@@ -74,6 +76,29 @@ impl OpenAIPreprocessor {
             common_request,
         )? {
             return Ok(true);
+        }
+
+        let uses_kimi_k3_parser = self
+            .tool_call_parser
+            .as_deref()
+            .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"))
+            || self
+                .runtime_config
+                .reasoning_parser
+                .as_deref()
+                .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
+        if is_forced_tool_choice && uses_kimi_k3_parser {
+            if matches!(tool_choice, ChatCompletionToolChoiceOption::Named(_)) {
+                return Err(invalid_argument(
+                    "named tool choice for Kimi K3 requires --dyn-tool-call-parser kimi_k3 \
+                     with XTML structural-tag support",
+                ));
+            }
+
+            // K3's prompt-level required instruction produces an XTML `tools`
+            // channel. Generic JSON guided decoding would constrain the wrong
+            // wire format and prevent the Rust K3 parser from seeing it.
+            return Ok(false);
         }
 
         match get_json_schema_from_tools(Some(tool_choice), Some(tools)) {

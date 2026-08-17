@@ -76,6 +76,49 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	if spec.Failover != nil {
 		allErrs = append(allErrs, v.validateFailoverSpecV1alpha1(spec.Failover, fldPath.Child("failover"))...)
 	}
+
+	// Validate runtime compatibility against the source-version fields.
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+		image, imagePath := runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
+		if image == "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
+		}
+	}
+
+	return allErrs
+}
+
+// validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1 validates a preserved v1alpha1 shared spec update.
+// newSpec, oldSpec, and fldPath must not be nil.
+func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
+	newSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// Ratchet legacy image absence or an unchanged legacy tuple, but reject a newly invalid tuple.
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+		newImage, imagePath := runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
+		oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
+		if newImage == "" && oldImage != "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
+			(newImage != oldImage || newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
+		}
+	}
+
 	return allErrs
 }
 
