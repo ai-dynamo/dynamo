@@ -4,6 +4,8 @@
 use std::time::Instant;
 
 #[cfg(all(test, feature = "kvbm-offload"))]
+use std::sync::{Arc, Mutex};
+#[cfg(all(test, feature = "kvbm-offload"))]
 use std::time::Duration;
 
 use tokio::sync::mpsc;
