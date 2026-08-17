@@ -79,6 +79,7 @@ pytestmark = [
 MODEL = "Qwen/Qwen3-0.6B"
 _DEFAULT_MM_DATA = object()
 
+
 TOOL_REQUEST = {
     "model": MODEL,
     "messages": [{"role": "user", "content": "Hello"}],
@@ -1650,6 +1651,52 @@ class TestToolCallGuidedDecoding:
         )
 
         assert result.guided_decoding == expected
+        assert result.tool_parser is None
+
+    @pytest.mark.asyncio
+    async def test_no_tools_never_activates_auto_tool_parser(self, tokenizer):
+        request = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Say hello"}],
+        }
+        result = await prepost_module.preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakePassthroughToolParser,
+            enable_auto_tool_choice=True,
+        )
+
+        assert result.tool_parser is None
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {"type": "function", "function": {"name": "get_weather"}},
+        ],
+        ids=["required", "named"],
+    )
+    @pytest.mark.asyncio
+    async def test_forced_choice_without_tools_is_rejected(
+        self, tokenizer, tool_choice
+    ):
+        with pytest.raises(InvalidArgument, match="tools must be set"):
+            await prepost_module.preprocess_chat_request(
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "Say hello"}],
+                    "tool_choice": tool_choice,
+                },
+                tokenizer=tokenizer,
+                renderer=SimpleNamespace(render_messages_async=AsyncMock()),
+                tool_parser_class=_FakePassthroughToolParser,
+                enable_auto_tool_choice=True,
+            )
 
     # A forced tool choice with a client-provided structured_outputs constraint
     # is a conflict: reject it rather than silently reuse or replace it. (The
@@ -1743,6 +1790,7 @@ class TestToolCallGuidedDecoding:
         # The parser's tool grammar survives; response_format is dropped rather
         # than rejected or allowed to win.
         assert result.guided_decoding == {"grammar": 'root ::= "<tool_call>"'}
+        assert result.tool_parser is not None
 
     # response_format={"type": "structural_tag"} is not a content format -- vLLM
     # normalizes it into structured_outputs.structural_tag, a grammar over the

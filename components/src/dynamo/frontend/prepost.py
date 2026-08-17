@@ -150,13 +150,6 @@ def _should_build_tool_call_guidance(
     structural_tag_scope: str,
 ) -> bool:
     tool_choice = request.tool_choice or "auto"
-    # TODO: a forced tool_choice with no tools is unsatisfiable and should be a
-    # 400, not an unconstrained request. preprocessor/tool_choice.rs rejects it
-    # (ToolChoiceError::EmptyTools via get_json_schema_from_tools); here and in
-    # sglang_prepost.py it returns no constraint and the caller gets a plausible
-    # answer that can never contain the tool call they required. vLLM's own
-    # "when using tool_choice, tools must be set" validator does not run because
-    # the DYN_VLLM_SKIP_REQUEST_VALIDATION fast path uses model_construct.
     if not request.tools:
         return False
 
@@ -336,6 +329,24 @@ def _build_assistant_guided_decoding(
     return guided_decoding
 
 
+def _tool_call_parsing_enabled(request: ChatCompletionRequest) -> bool:
+    """Whether this request permits model output to be parsed as tool calls.
+
+    A configured parser is a model capability, not a per-request instruction.
+    Automatic tool choice yields to an explicit assistant-output constraint;
+    forced choices retain the parser because their output must be a tool call.
+    """
+    if not request.tools:
+        return False
+
+    tool_choice = request.tool_choice or "auto"
+    if tool_choice == "none":
+        return False
+    if _is_forced_tool_choice(tool_choice):
+        return True
+    return _build_assistant_guided_decoding(request) is None
+
+
 def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
     key = id(tokenizer)
     async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
@@ -441,14 +452,13 @@ def _prepare_request(
     )
 
     tool_parser: ToolParser | None = None
-    # With enable_auto_tool_choice the model may emit tool calls even when the
-    # client did not supply an explicit `tools` list, so we activate the parser
-    # whenever the tool_parser_class is available.
-    has_tools = bool(request_for_sampling.tools)
-    if tool_parser_class and (has_tools or enable_auto_tool_choice):
-        if request_for_sampling.tool_choice != "none":
-            tool_parser = tool_parser_class(tokenizer, request_for_sampling.tools)
-            request_for_sampling = tool_parser.adjust_request(request_for_sampling)
+    # enable_auto_tool_choice is retained for API compatibility; parser class
+    # availability represents the configured server capability. Activation is
+    # request-scoped so content-only output cannot be reclassified as a call.
+    _ = enable_auto_tool_choice
+    if tool_parser_class and _tool_call_parsing_enabled(request_for_sampling):
+        tool_parser = tool_parser_class(tokenizer, request_for_sampling.tools)
+        request_for_sampling = tool_parser.adjust_request(request_for_sampling)
 
     # Strip tools from the template when tool_choice=none so the model doesn't
     # see them and generate raw XML tool calls in its response.
@@ -548,6 +558,8 @@ async def preprocess_chat_request(
         )
     )
     is_forced_tool_choice = _is_forced_tool_choice(validated_request.tool_choice)
+    if is_forced_tool_choice and not validated_request.tools:
+        raise InvalidArgument("When using tool_choice, tools must be set.")
     # Must be read BEFORE _prepare_request: it calls ToolParser.adjust_request(),
     # which mutates this same request object in place and can set
     # structured_outputs itself. Reading it afterwards would treat a
