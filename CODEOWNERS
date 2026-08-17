@@ -75,6 +75,7 @@
 /lib/kv-router/src/scheduling/                                               @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/kv_dc_relay/                                          @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/                                        @ai-dynamo/dynamo-router-codeowners
+/components/src/dynamo/kv_state_agent/                                       @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/squeeze_evolve/                                       @ai-dynamo/dynamo-router-codeowners
 /examples/router/custom-policy-example/                                      @ai-dynamo/dynamo-router-codeowners
 /examples/router/policy-class-queues.yaml                                    @ai-dynamo/dynamo-router-codeowners
@@ -435,7 +436,6 @@
 /benchmarks/incluster/                                                       @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/nat_trace/                                                       @ai-dynamo/dynamo-performance-codeowners
 /lib/bench/src/coding/                                                       @ai-dynamo/dynamo-performance-codeowners
-/lib/mocker/src/cache/                                                       @ai-dynamo/dynamo-performance-codeowners
 /recipes/gpt-oss-120b/                                                       @ai-dynamo/dynamo-performance-codeowners
 /recipes/qwen3-vl-30b/                                                       @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/__init__.py                                                      @ai-dynamo/dynamo-performance-codeowners
@@ -450,10 +450,8 @@
 /examples/backends/mocker/                                                   @ai-dynamo/dynamo-performance-codeowners
 /lib/mocker/src/scheduler/                                                   @ai-dynamo/dynamo-performance-codeowners
 /recipes/deepseek-v32-fp4/                                                   @ai-dynamo/dynamo-performance-codeowners
-/lib/mocker/src/kv_manager/                                                  @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/mocker/README.md                                                 @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/burstgpt_loadgen/                                                @ai-dynamo/dynamo-performance-codeowners
-/lib/mocker/src/kvbm_offload/                                                @ai-dynamo/dynamo-performance-codeowners
 /recipes/qwen3-235b-a22b-fp8/                                                @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/mocker/                                               @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/replay/                                               @ai-dynamo/dynamo-performance-codeowners
@@ -580,6 +578,7 @@
 /components/src/dynamo/common/protocols/                                     @ai-dynamo/dynamo-frontend-codeowners
 /deploy/operator/internal/observability/                                     @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/block_manager/controller.rs                                     @ai-dynamo/dynamo-kv-memory-codeowners
+/aisimulate/crates/core/src/engine/cache/                                    @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/common/multimodal/                                    @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/trtllm/multimodal/                                    @ai-dynamo/dynamo-multimodal-codeowners
 /lib/llm/src/block_manager/distributed.rs                                    @ai-dynamo/dynamo-kv-memory-codeowners
@@ -589,6 +588,7 @@
 /components/src/dynamo/vllm/multimodal_utils/                                @ai-dynamo/dynamo-multimodal-codeowners
 /lib/bindings/python/src/dynamo/nixl_connect/                                @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/tests/test_streaming_tool_parsers.rs                                @ai-dynamo/dynamo-frontend-codeowners
+/aisimulate/crates/core/src/engine/kv_manager/                               @ai-dynamo/dynamo-performance-codeowners
 /tests/router/test_router_e2e_with_vllm_xpu.py                               @ai-dynamo/dynamo-xpu-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                             @ai-dynamo/dynamo-multimodal-codeowners
 /container/templates/sglang_xpu_framework.Dockerfile                         @ai-dynamo/dynamo-xpu-codeowners
@@ -611,12 +611,10 @@
 /tests/gpu_memory_service/                                                   @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/request_trace/                                                  @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/mocker/servers/sglang/                                                  @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
-/lib/mocker/src/kv_manager/                                                  @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/runtime/src/logging.rs                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /benchmarks/multimodal/image/                                                @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/multimodal/sweep/                                                @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
 /lib/llm/src/fpm_publisher.rs                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
-/lib/mocker/src/kvbm_offload/                                                @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kvbm-logical/src/metrics/                                               @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
 /.github/workflows/fern-docs.yml                                             @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /lib/llm/src/protocols/agents.rs                                             @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
@@ -672,6 +670,7 @@
 /components/src/dynamo/trtllm/health_check.py                                @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/engine_monitor.py                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/multimodal_utils/                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/aisimulate/crates/core/src/engine/kv_manager/                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/trtllm/encode_helper.py                               @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/sglang/init_diffusion.py                              @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/trtllm/engine_monitor.py                              @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners

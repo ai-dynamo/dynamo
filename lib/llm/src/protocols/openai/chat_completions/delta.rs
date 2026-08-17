@@ -197,7 +197,7 @@ impl DeltaGenerator {
     /// This should be sent after the last content chunk when stream_options.include_usage is true.
     ///
     /// # Returns
-    /// * A [`CreateChatCompletionStreamResponse`] with empty choices and usage stats.
+    /// * A `CreateChatCompletionStreamResponse` with empty choices and usage stats.
     pub fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
         let usage = self.get_usage();
 

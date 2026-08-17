@@ -531,7 +531,7 @@ pub struct MetricsCtx<'a> {
     pub metrics: &'a crate::metrics::EngineMetrics,
 }
 
-/// Invoked once with a freshly-built [`SnapshotPublisher`]; engine drives
+/// Invoked once with a freshly-built [`SnapshotPublisher`](crate::SnapshotPublisher); engine drives
 /// `publish(rank, snapshot)` from its own stat-logger threads thereafter.
 ///
 /// Mirror of [`OnPublisherReady`] for the KV-event Push flavor — same

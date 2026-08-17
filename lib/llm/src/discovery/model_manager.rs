@@ -464,7 +464,7 @@ impl ModelManager {
     /// reservation first-come and symmetric across namespaces. A later deployment
     /// re-using a name fails loudly rather than silently displacing the owner.
     ///
-    /// Holds [`Self::reservation_lock`] across the reserved-name check and the
+    /// Holds `Self::reservation_lock` across the reserved-name check and the
     /// insert so the claim is atomic against a concurrent `register_alias` for
     /// the same name (a name can never end up both a live primary and an alias).
     /// The lock is always taken before any map access, so it never inverts with a
@@ -536,7 +536,7 @@ impl ModelManager {
     /// refused and logged so operators find the collision in the logs rather
     /// than through silent metric re-attribution.
     ///
-    /// Holds [`Self::reservation_lock`] across the live-primary probe and the
+    /// Holds `Self::reservation_lock` across the live-primary probe and the
     /// entry insert so the claim is atomic against a concurrent `add_worker_set`
     /// for the same name. Within that section the `models` guard is dropped before
     /// touching `alias_to_primary` (via `is_some_and`), and the lock is taken

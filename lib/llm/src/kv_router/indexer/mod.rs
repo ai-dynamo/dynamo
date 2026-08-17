@@ -42,15 +42,11 @@ pub(crate) use recovery::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
     RecoverySupervisor, RecoveryTarget, TargetFaultDisposition, start_target_subscriber,
 };
-// The version-aware state-agent watcher will use the status transport when it
-// activates residency-v2 consumption (DEP #13044).
-#[allow(unused_imports)]
-pub(crate) use recovery::{
-    RuntimeWorkerQueryTransport, start_subscriber, start_worker_kv_query_endpoint,
-    start_worker_kv_query_endpoint_with_status,
-};
 #[cfg(test)]
 pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
+pub(crate) use recovery::{
+    start_subscriber, start_worker_kv_query_endpoint, start_worker_kv_query_endpoint_with_status,
+};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
 /// to this router, even when the primary indexer is served or consumed
@@ -81,6 +77,19 @@ pub enum Indexer {
         primary_records_routing_decisions: bool,
     },
     None,
+}
+
+async fn dump_local_events(
+    mut events: Vec<RouterEvent>,
+    lower_tiers: &LowerTierIndexers,
+) -> Result<Vec<RouterEvent>, KvRouterError> {
+    for (tier, indexer) in lower_tiers.entries() {
+        events.extend(indexer.dump_events().await?.into_iter().map(|mut event| {
+            event.storage_tier = tier;
+            event
+        }));
+    }
+    Ok(events)
 }
 
 impl Indexer {
@@ -247,8 +256,16 @@ impl Indexer {
 
     pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         match self {
-            Self::KvIndexer { primary, .. } => primary.dump_events().await,
-            Self::Concurrent { primary, .. } => primary.dump_events().await,
+            Self::KvIndexer {
+                primary,
+                lower_tier,
+                ..
+            } => dump_local_events(primary.dump_events().await?, lower_tier).await,
+            Self::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } => dump_local_events(primary.dump_events().await?, lower_tier).await,
             Self::Remote { .. } => Ok(Vec::new()),
             Self::None => {
                 panic!(
@@ -672,6 +689,30 @@ mod tests {
                 .and_then(|tier| tier.hits.get(&worker)),
             Some(&1)
         );
+    }
+
+    #[tokio::test]
+    async fn router_dump_includes_all_allocated_physical_tiers() {
+        let indexer = make_test_indexer();
+        for (event_id, tier, block) in [
+            (1, StorageTier::Device, 11),
+            (2, StorageTier::HostPinned, 12),
+            (3, StorageTier::Disk, 13),
+        ] {
+            indexer
+                .apply_event(store_event(7, 0, event_id, &[], &[block], tier))
+                .await;
+        }
+        flush_indexer(&indexer).await;
+
+        let events = indexer.dump_events().await.unwrap();
+        for tier in [
+            StorageTier::Device,
+            StorageTier::HostPinned,
+            StorageTier::Disk,
+        ] {
+            assert!(events.iter().any(|event| event.storage_tier == tier));
+        }
     }
 
     #[tokio::test]
