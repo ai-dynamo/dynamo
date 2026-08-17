@@ -109,6 +109,32 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
         self.mode
     }
 
+    pub(in crate::replay::offline) fn validate_conservative_windows(&self) -> Result<()> {
+        if !matches!(self.mode, ReplayMode::Trace) {
+            anyhow::bail!("conservative replay does not support concurrency admission");
+        }
+        match &self.source {
+            AdmissionSource::Requests(requests) => {
+                if requests
+                    .iter()
+                    .any(|request| request.output_token_ids.is_none())
+                {
+                    anyhow::bail!(
+                        "conservative replay requires explicit output token IDs for direct requests"
+                    );
+                }
+            }
+            AdmissionSource::Workload(driver) => {
+                if !driver.supports_conservative_worker_windows() {
+                    anyhow::bail!(
+                        "conservative replay requires independent one-turn trace sessions"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(in crate::replay::offline) fn next_ready_time_ms(&mut self) -> Option<f64> {
         match (&self.mode, &mut self.source) {
             (ReplayMode::Trace, AdmissionSource::Requests(pending)) => pending

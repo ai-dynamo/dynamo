@@ -16,7 +16,7 @@ use super::super::state::OfflineWorkerState;
 #[cfg(feature = "kvbm-offload")]
 use super::ObservedOffloadEffects;
 use super::{EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation};
-use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
+use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, G1Backend, MockEngineArgs};
 use crate::replay::TraceCollector;
 use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
 
@@ -48,9 +48,199 @@ struct PassBoundary {
     tokens_visible: bool,
 }
 
+pub(in crate::replay::offline) struct ExecutedRankPass {
+    pub(in crate::replay::offline) rank_id: usize,
+    pub(in crate::replay::offline) executed: Option<EnginePassResult>,
+}
+
+pub(in crate::replay::offline) struct ExecutedGroupEpoch {
+    pub(in crate::replay::offline) worker_id: usize,
+    boundary: PassBoundary,
+    pub(in crate::replay::offline) ranks: SmallVec<[ExecutedRankPass; 1]>,
+}
+
+/// Scheduler and KV state owned by one logical worker and all of its DP ranks.
+///
+/// The conservative replay prototype moves these groups to persistent worker
+/// lanes. Global routing, collection, and event ordering remain outside this
+/// state.
+pub(in crate::replay::offline) struct IsolatedWorkerGroup {
+    worker_id: usize,
+    stage: SimulationWorkerStage,
+    pass_mode: EnginePassMode,
+    ranks: Vec<(usize, OfflineWorkerState)>,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::replay::offline) struct WorkerCompletionMutation {
+    pub(in crate::replay::offline) rank_id: usize,
+    pub(in crate::replay::offline) completed_requests: usize,
+}
+
+pub(in crate::replay::offline) struct WorkerCompletionAugment<Events: EngineEventBatch> {
+    pub(in crate::replay::offline) rank_id: usize,
+    pub(in crate::replay::offline) lifecycle_events: Vec<crate::scheduler::SchedulerLifecycleEvent>,
+    pub(in crate::replay::offline) engine_events: Events,
+    pub(in crate::replay::offline) had_raw_observations: bool,
+}
+
 impl PassBoundary {
     fn wall_time_secs(self) -> f64 {
         (self.end_ms - self.start_ms).max(0.0) / 1000.0
+    }
+}
+
+impl ExecutedGroupEpoch {
+    pub(in crate::replay::offline) fn start_ms(&self) -> f64 {
+        self.boundary.start_ms
+    }
+
+    pub(in crate::replay::offline) fn end_ms(&self) -> f64 {
+        self.boundary.end_ms
+    }
+
+    pub(in crate::replay::offline) fn completion_capacity(&self) -> usize {
+        self.boundary.completion_capacity
+    }
+
+    pub(in crate::replay::offline) fn wall_time_secs(&self) -> f64 {
+        self.boundary.wall_time_secs()
+    }
+}
+
+impl IsolatedWorkerGroup {
+    pub(in crate::replay::offline) fn worker_id(&self) -> usize {
+        self.worker_id
+    }
+
+    pub(in crate::replay::offline) fn rank_identities(&self) -> Vec<(usize, u32)> {
+        self.ranks
+            .iter()
+            .map(|(rank_id, worker)| (*rank_id, worker.rank_identity().1))
+            .collect()
+    }
+
+    pub(in crate::replay::offline) fn dispatch(
+        &mut self,
+        rank_id: usize,
+        request: DirectRequest,
+    ) -> anyhow::Result<()> {
+        let worker = self
+            .ranks
+            .iter_mut()
+            .find_map(|(candidate, worker)| (*candidate == rank_id).then_some(worker))
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
+        worker.receive_request(request);
+        Ok(())
+    }
+
+    pub(in crate::replay::offline) fn in_flight(&self) -> usize {
+        self.ranks
+            .iter()
+            .map(|(_, worker)| worker.in_flight())
+            .sum()
+    }
+
+    pub(in crate::replay::offline) fn is_drained(&self) -> bool {
+        self.ranks.iter().all(|(_, worker)| worker.is_drained())
+    }
+
+    pub(in crate::replay::offline) fn is_ready(&self) -> bool {
+        let any_busy = self.ranks.iter().any(|(_, worker)| worker.is_busy());
+        let any_ready = self.ranks.iter().any(|(_, worker)| worker.is_ready());
+        !any_busy && any_ready
+    }
+
+    pub(in crate::replay::offline) fn execute_epoch(
+        &mut self,
+        now_ms: f64,
+    ) -> anyhow::Result<ExecutedGroupEpoch> {
+        let completion_capacity = self.ranks.len();
+        let mut ranks: SmallVec<[ExecutedRankPass; 1]> =
+            SmallVec::with_capacity(completion_capacity);
+        for (rank_id, worker) in &mut self.ranks {
+            if !worker.is_ready() {
+                ranks.push(ExecutedRankPass {
+                    rank_id: *rank_id,
+                    executed: None,
+                });
+                continue;
+            }
+            let (logical_worker_id, dp_rank) = worker.rank_identity();
+            let executed = with_engine_evidence_context(
+                now_ms,
+                evidence_pool(self.stage),
+                logical_worker_id,
+                dp_rank,
+                || worker.try_execute_pass(now_ms),
+            )?;
+            ranks.push(ExecutedRankPass {
+                rank_id: *rank_id,
+                executed: Some(executed),
+            });
+        }
+        let end_ms = ranks
+            .iter()
+            .filter_map(|rank| rank.executed.as_ref())
+            .map(|executed| executed.end_ms)
+            .fold(now_ms, f64::max)
+            .max(now_ms);
+        Ok(ExecutedGroupEpoch {
+            worker_id: self.worker_id,
+            boundary: PassBoundary {
+                start_ms: now_ms,
+                end_ms,
+                completion_capacity,
+                tokens_visible: self.pass_mode == EnginePassMode::Visible,
+            },
+            ranks,
+        })
+    }
+
+    pub(in crate::replay::offline) fn mark_epoch_started_from_times(
+        &mut self,
+        start_ms: f64,
+        end_ms: f64,
+        mutations: &[WorkerCompletionMutation],
+    ) {
+        if end_ms <= start_ms {
+            return;
+        }
+        for mutation in mutations {
+            self.ranks
+                .iter_mut()
+                .find_map(|(rank_id, worker)| (*rank_id == mutation.rank_id).then_some(worker))
+                .expect("started epoch referenced an unknown rank")
+                .mark_busy();
+        }
+    }
+
+    pub(in crate::replay::offline) fn apply_completion_mutation<
+        Observation: ReplayEngineObservation,
+    >(
+        &mut self,
+        mutation: WorkerCompletionMutation,
+    ) -> anyhow::Result<WorkerCompletionAugment<Observation::Batch>> {
+        let worker = self
+            .ranks
+            .iter_mut()
+            .find_map(|(rank_id, worker)| (*rank_id == mutation.rank_id).then_some(worker))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "offline replay completion for unknown worker {}",
+                    mutation.rank_id
+                )
+            })?;
+        worker.mark_idle();
+        worker.mark_completed(mutation.completed_requests);
+        let lifecycle_events = worker.retry_pending_destinations();
+        let observed = Observation::drain_worker_events(worker);
+        Ok(WorkerCompletionAugment {
+            rank_id: mutation.rank_id,
+            lifecycle_events,
+            engine_events: observed.events,
+            had_raw_observations: observed.had_raw_observations,
+        })
     }
 }
 
@@ -183,6 +373,68 @@ where
     ) {
         self.args = args;
         self.capture_raw = capture_raw;
+    }
+
+    pub(in crate::replay::offline) fn validate_conservative_windows(&self) -> anyhow::Result<()> {
+        if self.startup_time_ms().is_some() {
+            bail!("conservative replay does not support worker startup delays");
+        }
+        if self.args.aic_nextn.is_some() {
+            bail!("conservative replay does not support AIC speculative decoding");
+        }
+        if self.args.resolved_g1_backend() != G1Backend::Native {
+            bail!("conservative replay requires native G1 state");
+        }
+        if self.args.num_g2_blocks.is_some()
+            || self.args.num_g3_blocks.is_some()
+            || self.args.enable_g4_storage
+        {
+            bail!("conservative replay does not support KVBM offload");
+        }
+        if matches!(
+            self.args.engine_type,
+            crate::common::protocols::EngineType::Trtllm
+        ) {
+            bail!("conservative replay supports only vLLM and SGLang");
+        }
+        Ok(())
+    }
+
+    /// Consume a static engine into independently owned logical-worker groups.
+    /// Dynamic lifecycle state is rejected because conservative replay keeps
+    /// the topology fixed for the complete run.
+    pub(in crate::replay::offline) fn into_isolated_groups(
+        mut self,
+    ) -> anyhow::Result<Vec<IsolatedWorkerGroup>> {
+        if !self.pending_removal.is_empty() || !self.pending_startup.is_empty() {
+            bail!("conservative replay requires a settled static worker topology");
+        }
+        let mut groups = Vec::with_capacity(self.live_group_count);
+        for (worker_id, rank_ids) in self.worker_groups.into_iter().enumerate() {
+            let rank_ids = rank_ids.ok_or_else(|| {
+                anyhow::anyhow!("conservative replay found removed worker group {worker_id}")
+            })?;
+            let mut ranks = Vec::with_capacity(rank_ids.len());
+            for rank_id in rank_ids {
+                let worker = self
+                    .workers
+                    .get_mut(rank_id)
+                    .and_then(Option::take)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "conservative replay worker group {worker_id} references missing rank {rank_id}"
+                        )
+                    })?;
+                ranks.push((rank_id, worker));
+            }
+            groups.push(IsolatedWorkerGroup {
+                worker_id,
+                stage: self.stage,
+                pass_mode: self.pass_mode,
+                ranks,
+            });
+        }
+        Ok(groups)
     }
 
     fn worker(&self, rank_id: usize) -> Option<&OfflineWorkerState> {
@@ -673,6 +925,108 @@ where
         }
     }
 
+    fn execute_group_epoch(
+        &mut self,
+        worker_id: usize,
+        now_ms: f64,
+    ) -> anyhow::Result<ExecutedGroupEpoch> {
+        let rank_ids = self
+            .worker_groups
+            .get(worker_id)
+            .and_then(Option::as_ref)
+            .expect("readiness frontier referenced a missing worker group");
+        let completion_capacity = rank_ids.len();
+        let mut ranks: SmallVec<[ExecutedRankPass; 1]> =
+            SmallVec::with_capacity(completion_capacity);
+
+        for &rank_id in rank_ids {
+            if !Self::required_worker(&self.workers, rank_id).is_ready() {
+                ranks.push(ExecutedRankPass {
+                    rank_id,
+                    executed: None,
+                });
+                continue;
+            }
+            let (logical_worker_id, dp_rank) =
+                Self::required_worker(&self.workers, rank_id).rank_identity();
+            let executed = with_engine_evidence_context(
+                now_ms,
+                evidence_pool(self.stage),
+                logical_worker_id,
+                dp_rank,
+                || Self::required_worker_mut(&mut self.workers, rank_id).try_execute_pass(now_ms),
+            )?;
+            ranks.push(ExecutedRankPass {
+                rank_id,
+                executed: Some(executed),
+            });
+        }
+
+        let end_ms = ranks
+            .iter()
+            .filter_map(|rank| rank.executed.as_ref())
+            .map(|executed| executed.end_ms)
+            .fold(now_ms, f64::max)
+            .max(now_ms);
+        Ok(ExecutedGroupEpoch {
+            worker_id,
+            boundary: PassBoundary {
+                start_ms: now_ms,
+                end_ms,
+                completion_capacity,
+                tokens_visible: self.pass_mode == EnginePassMode::Visible,
+            },
+            ranks,
+        })
+    }
+
+    fn lower_group_epoch(
+        &mut self,
+        epoch: ExecutedGroupEpoch,
+        collector: &mut TraceCollector,
+    ) -> EngineEffects<Observation::Batch> {
+        let mut effects = EngineEffects::default();
+        for rank in epoch.ranks {
+            let Some(executed) = rank.executed else {
+                if epoch.boundary.end_ms > epoch.boundary.start_ms {
+                    // Empty ranks still participate in the barrier so work
+                    // arriving mid-epoch cannot start ahead of a sibling.
+                    Self::required_worker_mut(&mut self.workers, rank.rank_id).mark_busy();
+                    effects.schedule_completion(
+                        epoch.boundary.end_ms,
+                        WorkerCompletionPayload {
+                            stage: self.stage,
+                            worker_idx: rank.rank_id,
+                            completed_requests: 0,
+                            output_signals: Vec::new(),
+                            lifecycle_events: Vec::new(),
+                            engine_events: Observation::Batch::default(),
+                            progress: EngineProgress::default(),
+                            fpm: Some(ForwardPassSnapshot {
+                                wall_time_secs: epoch.boundary.wall_time_secs(),
+                                ..Default::default()
+                            }),
+                            accept_length_output_tokens: 0,
+                            accept_length_decode_forwards: 0,
+                        },
+                        epoch.boundary.completion_capacity,
+                    );
+                }
+                continue;
+            };
+            Self::lower_executed_pass(
+                &mut self.workers,
+                self.stage,
+                rank.rank_id,
+                epoch.boundary,
+                executed,
+                collector,
+                &mut effects,
+            );
+        }
+        effects
+    }
+
     pub(in crate::replay::offline) fn drive_ready(
         &mut self,
         now_ms: f64,
@@ -711,114 +1065,10 @@ where
                 continue;
             }
 
-            let mut effects = EngineEffects::default();
-            let group_end_ms = if rank_ids.len() == 1 {
-                let rank_id = rank_ids[0];
-                let (worker_id, dp_rank) =
-                    Self::required_worker(&self.workers, rank_id).rank_identity();
-                let executed = with_engine_evidence_context(
-                    now_ms,
-                    evidence_pool(self.stage),
-                    worker_id,
-                    dp_rank,
-                    || {
-                        Self::required_worker_mut(&mut self.workers, rank_id)
-                            .try_execute_pass(now_ms)
-                    },
-                )?;
-                let group_end_ms = executed.end_ms.max(now_ms);
-                Self::lower_executed_pass(
-                    &mut self.workers,
-                    self.stage,
-                    rank_id,
-                    PassBoundary {
-                        start_ms: now_ms,
-                        end_ms: group_end_ms,
-                        completion_capacity: 1,
-                        tokens_visible: self.pass_mode == EnginePassMode::Visible,
-                    },
-                    executed,
-                    collector,
-                    &mut effects,
-                );
-                group_end_ms
-            } else {
-                let completion_capacity = rank_ids.len();
-                let mut executed_by_rank: SmallVec<[Option<EnginePassResult>; 1]> =
-                    SmallVec::with_capacity(completion_capacity);
-                for &rank_id in rank_ids {
-                    if !Self::required_worker(&self.workers, rank_id).is_ready() {
-                        executed_by_rank.push(None);
-                        continue;
-                    }
-                    let (worker_id, dp_rank) =
-                        Self::required_worker(&self.workers, rank_id).rank_identity();
-                    let executed = with_engine_evidence_context(
-                        now_ms,
-                        evidence_pool(self.stage),
-                        worker_id,
-                        dp_rank,
-                        || {
-                            Self::required_worker_mut(&mut self.workers, rank_id)
-                                .try_execute_pass(now_ms)
-                        },
-                    )?;
-                    executed_by_rank.push(Some(executed));
-                }
-
-                let group_end_ms = executed_by_rank
-                    .iter()
-                    .filter_map(Option::as_ref)
-                    .map(|executed| executed.end_ms)
-                    .fold(now_ms, f64::max);
-                let boundary = PassBoundary {
-                    start_ms: now_ms,
-                    end_ms: group_end_ms,
-                    completion_capacity,
-                    tokens_visible: self.pass_mode == EnginePassMode::Visible,
-                };
-
-                for (&rank_id, executed) in rank_ids.iter().zip(executed_by_rank) {
-                    let Some(executed) = executed else {
-                        if group_end_ms > now_ms {
-                            // Empty ranks still participate in the barrier so work
-                            // arriving mid-epoch cannot start ahead of a sibling.
-                            Self::required_worker_mut(&mut self.workers, rank_id).mark_busy();
-                            effects.schedule_completion(
-                                group_end_ms,
-                                WorkerCompletionPayload {
-                                    stage: self.stage,
-                                    worker_idx: rank_id,
-                                    completed_requests: 0,
-                                    output_signals: Vec::new(),
-                                    lifecycle_events: Vec::new(),
-                                    engine_events: Observation::Batch::default(),
-                                    progress: EngineProgress::default(),
-                                    fpm: Some(ForwardPassSnapshot {
-                                        wall_time_secs: boundary.wall_time_secs(),
-                                        ..Default::default()
-                                    }),
-                                    accept_length_output_tokens: 0,
-                                    accept_length_decode_forwards: 0,
-                                },
-                                boundary.completion_capacity,
-                            );
-                        }
-                        continue;
-                    };
-
-                    Self::lower_executed_pass(
-                        &mut self.workers,
-                        self.stage,
-                        rank_id,
-                        boundary,
-                        executed,
-                        collector,
-                        &mut effects,
-                    );
-                }
-                group_end_ms
-            };
+            let epoch = self.execute_group_epoch(worker_id, now_ms)?;
+            let group_end_ms = epoch.boundary.end_ms;
+            debug_assert_eq!(epoch.worker_id, worker_id);
+            let effects = self.lower_group_epoch(epoch, collector);
 
             if !effects.is_empty() {
                 if group_end_ms <= now_ms {

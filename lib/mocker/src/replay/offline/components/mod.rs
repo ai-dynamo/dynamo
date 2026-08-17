@@ -11,7 +11,10 @@ pub(crate) use super::extensions::kv_router::OfflineRouterSnapshot;
 pub(in crate::replay::offline) use admission::{
     AdmissionQueue, KvReplayMetadata, NoReplayMetadata, ReplayAdmissionMetadata,
 };
-pub(in crate::replay::offline) use engine::{EngineComponent, WorkerScaleDelta};
+pub(in crate::replay::offline) use engine::{
+    EngineComponent, ExecutedGroupEpoch, IsolatedWorkerGroup, WorkerCompletionAugment,
+    WorkerCompletionMutation, WorkerScaleDelta,
+};
 #[cfg(feature = "kvbm-offload")]
 pub(in crate::replay::offline) use types::ObservedOffloadEffects;
 pub(in crate::replay) use types::ReplayMode;

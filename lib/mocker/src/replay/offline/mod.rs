@@ -6,6 +6,7 @@ pub(crate) use crate::replay::normalize_trace_requests;
 pub(crate) mod agg;
 mod canonical;
 pub(crate) mod components;
+mod conservative;
 pub(crate) mod core;
 pub(crate) mod disagg;
 mod entrypoints;

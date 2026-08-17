@@ -6,6 +6,7 @@ use super::components::OfflineRouterSnapshot;
 pub(super) use super::components::ReplayMode;
 #[cfg(test)]
 use super::components::TrafficStats;
+use super::conservative::run_aggregated_conservative;
 use super::core::round_robin::AggregatedRoundRobinPlacement;
 use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
@@ -50,6 +51,25 @@ use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::collections::{BinaryHeap, VecDeque};
 use uuid::Uuid;
+
+const PARALLEL_THREADS_ENV: &str = "DYN_MOCKER_OFFLINE_AGG_PARALLEL_THREADS";
+
+fn conservative_parallel_threads() -> anyhow::Result<Option<usize>> {
+    let Some(raw) = std::env::var_os(PARALLEL_THREADS_ENV) else {
+        return Ok(None);
+    };
+    let raw = raw.to_string_lossy();
+    let configured = raw.parse::<usize>().map_err(|_| {
+        anyhow::anyhow!("{PARALLEL_THREADS_ENV} must be a non-negative integer; got {raw:?}")
+    })?;
+    if configured == 0 {
+        return Ok(None);
+    }
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    Ok(Some(configured.min(available).max(1)))
+}
 
 fn common_origin(mut origins: impl Iterator<Item = u64>) -> Option<u64> {
     let first = origins.next()?;
@@ -121,35 +141,35 @@ where
     Metadata: ReplayAdmissionMetadata,
     PlacementPolicyImpl: AggregatedPlacement<Observation::Batch, Metadata>,
 {
-    now_ms: f64,
-    dp_size: u32,
-    next_event_seq: u64,
-    next_scaling_tick_ordinal: u64,
-    admission: AdmissionQueue<Metadata>,
-    requests: FxHashMap<Uuid, AggRequestState>,
-    engine: EngineComponent<Observation>,
-    collector: TraceCollector,
-    events: BinaryHeap<SimulationEvent<Observation::Batch>>,
-    placement: PlacementPolicyImpl,
-    progress: ReplayProgress,
-    stats: AggRuntimeStats,
+    pub(super) now_ms: f64,
+    pub(super) dp_size: u32,
+    pub(super) next_event_seq: u64,
+    pub(super) next_scaling_tick_ordinal: u64,
+    pub(super) admission: AdmissionQueue<Metadata>,
+    pub(super) requests: FxHashMap<Uuid, AggRequestState>,
+    pub(super) engine: EngineComponent<Observation>,
+    pub(super) collector: TraceCollector,
+    pub(super) events: BinaryHeap<SimulationEvent<Observation::Batch>>,
+    pub(super) placement: PlacementPolicyImpl,
+    pub(super) progress: ReplayProgress,
+    pub(super) stats: AggRuntimeStats,
     /// Latest forward pass metric per worker/rank since the previous scaling tick.
-    fpm_buffer: LatestFpmBuffer,
+    pub(super) fpm_buffer: LatestFpmBuffer,
     /// Traffic statistics accumulated between scaling ticks.
-    traffic: TrafficAccumulator,
+    pub(super) traffic: TrafficAccumulator,
     /// Optional cap on simulated wall-clock time. When set, `run()` exits
     /// gracefully once the next scheduled timestamp exceeds this cap, leaving
     /// any in-flight requests as incomplete in the report.
-    max_sim_time_ms: Option<f64>,
+    pub(super) max_sim_time_ms: Option<f64>,
     /// Optional scaling component. When set, `run()` seeds recurring `ScalingTick` events.
-    scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    pub(super) scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     /// Whether to retain the latest FPM snapshot per worker/rank. Only the planner
     /// consumes them, so the plain `run()` path leaves this `false`.
-    collect_fpm: bool,
+    pub(super) collect_fpm: bool,
     #[cfg(test)]
-    worker_active_requests: Vec<Vec<Uuid>>,
+    pub(super) worker_active_requests: Vec<Vec<Uuid>>,
     #[cfg(test)]
-    stepped: bool,
+    pub(super) stepped: bool,
 }
 
 impl AggRuntimeImpl<AggregatedRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata> {
@@ -1255,7 +1275,13 @@ where
     /// If `max_sim_time_ms` is set, exits gracefully when the next scheduled
     /// timestamp would exceed that cap; in-flight requests at that point are
     /// reported as incomplete.
-    pub(in crate::replay) fn run(mut self) -> anyhow::Result<(TraceCollector, AggRuntimeStats)> {
+    pub(in crate::replay) fn run(mut self) -> anyhow::Result<(TraceCollector, AggRuntimeStats)>
+    where
+        Observation: Send + 'static,
+    {
+        if let Some(lane_count) = conservative_parallel_threads()? {
+            return run_aggregated_conservative(self, lane_count);
+        }
         if let Some(cap_ms) = self.max_sim_time_ms
             && (!cap_ms.is_finite() || cap_ms < 0.0)
         {
@@ -1710,6 +1736,195 @@ mod tests {
             }))
             .build()
             .unwrap()
+    }
+
+    fn independent_window_trace() -> Trace {
+        Trace {
+            block_size: 4,
+            sessions: (0..6)
+                .map(|session| SessionTrace {
+                    session_id: format!("window-{session}"),
+                    first_arrival_timestamp_ms: Some(if session < 4 { 0.0 } else { 500.0 }),
+                    turns: vec![TurnTrace {
+                        input_length: 16 + session,
+                        max_output_tokens: 4,
+                        hash_ids: vec![session as u32 + 1; (19 + session) / 4],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    }],
+                })
+                .collect(),
+        }
+    }
+
+    #[rstest]
+    #[case(EngineType::Vllm)]
+    #[case(EngineType::Sglang)]
+    fn conservative_windows_match_serial_for_independent_trace(#[case] engine_type: EngineType) {
+        let mut args = fast_router_args();
+        args.engine_type = engine_type;
+        args.block_size = 4;
+        if engine_type == EngineType::Sglang {
+            args.sglang = Some(SglangArgs {
+                page_size: Some(4),
+                ..Default::default()
+            });
+        }
+        let build = || {
+            RoundRobinAggRuntime::new_round_robin_workload(
+                &args,
+                WorkloadDriver::new_trace(independent_window_trace(), args.block_size).unwrap(),
+                2,
+                ReplayMode::Trace,
+            )
+            .unwrap()
+        };
+
+        let (serial, _) = build().run().unwrap();
+        let (parallel, _) = run_aggregated_conservative(build(), 2).unwrap();
+        assert_collectors_match(serial, parallel);
+    }
+
+    #[test]
+    fn conservative_windows_match_serial_across_router_backlog() {
+        let args = queueing_router_args(RouterQueuePolicy::Fcfs);
+        let build = || {
+            AggRuntime::new_workload(
+                &args,
+                Some(queueing_router_config(RouterQueuePolicy::Fcfs)),
+                None,
+                WorkloadDriver::new_trace(independent_window_trace(), args.block_size).unwrap(),
+                2,
+                ReplayMode::Trace,
+                ReplayRouterMode::KvRouter,
+            )
+            .unwrap()
+        };
+
+        let (serial, _) = build().run().unwrap();
+        let (parallel, _) = run_aggregated_conservative(build(), 2).unwrap();
+        assert_collectors_match(serial, parallel);
+    }
+
+    #[test]
+    fn conservative_windows_match_serial_for_attention_dp8() {
+        let mut args = fast_router_args();
+        args.dp_size = 8;
+        let build = || {
+            RoundRobinAggRuntime::new_round_robin_workload(
+                &args,
+                WorkloadDriver::new_trace(independent_window_trace(), args.block_size).unwrap(),
+                1,
+                ReplayMode::Trace,
+            )
+            .unwrap()
+        };
+
+        let (serial, _) = build().run().unwrap();
+        let (parallel, _) = run_aggregated_conservative(build(), 1).unwrap();
+        assert_collectors_match(serial, parallel);
+    }
+
+    #[test]
+    fn conservative_window_chunks_preserve_each_worker_cursor() {
+        let args = fast_router_args();
+        let output_token_ids = || Some((0..96).collect::<Vec<_>>());
+        let requests = VecDeque::from([
+            DirectRequest {
+                tokens: vec![1; 16],
+                max_output_tokens: 96,
+                output_token_ids: output_token_ids(),
+                uuid: Some(Uuid::from_u128(1)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            },
+            DirectRequest {
+                tokens: vec![2; 1024],
+                max_output_tokens: 96,
+                output_token_ids: output_token_ids(),
+                uuid: Some(Uuid::from_u128(2)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            },
+        ]);
+        let build = || {
+            RoundRobinAggRuntime::new_round_robin(&args, requests.clone(), 2, ReplayMode::Trace)
+                .unwrap()
+        };
+
+        let (serial, _) = build().run().unwrap();
+        let (parallel, _) = run_aggregated_conservative(build(), 2).unwrap();
+        assert_collectors_match(serial, parallel);
+    }
+
+    #[test]
+    fn conservative_windows_match_serial_at_simulation_cap() {
+        let args = fast_router_args();
+        let build = || {
+            RoundRobinAggRuntime::new_round_robin_workload(
+                &args,
+                WorkloadDriver::new_trace(independent_window_trace(), args.block_size).unwrap(),
+                2,
+                ReplayMode::Trace,
+            )
+            .unwrap()
+            .with_max_sim_time_ms(Some(0.001))
+        };
+
+        let (serial, _) = build().run().unwrap();
+        let (parallel, _) = run_aggregated_conservative(build(), 2).unwrap();
+        assert_collectors_match(serial, parallel);
+    }
+
+    #[test]
+    fn conservative_windows_reject_unsupported_admission() {
+        let args = fast_router_args();
+        let request = DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 2,
+            output_token_ids: Some(vec![2, 3]),
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        };
+        let concurrency = RoundRobinAggRuntime::new_round_robin(
+            &args,
+            VecDeque::from([request.clone()]),
+            1,
+            ReplayMode::Concurrency { max_in_flight: 1 },
+        )
+        .unwrap();
+        let error = run_aggregated_conservative(concurrency, 1)
+            .expect_err("concurrency mode must be rejected");
+        assert!(error.to_string().contains("concurrency admission"));
+
+        let missing_tokens = RoundRobinAggRuntime::new_round_robin(
+            &args,
+            VecDeque::from([DirectRequest {
+                output_token_ids: None,
+                ..request
+            }]),
+            1,
+            ReplayMode::Trace,
+        )
+        .unwrap();
+        let error = run_aggregated_conservative(missing_tokens, 1)
+            .expect_err("missing planned tokens must be rejected");
+        assert!(error.to_string().contains("explicit output token IDs"));
+    }
+
+    #[test]
+    fn conservative_windows_reject_dependent_trace_sessions() {
+        let args = fast_router_args();
+        let runtime = RoundRobinAggRuntime::new_round_robin_workload(
+            &args,
+            WorkloadDriver::new_trace(parity_workload(), args.block_size).unwrap(),
+            2,
+            ReplayMode::Trace,
+        )
+        .unwrap();
+        let error = run_aggregated_conservative(runtime, 2)
+            .expect_err("multi-turn sessions must be rejected");
+        assert!(error.to_string().contains("independent one-turn"));
     }
 
     #[test]
