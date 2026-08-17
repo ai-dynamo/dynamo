@@ -16,6 +16,9 @@
 
 blake3>=1.0.0,<2.0.0  # Dynamo SGLang multimodal request handlers import blake3 at startup
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive above
+# The upstream SGLang image bundles pillow at an older patch release; floor it
+# so the install refreshes it to the current patch line.
+pillow>=12.3.0,<13  # bounded: this file installs with --force-reinstall
 # NVDEC hardware decode for H.264/H.265 video input (dynamo common.multimodal.
 # nvdec_decoder), restoring those codecs after the video-DECODE purge in
 # sglang_runtime.Dockerfile. Pin >=2.2.0: it bundles only libavutil + libavformat
