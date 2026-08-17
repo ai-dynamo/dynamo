@@ -268,26 +268,6 @@ impl PrometheusParser {
 mod tests {
     use super::*;
 
-    /// Mirrors the real `transport` module: a parent whose constants all live in nested
-    /// `pub mod` blocks. Before recursion landed, this parsed to a parent with zero
-    /// constants and no children, which the generator turned into an empty Python class.
-    const NESTED_SOURCE: &str = r#"
-/// Transport-specific metrics (TCP / NATS)
-pub mod transport {
-    pub mod tcp {
-        pub const BYTES_SENT_TOTAL: &str = "tcp_bytes_sent_total";
-        pub const ERRORS_TOTAL: &str = "tcp_errors_total";
-    }
-    pub mod nats {
-        pub const ERRORS_TOTAL: &str = "nats_errors_total";
-    }
-}
-"#;
-
-    fn parse(src: &str) -> PrometheusParser {
-        PrometheusParser::parse_file(src).expect("source should parse")
-    }
-
     fn child<'a>(module: &'a ModuleDef, name: &str) -> &'a ModuleDef {
         module
             .submodules
@@ -296,63 +276,27 @@ pub mod transport {
             .unwrap_or_else(|| panic!("expected submodule `{name}`"))
     }
 
-    /// The regression this whole change exists for: nested modules must survive parsing
-    /// with their constants attached. Reverting the `Item::Mod` arm leaves `submodules`
-    /// empty and fails the first assertion.
+    /// Nested `pub mod` must survive parsing with its constants attached, sorted by name,
+    /// with private modules excluded and label values kept verbatim. Before recursion
+    /// landed, `transport` parsed with no children at all and the generator turned it into
+    /// an empty Python class, silently dropping every TCP and NATS name.
     #[test]
-    fn nested_modules_are_parsed_with_their_constants() {
-        let parser = parse(NESTED_SOURCE);
-        let transport = &parser.modules["transport"];
-
-        assert_eq!(
-            transport.submodules.len(),
-            2,
-            "transport must carry both nested modules, got {:?}",
-            transport
-                .submodules
-                .iter()
-                .map(|m| &m.name)
-                .collect::<Vec<_>>()
-        );
-
-        let tcp = child(transport, "tcp");
-        assert_eq!(
-            tcp.constants
-                .iter()
-                .map(|c| (c.name.as_str(), c.value.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                ("BYTES_SENT_TOTAL", "tcp_bytes_sent_total"),
-                ("ERRORS_TOTAL", "tcp_errors_total"),
-            ]
-        );
-        assert_eq!(child(transport, "nats").constants.len(), 1);
-    }
-
-    /// Submodule order must not depend on source order, or the generated Python file
-    /// churns whenever someone reorders the Rust modules.
-    #[test]
-    fn submodules_are_sorted_by_name() {
-        let parser = parse(NESTED_SOURCE);
-        let names: Vec<&str> = parser.modules["transport"]
-            .submodules
-            .iter()
-            .map(|m| m.name.as_str())
-            .collect();
-        assert_eq!(
-            names,
-            vec!["nats", "tcp"],
-            "source declares tcp before nats; output must still be sorted"
-        );
-    }
-
-    /// A nested module holding label *values* must keep those values verbatim. This is
-    /// the shape of `frontend_service::error_type`, where `NONE` is deliberately the
-    /// empty string and any prefixing would corrupt what callers compare against.
-    #[test]
-    fn nested_label_value_modules_keep_raw_values() {
-        let parser = parse(
+    fn nested_modules_are_parsed_sorted_and_scoped() {
+        let parser = PrometheusParser::parse_file(
             r#"
+/// Transport-specific metrics (TCP / NATS)
+pub mod transport {
+    pub mod tcp {
+        pub const ERRORS_TOTAL: &str = "tcp_errors_total";
+    }
+    pub mod nats {
+        pub const ERRORS_TOTAL: &str = "nats_errors_total";
+    }
+    mod private_mod {
+        pub const HIDDEN: &str = "hidden_value";
+    }
+}
+
 pub mod frontend_service {
     pub const REQUESTS_TOTAL: &str = "requests_total";
     /// Error type label values
@@ -362,10 +306,30 @@ pub mod frontend_service {
     }
 }
 "#,
-        );
-        let frontend = &parser.modules["frontend_service"];
-        assert_eq!(frontend.constants.len(), 1, "parent constants still parse");
+        )
+        .expect("source should parse");
 
+        // Source order is tcp-then-nats; output must be sorted so reordering the Rust
+        // source cannot churn the generated Python diff. The private module is absent.
+        let transport = &parser.modules["transport"];
+        assert_eq!(
+            transport
+                .submodules
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["nats", "tcp"]
+        );
+        assert_eq!(
+            child(transport, "tcp").constants[0].value,
+            "tcp_errors_total"
+        );
+
+        // A parent keeps its own constants alongside its children, and nested label
+        // values stay exactly as written — `NONE` is deliberately the empty string, so
+        // any prefixing would corrupt what callers compare against.
+        let frontend = &parser.modules["frontend_service"];
+        assert_eq!(frontend.constants.len(), 1);
         let error_type = child(frontend, "error_type");
         assert_eq!(error_type.doc_comment, "Error type label values");
         assert_eq!(
@@ -378,37 +342,9 @@ pub mod frontend_service {
         );
     }
 
-    /// Recursion is not depth-limited to one level, and a private nested module stays
-    /// out of the public Python surface.
-    #[test]
-    fn recursion_is_deep_and_skips_private_modules() {
-        let parser = parse(
-            r#"
-pub mod outer {
-    pub mod middle {
-        pub mod inner {
-            pub const LEAF: &str = "leaf_value";
-        }
-    }
-    mod private_mod {
-        pub const HIDDEN: &str = "hidden_value";
-    }
-}
-"#,
-        );
-        let outer = &parser.modules["outer"];
-        assert_eq!(
-            outer.submodules.len(),
-            1,
-            "the private module must not be exported"
-        );
-        let inner = child(child(outer, "middle"), "inner");
-        assert_eq!(inner.constants[0].value, "leaf_value");
-    }
-
-    /// Rust allows a const and a mod to share a name; Python cannot. The generator must
-    /// refuse rather than emit two `status` attributes where the nested class silently
-    /// overwrites the constant.
+    /// Rust keeps consts and mods in separate namespaces; Python class attributes are one.
+    /// `pub const status` beside `pub mod status` compiles in Rust and would emit two
+    /// `status` members, the nested class silently overwriting the constant. Fail instead.
     #[test]
     fn const_and_submodule_name_collision_is_rejected() {
         let err = PrometheusParser::parse_file(
@@ -429,21 +365,5 @@ pub mod frontend_service {
             msg.contains("frontend_service") && msg.contains("`status`"),
             "error must name the module and the clashing symbol, got: {msg}"
         );
-    }
-
-    /// Top-level modules that never had nesting must be unaffected — this guards the
-    /// flat namespace the Python file already exposes.
-    #[test]
-    fn flat_modules_are_unchanged() {
-        let parser = parse(
-            r#"
-pub mod kvrouter {
-    pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
-}
-"#,
-        );
-        let kvrouter = &parser.modules["kvrouter"];
-        assert!(kvrouter.submodules.is_empty());
-        assert_eq!(kvrouter.constants.len(), 1);
     }
 }

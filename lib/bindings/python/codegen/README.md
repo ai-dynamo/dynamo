@@ -57,11 +57,10 @@ Only `pub mod` is exported; a private nested module stays out of the generated f
 
 ### When to run
 
-Run after modifying `lib/runtime/src/metrics/prometheus_names.rs` to regenerate the Python file, then format it — the generator does not emit `black`-normalized output:
+Run after modifying `lib/runtime/src/metrics/prometheus_names.rs`:
 
 ```bash
 cargo run -p dynamo-codegen --bin gen-python-prometheus-names
-pre-commit run black --files lib/bindings/python/src/dynamo/prometheus_names.py
 ```
 
-Skipping the `black` step leaves a formatting-only diff that the pre-commit hook will produce on the next commit anyway.
+That single command is enough — the generator emits `black`-canonical output (88-column limit, no blank line under a docstring-free class header), so a second formatting pass changes nothing and re-running produces a byte-identical file.

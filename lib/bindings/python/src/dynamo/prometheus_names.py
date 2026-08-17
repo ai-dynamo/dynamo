@@ -162,6 +162,7 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
     # Total number of request migrations due to worker unavailability
     MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Time from detecting a migratable failure until recovery, terminal failure, or cancellation
     MODEL_MIGRATION_DURATION_SECONDS = "model_migration_duration_seconds"
     # Total number of times migration was disabled because the sequence length
     # exceeded the configured max_seq_len limit
@@ -208,7 +209,7 @@ class frontend_service:
     LORA_OVERFLOW_COUNT = "lora_overflow_count"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
-
+    # Label name for the outcome of a migration
     MIGRATION_OUTCOME_LABEL = "outcome"
     # Label name for tokenizer operation
     OPERATION_LABEL = "operation"
@@ -234,6 +235,16 @@ class frontend_service:
         INTERNAL = "internal"
         # Feature not implemented (501)
         NOT_IMPLEMENTED = "not_implemented"
+
+    class migration_outcome:
+        """Migration outcome label values"""
+
+        # Migration recovered on another worker
+        SUCCESS = "success"
+        # Migration ended without recovery
+        FAILURE = "failure"
+        # Migration ended because the request was cancelled
+        CANCELLED = "cancelled"
 
     class migration_type:
         """Migration type label values"""

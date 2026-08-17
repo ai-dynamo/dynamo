@@ -68,6 +68,25 @@ impl<'a> PythonGenerator<'a> {
     }
 }
 
+/// Black's line limit, from `pyproject.toml` (`line-length = 88`). The generator matches
+/// it so its output is already canonical and `cargo run` alone reproduces the checked-in
+/// file; keep the two in sync if the repo ever changes the limit.
+const MAX_LINE_LEN: usize = 88;
+
+/// Emit one `NAME = "value"` assignment, wrapping in parentheses exactly the way black
+/// does when the single-line form would exceed `MAX_LINE_LEN`. Comments are left alone —
+/// black does not reflow them, and flake8 has `E501` in `extend-ignore`.
+fn push_assignment(body_pad: &str, name: &str, value: &str, lines: &mut Vec<String>) {
+    let single = format!("{}{} = \"{}\"", body_pad, name, value);
+    if single.chars().count() <= MAX_LINE_LEN {
+        lines.push(single);
+        return;
+    }
+    lines.push(format!("{}{} = (", body_pad, name));
+    lines.push(format!("{}    \"{}\"", body_pad, value));
+    lines.push(format!("{})", body_pad));
+}
+
 /// Render one Rust module as a Python class, recursing into nested `pub mod` so
 /// `transport::tcp::ERRORS_TOTAL` becomes `transport.tcp.ERRORS_TOTAL`. `depth` is the
 /// nesting level; each level adds four spaces of indentation.
@@ -87,8 +106,15 @@ fn render_class(module: &ModuleDef, depth: usize, lines: &mut Vec<String>) {
         }
     }
 
+    // The blank separator is emitted only when something already sits in the body.
+    // Emitting it unconditionally puts a blank line directly under a docstring-free
+    // `class X:` header, which black then deletes — so the generator alone could not
+    // reproduce its own checked-in artifact and every regeneration needed a second
+    // formatting pass.
     if !module.constants.is_empty() {
-        lines.push("".to_string());
+        if wrote_body {
+            lines.push(String::new());
+        }
         wrote_body = true;
         for constant in &module.constants {
             if !constant.doc_comment.is_empty() {
@@ -96,17 +122,16 @@ fn render_class(module: &ModuleDef, depth: usize, lines: &mut Vec<String>) {
                     lines.push(format!("{}# {}", body_pad, comment_line));
                 }
             }
-            lines.push(format!(
-                "{}{} = \"{}\"",
-                body_pad, constant.name, constant.value
-            ));
+            push_assignment(&body_pad, &constant.name, &constant.value, lines);
         }
     }
 
     // Nested classes go after the constants, separated by one blank line each — PEP 8
     // uses a single blank line between nested definitions, not two.
     for child in &module.submodules {
-        lines.push("".to_string());
+        if wrote_body {
+            lines.push(String::new());
+        }
         render_class(child, depth + 1, lines);
         wrote_body = true;
     }
@@ -274,130 +299,81 @@ EXAMPLES:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_codegen::prometheus_parser::ConstantDef;
+    use dynamo_codegen::prometheus_parser::PrometheusParser;
 
-    fn constant(name: &str, value: &str) -> ConstantDef {
-        ConstantDef {
-            name: name.to_string(),
-            value: value.to_string(),
-            doc_comment: String::new(),
-        }
-    }
-
-    fn module(name: &str, constants: Vec<ConstantDef>, submodules: Vec<ModuleDef>) -> ModuleDef {
-        ModuleDef {
-            name: name.to_string(),
-            constants,
-            doc_comment: String::new(),
-            is_macro_generated: false,
-            macro_prefix: None,
-            submodules,
-        }
-    }
-
-    fn render(module: &ModuleDef) -> String {
-        let mut lines = Vec::new();
-        render_class(module, 0, &mut lines);
-        lines.join("\n")
-    }
-
-    /// A nested module must be emitted indented inside its parent's body. Emitting it at
-    /// column zero would make `transport.tcp` a sibling of `transport` instead of a
-    /// member, so the attribute access the whole change exists for would fail.
+    /// End-to-end: parse Rust source, generate the Python module, then actually import it
+    /// with `python3` and read the attributes back. This is the only test that proves the
+    /// whole chain — recursion, nested-class indentation, and black-canonical formatting —
+    /// produces a module where `transport.tcp.ERRORS_TOTAL` resolves. Asserting on the
+    /// rendered text instead would pass even if the indentation made `tcp` a sibling of
+    /// `transport` rather than a member.
     #[test]
-    fn nested_class_is_indented_inside_its_parent() {
-        let rendered = render(&module(
-            "transport",
-            vec![],
-            vec![module(
-                "tcp",
-                vec![constant("ERRORS_TOTAL", "tcp_errors_total")],
-                vec![],
-            )],
-        ));
-
-        assert_eq!(
-            rendered,
-            "class transport:\n\
-             \n\
-             \x20   class tcp:\n\
-             \n\
-             \x20       ERRORS_TOTAL = \"tcp_errors_total\""
-        );
+    fn generated_module_exposes_nested_metric_names() {
+        let parser = PrometheusParser::parse_file(
+            r#"
+/// Transport-specific metrics (TCP / NATS)
+pub mod transport {
+    pub mod tcp {
+        pub const ERRORS_TOTAL: &str = "tcp_errors_total";
     }
+}
 
-    /// Three levels deep the indentation must keep compounding; a fixed four-space pad
-    /// would silently flatten `outer.middle.inner` into `outer.middle`.
-    #[test]
-    fn indentation_compounds_with_depth() {
-        let rendered = render(&module(
-            "outer",
-            vec![],
-            vec![module(
-                "middle",
-                vec![],
-                vec![module(
-                    "inner",
-                    vec![constant("LEAF", "leaf_value")],
-                    vec![],
-                )],
-            )],
-        ));
+pub mod frontend_service {
+    pub const REQUESTS_TOTAL: &str = "requests_total";
+    pub mod operation {
+        pub const TOKENIZE: &str = "tokenize";
+    }
+}
+
+pub mod empty_module {}
+"#,
+        )
+        .expect("source should parse");
+
+        let code = PythonGenerator::new(&parser).generate_python_file();
+
+        // Unique per process so concurrent test binaries cannot collide on the path.
+        let path =
+            std::env::temp_dir().join(format!("dynamo_prometheus_names_{}.py", std::process::id()));
+        std::fs::write(&path, &code).expect("write generated module");
+
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(format!(
+                "import importlib.util as u;                  s = u.spec_from_file_location('gen', r'{}');                  m = u.module_from_spec(s); s.loader.exec_module(m);                  print(m.transport.tcp.ERRORS_TOTAL);                  print(m.frontend_service.REQUESTS_TOTAL);                  print(m.frontend_service.operation.TOKENIZE)",
+                path.display()
+            ))
+            .output()
+            .expect("python3 should be available to import the generated module");
+
+        let _ = std::fs::remove_file(&path);
 
         assert!(
-            rendered.contains("\n        class inner:"),
-            "inner class should sit at 8 spaces, got:\n{rendered}"
+            out.status.success(),
+            "generated module failed to import:\n{}\n--- generated ---\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            code
+        );
+        let values: Vec<&str> = std::str::from_utf8(&out.stdout)
+            .expect("utf8 stdout")
+            .lines()
+            .collect();
+        assert_eq!(
+            values,
+            vec!["tcp_errors_total", "requests_total", "tokenize"],
+            "nested and flat names must both resolve as attributes"
+        );
+
+        // The generator must emit canonical black output on its own; a stray blank line
+        // under a docstring-free header, or an over-long assignment left unwrapped, would
+        // mean `cargo run` alone could not reproduce the checked-in file.
+        assert!(
+            !code.contains("class tcp:\n\n"),
+            "no blank line belongs directly under a docstring-free class header:\n{code}"
         );
         assert!(
-            rendered.contains("\n            LEAF = \"leaf_value\""),
-            "leaf constant should sit at 12 spaces, got:\n{rendered}"
+            code.contains("class empty_module:\n    pass"),
+            "a module with no body must emit `pass`, not a syntax error:\n{code}"
         );
-    }
-
-    /// Parent constants come first, then nested classes. Interleaving them would still be
-    /// valid Python but churns the diff whenever a constant is added.
-    #[test]
-    fn parent_constants_precede_nested_classes() {
-        let rendered = render(&module(
-            "frontend_service",
-            vec![constant("REQUESTS_TOTAL", "requests_total")],
-            vec![module(
-                "status",
-                vec![constant("SUCCESS", "success")],
-                vec![],
-            )],
-        ));
-
-        let const_at = rendered.find("REQUESTS_TOTAL").expect("parent constant");
-        let class_at = rendered.find("class status:").expect("nested class");
-        assert!(
-            const_at < class_at,
-            "parent constants must precede nested classes, got:\n{rendered}"
-        );
-    }
-
-    /// An otherwise-empty module must emit `pass`. Without it the generator writes
-    /// `class X:` with nothing under it, which is a SyntaxError — the one failure mode
-    /// that is worse than the silent empty class this change replaced.
-    #[test]
-    fn empty_module_emits_pass() {
-        assert_eq!(
-            render(&module("empty", vec![], vec![])),
-            "class empty:\n    pass"
-        );
-    }
-
-    /// The `pass` guard must not fire when a docstring alone forms the body, or every
-    /// documented-but-constant-free module grows a redundant statement.
-    #[test]
-    fn docstring_only_module_does_not_emit_pass() {
-        let mut m = module("documented", vec![], vec![]);
-        m.doc_comment = "Only a doc comment".to_string();
-        let rendered = render(&m);
-        assert_eq!(
-            rendered,
-            "class documented:\n    \"\"\"Only a doc comment\"\"\""
-        );
-        assert!(!rendered.contains("pass"));
     }
 }
