@@ -52,18 +52,23 @@ git log --format='%h %s%n%(trailers:key=Signed-off-by)' upstream/main..HEAD
 
 Each listed commit must have a sign-off trailer.
 
-## Sign Commits for Automatic Fork CI
+## Automatic Trusted CI for Fork Pull Requests
 
-For a pull request from a fork that uses automatic trusted-CI approval, GitHub must report every
+For a fork pull request that qualifies for automatic trusted-CI approval, GitHub must report every
 commit in the pull request as `Verified`. A DCO sign-off from `git commit -s` does not add a
 cryptographic signature. Configure [GitHub-supported commit
 signing](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)
 and use that configuration whenever you create, amend, or rebase a commit.
 
 Open the pull request's **Commits** tab and confirm that GitHub shows `Verified` for every commit.
-If any commit is not verified, the automatic `/ok to test` comment is not posted.
+If any commit is not verified, the automatic `/ok to test` comment is not posted. Signing commits
+does not by itself qualify a pull request for automatic approval. When automatic approval is
+unavailable, a maintainer can review the current head and comment `/ok to test <sha>` to start CI.
 
-## Repair the Latest Commit
+The repair commands below add DCO sign-offs. To add or preserve a cryptographic signature while
+rewriting a commit, include `--gpg-sign` after configuring commit signing.
+
+## Repair the Latest DCO Sign-off
 
 If only the latest commit is missing its sign-off, amend it:
 
@@ -75,7 +80,7 @@ git push --force-with-lease
 Amending changes the commit SHA. Use `--force-with-lease`, not `--force`, when updating a published
 branch.
 
-## Repair Multiple Commits
+## Repair Multiple DCO Sign-offs
 
 Start an interactive rebase that includes the unsigned commits:
 

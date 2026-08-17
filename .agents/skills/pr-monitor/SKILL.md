@@ -47,7 +47,7 @@ If the branch does not exist, full CI has not been triggered. Common reasons:
 
 1. **Awaiting approval**: An NVIDIA maintainer needs to comment `/ok to test <commit_sha>` on the PR to create the branch and trigger full CI. This applies to both fork PRs and internal PRs from authors not yet in the approval list.
 2. **DCO failure**: Commits are not signed (`Signed-off-by` line missing). Check for a DCO bot comment. Fix: author signs their commits (see `DCO.md`).
-3. **Unverified commit signature (fork automatic approval)**: The automatic `/ok to test` flow requires GitHub to report every PR commit as `Verified`. A DCO sign-off alone does not meet this requirement. Check the workflow's unsigned-commit comment or inspect `.commit.verification` for every PR commit; sign each unverified commit, then push again.
+3. **Unverified commit signature (eligible fork automatic approval)**: The automatic `/ok to test` flow requires GitHub to report every PR commit as `Verified`. A DCO sign-off alone does not meet this requirement. This applies only after the PR has an automatic approval path; signing commits does not create that path. Check the workflow's unsigned-commit comment or inspect `.commit.verification` for every PR commit; sign each unverified commit, then push again. A maintainer can manually review the current head and comment `/ok to test <sha>` when automatic approval is unavailable.
 4. **Draft PR**: Some checks may not run until marked ready for review.
 
 For a fork PR that is otherwise eligible for automatic approval, check every commit's
@@ -214,7 +214,7 @@ Synthesize into a concise report:
 **If full CI not triggered:**
 - "Full CI awaiting approval — an NVIDIA maintainer needs to comment `/ok to test <sha>` to create the `pull-request/$PR_NUMBER` branch."
 - "DCO check failed — commits need to be signed. See DCO.md."
-- "Fork automatic approval is blocked — every PR commit needs a cryptographic signature that GitHub reports as Verified; DCO sign-off alone is insufficient."
+- "Eligible fork automatic approval is blocked — every PR commit needs a cryptographic signature that GitHub reports as `Verified`; DCO sign-off alone is insufficient."
 - "Draft PR — some checks may not run until marked ready for review."
 - Note which lightweight checks passed/failed.
 
@@ -236,7 +236,8 @@ Synthesize into a concise report:
 **Next steps** — concrete actions ordered by priority:
 - "An NVIDIA maintainer should comment `/ok to test <sha>`" if full CI hasn't triggered
 - "Sign your commits with `git commit --amend -s`" for DCO failures
-- "Sign and rewrite every unverified fork-PR commit, then push" when automatic approval is blocked by commit verification
+- "Sign and rewrite every unverified fork-PR commit, then push" when eligible automatic approval is blocked by commit verification
+- "Ask a maintainer to review the current head and comment `/ok to test <sha>`" when automatic approval is unavailable
 - "Fix X in file Y" for code failures
 - Re-run command for infra flakes: `gh run rerun $RUN_ID --repo ai-dynamo/dynamo --failed`
 - "No action needed — CI is green" if everything passed
