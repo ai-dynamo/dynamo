@@ -131,12 +131,24 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>json</Badge> <Badge intent="note" minimal>msgpack</Badge></span>
 </ParamField>
 
-<ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected local address">
-  IPv4 or IPv6 address, or exact network interface name, used to bind and advertise the TCP response
-  stream server. If an interface name occurs more than once in the operating system's interface
-  list, Dynamo uses the last address. Dynamo trims whitespace and treats an empty value as unset.
-  Unspecified addresses such as `0.0.0.0` and `::` are invalid.
+<ParamField path="DYN_TCP_RPC_HOST" type="string" default="auto-detected">
+  Host for the TCP request-plane server. Accepts IPv4 and IPv6 literals, bracketed IPv6 literals,
+  wildcards, and interface names such as `eth0:1`. If unset, Dynamo selects the first usable
+  non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6 loopback.
+
+  A wildcard advertises a reachable address in its requested family. If only the other family has a
+  usable non-loopback address, Dynamo switches the bind wildcard to that family. IPv4 link-local
+  addresses are accepted. Unspecified, multicast, broadcast, and unscoped IPv6 link-local
+  advertisement addresses are rejected.
 </ParamField>
+
+<ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected">
+  Host for the TCP response-stream server. It accepts the same values and uses the same address
+  selection and wildcard-family rules as `DYN_TCP_RPC_HOST`.
+</ParamField>
+
+Automatic local-address selection caches only successful non-loopback results. Dynamo retries after
+interface-enumeration errors and loopback fallbacks.
 
 <ParamField path="DYN_TCP_RESPONSE_STREAM_PORT" type="integer" default="0">
   Port used by the TCP response stream server. Dynamo trims surrounding whitespace. When the value
