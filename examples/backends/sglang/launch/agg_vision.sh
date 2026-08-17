@@ -92,6 +92,20 @@ BANNER_SUFFIX=""
 if [ "$FRONTEND_DECODING" = true ]; then
     FD_ARGS+=(--frontend-decoding)
     BANNER_SUFFIX=" (Frontend Decoding)"
+
+    # The SGLang image inherits NIXL from the upstream lmsysorg/sglang runtime
+    # stack but does NOT add its native libs to LD_LIBRARY_PATH (cf.
+    # container/templates/dev.Dockerfile: "SGLang dev/local-dev inherit the
+    # upstream SGLang/NIXL runtime stack"). Without this, dynamo.frontend's Rust
+    # runtime hits "NIXL is not supported in stub mode" the moment it tries to
+    # build a media-fetching pipeline. Point the loader at the wheel-shipped .so
+    # files explicitly. We build cuda13 only, so the wheel is nixl_cu13, which
+    # stores its native libs under ".nixl_cu13.mesonpy.libs".
+    NIXL_WHEEL_LIBS="$(python3 -c 'import nixl_cu13, os; print(os.path.join(os.path.dirname(os.path.dirname(nixl_cu13.__file__)), ".nixl_cu13.mesonpy.libs"))' 2>/dev/null || true)"
+    if [ -d "$NIXL_WHEEL_LIBS" ]; then
+        export LD_LIBRARY_PATH="${NIXL_WHEEL_LIBS}:${NIXL_WHEEL_LIBS}/plugins:${LD_LIBRARY_PATH}"
+        export NIXL_PLUGIN_DIR="${NIXL_PLUGIN_DIR:-$NIXL_WHEEL_LIBS/plugins}"
+    fi
 fi
 
 print_launch_banner --multimodal "Launching Aggregated Vision Serving${BANNER_SUFFIX}" "$MODEL" "$HTTP_PORT"
