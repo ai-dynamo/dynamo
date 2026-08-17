@@ -667,13 +667,6 @@ Engine fields.
 
 ## Router
 
-```yaml
-router:
-  policy: round_robin
-  prefill_load_model:
-    type: none
-```
-
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
 | `router.preset` | `default` in `recommend` | `x` | `-` | Default list, complete mapping list, `false`, or `{}`. |
