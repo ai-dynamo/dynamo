@@ -81,7 +81,7 @@ The CLI deliberately does not expose field-specific flags such as `--request-per
 aisimulate simulate \
   --config simulation.yaml \
   --set traffic.load.requests_per_second=16 \
-  --set engine.workers.aggregated.replicas=4
+  --set engine.workers.aggregated.parallelism.replicas=4
 ```
 
 The following rules apply:
@@ -391,8 +391,8 @@ engine:
   context_length: 32768
   workers:
     aggregated:
-      replicas: 2
       parallelism:
+        replicas: 2
         tensor: 1
         pipeline: 1
         attention_data: 1
@@ -448,8 +448,7 @@ engine:
     timing_mode: destination_missing
   workers:
     prefill:
-      replicas: 2
-      parallelism: {tensor: 2, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      parallelism: {replicas: 2, tensor: 2, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
       scheduler: {max_batched_tokens: 8192, max_sequences: 64}
       kv_cache:
         block_size: 64
@@ -458,8 +457,7 @@ engine:
       timing: {type: default}
       startup_seconds: 0
     decode:
-      replicas: 4
-      parallelism: {tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      parallelism: {replicas: 4, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
       scheduler: {max_batched_tokens: 8192, max_sequences: 256}
       kv_cache:
         block_size: 64
@@ -482,13 +480,14 @@ used by `recommend` when no preset, concrete value, or explicit domain supplies 
 
 | Path Under a Worker | Type | Simulate Default | Recommend Default Domain | Constraints |
 |---|---|---:|---|---|
-| `preset` | string or null | `null` | `null` | One backend-declared whole-worker preset; see [Preset and Default-Domain Rules](#preset-and-default-domain-rules). |
-| `replicas` | integer | `1` | Feasible positive values within the GPU budget | Greater than zero. |
-| `parallelism.tensor` | integer | `1` | `auto` | Greater than zero and feasible for the model, backend, hardware, and budget. |
-| `parallelism.pipeline` | integer | `1` | `auto` | Greater than zero and feasible for the model, backend, hardware, and budget. |
-| `parallelism.attention_data` | integer | `1` | `auto` | Greater than zero and feasible for the model, backend, hardware, and budget. |
-| `parallelism.moe_tensor` | integer | `1` | `auto` | Greater than zero and compatible with the model/backend. |
-| `parallelism.moe_expert` | integer | `1` | `auto` | Greater than zero and compatible with the model/backend. |
+| `parallelism` | mapping or `auto` | All fields `1` | `auto` | `auto` is recommend-only and resolves the complete parallel configuration. |
+| `parallelism.preset` | string or null | `null` | `null` | One backend-declared whole-parallelism preset; see [Preset and Default-Domain Rules](#preset-and-default-domain-rules). |
+| `parallelism.replicas` | integer | `1` | Feasible positive values within the GPU budget | Greater than zero. |
+| `parallelism.tensor` | integer | `1` | Feasible values from the parallelism registry | Greater than zero and feasible for the model, backend, hardware, and budget. |
+| `parallelism.pipeline` | integer | `1` | Feasible values from the parallelism registry | Greater than zero and feasible for the model, backend, hardware, and budget. |
+| `parallelism.attention_data` | integer | `1` | Feasible values from the parallelism registry | Greater than zero and feasible for the model, backend, hardware, and budget. |
+| `parallelism.moe_tensor` | integer | `1` | Feasible values from the parallelism registry | Greater than zero and compatible with the model/backend. |
+| `parallelism.moe_expert` | integer | `1` | Feasible values from the parallelism registry | Greater than zero and compatible with the model/backend. |
 | `scheduler.max_batched_tokens` | integer | `8192` | Prefill/aggregated: `{choices: [8192, 16384, 32768]}`; decode: `{choices: [8192]}` | Greater than zero. |
 | `scheduler.max_sequences` | integer | `256` | Prefill: `{choices: [1, 2, 4, 8, 16, 32, 64, 128, 256]}`; aggregated/decode: `{choices: [256, 512, 1024]}` | Greater than zero. |
 | `kv_cache.block_size` | integer | vLLM `64`; SGLang `1`; TensorRT-LLM `32` | Fixed at the backend default | Greater than zero and supported by the backend. |
@@ -500,6 +499,33 @@ used by `recommend` when no preset, concrete value, or explicit domain supplies 
 | `timing.prefill_ms` | number | None | No default domain | Required, finite, and nonnegative for `type: fixed`. |
 | `timing.decode_ms` | number | None | No default domain | Required, finite, and nonnegative for `type: fixed`. |
 | `startup_seconds` | number | `0` | Fixed at `0` | Nonnegative. |
+
+`parallelism` uses exactly one of these shapes:
+
+```yaml
+# Complete automatic search in recommend.
+parallelism: auto
+```
+
+```yaml
+# One backend-declared complete parallelism preset.
+parallelism:
+  preset: throughput
+```
+
+```yaml
+# Explicit values or per-leaf recommendation domains.
+parallelism:
+  replicas: {range: {min: 1, max: 8, step: 1}}
+  tensor: {choices: [1, 2, 4, 8]}
+  pipeline: 1
+  attention_data: 1
+  moe_tensor: 1
+  moe_expert: 1
+```
+
+A `parallelism` preset expands all six fields. It cannot be combined with a domain on a covered leaf;
+the common preset rules still permit an intentional concrete leaf override.
 
 `kv_cache.capacity.type: default` and `timing.type: default` replace the previous public name `aic`.
 They select the stack's default capacity estimator and timing provider. The initial default registry
@@ -514,7 +540,7 @@ hardware, parallelism, block size, backend, and memory fraction.
 The physical GPU count of a worker role is:
 
 ```text
-replicas * tensor * pipeline * attention_data
+parallelism.replicas * parallelism.tensor * parallelism.pipeline * parallelism.attention_data
 ```
 
 `moe_tensor` and `moe_expert` describe partitioning within that physical shape and do not multiply
@@ -644,10 +670,10 @@ combinations are rejected before search instead of being silently removed.
 
 ### Preset and Default-Domain Rules
 
-Each lowest-level tunable object, `engine.workers.<role>`, `router`, or `planner`, accepts at most one
-whole-object `preset`. A preset value is either one concrete identifier or a `choices` domain of
-identifiers. Presets do not support `range` or `auto`. Worker preset identifiers are declared by the
-selected backend; Router and Planner identifiers are listed in their sections above.
+Each lowest-level tunable object, `engine.workers.<role>.parallelism`, `router`, or `planner`, accepts
+at most one whole-object `preset`. A preset value is either one concrete identifier or a `choices`
+domain of identifiers. Presets do not support `range` or `auto`. Parallelism preset identifiers are
+declared by the selected backend; Router and Planner identifiers are listed in their sections above.
 
 Every preset covers every public knob in its object, including knobs for which it simply selects the
 component default. It is therefore a complete baseline rather than a partial bundle or an ordered
@@ -671,15 +697,15 @@ For example, a recommendation that supplies a range only for
 `planner.load_adjustment_interval_seconds` searches that range and the default domains of all other
 Planner knobs. A user who wants a knob fixed at its simulate default supplies that concrete value.
 
-The following is invalid because the selected preset already controls `max_sequences`:
+The following is invalid because the selected parallelism preset already controls `replicas`:
 
 ```yaml
 engine:
   workers:
     decode:
-      preset: throughput
-      scheduler:
-        max_sequences: {choices: [256, 512]}
+      parallelism:
+        preset: throughput
+        replicas: {range: {min: 1, max: 8, step: 1}}
 ```
 
 The same field set to one concrete integer remains a permitted intentional override. Errors name the
@@ -743,12 +769,13 @@ means a search domain.
 engine:
   workers:
     aggregated:
-      replicas:
-        range:
-          min: 1
-          max: 8
-          step: 1
-          scale: linear
+      parallelism:
+        replicas:
+          range:
+            min: 1
+            max: 8
+            step: 1
+            scale: linear
 ```
 
 | Range Field | Type | Default | Constraints |
@@ -764,25 +791,27 @@ integers, including when sampled from a log range.
 ### Feasible Parallelism
 
 ```yaml
-parallelism:
-  tensor: auto
-  pipeline: 1
-  attention_data: auto
-  moe_tensor: auto
-  moe_expert: auto
+engine:
+  workers:
+    aggregated:
+      parallelism: auto
 ```
 
-The scalar string `auto` is accepted only on worker parallelism fields in `recommend`. It requests all
-model-, hardware-, backend-, and budget-compatible values. An omitted parallelism field also uses
-`auto`, its default recommendation domain. In `simulate`, the field must be a concrete positive
-integer.
+The scalar string `auto` is accepted only for the complete worker `parallelism` object in `recommend`.
+It requests feasible tuples of `replicas`, tensor parallelism, pipeline parallelism, attention data
+parallelism, MoE tensor parallelism, and MoE expert parallelism. This preserves compatibility among
+the dimensions instead of taking an invalid Cartesian product of independently automatic leaves.
+
+An omitted `parallelism` object also uses `auto`, its default recommendation domain. In `simulate`,
+`parallelism` must resolve from a concrete mapping or preset; `auto` is rejected. An explicit mapping
+may put `choices` or `range` on its leaves, but a leaf cannot itself be `auto`.
 
 ### Domain Validation
 
 A field accepts at most one domain form. `choices` and `range` use mappings; feasible parallelism uses
 the scalar `auto`. Domains are allowed only at documented searchable leaves:
 
-- Engine mode, backend, `hardware: auto`, worker preset, replicas, parallelism, scheduler, KV cache,
+- Engine mode, backend, `hardware: auto`, parallelism preset or `auto`, parallelism leaves, scheduler, KV cache,
   transfer, timing, and supported backend-specific
   fields.
 - Router policy, load model, preset, and supported policy-specific fields.
@@ -898,8 +927,8 @@ engine:
   context_length: 32768
   workers:
     aggregated:
-      replicas: 2
       parallelism:
+        replicas: 2
         tensor: 1
         pipeline: 1
         attention_data: 1
@@ -956,16 +985,13 @@ engine:
   context_length: 32768
   workers:
     aggregated:
-      replicas: {range: {min: 1, max: 8, step: 1}}
-      parallelism: {tensor: auto, pipeline: 1, attention_data: auto, moe_tensor: auto, moe_expert: auto}
+      parallelism: auto
       scheduler: {max_batched_tokens: {choices: [8192, 16384]}, max_sequences: {choices: [256, 512]}}
     prefill:
-      replicas: {range: {min: 1, max: 4, step: 1}}
-      parallelism: {tensor: auto, pipeline: 1, attention_data: auto, moe_tensor: auto, moe_expert: auto}
+      parallelism: auto
       scheduler: {max_batched_tokens: 8192, max_sequences: 64}
     decode:
-      replicas: {range: {min: 1, max: 8, step: 1}}
-      parallelism: {tensor: auto, pipeline: 1, attention_data: auto, moe_tensor: auto, moe_expert: auto}
+      parallelism: auto
       scheduler: {max_batched_tokens: 8192, max_sequences: 256}
 
 router:
