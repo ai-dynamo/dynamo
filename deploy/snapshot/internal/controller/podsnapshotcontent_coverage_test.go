@@ -50,6 +50,7 @@ func makeNodeControllerWithInterceptor(t *testing.T, fc *fakeCheckpointer, funcs
 		contentIndexer: idx,
 	}
 	w.checkpointFn = fc.fn
+	w.releaseCheckpointFn = func(int) error { return nil }
 	return w
 }
 
@@ -200,6 +201,35 @@ func TestSetSnapshotContentSucceeded_StatusPatchErrorReturnsError(t *testing.T) 
 
 	require.Error(t, err)
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
+}
+
+func TestRunCheckpoint_ReadyPatchErrorDoesNotRelease(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			return errors.New("status patch rejected")
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
+	released := false
+	w.releaseCheckpointFn = func(int) error {
+		released = true
+		return nil
+	}
+	pod := &corev1.Pod{}
+	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
+	loc := checkpointLocations{
+		HostPath:      w.config.Storage.BasePath,
+		ContainerPath: w.config.Storage.BasePath,
+	}
+
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "x", loc, leaseKey, "x")
+
+	assert.False(t, released)
+	assert.Nil(t, meta.FindStatusCondition(
+		getContent(t, w, content.Name).Status.Conditions,
+		nvidiacomv1alpha1.PodSnapshotConditionReady,
+	))
 }
 
 func TestSetSnapshotContentFailed_StatusPatchErrorReturnsError(t *testing.T) {

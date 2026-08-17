@@ -7,8 +7,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -96,6 +98,7 @@ func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Objec
 		contentIndexer: idx,
 	}
 	w.checkpointFn = fc.fn
+	w.releaseCheckpointFn = func(int) error { return nil }
 	return w
 }
 
@@ -416,18 +419,25 @@ func TestReconcileSnapshotContent_OpaqueNameUsesPodLabel(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 }
 
-func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
+func TestReconcileSnapshotContent_ResumeWritesReadyAndReleases(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod("abc")
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	released := false
+	w.releaseCheckpointFn = func(containerPID int) error {
+		assert.Equal(t, 4242, containerPID)
+		released = true
+		return nil
+	}
 	// Pre-create the artifact directory at the resolved destination so the resume check fires.
 	dest := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
 	require.NoError(t, os.MkdirAll(dest, 0o755))
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 	assert.False(t, fc.wasCalled())
+	assert.True(t, released)
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
 	require.NotNil(t, cond)
@@ -616,7 +626,7 @@ func TestReconcileSourcePod_ContainersWinsOverLegacyAnnotation(t *testing.T) {
 		"target must come from PodRef.Containers, not the legacy target-containers annotation")
 }
 
-func TestRunCheckpoint_WritesReadyOnSuccess(t *testing.T) {
+func TestRunCheckpoint_WritesReadyBeforeRelease(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content)
@@ -626,13 +636,22 @@ func TestRunCheckpoint_WritesReadyOnSuccess(t *testing.T) {
 		HostPath:      filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
 		ContainerPath: filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
 	}
+	released := false
+	w.releaseCheckpointFn = func(containerPID int) error {
+		assert.Equal(t, 7, containerPID)
+		cond := meta.FindStatusCondition(
+			getContent(t, w, content.Name).Status.Conditions,
+			nvidiacomv1alpha1.PodSnapshotConditionReady,
+		)
+		require.NotNil(t, cond, "Ready must be observable before the target is released")
+		released = true
+		return nil
+	}
 
 	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", loc, leaseKey, "abc")
 
 	assert.True(t, fc.wasCalled())
-	got := getContent(t, w, content.Name)
-	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
-	require.NotNil(t, cond)
+	assert.True(t, released)
 }
 
 func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
@@ -652,6 +671,38 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "CheckpointFailed", cond.Reason)
+}
+
+func TestRunCheckpoint_ReleaseFailureKillsTarget(t *testing.T) {
+	target := exec.Command("sleep", "30")
+	require.NoError(t, target.Start())
+	t.Cleanup(func() {
+		if target.ProcessState == nil {
+			_ = target.Process.Kill()
+		}
+	})
+
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.releaseCheckpointFn = func(int) error { return errors.New("sentinel write rejected") }
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
+	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
+	loc := checkpointLocations{
+		HostPath:      filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
+		ContainerPath: filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
+	}
+
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", target.Process.Pid, "abc", loc, leaseKey, "abc")
+
+	err := target.Wait()
+	require.Error(t, err)
+	waitStatus, ok := target.ProcessState.Sys().(syscall.WaitStatus)
+	require.True(t, ok)
+	assert.Equal(t, syscall.SIGKILL, waitStatus.Signal())
+	require.NotNil(t, meta.FindStatusCondition(
+		getContent(t, w, content.Name).Status.Conditions,
+		nvidiacomv1alpha1.PodSnapshotConditionReady,
+	))
 }
 
 // mustUnstructured converts a typed object to the *unstructured.Unstructured the dynamic informer
