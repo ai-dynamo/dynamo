@@ -54,5 +54,5 @@ not choose a replay implementation.
 - The runner advertises supported `ReplaySpec` versions, backend/topology pairs, and runtime hooks
   before a study starts.
 - Every `Sweeper.run` call owns fresh optimizer studies, result caches, runners, and worker pools.
-- KVBM search fields are rejected. Native G2 replaces that path; Sweeper does not forward the old
-  host or disk offload settings.
+- KVBM search fields are rejected. The AI Simulate engine and replay path do not support those
+  fields and provide no adapter migration for the old host or disk offload settings.

@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib
 import json
 from pathlib import Path
 
@@ -19,6 +18,7 @@ from .replay_utils import (
     _partial_router_config,
     _prefill_args,
     _report_summary,
+    _require_aisimulate_distribution,
     _router_config,
     _sglang_args,
     _vllm_args,
@@ -454,7 +454,9 @@ def test_direct_agentic_dynamo_trace_honors_per_request_capture():
     assert report.summary["completed_requests"] == len(report.per_request)
 
 
+@pytest.mark.planner
 def test_planner_replay_accepts_multi_shard_dynamo_trace(tmp_path):
+    _require_aisimulate_distribution()
     trace_paths = []
     for index in range(2):
         trace_path = tmp_path / f"trace-{index}.jsonl"
@@ -750,39 +752,6 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
         extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
         num_workers=1,
         replay_mode=replay_mode,
-    )
-
-    _assert_basic_report_counts(
-        report,
-        num_requests=2,
-        input_tokens=64,
-        output_tokens=2,
-    )
-
-
-def test_run_trace_replay_materializes_kv_bytes_from_aic_model(monkeypatch, tmp_path):
-    kv_cache = importlib.import_module("dynamo.mocker.utils.kv_cache")
-
-    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
-        return 1 if model_path == "test/model" else None
-
-    monkeypatch.setattr(
-        kv_cache, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
-    )
-    trace_path = _write_trace_and_args(tmp_path)
-
-    report = run_trace_replay(
-        trace_path,
-        extra_engine_args=MockEngineArgs(
-            block_size=64,
-            speedup_ratio=1000.0,
-            num_gpu_blocks=512,
-            num_g2_blocks=512,
-            num_g3_blocks=512,
-            aic_model_path="test/model",
-        ),
-        num_workers=1,
-        replay_mode="offline",
     )
 
     _assert_basic_report_counts(

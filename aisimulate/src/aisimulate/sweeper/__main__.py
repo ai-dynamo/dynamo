@@ -54,8 +54,7 @@ def print_candidates_or_exit(
                 f" concurrency={concurrency}" if concurrency is not None else ""
             )
             print(
-                f"{index}: {objectives}{concrete_load} "
-                f"used_gpus={candidate.used_gpus}"
+                f"{index}: {objectives}{concrete_load} used_gpus={candidate.used_gpus}"
             )
         return
     for index, candidate in enumerate(candidates):

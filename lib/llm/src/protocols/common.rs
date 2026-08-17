@@ -630,7 +630,7 @@ pub struct OutputOptions {
     /// templates that are applied during the backend preprocessing.
     pub formatted_prompt: Option<bool>,
 
-    /// When true, logprob token fields are returned as "token_id:<id>"
+    /// When true, logprob token fields are returned as "token_id:`<id>`"
     /// instead of decoded text.
     pub return_tokens_as_token_ids: Option<bool>,
 }
