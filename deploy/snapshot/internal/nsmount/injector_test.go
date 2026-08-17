@@ -6,6 +6,7 @@ package nsmount
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -24,6 +25,7 @@ type fakemountRef struct {
 }
 
 func (h *fakemountRef) TargetPath() string { return h.dst }
+func (h *fakemountRef) NsFd() *os.File     { return nil }
 
 func (h *fakemountRef) Unmount(_ context.Context) error {
 	*h.unmountLog = append(*h.unmountLog, h.dst)

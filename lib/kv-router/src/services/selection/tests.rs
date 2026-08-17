@@ -242,7 +242,7 @@ async fn native_policy_app<F>(factory: F) -> Router
 where
     F: for<'a> Fn(
             &crate::config::KvRouterConfig,
-            &'static str,
+            crate::WorkerType,
             RoutingPartitionRef<'a>,
         ) -> WorkerSelectionPolicy
         + Send
@@ -285,19 +285,22 @@ async fn worker_selection_policy_factory_is_per_partition_composes_filter_scorer
 {
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let factory_partitions = Arc::new(Mutex::new(Vec::new()));
+    let factory_worker_types = Arc::new(Mutex::new(Vec::new()));
     let factory_rendezvous = Arc::new(FactoryRendezvous::default());
     let calls = Arc::clone(&factory_calls);
     let partitions = Arc::clone(&factory_partitions);
+    let worker_types = Arc::clone(&factory_worker_types);
     let rendezvous = Arc::clone(&factory_rendezvous);
     let service = SelectionServiceBuilder::new(test_config())
         .indexer_threads(1)
         .worker_selection_policy_factory(move |config, worker_type, partition| {
             calls.fetch_add(1, Ordering::Relaxed);
             partitions.lock().unwrap().push(partition.into_owned());
+            worker_types.lock().unwrap().push(worker_type);
             rendezvous.wait_for_peer();
             WorkerSelectionPolicy::new_with_filters(
                 config.clone(),
-                worker_type,
+                worker_type.as_str(),
                 vec![Box::new(RejectWorker(1))],
                 vec![Box::new(WorkerIdScorer)],
                 Box::new(LowestCostPicker),
@@ -362,6 +365,10 @@ async fn worker_selection_policy_factory_is_per_partition_composes_filter_scorer
     assert_eq!(active_requests(app.clone(), 2).await, 1);
 
     assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        *factory_worker_types.lock().unwrap(),
+        vec![crate::WorkerType::Aggregated; 2]
+    );
 }
 
 #[tokio::test]
@@ -369,7 +376,7 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
     let app = native_policy_app(|config, worker_type, _partition| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            worker_type,
+            worker_type.as_str(),
             vec![Box::new(NonFiniteScorer)],
             Box::new(LowestCostPicker),
         )
@@ -401,7 +408,7 @@ async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
     let app = native_policy_app(|config, worker_type, _partition| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            worker_type,
+            worker_type.as_str(),
             Vec::new(),
             Box::new(InvalidRowPicker),
         )
@@ -433,7 +440,7 @@ async fn worker_selection_filter_returns_unavailable_without_booking() {
     let app = native_policy_app(|config, worker_type, _partition| {
         WorkerSelectionPolicy::new_with_filters(
             config.clone(),
-            worker_type,
+            worker_type.as_str(),
             vec![Box::new(RejectAllFilter)],
             Vec::new(),
             Box::new(LowestCostPicker),

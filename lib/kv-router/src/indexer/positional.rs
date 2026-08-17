@@ -526,7 +526,11 @@ impl PositionalIndexer {
             for (pos, local_hash, seq_hash) in blocks {
                 events.push(RouterEvent {
                     worker_id: worker.worker_id,
+                    state_source: None,
                     storage_tier: crate::protocols::StorageTier::Device,
+                    residency_domain: crate::protocols::WireResidencyDomain::explicit(
+                        crate::protocols::ResidencyDomain::Worker,
+                    ),
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {

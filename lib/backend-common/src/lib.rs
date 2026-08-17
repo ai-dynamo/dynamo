@@ -4,7 +4,7 @@
 //! Shared runtime glue for Rust LLM backends.
 //!
 //! Two-type abstraction: [`LLMEngine`] (the engine trait an author implements)
-//! and [`Worker`] (the runtime lifecycle owner), plus a [`run`] helper called
+//! and [`Worker`] (the runtime lifecycle owner), plus a [`run()`] helper called
 //! from each backend's `main.rs`.
 //!
 //! Engines work directly with [`PreprocessedRequest`] and [`LLMEngineOutput`]
