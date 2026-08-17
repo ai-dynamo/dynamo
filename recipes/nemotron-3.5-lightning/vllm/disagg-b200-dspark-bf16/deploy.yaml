@@ -4,19 +4,19 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: vllm-disagg-b200-dspark-config
+  name: vllm-disagg-b200-dspark-bf16-config
 data:
   speculative-config: |-
     {
       "method": "dspark",
-      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark",
       "num_speculative_tokens": 1,
       "attention_backend": "TRITON_ATTN"
     }
   speculative-config-synthetic: |-
     {
       "method": "dspark",
-      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark",
       "num_speculative_tokens": 1,
       "rejection_sample_method": "synthetic",
       "synthetic_acceptance_length": 1.83,
@@ -26,9 +26,9 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg-b200-dspark
+  name: vllm-disagg-b200-dspark-bf16
   labels:
-    app.kubernetes.io/name: vllm-disagg-b200-dspark
+    app.kubernetes.io/name: vllm-disagg-b200-dspark-bf16
     app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
@@ -119,14 +119,14 @@ spec:
           - -m
           - dynamo.vllm
           - --model
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --served-model-name
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --trust-remote-code
           - --tensor-parallel-size
           - '1'
           - --max-num-seqs
-          - '32'
+          - '80'
           - --async-scheduling
           - --no-enable-flashinfer-autotune
           - --enable-prefix-caching
@@ -146,6 +146,7 @@ spec:
           - nemotron_nano
           - --reasoning-parser
           - nemotron_v3
+          - --speculative-config=$(SPECULATIVE_CONFIG)
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           - --disaggregation-mode
@@ -167,6 +168,11 @@ spec:
             value: /tmp/vllm-config
           - name: VLLM_CACHE_ROOT
             value: /tmp/vllm-cache
+          - name: SPECULATIVE_CONFIG
+            valueFrom:
+              configMapKeyRef:
+                name: vllm-disagg-b200-dspark-bf16-config
+                key: speculative-config # speculative-config-synthetic for benchmarking
           - name: VLLM_DISABLED_KERNELS
             value: FlashInferFP8ScaledMMLinearKernel
           - name: NCCL_IB_DISABLE
@@ -250,14 +256,14 @@ spec:
           - -m
           - dynamo.vllm
           - --model
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --served-model-name
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --trust-remote-code
           - --tensor-parallel-size
           - '1'
           - --max-num-seqs
-          - '32'
+          - '80'
           - --async-scheduling
           - --no-enable-flashinfer-autotune
           - --enable-prefix-caching
@@ -302,7 +308,7 @@ spec:
           - name: SPECULATIVE_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: vllm-disagg-b200-dspark-config
+                name: vllm-disagg-b200-dspark-bf16-config
                 key: speculative-config # speculative-config-synthetic for benchmarking
           - name: VLLM_DISABLED_KERNELS
             value: FlashInferFP8ScaledMMLinearKernel

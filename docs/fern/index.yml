@@ -462,7 +462,7 @@ navigation:
           - page: Kimi-K2.6
             path: pages/recipes/model-recipes/kimi-k2-6.mdx
             slug: kimi-k2-6
-          - page: Nemotron-3.5-Lightning
+          - page: Nemotron 3.5 Lightning
             path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
             slug: nemotron-3-5-lightning
           - page: Nemotron 3 Ultra

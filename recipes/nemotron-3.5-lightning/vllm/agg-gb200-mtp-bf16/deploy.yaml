@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated vLLM deployment for Nemotron 3.5 Lightning NVFP4 on 1x GB200 with built-in MTP speculative decoding.
+# Aggregated vLLM deployment for Nemotron 3.5 Lightning BF16 on 1x GB200 with built-in MTP speculative decoding.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: vllm-agg-gb200-mtp-config
+  name: vllm-agg-gb200-mtp-bf16-config
 data:
   speculative-config: |-
     {
@@ -23,9 +23,9 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-agg-gb200-mtp
+  name: vllm-agg-gb200-mtp-bf16
   labels:
-    app.kubernetes.io/name: vllm-agg-gb200-mtp
+    app.kubernetes.io/name: vllm-agg-gb200-mtp-bf16
     app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
@@ -143,9 +143,9 @@ spec:
                 - dynamo.vllm
               args:
                 - --model
-                - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+                - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
                 - --served-model-name
-                - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+                - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
                 - --trust-remote-code
                 - --tensor-parallel-size
                 - "1"
@@ -201,7 +201,7 @@ spec:
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: vllm-agg-gb200-mtp-config
+                      name: vllm-agg-gb200-mtp-bf16-config
                       key: speculative-config # speculative-config-synthetic for benchmarking
                 - name: NCCL_IB_DISABLE
                   value: "1"
