@@ -10,10 +10,10 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 181 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 186 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">83 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">88 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">66 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
@@ -105,6 +105,129 @@ checkpoint; checkpointRef restores the named checkpoint.
 
 - <Badge intent="note" minimal>Auto</Badge> Deprecated: use checkpoint.enabled=true and omit checkpointRef.
 - <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing checkpoint.
+</Accordion>
+
+<Accordion id="checkpointsource" title="CheckpointSource">
+CheckpointSource describes the environment a checkpoint was created from.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoCheckpointStatus](#dynamocheckpointstatus), [PodSnapshotContentStatus](#podsnapshotcontentstatus), [PodSnapshotStatus](#podsnapshotstatus)
+
+<ParamField path="hardware" type="CheckpointSourceHardware">
+Hardware contains available source hardware facts.
+See [CheckpointSourceHardware](#checkpointsourcehardware).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="provenance" type="CheckpointSourceProvenance">
+Provenance identifies where and when the checkpoint was created.
+See [CheckpointSourceProvenance](#checkpointsourceprovenance).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="mounts" type="CheckpointSourceMount array">
+Mounts lists source pod mounts required by the checkpoint. Mounted volume contents are not captured in the checkpoint.
+See [CheckpointSourceMount](#checkpointsourcemount).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="mountCount" type="integer">
+MountCount is the number of source pod mounts required by the checkpoint.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="runtimeManagedMounts" type="integer">
+RuntimeManagedMounts is the number of additional mounts recreated by the container runtime or kubelet.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="checkpointsourcegpu" title="CheckpointSourceGPU">
+CheckpointSourceGPU identifies one source GPU.
+
+
+**Kind:** `type`
+**Appears in:** [CheckpointSourceHardware](#checkpointsourcehardware)
+
+<ParamField path="uuid" type="string">
+UUID is the GPU UUID recorded at capture time.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="checkpointsourcehardware" title="CheckpointSourceHardware">
+CheckpointSourceHardware contains available source hardware facts.
+
+
+**Kind:** `type`
+**Appears in:** [CheckpointSource](#checkpointsource)
+
+<ParamField path="gpuCount" type="integer">
+GPUCount is the number of GPUs visible to the captured container.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="gpus" type="CheckpointSourceGPU array">
+GPUs identifies the GPUs visible to the captured container.
+See [CheckpointSourceGPU](#checkpointsourcegpu).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="checkpointsourcemount" title="CheckpointSourceMount">
+CheckpointSourceMount describes a source pod mount required at restore.
+Mounted volume contents are not captured in the checkpoint.
+
+
+**Kind:** `type`
+**Appears in:** [CheckpointSource](#checkpointsource)
+
+<ParamField path="path" type="string">
+Path is the mount destination inside the captured container.
+</ParamField>
+
+<ParamField path="volume" type="string">
+Volume is the source pod volume name.
+</ParamField>
+
+<ParamField path="providedBy" type="string">
+ProvidedBy identifies the Kubernetes volume source.
+</ParamField>
+
+<ParamField path="readOnly" type="boolean">
+ReadOnly reports whether the source container mounted the volume read-only.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="subPath" type="string">
+SubPath is the path within the volume mounted into the container.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="checkpointsourceprovenance" title="CheckpointSourceProvenance">
+CheckpointSourceProvenance identifies the source workload and capture time.
+
+
+**Kind:** `type`
+**Appears in:** [CheckpointSource](#checkpointsource)
+
+<ParamField path="node" type="string">
+Node is the source node name.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="pod" type="string">
+Pod is the namespaced source pod name.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="capturedAt" type="Time">
+CapturedAt is the checkpoint manifest creation time.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="checkpointstartuppolicy" title="CheckpointStartupPolicy">
@@ -465,6 +588,12 @@ See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 
 <ParamField path="message" type="string">
 Message provides additional information about the current state
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="source" type="CheckpointSource">
+Source describes the environment recorded in the checkpoint manifest.
+See [CheckpointSource](#checkpointsource).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -1875,6 +2004,12 @@ Conditions reflect the latest observations of the PodSnapshotContent's state. St
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
+
+<ParamField path="source" type="CheckpointSource">
+Source describes the environment recorded in the checkpoint manifest.
+See [CheckpointSource](#checkpointsource).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="podsnapshotreference" title="PodSnapshotReference">
@@ -1944,6 +2079,12 @@ BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent
 <ParamField path="conditions" type="Condition array">
 Conditions reflect the latest observations of the PodSnapshot's state. Standard types are Ready and Failed.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="source" type="CheckpointSource">
+Source describes the environment recorded in the checkpoint manifest.
+See [CheckpointSource](#checkpointsource).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
