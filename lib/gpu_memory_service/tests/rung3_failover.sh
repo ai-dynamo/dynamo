@@ -174,6 +174,29 @@ echo "  warm : cached=$WARM_CACHED hash=$WARM_HASH"
 
 # ---- Phase 5: SIGKILL the whole active process group ----
 echo ""; echo "=== Phase 5: Failover (SIGKILL) ==="
+# RUNG3_KILL_UNDER_LOAD=1 crashes the engine with batches in flight rather than
+# idle. That is the case the publication fence exists for: labels are attached
+# during schedule(), before their KV is computed, so an engine killed mid-batch
+# must not hand those labels to its successor.
+LOAD_PIDS=()
+if [ "${RUNG3_KILL_UNDER_LOAD:-0}" = "1" ]; then
+    echo "Firing concurrent traffic so the kill lands mid-batch..."
+    for i in $(seq 1 8); do
+        python3 - "$MODEL_NAME" "$i" >/dev/null 2>&1 <<'PY' &
+import json, sys, urllib.request
+model, i = sys.argv[1], sys.argv[2]
+prompt = f"Distinct prefix {i}. " + "Tell me a long story about the sea. " * 120
+body = json.dumps({"model": model, "prompt": prompt, "max_tokens": 256,
+                   "temperature": 0}).encode()
+req = urllib.request.Request("http://localhost:8000/v1/completions", data=body,
+                             headers={"Content-Type": "application/json"})
+try: urllib.request.urlopen(req, timeout=60)
+except Exception: pass
+PY
+        LOAD_PIDS+=($!)
+    done
+    sleep 2   # let them reach the scheduler
+fi
 KILL_MS=$(date +%s%3N)
 WIN_PGID=$(ps -o pgid= -p "$WIN_PID" | tr -d ' ')
 echo "Killing engine $WIN process group $WIN_PGID"
