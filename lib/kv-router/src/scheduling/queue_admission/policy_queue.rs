@@ -465,7 +465,7 @@ impl<T> PolicyQueue<T> {
         }
     }
 
-    #[expect(
+    #[allow(
         dead_code,
         reason = "the queue-admission host installs the policy in the next stacked PR"
     )]
@@ -474,7 +474,7 @@ impl<T> PolicyQueue<T> {
         self
     }
 
-    #[expect(
+    #[allow(
         dead_code,
         reason = "the queue-admission host invokes admission in the next stacked PR"
     )]
@@ -507,7 +507,7 @@ impl<T> PolicyQueue<T> {
         (!matches!(decision, QueueAdmissionDecision::Bypass)).then_some((id, decision))
     }
 
-    #[expect(
+    #[allow(
         dead_code,
         reason = "the queue-admission host emits lifecycle events in the next stacked PR"
     )]
@@ -640,7 +640,7 @@ impl<T> PolicyQueue<T> {
         Ok(())
     }
 
-    #[expect(
+    #[allow(
         dead_code,
         reason = "the queue-admission host stores deferred requests in the next stacked PR"
     )]
