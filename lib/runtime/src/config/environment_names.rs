@@ -293,6 +293,30 @@ pub mod llm {
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
 
+    /// Enable JWT bearer-token authentication on inference endpoints (set to "true" to enable)
+    pub const DYN_AUTH_ENABLED: &str = "DYN_AUTH_ENABLED";
+
+    /// Comma-separated HMAC secret key(s) for JWT validation (supports key rotation)
+    pub const DYN_AUTH_SECRET_KEY: &str = "DYN_AUTH_SECRET_KEY";
+
+    /// Comma-separated org UUID allowlist; empty = allow all authenticated orgs
+    pub const DYN_AUTH_VALID_ORGS: &str = "DYN_AUTH_VALID_ORGS";
+
+    /// Enable async FlexPrice usage-event billing (set to "true" to enable; requires DYN_AUTH_ENABLED)
+    pub const DYN_FLEXPRICE_ENABLED: &str = "DYN_FLEXPRICE_ENABLED";
+
+    /// FlexPrice API key
+    pub const DYN_FLEXPRICE_API_KEY: &str = "DYN_FLEXPRICE_API_KEY";
+
+    /// FlexPrice API host, e.g. "api.flexprice.io"
+    pub const DYN_FLEXPRICE_API_HOST: &str = "DYN_FLEXPRICE_API_HOST";
+
+    /// Override billing event name (default: "{model}-llm-usage")
+    pub const DYN_FLEXPRICE_EVENT_NAME: &str = "DYN_FLEXPRICE_EVENT_NAME";
+
+    /// Override billing source name (default: "{model}")
+    pub const DYN_FLEXPRICE_SOURCE_NAME: &str = "DYN_FLEXPRICE_SOURCE_NAME";
+
     /// Backend stream inactivity timeout in seconds.
     ///
     /// When set to a positive integer, the frontend will kill the engine context

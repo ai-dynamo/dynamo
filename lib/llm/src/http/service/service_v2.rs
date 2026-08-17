@@ -60,6 +60,9 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    auth_config: Arc<super::flexprice::AuthConfig>,
+    flexprice_config: Arc<super::flexprice::FlexPriceConfig>,
+    flexprice_client: Option<Arc<super::flexprice::FlexPriceClient>>,
 }
 
 #[derive(Default, Debug)]
@@ -130,6 +133,9 @@ impl State {
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
+        auth_config: Arc<super::flexprice::AuthConfig>,
+        flexprice_config: Arc<super::flexprice::FlexPriceConfig>,
+        flexprice_client: Option<Arc<super::flexprice::FlexPriceClient>>,
     ) -> Self {
         Self {
             manager,
@@ -147,12 +153,30 @@ impl State {
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
+            auth_config,
+            flexprice_config,
+            flexprice_client,
         }
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
     pub fn metrics_clone(&self) -> Arc<Metrics> {
         self.metrics.clone()
+    }
+
+    /// JWT auth configuration (see [`super::flexprice::AuthConfig`]).
+    pub fn auth_config(&self) -> &super::flexprice::AuthConfig {
+        &self.auth_config
+    }
+
+    /// FlexPrice usage-billing configuration (see [`super::flexprice::FlexPriceConfig`]).
+    pub fn flexprice_config(&self) -> &super::flexprice::FlexPriceConfig {
+        &self.flexprice_config
+    }
+
+    /// The FlexPrice billing client, if `DYN_FLEXPRICE_ENABLED=true`.
+    pub fn flexprice_client(&self) -> Option<Arc<super::flexprice::FlexPriceClient>> {
+        self.flexprice_client.clone()
     }
 
     pub fn manager(&self) -> &ModelManager {
@@ -503,7 +527,27 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
+        let auth_config = Arc::new(super::flexprice::AuthConfig::from_env());
+        auth_config.validate()?;
+        let flexprice_config = Arc::new(super::flexprice::FlexPriceConfig::from_env());
+        flexprice_config.validate(auth_config.enabled)?;
+        let flexprice_client = flexprice_config
+            .enabled
+            .then(|| super::flexprice::FlexPriceClient::new(&flexprice_config.api_host, &flexprice_config.api_key));
+        tracing::info!(
+            auth_enabled = auth_config.enabled,
+            flexprice_enabled = flexprice_config.enabled,
+            "Auth/FlexPrice billing configuration"
+        );
+
+        let state = Arc::new(State::new(
+            model_manager,
+            discovery_client,
+            cancel_token,
+            auth_config,
+            flexprice_config,
+            flexprice_client,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -607,6 +651,16 @@ impl HttpServiceConfigBuilder {
         for (route_docs, route) in endpoint_routes {
             inference_router = inference_router.merge(route);
             all_docs.extend(route_docs);
+        }
+        // JWT auth gates inference routes only — system routes (health, live,
+        // metrics, models) always stay unauthenticated. Adding the layer only
+        // when enabled keeps the disabled case truly zero-cost (no extra
+        // Service in the tower stack, not just a fast per-request no-op).
+        if state.auth_config().enabled {
+            inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::flexprice::auth_middleware,
+            ));
         }
         inference_router = inference_router.layer(
             TraceLayer::new_for_http()
@@ -770,5 +824,62 @@ mod tests {
 
         // Clean up
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_auth_gates_inference_but_not_system_routes() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_AUTH_ENABLED", Some("true")),
+                ("DYN_AUTH_SECRET_KEY", Some("test-secret")),
+            ],
+            async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder().port(port).build().unwrap();
+
+                let cancel_token = CancellationToken::new();
+                let service_token = cancel_token.clone();
+                let handle = tokio::spawn(async move {
+                    service.run_with_listener(service_token, listener).await
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+                let client = reqwest::Client::new();
+
+                // System route: no auth required even though DYN_AUTH_ENABLED=true.
+                let resp = client
+                    .get(format!("http://localhost:{port}/health"))
+                    .send()
+                    .await
+                    .expect("health request failed");
+                assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+                // Inference route without a token: 401.
+                let resp = client
+                    .post(format!("http://localhost:{port}/v1/chat/completions"))
+                    .json(&serde_json::json!({"model": "x", "messages": []}))
+                    .send()
+                    .await
+                    .expect("chat completions request failed");
+                assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+                // Inference route with a malformed bearer token: 401.
+                let resp = client
+                    .post(format!("http://localhost:{port}/v1/chat/completions"))
+                    .header("Authorization", "Bearer not-a-jwt")
+                    .json(&serde_json::json!({"model": "x", "messages": []}))
+                    .send()
+                    .await
+                    .expect("chat completions request failed");
+                assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+                cancel_token.cancel();
+                handle.abort();
+            },
+        )
+        .await;
     }
 }

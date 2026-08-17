@@ -35,6 +35,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
+    flexprice,
     metadata::extract_metadata_from_http,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -546,6 +547,16 @@ async fn completions_single(
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
+    // No-op shell unless DYN_FLEXPRICE_ENABLED=true and the request carries a
+    // JWT-verified org id (see `flexprice::auth_middleware`).
+    let mut usage_guard = flexprice::UsageBillingGuard::new(
+        state.flexprice_client(),
+        state.flexprice_config(),
+        request.metadata().get("org-uuid").map(String::as_str),
+        &metric_model,
+        streaming,
+    );
+
     // Create inflight_guard early to ensure all errors are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         &metric_model,
@@ -622,6 +633,12 @@ async fn completions_single(
                 )
             })
             .map(move |response| {
+                // Usage only appears on the final chunk; the guard is dropped
+                // — and the billing event enqueued — once this closure itself
+                // is dropped at stream end.
+                if let Some(data) = response.data.as_ref() {
+                    usage_guard.record_usage_opt(data.inner.usage.as_ref());
+                }
                 // Calls observe_response() on each token
                 process_response_using_event_converter_and_observe_metrics(
                     EventConverter::from(response),
@@ -671,6 +688,8 @@ async fn completions_single(
                 err_response
             })?;
 
+        usage_guard.record_usage_opt(response.inner.usage.as_ref());
+
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
         // assembled but never delivered. Override to cancelled.
@@ -697,6 +716,17 @@ async fn completions_batch(
     let streaming = request.inner.stream.unwrap_or(false);
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
+
+    // No-op shell unless DYN_FLEXPRICE_ENABLED=true and the request carries a
+    // JWT-verified org id (see `flexprice::auth_middleware`). Constructed once
+    // for the whole batch so usage sums across every prompt, not per-prompt.
+    let mut usage_guard = flexprice::UsageBillingGuard::new(
+        state.flexprice_client(),
+        state.flexprice_config(),
+        request.metadata().get("org-uuid").map(String::as_str),
+        &metric_model,
+        streaming,
+    );
 
     // Create inflight_guard early to ensure all errors are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
@@ -817,6 +847,12 @@ async fn completions_batch(
                 )
             })
             .map(move |response| {
+                // Usage only appears on the final chunk; the guard is dropped
+                // — and the billing event enqueued — once this closure itself
+                // is dropped at stream end.
+                if let Some(data) = response.data.as_ref() {
+                    usage_guard.record_usage_opt(data.inner.usage.as_ref());
+                }
                 // Calls observe_response() on each token
                 process_response_using_event_converter_and_observe_metrics(
                     EventConverter::from(response),
@@ -866,6 +902,8 @@ async fn completions_batch(
                 err_response
             })?;
 
+        usage_guard.record_usage_opt(response.inner.usage.as_ref());
+
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
         // assembled but never delivered. Override to cancelled.
@@ -896,6 +934,16 @@ async fn embeddings(
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
     let metric_model = state.manager().metric_model_for(model).to_string();
+
+    // No-op shell unless DYN_FLEXPRICE_ENABLED=true and the request carries a
+    // JWT-verified org id (see `flexprice::auth_middleware`).
+    let mut usage_guard = flexprice::UsageBillingGuard::new(
+        state.flexprice_client(),
+        state.flexprice_config(),
+        request.metadata().get("org-uuid").map(String::as_str),
+        &metric_model,
+        streaming,
+    );
 
     // Start the embedding-specific latency timer. Distinct from
     // `request_duration` (which has 1..512s LLM-gen buckets); pooling-model
@@ -965,6 +1013,8 @@ async fn embeddings(
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+
+    usage_guard.record_embedding_usage(&response.inner.usage);
 
     state
         .metrics_clone()
@@ -1338,6 +1388,16 @@ async fn chat_completions(
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
+    // No-op shell unless DYN_FLEXPRICE_ENABLED=true and the request carries a
+    // JWT-verified org id (see `flexprice::auth_middleware`).
+    let mut usage_guard = flexprice::UsageBillingGuard::new(
+        state.flexprice_client(),
+        state.flexprice_config(),
+        request.metadata().get("org-uuid").map(String::as_str),
+        &metric_model,
+        streaming,
+    );
+
     tracing::trace!("Received chat completions request: {:?}", request.content());
 
     // Create inflight_guard early to ensure all errors (including validation) are counted
@@ -1467,6 +1527,13 @@ async fn chat_completions(
                 ));
             }
 
+            // Usage only appears on the final chunk (stream_options.include_usage
+            // is force-set true below); the guard is dropped — and the billing
+            // event enqueued — once this closure itself is dropped at stream end.
+            if let Some(data) = response.data.as_ref() {
+                usage_guard.record_usage_opt(data.inner.usage.as_ref());
+            }
+
             // Convert to SSE event (this consumes the response).
             // EventConverter will detect `event: "error"` and convert to SSE error events.
             let sse_result = process_response_using_event_converter_and_observe_metrics(
@@ -1529,6 +1596,8 @@ async fn chat_completions(
                     inflight_guard.mark_error(extract_error_type_from_response(&err_response));
                     err_response
                 })?;
+
+        usage_guard.record_usage_opt(response.inner.usage.as_ref());
 
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
