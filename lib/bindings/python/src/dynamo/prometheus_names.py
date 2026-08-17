@@ -550,6 +550,9 @@ class transport:
         BYTES_RECEIVED_TOTAL = "tcp_bytes_received_total"
         ERRORS_TOTAL = "tcp_errors_total"
         SERVER_QUEUE_DEPTH = "tcp_server_queue_depth"
+        # Response-server accept failures that triggered a descriptor- or memory-exhaustion
+        # backoff sleep; counts per failed accept, not per backoff episode
+        ACCEPT_BACKOFF_TOTAL = "tcp_accept_backoff_total"
 
 
 class trtllm_additional:
