@@ -82,7 +82,8 @@ The reference tables below use four core columns:
 - **Default Range** is the recommendation domain used when preset search is disabled. `x` means the
   knob is non-sweepable and rejects any domain. `-` means the knob is sweepable, but its default
   domain is the singleton concrete default. Any displayed `choices` or `range` is searched by
-  default.
+  default. On a `preset` row, this column lists the built-in preset choices; `auto` on the
+  parallelism preset means the Sweeper generates its projected default space.
 - **Preset** names the smallest configuration object whose preset covers the knob. `-` means no
   preset covers it.
 - **Rules** carries the type, conditional availability, and validation that would otherwise require
@@ -126,7 +127,8 @@ list replaces it. A list entry missing any covered knob, containing an unknown k
 `choices`, `range`, or `auto` domain is rejected.
 
 The built-in list is versioned public configuration data owned by the component provider. It follows
-the same complete-mapping validation as a user-provided list; it is not an opaque runtime mode.
+the same complete-mapping validation as a user-provided list; it is not an opaque runtime mode. Names
+shown in a preset row's Default Range are public identifiers that each expand to one complete mapping.
 
 When `preset` is `false` or `{}`, every covered sweepable knob becomes an independent sweep dimension.
 An explicit concrete value pins the knob; an explicit `choices` or `range` replaces its table-defined
@@ -570,7 +572,7 @@ engine:
 | `engine.backend_version` | `null` | `x` | `-` | Fixed when set. |
 | `engine.context_length` | `"max"` | `x` | `-` | `"max"` derives the effective maximum from the resolved Hugging Face model config; a concrete value must be positive. |
 | `engine.workers` | Required | `x` | `-` | Aggregated role or prefill plus decode roles. |
-| `engine.workers.<role>.parallelism.preset` | `default` in `recommend` | `x` | `-` | Default list, complete mapping list, `false`, or `{}`. |
+| `engine.workers.<role>.parallelism.preset` | `default` in `recommend` | `auto` | `-` | Generated default space, complete mapping list, `false`, or `{}`. |
 | `engine.workers.<role>.parallelism.replicas` | `1` | Feasible positive values within GPU budget | `parallelism` | Positive. |
 | `engine.workers.<role>.parallelism.tensor` | `1` | Feasible registry values | `parallelism` | Positive and model/backend compatible. |
 | `engine.workers.<role>.parallelism.pipeline` | `1` | Feasible registry values | `parallelism` | Positive and model/backend compatible. |
@@ -669,7 +671,7 @@ Engine fields.
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `router.preset` | `default` in `recommend` | `x` | `-` | Default list, complete mapping list, `false`, or `{}`. |
+| `router.preset` | `default` in `recommend` | `{choices: [default, load_aware]}` | `-` | Built-in preset choices, complete mapping list, `false`, or `{}`. |
 | `router.policy` | `round_robin` | `{choices: [round_robin, kv_router]}` | `router` | `round_robin` or `kv_router`. |
 | `router.prefill_load_model.type` | `none` | `{choices: [none, aic]}` | `router` | `aic` is KV-router-only. |
 | `router.overlap_score_credit` | `1.0` | `{choices: [0.0, 0.5, 1.0]}` | `router` | Finite, nonnegative, and KV-router-only. |
@@ -689,7 +691,7 @@ planner:
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `planner.preset` | `default` in `recommend` | `x` | `-` | Default list, complete mapping list, `false`, or `{}`. |
+| `planner.preset` | `default` in `recommend` | `{choices: [disabled, throughput_180_5, throughput_600_5, load_180_5, load_180_10, hybrid_180_5, hybrid_600_5]}` | `-` | Built-in preset choices, complete mapping list, `false`, or `{}`. |
 | `planner.policy` | `disabled` | `{choices: [disabled, planner]}` | `planner` | `disabled` or `planner`. |
 | `planner.target` | `throughput` | `x` | `planner` | Derived from `optimization.target` in `recommend`. |
 | `planner.enable_throughput_scaling` | `true` | `{choices: [false, true]}` | `planner` | Planner policy only. |
@@ -789,10 +791,10 @@ integers, including when sampled from a log range.
 
 A field accepts at most one domain form. Domains are allowed only where **Default Range** is not `x`:
 
-- Engine mode, backend, `hardware: auto`, parallelism leaves, scheduler, and supported
+- Engine mode, backend, `hardware: auto`, parallelism preset and leaves, scheduler, and supported
   backend-specific fields.
-- Router policy, load model, and supported policy-specific fields.
-- Planner policy and supported Planner-specific fields.
+- Router preset, policy, load model, and supported policy-specific fields.
+- Planner preset, policy, and supported Planner-specific fields.
 - Traffic load intensity and timing fields marked `-` in the table.
 
 The following stay concrete in version 1:
