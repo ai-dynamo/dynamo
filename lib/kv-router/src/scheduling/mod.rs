@@ -11,10 +11,6 @@ pub mod policy_config;
 pub mod prefill_load;
 pub mod queue;
 pub mod queue_admission;
-#[deprecated(note = "use scheduling::queue_admission instead")]
-pub mod policy_queue {
-    pub use super::queue_admission::policy_queue::*;
-}
 pub mod selector;
 
 mod worker_selection_config;
