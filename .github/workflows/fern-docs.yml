@@ -219,14 +219,6 @@ jobs:
           cp source-checkout/docs/fern/pages/home/index.mdx docs-checkout/fern/index.mdx
           sed -i 's|\.\./\.\./assets/|./assets/|g' docs-checkout/fern/index.mdx
 
-          # Sync root-level assets/ (docs.yml logos/fonts and index.mdx reference
-          # ./assets/ relative to the Fern root, not pages-dev). Merge-copy without
-          # deleting so assets still referenced by older versioned pages survive.
-          if [ -d source-checkout/docs/fern/assets ]; then
-            echo "Syncing assets/ to docs-website branch..."
-            cp -r source-checkout/docs/fern/assets/. docs-checkout/fern/assets/
-          fi
-
           # Sync legacy Digest asset mirror
           if [ -d source-checkout/docs/fern/pages/blog/_assets ]; then
             echo "Syncing Blog assets to the legacy digest/ compatibility path..."
@@ -275,6 +267,93 @@ jobs:
               fi
             done
           fi
+
+      - name: Generate, validate, and sync release assets
+        run: |
+          set -euo pipefail
+
+          python3 source-checkout/docs/fern/scripts/gen_llms_tables.py --assets-only
+
+          generated_json="source-checkout/docs/fern/assets/releases.json"
+          generated_atom="source-checkout/docs/fern/assets/releases-atom.xml"
+          for asset in "$generated_json" "$generated_atom"; do
+            if [ ! -s "$asset" ]; then
+              echo "::error::$asset is missing or empty after release-asset generation"
+              exit 1
+            fi
+          done
+
+          python3 - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          source_root = Path("source-checkout/docs/fern")
+          generated_path = source_root / "assets/releases.json"
+          published_path = Path("docs-checkout/fern/assets/releases.json")
+
+
+          def fail(message: str) -> None:
+              print(f"::error::{message}", file=sys.stderr)
+              raise SystemExit(1)
+
+
+          def load_json(path: Path, label: str) -> dict:
+              try:
+                  payload = json.loads(path.read_text(encoding="utf-8"))
+              except (OSError, json.JSONDecodeError) as exc:
+                  fail(f"{label} is not valid readable JSON: {exc}")
+              if not isinstance(payload, dict):
+                  fail(f"{label} must contain a JSON object")
+              return payload
+
+
+          generated = load_json(generated_path, "generated releases.json")
+          releases = generated.get("releases")
+          if not isinstance(releases, list) or not releases:
+              fail("generated releases.json must contain a non-empty releases array")
+
+          if published_path.exists():
+              published = load_json(published_path, "previously published releases.json")
+              published_releases = published.get("releases")
+              if not isinstance(published_releases, list):
+                  fail("previously published releases.json must contain a releases array")
+              if len(releases) < len(published_releases):
+                  fail(
+                      "generated releases.json has fewer entries than the previously "
+                      f"published copy ({len(releases)} < {len(published_releases)})"
+                  )
+          else:
+              print(
+                  "::notice::No previously published releases.json exists; "
+                  "entry-count regression check skipped"
+              )
+
+          sys.path.insert(0, str(source_root / "scripts"))
+          import gen_llms_tables  # noqa: E402
+
+          try:
+              current_version = gen_llms_tables.parse_data_module(
+                  source_root / "components/releases.data.ts"
+              )["CURRENT_VERSION"]
+          except (KeyError, OSError, gen_llms_tables.TSParseError) as exc:
+              fail(f"could not read CURRENT_VERSION from releases.data.ts: {exc}")
+
+          latest = releases[0]
+          if not isinstance(latest, dict) or latest.get("version") != current_version:
+              latest_version = latest.get("version") if isinstance(latest, dict) else None
+              fail(
+                  "latest generated release version does not match CURRENT_VERSION "
+                  f"({latest_version!r} != {current_version!r})"
+              )
+          PY
+
+          # Sync root-level assets/ (docs.yml logos/fonts and index.mdx reference
+          # ./assets/ relative to the Fern root, not pages-dev). Merge-copy without
+          # deleting so assets still referenced by older versioned pages survive.
+          echo "Syncing assets/ to docs-website branch..."
+          mkdir -p docs-checkout/fern/assets
+          cp -r source-checkout/docs/fern/assets/. docs-checkout/fern/assets/
 
       - name: Transform paths in dev.yml for docs-website layout
         run: |
