@@ -79,8 +79,10 @@ The reference tables below use four core columns:
 
 - **Knob** is the complete YAML path.
 - **Default** is the concrete value used by `simulate` when the knob is omitted.
-- **Default Range** is the recommendation domain used when preset search is disabled. `-` means the
-  knob is not searched by default and remains at its concrete default.
+- **Default Range** is the recommendation domain used when preset search is disabled. `x` means the
+  knob is non-sweepable and rejects any domain. `-` means the knob is sweepable, but its default
+  domain is the singleton concrete default. Any displayed `choices` or `range` is searched by
+  default.
 - **Preset** names the smallest configuration object whose preset covers the knob. `-` means no
   preset covers it.
 - **Rules** carries the type, conditional availability, and validation that would otherwise require
@@ -126,11 +128,11 @@ list replaces it. A list entry missing any covered knob, containing an unknown k
 The built-in list is versioned public configuration data owned by the component provider. It follows
 the same complete-mapping validation as a user-provided list; it is not an opaque runtime mode.
 
-When `preset` is `false` or `{}`, every covered knob becomes an independent sweep dimension. An
-explicit concrete value pins the knob; an explicit `choices` or `range` replaces its table-defined
-default range. An omitted knob uses its default range, or its concrete default when the table shows
-`-`. The Sweeper evaluates the Cartesian product and rejects infeasible concrete combinations. A
-preset and independent domains cannot be active on the same object.
+When `preset` is `false` or `{}`, every covered sweepable knob becomes an independent sweep dimension.
+An explicit concrete value pins the knob; an explicit `choices` or `range` replaces its table-defined
+default range. An omitted `-` knob uses the singleton concrete default. An `x` knob stays pinned and
+rejects a domain. The Sweeper evaluates the Cartesian product and rejects infeasible concrete
+combinations. A preset and independent domains cannot be active on the same object.
 
 Preset controls are recommendation-only. `simulation.resolved.yaml` and recommended simulation YAMLs
 contain only the expanded concrete knobs.
@@ -319,30 +321,30 @@ source, load, and stop validation applies.
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `traffic.source.type` | `synthetic` | `-` | `-` | `synthetic`, `synthetic-session`, or `trace`. |
-| `traffic.source.input_tokens` | `1024` | `-` | `-` | Positive; `synthetic` only. |
-| `traffic.source.output_tokens` | `128` | `-` | `-` | Positive; `synthetic` only. |
-| `traffic.source.new_input_tokens_per_turn` | `1024` | `-` | `-` | Positive; `synthetic-session` only. |
-| `traffic.source.output_tokens_per_turn` | `128` | `-` | `-` | Positive; `synthetic-session` only. |
-| `traffic.source.session.turns` | `4` | `-` | `-` | At least `2`. |
-| `traffic.source.session.shared_prefix_ratio` | `0` | `-` | `-` | From `0` through `1`. |
-| `traffic.source.session.prefix_groups` | `0` | `-` | `-` | Nonnegative; positive when prefix ratio is positive. |
-| `traffic.source.session.inter_turn_delay_ms` | `0` | `-` | `-` | Nonnegative. |
-| `traffic.source.paths` | Required for trace | `-` | `-` | One path except `dynamo`, which permits multiple. |
-| `traffic.source.format` | `mooncake` | `-` | `-` | See [Trace Format Compatibility](#trace-format-compatibility). |
-| `traffic.source.block_size` | `512`; embedded for `dynamo` | `-` | `-` | Positive. |
-| `traffic.load.type` | `concurrency` | `-` | `-` | Synthetic: `concurrency`, `poisson`, `constant_rate`, or `kv_capacity_fraction`; trace: `trace_timestamps` or `concurrency`. |
+| `traffic.source.type` | `synthetic` | `x` | `-` | `synthetic`, `synthetic-session`, or `trace`. |
+| `traffic.source.input_tokens` | `1024` | `x` | `-` | Positive; `synthetic` only. |
+| `traffic.source.output_tokens` | `128` | `x` | `-` | Positive; `synthetic` only. |
+| `traffic.source.new_input_tokens_per_turn` | `1024` | `x` | `-` | Positive; `synthetic-session` only. |
+| `traffic.source.output_tokens_per_turn` | `128` | `x` | `-` | Positive; `synthetic-session` only. |
+| `traffic.source.session.turns` | `4` | `x` | `-` | At least `2`. |
+| `traffic.source.session.shared_prefix_ratio` | `0` | `x` | `-` | From `0` through `1`. |
+| `traffic.source.session.prefix_groups` | `0` | `x` | `-` | Nonnegative; positive when prefix ratio is positive. |
+| `traffic.source.session.inter_turn_delay_ms` | `0` | `x` | `-` | Nonnegative. |
+| `traffic.source.paths` | Required for trace | `x` | `-` | One path except `dynamo`, which permits multiple. |
+| `traffic.source.format` | `mooncake` | `x` | `-` | See [Trace Format Compatibility](#trace-format-compatibility). |
+| `traffic.source.block_size` | `512`; embedded for `dynamo` | `x` | `-` | Positive. |
+| `traffic.load.type` | `concurrency` | `x` | `-` | Synthetic: `concurrency`, `poisson`, `constant_rate`, or `kv_capacity_fraction`; trace: `trace_timestamps` or `concurrency`. |
 | `traffic.load.concurrency` | `1` | `-` | `-` | Positive integer; explicit domains are allowed in `recommend`. |
 | `traffic.load.requests_per_second` | `null` | `-` | `-` | Positive; synthetic request open-loop load only. |
 | `traffic.load.sessions_per_second` | `null` | `-` | `-` | Positive; synthetic session open-loop load only. |
-| `traffic.load.seed` | `42` | `-` | `-` | Nonnegative; `poisson` only. |
+| `traffic.load.seed` | `42` | `x` | `-` | Nonnegative; `poisson` only. |
 | `traffic.load.fraction` | `null` | `-` | `-` | Positive finite number; `kv_capacity_fraction` only and may exceed `1`. |
 | `traffic.load.speedup` | `1` | `-` | `-` | Positive; trace timestamp load only. |
-| `traffic.stop.requests` | `100` for default traffic | `-` | `-` | Positive integer; synthetic request source only. |
-| `traffic.stop.requests_per_load_unit` | `null` | `-` | `-` | Positive; synthetic request source only. |
-| `traffic.stop.sessions` | `null` | `-` | `-` | Positive integer; synthetic session source only. |
-| `traffic.stop.sessions_per_load_unit` | `null` | `-` | `-` | Positive; synthetic session source only. |
-| `traffic.stop.max_virtual_time_seconds` | `null` | `-` | `-` | Positive; supported trace formats only. |
+| `traffic.stop.requests` | `100` for default traffic | `x` | `-` | Positive integer; synthetic request source only. |
+| `traffic.stop.requests_per_load_unit` | `null` | `x` | `-` | Positive; synthetic request source only. |
+| `traffic.stop.sessions` | `null` | `x` | `-` | Positive integer; synthetic session source only. |
+| `traffic.stop.sessions_per_load_unit` | `null` | `x` | `-` | Positive; synthetic session source only. |
+| `traffic.stop.max_virtual_time_seconds` | `null` | `x` | `-` | Positive; supported trace formats only. |
 
 ### Synthetic Request Source
 
@@ -417,7 +419,7 @@ the first turn; later turns follow that session's completion and `inter_turn_del
 count as new load arrivals. `requests_per_second` schedules independent single requests.
 
 In a recommendation input, source type, token fields, session shape, and stopping condition stay
-concrete. Only numeric fields under `traffic.load` can be search domains. A
+concrete. Only `traffic.load` rows whose Default Range is not `x` can be search domains. A
 `kv_capacity_fraction` recommendation is materialized as a concrete `concurrency` load in each
 recommended simulation YAML.
 
@@ -562,13 +564,13 @@ engine:
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
 | `engine.mode` | `aggregated` | `{choices: [aggregated, disaggregated]}` | `-` | `aggregated` or `disaggregated`. |
-| `engine.model` | Required | `-` | `-` | Nonempty and fixed during recommendation. |
-| `engine.hardware` | Required | `-` | `-` | Concrete assignment; `recommend` also accepts `auto` with `optimization.hardware`. |
+| `engine.model` | Required | `x` | `-` | Nonempty and fixed during recommendation. |
+| `engine.hardware` | Required | `auto` | `-` | Concrete assignment; `recommend` also accepts `auto` with `optimization.hardware`. |
 | `engine.backend` | `vllm` | `{choices: [vllm]}` | `-` | `vllm`, `sglang`, or `trtllm`; explicit choices may include supported alternatives. |
-| `engine.backend_version` | `null` | `-` | `-` | Fixed when set. |
-| `engine.context_length` | Required | `-` | `-` | Positive. |
-| `engine.workers` | Required | `-` | `-` | Aggregated role or prefill plus decode roles. |
-| `engine.workers.<role>.parallelism.preset` | `default` in `recommend` | `-` | `-` | Default list, complete mapping list, `false`, or `{}`. |
+| `engine.backend_version` | `null` | `x` | `-` | Fixed when set. |
+| `engine.context_length` | Required | `x` | `-` | Positive. |
+| `engine.workers` | Required | `x` | `-` | Aggregated role or prefill plus decode roles. |
+| `engine.workers.<role>.parallelism.preset` | `default` in `recommend` | `x` | `-` | Default list, complete mapping list, `false`, or `{}`. |
 | `engine.workers.<role>.parallelism.replicas` | `1` | Feasible positive values within GPU budget | `parallelism` | Positive. |
 | `engine.workers.<role>.parallelism.tensor` | `1` | Feasible registry values | `parallelism` | Positive and model/backend compatible. |
 | `engine.workers.<role>.parallelism.pipeline` | `1` | Feasible registry values | `parallelism` | Positive and model/backend compatible. |
@@ -674,7 +676,7 @@ router:
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `router.preset` | `default` in `recommend` | `-` | `-` | Default list, complete mapping list, `false`, or `{}`. |
+| `router.preset` | `default` in `recommend` | `x` | `-` | Default list, complete mapping list, `false`, or `{}`. |
 | `router.policy` | `round_robin` | `{choices: [round_robin, kv_router]}` | `router` | `round_robin` or `kv_router`. |
 | `router.prefill_load_model.type` | `none` | `{choices: [none, aic]}` | `router` | `aic` is KV-router-only. |
 | `router.overlap_score_credit` | `1.0` | `{choices: [0.0, 0.5, 1.0]}` | `router` | Finite, nonnegative, and KV-router-only. |
@@ -694,9 +696,9 @@ planner:
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `planner.preset` | `default` in `recommend` | `-` | `-` | Default list, complete mapping list, `false`, or `{}`. |
+| `planner.preset` | `default` in `recommend` | `x` | `-` | Default list, complete mapping list, `false`, or `{}`. |
 | `planner.policy` | `disabled` | `{choices: [disabled, planner]}` | `planner` | `disabled` or `planner`. |
-| `planner.target` | `throughput` | `-` | `planner` | Derived from `optimization.target` in `recommend`. |
+| `planner.target` | `throughput` | `x` | `planner` | Derived from `optimization.target` in `recommend`. |
 | `planner.enable_throughput_scaling` | `true` | `{choices: [false, true]}` | `planner` | Planner policy only. |
 | `planner.enable_load_scaling` | `false` | `{choices: [false, true]}` | `planner` | Planner policy only. |
 | `planner.throughput_adjustment_interval_seconds` | `180` | `{choices: [180, 600]}` | `planner` | Positive; throughput scaling only. |
@@ -742,9 +744,9 @@ evaluation:
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `evaluation.sla.ttft_ms` | `null` | `-` | `-` | Positive; supplied with `itl_ms`. |
-| `evaluation.sla.itl_ms` | `null` | `-` | `-` | Positive; supplied with `ttft_ms`. |
-| `evaluation.sla.e2e_ms` | `null` | `-` | `-` | Positive; mutually exclusive with TTFT plus ITL. |
+| `evaluation.sla.ttft_ms` | `null` | `x` | `-` | Positive; supplied with `itl_ms`. |
+| `evaluation.sla.itl_ms` | `null` | `x` | `-` | Positive; supplied with `ttft_ms`. |
+| `evaluation.sla.e2e_ms` | `null` | `x` | `-` | Positive; mutually exclusive with TTFT plus ITL. |
 
 `goodput` and `goodput_per_gpu` optimization require either SLA form. Planner throughput scaling uses
 the `ttft_ms` plus `itl_ms` form when the recommendation target is SLA-based.
@@ -792,14 +794,13 @@ integers, including when sampled from a log range.
 
 ### Domain Validation
 
-A field accepts at most one domain form. Domains are allowed only at table rows with a default range
-or an explicitly documented recommendation-only value:
+A field accepts at most one domain form. Domains are allowed only where **Default Range** is not `x`:
 
-- Engine mode, backend, `hardware: auto`, parallelism presets and leaves, scheduler, transfer timing,
-  and supported backend-specific fields.
-- Router policy, load model, preset, and supported policy-specific fields.
-- Planner policy, preset, and supported Planner-specific fields.
-- Numeric fields under `traffic.load`.
+- Engine mode, backend, `hardware: auto`, parallelism leaves, scheduler, transfer timing, and
+  supported backend-specific fields.
+- Router policy, load model, and supported policy-specific fields.
+- Planner policy and supported Planner-specific fields.
+- Traffic load intensity and timing fields marked `-` in the table.
 
 The following stay concrete in version 1:
 
@@ -822,10 +823,10 @@ optimization:
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `optimization.target` | `throughput` | `-` | `-` | Maximize `throughput`, `throughput_per_gpu`, `throughput_per_user`, `goodput`, or `goodput_per_gpu`; minimize `ttft` or `e2e_latency`; or compute `pareto`. |
-| `optimization.hardware` | `null` | `-` | `-` | Required inventory mapping for `engine.hardware: auto`; positive GPU count per SKU. |
-| `optimization.constraints.min_candidate_gpus` | `null` | `-` | `-` | Positive when set and no greater than the maximum. |
-| `optimization.constraints.max_candidate_gpus` | `32` | `-` | `-` | Positive and bounded by hardware inventory. |
+| `optimization.target` | `throughput` | `x` | `-` | Maximize `throughput`, `throughput_per_gpu`, `throughput_per_user`, `goodput`, or `goodput_per_gpu`; minimize `ttft` or `e2e_latency`; or compute `pareto`. |
+| `optimization.hardware` | `null` | `x` | `-` | Required inventory mapping for `engine.hardware: auto`; positive GPU count per SKU. |
+| `optimization.constraints.min_candidate_gpus` | `null` | `x` | `-` | Positive when set and no greater than the maximum. |
+| `optimization.constraints.max_candidate_gpus` | `32` | `x` | `-` | Positive and bounded by hardware inventory. |
 
 `pareto` is always the fixed `throughput_per_gpu` and `throughput_per_user` frontier. Goodput targets
 require `evaluation.sla`. Aggregated candidates choose one hardware SKU; disaggregated candidates may
@@ -844,11 +845,11 @@ optimizer:
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `optimizer.algorithm` | `bayesian` | `-` | `-` | `bayesian` or `random`. |
-| `optimizer.max_trials` | `320` | `-` | `-` | Positive total trial budget. |
-| `optimizer.parallelism` | `16` | `-` | `-` | Positive. |
-| `optimizer.candidate_timeout_seconds` | `600` | `-` | `-` | Positive wall-clock limit per candidate. |
-| `optimizer.seed` | `42` | `-` | `-` | Nonnegative. |
+| `optimizer.algorithm` | `bayesian` | `x` | `-` | `bayesian` or `random`. |
+| `optimizer.max_trials` | `320` | `x` | `-` | Positive total trial budget. |
+| `optimizer.parallelism` | `16` | `x` | `-` | Positive. |
+| `optimizer.candidate_timeout_seconds` | `600` | `x` | `-` | Positive wall-clock limit per candidate. |
+| `optimizer.seed` | `42` | `x` | `-` | Nonnegative. |
 
 ## Complete Simulation Example
 
