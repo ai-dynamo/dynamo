@@ -10,7 +10,7 @@
 //! in `passthrough`. `sampling_params` is validated while its complete JSON
 //! object is retained for the version-matched worker.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
@@ -22,6 +22,7 @@ use serde_json::{Map, Value};
 use super::{convert_backend_top_logprobs, token_to_utf8_bytes};
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
+use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
 /// Token-in/token-out generation request.
 ///
@@ -64,8 +65,11 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_transfer_params: Option<Map<String, Value>>,
 
-    /// Future top-level fields, including Python-frontend-only fields such as
-    /// `features`, are retained and forwarded to the worker.
+    /// Engine-ready multimodal features emitted by vLLM's render endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<MultiModalFeatures>,
+
+    /// Future top-level fields are retained and forwarded to the worker.
     #[serde(flatten)]
     pub passthrough: Map<String, Value>,
 }
@@ -92,6 +96,13 @@ impl GenerateRequest {
             return Err("sampling_params.max_tokens must be greater than 0.".to_string());
         }
 
+        if let Some(logprobs) = self.sampling_params.logprobs()
+            && logprobs < 0
+            && logprobs != -1
+        {
+            return Err("sampling_params.logprobs must be non-negative or -1.".to_string());
+        }
+
         if let Some(prompt_logprobs) = self.sampling_params.prompt_logprobs() {
             if prompt_logprobs < 0 && prompt_logprobs != -1 {
                 return Err(
@@ -116,8 +127,99 @@ impl GenerateRequest {
             ));
         }
 
+        if let Some(features) = &self.features {
+            features.validate(self.token_ids.len())?;
+        }
+
         Ok(())
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MultiModalFeatures {
+    pub mm_hashes: BTreeMap<String, Vec<String>>,
+    pub mm_placeholders: BTreeMap<String, Vec<MultiModalPlaceholderRange>>,
+    #[serde(default)]
+    pub kwargs_data: Option<BTreeMap<String, Vec<Option<String>>>>,
+}
+
+impl MultiModalFeatures {
+    fn validate(&self, token_count: usize) -> Result<(), String> {
+        if self.mm_hashes.is_empty() {
+            return Err("features.mm_hashes must contain at least one modality.".to_string());
+        }
+        if self.mm_hashes.keys().ne(self.mm_placeholders.keys()) {
+            return Err(
+                "features.mm_hashes and features.mm_placeholders must contain the same modalities."
+                    .to_string(),
+            );
+        }
+        if let Some(kwargs_data) = &self.kwargs_data
+            && self.mm_hashes.keys().ne(kwargs_data.keys())
+        {
+            return Err(
+                "features.kwargs_data must contain the same modalities as features.mm_hashes."
+                    .to_string(),
+            );
+        }
+
+        let mut ranges = Vec::new();
+        for (modality, hashes) in &self.mm_hashes {
+            let placeholders = &self.mm_placeholders[modality];
+            if hashes.len() != placeholders.len() {
+                return Err(format!(
+                    "features.{modality} hashes and placeholders must have equal lengths."
+                ));
+            }
+            if let Some(kwargs_data) = &self.kwargs_data
+                && kwargs_data[modality].len() != hashes.len()
+            {
+                return Err(format!(
+                    "features.kwargs_data.{modality} must align with hashes and placeholders."
+                ));
+            }
+            for (index, (hash, placeholder)) in hashes.iter().zip(placeholders).enumerate() {
+                if hash.is_empty() {
+                    return Err(format!(
+                        "features.mm_hashes.{modality}[{index}] must be non-empty."
+                    ));
+                }
+                if placeholder.length == 0 {
+                    return Err(format!(
+                        "features.mm_placeholders.{modality}[{index}].length must be positive."
+                    ));
+                }
+                let end = placeholder
+                    .offset
+                    .checked_add(placeholder.length)
+                    .filter(|end| *end <= token_count)
+                    .ok_or_else(|| {
+                        format!("features.mm_placeholders.{modality}[{index}] exceeds token_ids.")
+                    })?;
+                if let Some(mask) = &placeholder.is_embed
+                    && mask.len() != placeholder.length
+                {
+                    return Err(format!(
+                        "features.mm_placeholders.{modality}[{index}].is_embed must match length."
+                    ));
+                }
+                ranges.push((placeholder.offset, end));
+            }
+        }
+        ranges.sort_unstable();
+        if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+            return Err("features multimodal placeholder ranges must not overlap.".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MultiModalPlaceholderRange {
+    pub offset: usize,
+    pub length: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_embed: Option<Vec<bool>>,
 }
 
 /// vLLM Rust streaming options. Unknown options are retained for forward
@@ -151,7 +253,7 @@ pub struct SamplingParams {
     // reads only the controls it needs; `raw` remains authoritative.
     temperature: Option<f32>,
     top_p: Option<f32>,
-    top_k: Option<u32>,
+    top_k: Option<i32>,
     seed: Option<i64>,
     max_tokens: Option<u32>,
     min_tokens: Option<u32>,
@@ -162,8 +264,12 @@ pub struct SamplingParams {
     frequency_penalty: Option<f32>,
     presence_penalty: Option<f32>,
     repetition_penalty: Option<f32>,
+    stop: Option<StopStrings>,
     stop_token_ids: Option<Vec<u32>>,
     ignore_eos: bool,
+    skip_special_tokens: Option<bool>,
+    include_stop_str_in_output: Option<bool>,
+    return_token_ids: Option<bool>,
     logit_bias: Option<HashMap<u32, f32>>,
     allowed_token_ids: Option<Vec<u32>>,
     bad_words: Option<Vec<String>>,
@@ -172,7 +278,24 @@ pub struct SamplingParams {
     /// typed view opaque avoids duplicating version-specific vLLM validation.
     structured_outputs: Option<Value>,
     skip_reading_prefix_cache: Option<bool>,
+    cache_salt: Option<String>,
     vllm_xargs: Option<HashMap<String, Value>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum StopStrings {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StopStrings {
+    fn as_vec(&self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value.clone()],
+            Self::Many(values) => values.clone(),
+        }
+    }
 }
 
 impl SamplingParams {
@@ -196,8 +319,60 @@ impl SamplingParams {
         self.prompt_logprobs
     }
 
+    pub fn cache_salt(&self) -> Option<&str> {
+        self.cache_salt.as_deref()
+    }
+
     pub fn as_value(&self) -> &Value {
         &self.raw
+    }
+
+    pub(crate) fn project_sampling_options(&self) -> SamplingOptions {
+        SamplingOptions {
+            n: Some(1),
+            presence_penalty: self.presence_penalty,
+            frequency_penalty: self.frequency_penalty,
+            repetition_penalty: self.repetition_penalty,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            top_k: self.top_k,
+            min_p: self.min_p,
+            seed: self.seed,
+            include_stop_str_in_output: self.include_stop_str_in_output,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn project_stop_conditions(&self) -> StopConditions {
+        StopConditions {
+            max_tokens: self.max_tokens,
+            stop: self.stop.as_ref().map(StopStrings::as_vec),
+            stop_token_ids: self.stop_token_ids.clone(),
+            min_tokens: self.min_tokens,
+            ignore_eos: Some(self.ignore_eos),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn project_output_options(&self) -> Result<OutputOptions, String> {
+        Ok(OutputOptions {
+            logprobs: project_logprob_count(self.logprobs, "logprobs")?,
+            prompt_logprobs: project_logprob_count(self.prompt_logprobs, "prompt_logprobs")?,
+            skip_special_tokens: self.skip_special_tokens,
+            return_tokens_as_token_ids: self.return_token_ids,
+            ..Default::default()
+        })
+    }
+}
+
+fn project_logprob_count(value: Option<i32>, field: &str) -> Result<Option<u32>, String> {
+    match value {
+        None => Ok(None),
+        Some(-1) => Ok(Some(u32::MAX)),
+        Some(value) if value >= 0 => Ok(Some(value as u32)),
+        Some(value) => Err(format!(
+            "sampling_params.{field} must be non-negative or -1, got {value}"
+        )),
     }
 }
 
@@ -245,15 +420,20 @@ impl<'de> Deserialize<'de> for SamplingParams {
             frequency_penalty: field!(frequency_penalty),
             presence_penalty: field!(presence_penalty),
             repetition_penalty: field!(repetition_penalty),
+            stop: field!(stop),
             stop_token_ids: field!(stop_token_ids),
             ignore_eos: sampling_field_or_default(object, "ignore_eos")
                 .map_err(serde::de::Error::custom)?,
+            skip_special_tokens: field!(skip_special_tokens),
+            include_stop_str_in_output: field!(include_stop_str_in_output),
+            return_token_ids: field!(return_token_ids),
             logit_bias: field!(logit_bias),
             allowed_token_ids: field!(allowed_token_ids),
             bad_words: field!(bad_words),
             logprob_token_ids: field!(logprob_token_ids),
             structured_outputs: field!(structured_outputs),
             skip_reading_prefix_cache: field!(skip_reading_prefix_cache),
+            cache_salt: field!(cache_salt),
             vllm_xargs: field!(vllm_xargs),
             raw,
         })
@@ -295,7 +475,7 @@ pub struct GenerateResponseChoice {
 
     pub finish_reason: Option<String>,
 
-    pub routed_experts: Option<String>,
+    pub routed_experts: Option<Value>,
 }
 
 /// Token-in/token-out generation response.
@@ -323,7 +503,7 @@ struct GenerateChoiceAcc {
     token_ids: Vec<crate::protocols::TokenIdType>,
     logprobs: Option<Vec<Value>>,
     finish_reason: Option<String>,
-    routed_experts: Option<String>,
+    routed_experts: Option<Value>,
 }
 
 impl GenerateChoiceAcc {
@@ -547,11 +727,7 @@ impl GenerateAggregator {
         });
         if let Some(engine_data) = output.engine_data.as_ref() {
             if let Some(routed_experts) = engine_data.get("routed_experts") {
-                choice.routed_experts = Some(
-                    serde_json::from_value(routed_experts.clone()).map_err(|error| {
-                        anyhow::anyhow!("invalid generate routed_experts payload: {error}")
-                    })?,
-                );
+                choice.routed_experts = Some(routed_experts.clone());
             }
             if let Some(kv_transfer_params) = engine_data.get("kv_transfer_params") {
                 self.kv_transfer_params = Some(kv_transfer_params.clone());
@@ -691,6 +867,51 @@ mod tests {
     }
 
     #[test]
+    fn generate_request_types_and_validates_multimodal_features() {
+        let req: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [10, 99, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-a"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["encoded-kwargs"]}
+            }
+        }))
+        .expect("deserialize multimodal request");
+
+        assert!(req.validate().is_ok());
+        assert!(!req.passthrough.contains_key("features"));
+        let features = req.features.expect("typed features");
+        assert_eq!(features.mm_hashes["image"], ["image-a"]);
+        assert_eq!(features.mm_placeholders["image"][0].offset, 1);
+        assert_eq!(
+            features.kwargs_data.expect("kwargs data")["image"],
+            [Some("encoded-kwargs".to_string())]
+        );
+    }
+
+    #[test]
+    fn generate_request_rejects_overlapping_multimodal_features() {
+        let req: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [10, 99, 99, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-a", "image-b"]},
+                "mm_placeholders": {"image": [
+                    {"offset": 1, "length": 2},
+                    {"offset": 2, "length": 2}
+                ]}
+            }
+        }))
+        .expect("deserialize multimodal request");
+
+        assert_eq!(
+            req.validate().expect_err("overlap must fail"),
+            "features multimodal placeholder ranges must not overlap."
+        );
+    }
+
+    #[test]
     fn generate_request_preserves_unknown_sampling_fields() {
         let raw_sampling = json!({
             "temperature": 0.5,
@@ -734,15 +955,18 @@ mod tests {
             }),
             json!({
                 "token_ids": [1],
-                "sampling_params": {"top_k": -1}
-            }),
-            json!({
-                "token_ids": [1],
                 "sampling_params": {"ignore_eos": null}
             }),
         ] {
             assert!(serde_json::from_value::<GenerateRequest>(raw).is_err());
         }
+
+        let unbounded_top_k: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [1],
+            "sampling_params": {"top_k": -1}
+        }))
+        .expect("vLLM uses top_k=-1 to disable top-k filtering");
+        assert_eq!(unbounded_top_k.sampling_params.top_k, Some(-1));
     }
 
     #[test]
@@ -1041,8 +1265,8 @@ mod tests {
         assert_eq!(response.choices[0].token_ids, Some(vec![100, 101]));
         assert_eq!(response.choices[0].finish_reason.as_deref(), Some("length"));
         assert_eq!(
-            response.choices[0].routed_experts.as_deref(),
-            Some("encoded-experts")
+            response.choices[0].routed_experts,
+            Some(json!("encoded-experts"))
         );
         let logprobs = response.choices[0]
             .logprobs
@@ -1105,35 +1329,40 @@ mod tests {
             .expect("aggregate routed experts");
 
         assert_eq!(response.choices[0].index, 0);
-        assert_eq!(
-            response.choices[0].routed_experts.as_deref(),
-            Some("experts-0")
-        );
+        assert_eq!(response.choices[0].routed_experts, Some(json!("experts-0")));
         assert_eq!(response.choices[1].index, 1);
-        assert_eq!(
-            response.choices[1].routed_experts.as_deref(),
-            Some("experts-1")
-        );
+        assert_eq!(response.choices[1].routed_experts, Some(json!("experts-1")));
     }
 
     #[tokio::test]
-    async fn generate_response_rejects_malformed_routed_experts() {
+    async fn generate_response_preserves_structured_routed_experts() {
         let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-            engine_data: Some(json!({"routed_experts": {"unexpected": "object"}})),
+            engine_data: Some(json!({
+                "routed_experts": {
+                    "data": "AQIDBA==",
+                    "shape": [2, 1, 2],
+                    "start": 3,
+                    "dtype": "uint8"
+                }
+            })),
             ..Default::default()
         })]);
 
-        let error = GenerateResponse::from_annotated_stream(stream, "req-routed".to_string())
+        let response = GenerateResponse::from_annotated_stream(stream, "req-routed".to_string())
             .await
-            .expect_err("malformed routed experts must fail");
+            .expect("structured routed experts must pass through");
 
-        assert!(
-            error
-                .to_string()
-                .contains("invalid generate routed_experts payload")
+        assert_eq!(
+            response.choices[0].routed_experts,
+            Some(json!({
+                "data": "AQIDBA==",
+                "shape": [2, 1, 2],
+                "start": 3,
+                "dtype": "uint8"
+            }))
         );
     }
 

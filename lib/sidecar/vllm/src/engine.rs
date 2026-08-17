@@ -101,6 +101,12 @@ impl VllmSidecarEngine {
         }
 
         let endpoint = GrpcEndpoint::parse(&args.vllm_endpoint, "--vllm-endpoint")?;
+        let vllm_http_url = args
+            .vllm_http_endpoint
+            .as_deref()
+            .map(|value| GrpcEndpoint::parse(value, "--vllm-http-endpoint"))
+            .transpose()?
+            .map(|endpoint| endpoint.to_string());
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
         eprintln!(
@@ -109,6 +115,12 @@ impl VllmSidecarEngine {
         );
         let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
         let mode = args.sidecar.common.disaggregation_mode;
+        let rl_metadata = args
+            .sidecar
+            .common
+            .enable_rl
+            .then(|| model.rl_worker_metadata(vllm_http_url))
+            .transpose()?;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
@@ -135,6 +147,7 @@ impl VllmSidecarEngine {
             disaggregation_mode: mode,
             route_to_encoder: false,
             enable_rl: args.sidecar.common.enable_rl,
+            rl_metadata,
             ..Default::default()
         };
         Ok((engine, config))

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, MultimodalData,
     PrefillResult, PreprocessedRequest, StopReason, TopLogprob, usage,
@@ -16,6 +17,29 @@ const MM_HASHES_KEY: &str = "mm_hashes";
 // Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
+#[derive(Debug, serde::Deserialize)]
+struct VllmTitoFeatures {
+    mm_hashes: std::collections::BTreeMap<String, Vec<String>>,
+    mm_placeholders: std::collections::BTreeMap<String, Vec<VllmTitoPlaceholder>>,
+    #[serde(default)]
+    kwargs_data: Option<std::collections::BTreeMap<String, Vec<Option<String>>>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct VllmTitoPlaceholder {
+    offset: u64,
+    length: u64,
+    #[serde(default)]
+    is_embed: Option<Vec<bool>>,
+}
+
+#[derive(Default)]
+struct VllmTitoProjection {
+    priority: Option<i32>,
+    features: Option<VllmTitoFeatures>,
+    routed_experts_prompt_start: Option<u32>,
+}
+
 pub(crate) fn build_generate_request(
     request: PreprocessedRequest,
     request_id: String,
@@ -23,24 +47,24 @@ pub(crate) fn build_generate_request(
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode)?;
 
-    let has_media = request
+    let has_raw_media = request
         .multi_modal_data
         .as_ref()
         .is_some_and(|media| media.values().any(|items| !items.is_empty()));
     // Decode reuses the prefill-expanded tokens without reprocessing media.
-    let forwarded_mm_uuids = if has_media && !mode.is_decode() {
+    let forwarded_mm_uuids = if has_raw_media && !mode.is_decode() {
         forwarded_mm_uuids(&request)?
     } else {
         None
     };
-    let media = if mode.is_decode() {
+    let raw_media = if mode.is_decode() {
         Vec::new()
     } else {
         build_media(&request, forwarded_mm_uuids.as_deref())?
     };
     let mut prefill_result = request.prefill_result;
     let mut token_ids = request.token_ids;
-    if mode.is_decode() && has_media {
+    if mode.is_decode() && has_raw_media {
         token_ids = take_multimodal_prompt_token_ids(&mut prefill_result)?;
     }
     let prompt_logprobs = request.output_options.prompt_logprobs;
@@ -56,7 +80,7 @@ pub(crate) fn build_generate_request(
         request.stop_conditions.min_tokens.unwrap_or(0)
     };
     let mut routing = request.routing;
-    let priority = routing
+    let mut priority = routing
         .as_ref()
         .and_then(|routing| routing.priority)
         .unwrap_or(0);
@@ -67,6 +91,35 @@ pub(crate) fn build_generate_request(
     let sampling = request.sampling_options;
     let stop_conditions = request.stop_conditions;
     let mut extra_args = request.extra_args;
+    let vllm_tito = validate_and_remove_vllm_tito(
+        &mut extra_args,
+        cache_salt.as_deref(),
+        priority,
+        &request_id,
+    )?;
+    if let Some(vllm_priority) = vllm_tito.priority {
+        priority = vllm_priority;
+    }
+    let feature_media = if mode.is_decode() {
+        Vec::new()
+    } else {
+        vllm_tito
+            .features
+            .map(build_preprocessed_media)
+            .transpose()?
+            .unwrap_or_default()
+    };
+    if !raw_media.is_empty() && !feature_media.is_empty() {
+        return Err(client::invalid_argument(
+            "raw multimodal data and preprocessed features cannot be mixed",
+        ));
+    }
+    let media = if feature_media.is_empty() {
+        raw_media
+    } else {
+        feature_media
+    };
+    let has_media = has_raw_media || !media.is_empty();
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
         // These fields are already represented by token_ids and media.
@@ -110,13 +163,15 @@ pub(crate) fn build_generate_request(
             ignore_eos: stop_conditions.ignore_eos.unwrap_or(false),
         }),
         response: Some(pb::ResponseOptions {
-            prompt_token_ids: prompt_logprobs.is_some() || (has_media && mode.is_prefill()),
+            prompt_token_ids: prompt_logprobs.is_some() || (has_raw_media && mode.is_prefill()),
             prompt_logprobs: prompt_logprobs.is_some(),
             prompt_candidates: prompt_logprobs.map(top_n_candidates).transpose()?,
             output_text: Some(true),
             output_token_ids: true,
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
+            skip_special_tokens: request.output_options.skip_special_tokens,
+            routed_experts_prompt_start: vllm_tito.routed_experts_prompt_start,
         }),
         kv: Some(kv),
         truncate_prompt_tokens: 0,
@@ -124,6 +179,257 @@ pub(crate) fn build_generate_request(
         session_id: None,
         media,
     })
+}
+
+fn validate_and_remove_vllm_tito(
+    extra_args: &mut Option<serde_json::Value>,
+    canonical_cache_salt: Option<&str>,
+    canonical_priority: i32,
+    canonical_request_id: &str,
+) -> Result<VllmTitoProjection, DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(VllmTitoProjection::default());
+    };
+    let Some(envelope) = extra.remove("vllm_tito") else {
+        return Ok(VllmTitoProjection::default());
+    };
+    let serde_json::Value::Object(envelope) = envelope else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito must be a JSON object",
+        ));
+    };
+
+    for key in envelope.keys() {
+        if !matches!(
+            key.as_str(),
+            "request_id"
+                | "sampling_params"
+                | "model"
+                | "stream"
+                | "stream_options"
+                | "cache_salt"
+                | "priority"
+                | "kv_transfer_params"
+                | "features"
+        ) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.{key} is not supported by vLLM gRPC"
+            )));
+        }
+    }
+
+    if envelope
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|request_id| request_id != canonical_request_id)
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.request_id must match the canonical request ID",
+        ));
+    }
+
+    let features = envelope
+        .get("features")
+        .filter(|features| !features.is_null())
+        .map(|features| {
+            serde_json::from_value::<VllmTitoFeatures>(features.clone()).map_err(|error| {
+                client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features is invalid: {error}"
+                ))
+            })
+        })
+        .transpose()?;
+    if envelope
+        .get("model")
+        .is_some_and(|model| !model.is_null() && !model.is_string())
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.model must be a string",
+        ));
+    }
+    if envelope
+        .get("stream")
+        .is_some_and(|stream| stream != &serde_json::Value::Bool(false))
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.stream must be false",
+        ));
+    }
+    if envelope
+        .get("stream_options")
+        .is_some_and(|options| !options.is_null())
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.stream_options is not supported by vLLM gRPC",
+        ));
+    }
+
+    let sampling = envelope.get("sampling_params").ok_or_else(|| {
+        client::invalid_argument("extra_args.vllm_tito.sampling_params is required")
+    })?;
+    let serde_json::Value::Object(sampling) = sampling else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params must be a JSON object",
+        ));
+    };
+    for key in sampling.keys() {
+        if !matches!(
+            key.as_str(),
+            "temperature"
+                | "top_p"
+                | "top_k"
+                | "min_p"
+                | "seed"
+                | "max_tokens"
+                | "min_tokens"
+                | "presence_penalty"
+                | "frequency_penalty"
+                | "repetition_penalty"
+                | "stop"
+                | "stop_token_ids"
+                | "ignore_eos"
+                | "logprobs"
+                | "prompt_logprobs"
+                | "cache_salt"
+                | "skip_reading_prefix_cache"
+                | "skip_special_tokens"
+                | "include_stop_str_in_output"
+                | "return_token_ids"
+                | "routed_experts_prompt_start"
+        ) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.sampling_params.{key} is not supported by vLLM gRPC"
+            )));
+        }
+    }
+    if sampling
+        .get("skip_special_tokens")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params.skip_special_tokens must be a boolean",
+        ));
+    }
+    let routed_experts_prompt_start = sampling
+        .get("routed_experts_prompt_start")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    client::invalid_argument(
+                        "extra_args.vllm_tito.sampling_params.routed_experts_prompt_start must be an unsigned 32-bit integer",
+                    )
+                })
+        })
+        .transpose()?;
+    if sampling
+        .get("return_token_ids")
+        .is_some_and(|value| value != &serde_json::Value::Bool(true))
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params.return_token_ids must be true",
+        ));
+    }
+    validate_compat_cache_salt(
+        sampling.get("cache_salt"),
+        canonical_cache_salt,
+        "sampling_params.cache_salt",
+    )?;
+    validate_compat_cache_salt(
+        envelope.get("cache_salt"),
+        canonical_cache_salt,
+        "cache_salt",
+    )?;
+
+    if let Some(skip_reading_prefix_cache) = sampling.get("skip_reading_prefix_cache") {
+        if !skip_reading_prefix_cache.is_boolean() {
+            return Err(client::invalid_argument(
+                "extra_args.vllm_tito.sampling_params.skip_reading_prefix_cache must be a boolean",
+            ));
+        }
+        insert_compatible_projection(
+            extra,
+            "skip_reading_prefix_cache",
+            skip_reading_prefix_cache.clone(),
+            "sampling_params.skip_reading_prefix_cache",
+        )?;
+    }
+    if let Some(kv_transfer_params) = envelope.get("kv_transfer_params")
+        && !kv_transfer_params.is_null()
+    {
+        if !kv_transfer_params.is_object() {
+            return Err(client::invalid_argument(
+                "extra_args.vllm_tito.kv_transfer_params must be a JSON object",
+            ));
+        }
+        insert_compatible_projection(
+            extra,
+            "kv_transfer_params",
+            kv_transfer_params.clone(),
+            "kv_transfer_params",
+        )?;
+    }
+
+    let priority = envelope
+        .get("priority")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|priority| i32::try_from(priority).ok())
+        .ok_or_else(|| {
+            client::invalid_argument(
+                "extra_args.vllm_tito.priority must be a signed 32-bit integer",
+            )
+        })?;
+    if priority.saturating_neg() != canonical_priority {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.priority does not match the canonical Dynamo routing priority",
+        ));
+    }
+    Ok(VllmTitoProjection {
+        priority: Some(priority),
+        features,
+        routed_experts_prompt_start,
+    })
+}
+
+fn insert_compatible_projection(
+    extra: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: serde_json::Value,
+    envelope_path: &str,
+) -> Result<(), DynamoError> {
+    if let Some(existing) = extra.get(key) {
+        if existing != &value {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.{envelope_path} conflicts with extra_args.{key}"
+            )));
+        }
+    } else {
+        extra.insert(key.to_string(), value);
+    }
+    Ok(())
+}
+
+fn validate_compat_cache_salt(
+    value: Option<&serde_json::Value>,
+    canonical: Option<&str>,
+    path: &str,
+) -> Result<(), DynamoError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let Some(value) = value.as_str() else {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.{path} must be a string"
+        )));
+    };
+    if Some(value) != canonical {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.{path} must match the canonical cache_salt"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn data_parallel_rank(
@@ -358,7 +664,118 @@ fn build_media(
     Ok(media)
 }
 
+fn build_preprocessed_media(features: VllmTitoFeatures) -> Result<Vec<pb::MediaItem>, DynamoError> {
+    if features.mm_hashes.is_empty() {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.features.mm_hashes must contain at least one modality",
+        ));
+    }
+    if features
+        .mm_hashes
+        .keys()
+        .ne(features.mm_placeholders.keys())
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.features hashes and placeholders must contain the same modalities",
+        ));
+    }
+    if let Some(kwargs_data) = &features.kwargs_data
+        && features.mm_hashes.keys().ne(kwargs_data.keys())
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.features kwargs_data must contain the same modalities as mm_hashes",
+        ));
+    }
+
+    let mut media = Vec::new();
+    for (modality, hashes) in features.mm_hashes {
+        let placeholders = features
+            .mm_placeholders
+            .get(&modality)
+            .expect("validated modality keys");
+        if hashes.len() != placeholders.len() {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.features.{modality} hashes and placeholders must have equal lengths"
+            )));
+        }
+        let kwargs = features
+            .kwargs_data
+            .as_ref()
+            .map(|kwargs_data| &kwargs_data[&modality]);
+        if kwargs.is_some_and(|kwargs| kwargs.len() != hashes.len()) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.features.kwargs_data.{modality} must align with hashes and placeholders"
+            )));
+        }
+        let modality_code = match modality.as_str() {
+            "image" => pb::Modality::Image,
+            "video" => pb::Modality::Video,
+            "audio" => pb::Modality::Audio,
+            _ => {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features modality `{modality}` is not supported"
+                )));
+            }
+        };
+
+        for (index, (identifier, placeholder)) in hashes.into_iter().zip(placeholders).enumerate() {
+            if identifier.is_empty() {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features.mm_hashes.{modality}[{index}] must be non-empty"
+                )));
+            }
+            if placeholder.length == 0 {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}].length must be positive"
+                )));
+            }
+            if placeholder
+                .is_embed
+                .as_ref()
+                .is_some_and(|mask| mask.len() as u64 != placeholder.length)
+            {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}].is_embed must match length"
+                )));
+            }
+            let encoded_kwargs = kwargs
+                .and_then(|kwargs| kwargs.get(index))
+                .and_then(|kwargs| kwargs.as_deref());
+            let decoded_kwargs = encoded_kwargs
+                .map(|kwargs| {
+                    BASE64_STANDARD.decode(kwargs).map_err(|error| {
+                        client::invalid_argument(format!(
+                            "extra_args.vllm_tito.features.kwargs_data.{modality}[{index}] is not valid base64: {error}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            media.push(pb::MediaItem {
+                modality: modality_code as i32,
+                source: Some(pb::media_item::Source::Features(
+                    pb::PreprocessedMediaFeatures {
+                        kwargs: decoded_kwargs,
+                        identifier: identifier.clone(),
+                        offset: placeholder.offset,
+                        length: placeholder.length,
+                        mm_hash: Some(identifier),
+                        is_embed: placeholder.is_embed.clone().unwrap_or_default(),
+                    },
+                )),
+                mime_type: String::new(),
+                uuid: String::new(),
+            });
+        }
+    }
+    Ok(media)
+}
+
 fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
+    if count == u32::MAX {
+        return Ok(pb::CandidateTokens {
+            select: Some(pb::candidate_tokens::Select::All(true)),
+        });
+    }
     i32::try_from(count).map_err(|_| {
         client::invalid_argument(format!(
             "vLLM logprobs request must fit in i32; got {count}"
@@ -605,11 +1022,6 @@ fn validate_request(
             "max_thinking_tokens is not supported by vLLM gRPC v0.25.1",
         ));
     }
-    if request.output_options.skip_special_tokens == Some(false) {
-        return Err(client::invalid_argument(
-            "skip_special_tokens=false is not supported by vLLM gRPC v0.25.1",
-        ));
-    }
     let sampling = &request.sampling_options;
     if sampling.n.unwrap_or(1) != 1 {
         return Err(client::invalid_argument("n must be 1"));
@@ -701,6 +1113,11 @@ impl ResponseState {
         } else {
             None
         };
+        let routed_experts = output
+            .routed_experts
+            .as_ref()
+            .map(routed_experts_to_json)
+            .transpose()?;
         let pb::SequenceOutput {
             text,
             num_tokens,
@@ -730,6 +1147,11 @@ impl ResponseState {
         }
 
         let Some(finish) = finish_info else {
+            if routed_experts.is_some() {
+                return Err(client::protocol_error(
+                    "routed_experts are only valid on a terminal sequence output",
+                ));
+            }
             return if self.is_prefill || num_tokens == 0 {
                 Ok(None)
             } else {
@@ -795,6 +1217,15 @@ impl ResponseState {
             );
         }
         self.attach_prompt_data(&mut mapped);
+        if let Some(routed_experts) = routed_experts {
+            let engine_data = mapped
+                .engine_data
+                .get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            let engine_data = engine_data.as_object_mut().ok_or_else(|| {
+                client::protocol_error("terminal engine_data is not a JSON object")
+            })?;
+            engine_data.insert("routed_experts".to_string(), routed_experts);
+        }
         Ok(Some(mapped))
     }
 
@@ -846,6 +1277,44 @@ impl ResponseState {
         self.prompt_info = Some(prompt);
         Ok(())
     }
+}
+
+fn routed_experts_to_json(routed: &pb::RoutedExperts) -> Result<serde_json::Value, DynamoError> {
+    if routed.shape.len() != 3 {
+        return Err(client::protocol_error(format!(
+            "routed_experts shape must have rank 3, got {:?}",
+            routed.shape
+        )));
+    }
+    let item_size = match routed.dtype.as_str() {
+        "uint8" => 1usize,
+        "uint16" => 2usize,
+        dtype => {
+            return Err(client::protocol_error(format!(
+                "routed_experts dtype must be uint8 or uint16, got {dtype:?}"
+            )));
+        }
+    };
+    let expected = routed
+        .shape
+        .iter()
+        .try_fold(1usize, |count, dimension| {
+            count.checked_mul(*dimension as usize)
+        })
+        .and_then(|count| count.checked_mul(item_size))
+        .ok_or_else(|| client::protocol_error("routed_experts byte length overflow"))?;
+    if routed.data.len() != expected {
+        return Err(client::protocol_error(format!(
+            "routed_experts byte length mismatch: expected {expected}, got {}",
+            routed.data.len()
+        )));
+    }
+    Ok(serde_json::json!({
+        "data": BASE64_STANDARD.encode(&routed.data),
+        "shape": routed.shape,
+        "start": routed.start,
+        "dtype": routed.dtype,
+    }))
 }
 
 fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {

@@ -32,8 +32,7 @@ use super::openai::{
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
-use crate::protocols::common::preprocessor::PreprocessedRequest;
-use crate::protocols::common::{SamplingOptions, StopConditions};
+use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
@@ -173,6 +172,8 @@ struct VllmTitoEnvelope<'a> {
     priority: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     kv_transfer_params: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features: Option<&'a crate::protocols::openai::generate::MultiModalFeatures>,
     #[serde(flatten)]
     passthrough: &'a serde_json::Map<String, serde_json::Value>,
 }
@@ -189,6 +190,7 @@ impl<'a> VllmTitoEnvelope<'a> {
             cache_salt,
             priority,
             kv_transfer_params,
+            features,
             passthrough,
         } = request;
         Self {
@@ -200,46 +202,218 @@ impl<'a> VllmTitoEnvelope<'a> {
             cache_salt: cache_salt.as_deref(),
             priority: *priority,
             kv_transfer_params: kv_transfer_params.as_ref(),
+            features: features.as_ref(),
             passthrough,
         }
     }
 }
 
+type MmPlaceholderRange = (usize, usize, u64, Option<Vec<bool>>);
+
+fn generate_mm_routing_info(
+    request: &GenerateRequest,
+    kv_cache_block_size: u32,
+) -> Result<Option<MmRoutingInfo>, &'static str> {
+    let Some(features) = request.features.as_ref() else {
+        return Ok(None);
+    };
+    if features
+        .mm_hashes
+        .keys()
+        .chain(features.mm_placeholders.keys())
+        .any(|modality| modality != "image")
+    {
+        return Err(
+            "exact /generate multimodal routing currently supports image placeholders only",
+        );
+    }
+    if kv_cache_block_size == 0 {
+        return Err("KV cache block size must be non-zero");
+    }
+    let (Some(hashes), Some(placeholders)) = (
+        features.mm_hashes.get("image"),
+        features.mm_placeholders.get("image"),
+    ) else {
+        return Ok(None);
+    };
+    if hashes.len() != placeholders.len() {
+        return Err("image hashes and placeholders must have equal lengths");
+    }
+
+    let mut ranges: Vec<MmPlaceholderRange> = Vec::with_capacity(hashes.len());
+    for (hash, placeholder) in hashes.iter().zip(placeholders) {
+        let hash = dynamo_kv_router::protocols::hash_mm_identifier(hash)
+            .ok_or("multimodal hashes must be non-empty strings")?;
+        let end = placeholder
+            .offset
+            .checked_add(placeholder.length)
+            .filter(|end| *end <= request.token_ids.len())
+            .ok_or("multimodal placeholder range exceeds token_ids")?;
+        if placeholder.length == 0 {
+            return Err("multimodal placeholder lengths must be positive integers");
+        }
+        if placeholder.is_embed.is_none()
+            && request.token_ids[placeholder.offset..end]
+                .windows(2)
+                .any(|pair| pair[0] != pair[1])
+        {
+            return Err("mixed multimodal placeholder spans require is_embed");
+        }
+        if placeholder
+            .is_embed
+            .as_ref()
+            .is_some_and(|mask| mask.len() != placeholder.length)
+        {
+            return Err("multimodal placeholder is_embed length must match placeholder length");
+        }
+        ranges.push((placeholder.offset, end, hash, placeholder.is_embed.clone()));
+    }
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+
+    ranges.sort_unstable_by_key(|(offset, _, _, _)| *offset);
+    for pair in ranges.windows(2) {
+        let (_, previous_end, previous_hash, _) = &pair[0];
+        let (next_offset, _, next_hash, _) = &pair[1];
+        if previous_end > next_offset {
+            return Err("multimodal placeholder ranges must not overlap");
+        }
+        if previous_end == next_offset && previous_hash != next_hash {
+            return Err("adjacent multimodal placeholders must share an identifier");
+        }
+    }
+
+    let block_size = kv_cache_block_size as usize;
+    for block_start in (0..request.token_ids.len()).step_by(block_size) {
+        let block_end = (block_start + block_size).min(request.token_ids.len());
+        let mut worker_objects = Vec::new();
+        let mut expected_by_position = vec![None; block_end - block_start];
+
+        for (offset, end, hash, is_embed) in &ranges {
+            let intersection_start = (*offset).max(block_start);
+            let intersection_end = (*end).min(block_end);
+            if intersection_start >= intersection_end {
+                continue;
+            }
+            worker_objects.push(*hash);
+            for global_position in intersection_start..intersection_end {
+                if is_embed
+                    .as_ref()
+                    .is_none_or(|mask| mask[global_position - *offset])
+                {
+                    expected_by_position[global_position - block_start] = Some(*hash);
+                }
+            }
+        }
+
+        let mut expected_runs = Vec::new();
+        let mut current_run = None;
+        for expected_hash in expected_by_position {
+            match (current_run, expected_hash) {
+                (None, Some(hash)) => {
+                    current_run = Some(hash);
+                    expected_runs.push(hash);
+                }
+                (Some(current), Some(hash)) if current != hash => {
+                    return Err("adjacent multimodal embed positions must share an identifier");
+                }
+                (Some(_), None) => current_run = None,
+                _ => {}
+            }
+        }
+        for (run_index, expected_hash) in expected_runs.into_iter().enumerate() {
+            let worker_hash = worker_objects
+                .get(run_index)
+                .or_else(|| worker_objects.last())
+                .copied();
+            if worker_hash != Some(expected_hash) {
+                return Err(
+                    "sparse multimodal layout cannot be normalized exactly by worker events",
+                );
+            }
+        }
+    }
+
+    let mut routing_token_ids = request.token_ids.clone();
+    for (offset, end, hash, is_embed) in ranges {
+        let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash);
+        if let Some(mask) = is_embed {
+            for (token, should_embed) in routing_token_ids[offset..end].iter_mut().zip(mask) {
+                if should_embed {
+                    *token = pad;
+                }
+            }
+        } else {
+            routing_token_ids[offset..end].fill(pad);
+        }
+    }
+    let padded_len = routing_token_ids
+        .len()
+        .div_ceil(block_size)
+        .checked_mul(block_size)
+        .ok_or("multimodal routing token length overflow")?;
+    routing_token_ids.resize(padded_len, 0);
+
+    Ok(Some(MmRoutingInfo {
+        routing_token_ids,
+        block_mm_infos: Vec::new(),
+        expanded_prompt_len: request.token_ids.len(),
+    }))
+}
+
 /// Project routing controls while retaining all engine-owned fields in
 /// `extra_args.vllm_tito`. The backend remains the authority for interpreting
 /// every vLLM-specific field.
-fn preprocessed_from_generate(
+fn preprocessed_from_generate_with_routing(
     request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
     request_id: &str,
+    kv_cache_block_size: u32,
+    supports_exact_mm_routing: bool,
 ) -> anyhow::Result<PreprocessedRequest> {
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
-    let min_tokens = sampling.min_tokens();
-    let ignore_eos = sampling.ignore_eos();
+    let stop_conditions = sampling.project_stop_conditions();
+    let sampling_options = sampling.project_sampling_options();
+    let output_options = sampling
+        .project_output_options()
+        .map_err(anyhow::Error::msg)?;
+    let cache_salt = match (request.cache_salt.as_deref(), sampling.cache_salt()) {
+        (Some(top_level), Some(sampling)) if top_level != sampling => {
+            anyhow::bail!("cache_salt conflicts with sampling_params.cache_salt");
+        }
+        (Some(top_level), _) => Some(top_level.to_string()),
+        (None, Some(sampling)) => Some(sampling.to_string()),
+        (None, None) => None,
+    };
     let routing_priority = dynamo_routing_priority(request.priority);
+    let mm_routing_info = if supports_exact_mm_routing {
+        match generate_mm_routing_info(&request, kv_cache_block_size) {
+            Ok(info) => info,
+            Err(reason) => {
+                tracing::debug!(
+                    target: "mm_routing",
+                    reason,
+                    "invalid /generate multimodal routing metadata; using token-only routing"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
-    let GenerateRequest {
-        token_ids,
-        cache_salt,
-        ..
-    } = request;
+    let GenerateRequest { token_ids, .. } = request;
 
     PreprocessedRequest::builder()
         .model(model.to_string())
         .token_ids(token_ids)
-        .stop_conditions(StopConditions {
-            max_tokens,
-            min_tokens,
-            ignore_eos: Some(ignore_eos),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            n: Some(1),
-            ..Default::default()
-        })
-        .output_options(Default::default())
+        .stop_conditions(stop_conditions)
+        .sampling_options(sampling_options)
+        .output_options(output_options)
+        .mm_routing_info(mm_routing_info)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
             expected_output_tokens: max_tokens,
@@ -257,6 +431,23 @@ fn preprocessed_from_generate(
         })))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
+}
+
+#[cfg(test)]
+fn preprocessed_from_generate(
+    request: GenerateRequest,
+    model: &str,
+    data_parallel_rank: Option<u32>,
+    request_id: &str,
+) -> anyhow::Result<PreprocessedRequest> {
+    preprocessed_from_generate_with_routing(
+        request,
+        model,
+        data_parallel_rank,
+        request_id,
+        0,
+        false,
+    )
 }
 
 /// Resolve, route, and dispatch a frontend-native token-in/token-out request.
@@ -313,9 +504,9 @@ async fn handler_generate(
         return response.into_response();
     }
 
-    let engine = match state
+    let engine_selection = match state
         .manager()
-        .get_generate_engine_for_capability(&model, VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+        .get_generate_engine_selection_for_capability(&model, VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
     {
         Ok(engine) => engine,
         Err(error) => {
@@ -330,11 +521,13 @@ async fn handler_generate(
     };
 
     let request_context = resolve_generate_request_context(&headers, request.request_id.as_deref());
-    let preprocessed = match preprocessed_from_generate(
+    let preprocessed = match preprocessed_from_generate_with_routing(
         request,
         &model,
         request_context.data_parallel_rank,
         &request_context.request_id,
+        engine_selection.kv_cache_block_size,
+        engine_selection.supports_exact_mm_routing,
     ) {
         Ok(preprocessed) => preprocessed,
         Err(error) => {
@@ -371,7 +564,7 @@ async fn handler_generate(
     // each backend await point and then exits promptly.
     let response = match tokio::spawn(
         generate_dispatch(
-            engine,
+            engine_selection.engine,
             context,
             request_id,
             model,
@@ -764,6 +957,7 @@ mod tests {
         let invalid = [
             r#"{"token_ids":[1],"sampling_params":{},"stream_options":{"include_usage":true}}"#,
             r#"{"token_ids":[1],"sampling_params":{"max_tokens":0}}"#,
+            r#"{"token_ids":[1],"sampling_params":{"logprobs":-2}}"#,
             r#"{"token_ids":[1],"sampling_params":{"prompt_logprobs":-2}}"#,
             r#"{"token_ids":[1],"sampling_params":{"min_tokens":3,"max_tokens":2}}"#,
         ];
@@ -841,7 +1035,11 @@ mod tests {
             "stream": true,
             "stream_options": {"include_usage": true},
             "cache_salt": "tenant-a",
-            "features": {"future_feature": [1, 2, 3]},
+            "features": {
+                "mm_hashes": {"image": ["image-a"]},
+                "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+                "kwargs_data": null
+            },
             "priority": 7,
             "kv_transfer_params": {"remote": "worker-a"},
             "future_top_level_field": {"anything": "works"}
@@ -899,6 +1097,182 @@ mod tests {
         assert_eq!(expected_token_ids, serde_json::json!([1, 2]));
         assert_eq!(envelope, &expected_envelope);
         assert!(envelope.get("token_ids").is_none());
+    }
+
+    #[test]
+    fn distinct_images_with_identical_placeholders_get_distinct_routing_tokens() {
+        let request = |hash: &str| {
+            serde_json::from_value::<GenerateRequest>(serde_json::json!({
+                "token_ids": [10, 99, 99, 20],
+                "sampling_params": {},
+                "features": {
+                    "mm_hashes": {"image": [hash]},
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                    "kwargs_data": {"image": ["cmVk"]}
+                }
+            }))
+            .expect("deserialize multimodal request")
+        };
+        let red = request("image-red");
+        let blue = request("image-blue");
+
+        let red_routing = generate_mm_routing_info(&red, 4)
+            .expect("valid red routing")
+            .expect("red routing info");
+        let blue_routing = generate_mm_routing_info(&blue, 4)
+            .expect("valid blue routing")
+            .expect("blue routing info");
+        assert_ne!(
+            red_routing.routing_token_ids,
+            blue_routing.routing_token_ids
+        );
+        assert_eq!(red.token_ids, blue.token_ids);
+
+        let red_preprocessed = preprocessed_from_generate_with_routing(
+            red,
+            "test-model",
+            None,
+            "red-request",
+            4,
+            true,
+        )
+        .expect("build red request");
+        assert_eq!(
+            red_preprocessed.extra_args.as_ref().unwrap()["vllm_tito"]["features"]["mm_hashes"]["image"]
+                [0],
+            "image-red"
+        );
+    }
+
+    #[test]
+    fn sampling_cache_salt_becomes_the_canonical_routing_namespace() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "max_tokens": 8,
+                "cache_salt": "policy-version-3"
+            }
+        }))
+        .expect("deserialize request");
+
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request")
+                .expect("build request");
+
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.cache_namespace.as_deref()),
+            Some("policy-version-3")
+        );
+    }
+
+    #[test]
+    fn conflicting_cache_salts_are_rejected_before_routing() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "cache_salt": "top-level",
+            "sampling_params": {
+                "max_tokens": 8,
+                "cache_salt": "sampling"
+            }
+        }))
+        .expect("deserialize request");
+
+        let error = preprocessed_from_generate(request, "test-model", None, "resolved-request")
+            .expect_err("reject conflicting cache salts");
+
+        assert_eq!(
+            error.to_string(),
+            "cache_salt conflicts with sampling_params.cache_salt"
+        );
+    }
+
+    #[test]
+    fn generate_projects_vllm_sampling_and_output_controls() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "temperature": 0.25,
+                "top_p": 0.9,
+                "top_k": 17,
+                "min_p": 0.05,
+                "seed": 23,
+                "max_tokens": 8,
+                "min_tokens": 2,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "repetition_penalty": 1.1,
+                "stop": ["done"],
+                "stop_token_ids": [7, 8],
+                "ignore_eos": true,
+                "logprobs": 3,
+                "prompt_logprobs": 4,
+                "skip_special_tokens": false,
+                "include_stop_str_in_output": true,
+                "return_token_ids": true
+            },
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request")
+                .expect("build request");
+
+        assert_eq!(preprocessed.sampling_options.temperature, Some(0.25));
+        assert_eq!(preprocessed.sampling_options.top_p, Some(0.9));
+        assert_eq!(preprocessed.sampling_options.top_k, Some(17));
+        assert_eq!(preprocessed.sampling_options.min_p, Some(0.05));
+        assert_eq!(preprocessed.sampling_options.seed, Some(23));
+        assert_eq!(preprocessed.sampling_options.presence_penalty, Some(0.1));
+        assert_eq!(preprocessed.sampling_options.frequency_penalty, Some(0.2));
+        assert_eq!(preprocessed.sampling_options.repetition_penalty, Some(1.1));
+        assert_eq!(
+            preprocessed.sampling_options.include_stop_str_in_output,
+            Some(true)
+        );
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
+        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(2));
+        assert_eq!(
+            preprocessed.stop_conditions.stop.as_deref(),
+            Some(&["done".to_string()][..])
+        );
+        assert_eq!(
+            preprocessed.stop_conditions.stop_token_ids.as_deref(),
+            Some(&[7, 8][..])
+        );
+        assert_eq!(preprocessed.stop_conditions.ignore_eos, Some(true));
+        assert_eq!(preprocessed.output_options.logprobs, Some(3));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(4));
+        assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
+        assert_eq!(
+            preprocessed.output_options.return_tokens_as_token_ids,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn generate_projects_all_logprobs_and_unbounded_top_k() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "top_k": -1,
+                "logprobs": -1,
+                "prompt_logprobs": -1
+            },
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request")
+                .expect("build request");
+
+        assert_eq!(preprocessed.sampling_options.top_k, Some(-1));
+        assert_eq!(preprocessed.output_options.logprobs, Some(u32::MAX));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(u32::MAX));
     }
 
     #[test]

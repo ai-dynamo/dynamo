@@ -80,6 +80,9 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// Worker-advertised support for vLLM-compatible multimodal KV-event hashing.
+pub const VLLM_EXACT_MM_ROUTING_CAPABILITY: &str = "vllm_exact_mm_routing";
+
 /// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
 /// adapter.
 ///

@@ -17,6 +17,7 @@ use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
 use crate::protocols::openai::ParsingOptions;
 
+use crate::local_model::runtime_config::VLLM_EXACT_MM_ROUTING_CAPABILITY;
 use crate::types::{
     RealtimeBidirectionalEngine,
     generic::tensor::TensorStreamingEngine,
@@ -29,6 +30,13 @@ use crate::types::{
         videos::OpenAIVideosStreamingEngine,
     },
 };
+
+#[derive(Clone)]
+pub struct GenerateEngineSelection {
+    pub engine: GenerateStreamingEngine,
+    pub kv_cache_block_size: u32,
+    pub supports_exact_mm_routing: bool,
+}
 
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
@@ -666,6 +674,29 @@ impl Model {
             worker_set
                 .supports_runtime_capability(capability)
                 .then(|| worker_set.generate_engine.clone())
+                .flatten()
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+    }
+
+    pub fn get_generate_engine_selection_for_capability(
+        &self,
+        capability: &str,
+    ) -> Result<GenerateEngineSelection, ModelManagerError> {
+        self.select_worker_set_with(|worker_set| {
+            worker_set
+                .supports_runtime_capability(capability)
+                .then(|| {
+                    worker_set
+                        .generate_engine
+                        .clone()
+                        .map(|engine| GenerateEngineSelection {
+                            engine,
+                            kv_cache_block_size: worker_set.card().kv_cache_block_size,
+                            supports_exact_mm_routing: worker_set
+                                .supports_runtime_capability(VLLM_EXACT_MM_ROUTING_CAPABILITY),
+                        })
+                })
                 .flatten()
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))

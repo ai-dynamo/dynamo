@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc};
 
 use async_trait::async_trait;
 use dynamo_runtime::component::{Endpoint, StartedEndpoint};
@@ -24,6 +24,48 @@ pub(crate) struct RlServeEndpoint {
 pub(crate) struct RlEndpointConfig {
     endpoint_name: String,
     system_url: String,
+    metadata: Option<RlWorkerMetadata>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RlWorkerMetadata {
+    world_size: NonZeroU32,
+    weight_transfer_backend: Option<String>,
+    admin_base_url: Option<String>,
+}
+
+impl RlWorkerMetadata {
+    pub fn new(
+        world_size: u32,
+        weight_transfer_backend: Option<String>,
+        admin_base_url: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let world_size = NonZeroU32::new(world_size)
+            .ok_or_else(|| anyhow::anyhow!("RL worker world size must be positive"))?;
+        let weight_transfer_backend = normalized_optional(
+            weight_transfer_backend,
+            "RL weight-transfer backend must not be blank",
+        )?;
+        let admin_base_url =
+            normalized_optional(admin_base_url, "RL admin base URL must not be blank")?;
+        Ok(Self {
+            world_size,
+            weight_transfer_backend,
+            admin_base_url,
+        })
+    }
+}
+
+fn normalized_optional(value: Option<String>, error: &str) -> anyhow::Result<Option<String>> {
+    value
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty() {
+                anyhow::bail!(error.to_string());
+            }
+            Ok(value.to_string())
+        })
+        .transpose()
 }
 
 impl RlServeEndpoint {
@@ -32,7 +74,10 @@ impl RlServeEndpoint {
     }
 }
 
-pub(crate) fn prepare_endpoint(primary: &Endpoint) -> anyhow::Result<RlEndpointConfig> {
+pub(crate) fn prepare_endpoint(
+    primary: &Endpoint,
+    metadata: Option<RlWorkerMetadata>,
+) -> anyhow::Result<RlEndpointConfig> {
     let endpoint_name = resolve_endpoint_name(&primary.id().name)?;
     let system_url = self_host_base_url(primary.drt()).ok_or_else(|| {
         anyhow::anyhow!(
@@ -42,6 +87,7 @@ pub(crate) fn prepare_endpoint(primary: &Endpoint) -> anyhow::Result<RlEndpointC
     Ok(RlEndpointConfig {
         endpoint_name,
         system_url,
+        metadata,
     })
 }
 
@@ -53,6 +99,7 @@ pub(crate) async fn serve_endpoint(
     let handler = Arc::new(RlRouteHandler {
         routes: primary.drt().engine_routes().clone(),
         system_url: config.system_url,
+        metadata: config.metadata,
     });
     let ingress = Ingress::for_engine(handler)?;
     let started = endpoint
@@ -100,6 +147,7 @@ fn validate_endpoint_name(endpoint_name: &str, primary_name: &str) -> anyhow::Re
 struct RlRouteHandler {
     routes: EngineRouteRegistry,
     system_url: String,
+    metadata: Option<RlWorkerMetadata>,
 }
 
 impl RlRouteHandler {
@@ -122,11 +170,21 @@ impl RlRouteHandler {
         let mut routes = self.routes.routes().into_iter().collect::<Vec<_>>();
         routes.sort();
         routes.dedup();
-        json!({
+        let mut response = json!({
             "status": "ok",
             "routes": routes,
             "system_url": self.system_url,
-        })
+        });
+        if let Some(metadata) = &self.metadata {
+            response["world_size"] = json!(metadata.world_size.get());
+            if let Some(backend) = &metadata.weight_transfer_backend {
+                response["weight_transfer_backend"] = json!(backend);
+            }
+            if let Some(url) = &metadata.admin_base_url {
+                response["admin_base_url"] = json!(url);
+            }
+        }
+        response
     }
 }
 
@@ -156,6 +214,14 @@ mod tests {
         let handler = RlRouteHandler {
             routes,
             system_url: "http://worker:8080".to_string(),
+            metadata: Some(
+                RlWorkerMetadata::new(
+                    4,
+                    Some(" nccl ".to_string()),
+                    Some(" http://worker:8120 ".to_string()),
+                )
+                .expect("valid metadata"),
+            ),
         };
 
         assert_eq!(
@@ -164,11 +230,21 @@ mod tests {
                 "status": "ok",
                 "routes": ["control/pause_generation"],
                 "system_url": "http://worker:8080",
+                "admin_base_url": "http://worker:8120",
+                "world_size": 4,
+                "weight_transfer_backend": "nccl",
             })
         );
         assert_eq!(
             handler.dispatch(&json!({"method": "control/pause_generation"}))["status"],
             "error"
         );
+    }
+
+    #[test]
+    fn rl_worker_metadata_rejects_invalid_values() {
+        assert!(RlWorkerMetadata::new(0, None, None).is_err());
+        assert!(RlWorkerMetadata::new(1, Some("   ".to_string()), None).is_err());
+        assert!(RlWorkerMetadata::new(1, None, Some("   ".to_string())).is_err());
     }
 }
