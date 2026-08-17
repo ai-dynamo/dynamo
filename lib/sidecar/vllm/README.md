@@ -26,13 +26,13 @@ It is a standalone Rust executable.
 - Sampling, stop conditions, structured output, logprobs, cache options, and priority
 - Opaque `kv_transfer_params` handoff
 - Data-parallel rank routing and KV-event source discovery
-- Image URL and data-URI inputs, including media UUIDs
 
-The protocol does not support LoRA, encode workers, beam search, `n > 1`,
-preprocessed multimodal features, audio/video media, or Dynamo tool-call and
-reasoning parsers. Parser defaults returned by Control are intentionally not
-advertised to the Dynamo frontend because the current inference protocol does
-not preserve all parser-related request semantics.
+The released vLLM v0.27.1 protocol does not support multimodal requests, LoRA,
+encode workers, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers.
+The sidecar rejects those request features before submitting an RPC. Parser
+defaults returned by Control are intentionally not advertised to the Dynamo
+frontend because the current inference protocol does not preserve all
+parser-related request semantics.
 
 ## Run
 
@@ -101,7 +101,11 @@ disaggregated prefill/decode with NIXL KV transfer.
 There is no published vLLM sidecar image yet, so you build and push your own from
 `Dockerfile` — the same pattern as the TensorRT-LLM and SGLang sidecars.
 
-The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
+The sidecar waits for both the Control and Inference services through the
+standard gRPC health API before registering the worker. The deployment
+manifests retain lightweight socket probes for container lifecycle monitoring.
+The examples pair the exact vLLM v0.27.1 engine image with protocol files
+vendored from the same release.
 
 ### Prerequisites
 
