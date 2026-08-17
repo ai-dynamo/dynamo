@@ -291,6 +291,16 @@ impl ServedIndexerService {
         true
     }
 
+    /// Marks the service retired whether or not it still holds bindings.
+    ///
+    /// Only runtime teardown uses this. The endpoints are going away regardless of
+    /// who is still bound, so a binder that cloned this `Arc` before cancellation
+    /// fired must not be allowed to attach to it afterwards.
+    fn mark_retired(&self) {
+        let _bindings = self.bindings.write();
+        self.retired.store(true, Ordering::SeqCst);
+    }
+
     fn is_retired(&self) -> bool {
         self.retired.load(Ordering::SeqCst)
     }
@@ -343,9 +353,11 @@ pub async fn ensure_served_indexer_service(
     }
 
     // A concurrent mode switch can retire the service between the lookup and the
-    // binding insert. The retired flag is terminal for a given service, so one
-    // retry always lands on a live replacement; a second retirement is reported
-    // rather than looped on.
+    // binding insert. The retired flag is terminal for a given service and
+    // `get_or_start_service` never hands back a service already carrying it, so the
+    // retry lands on a live replacement; only a second mode switch inside the same
+    // narrow window could retire that one too, and that is reported rather than
+    // looped on.
     for _ in 0..2 {
         let service = get_or_start_service(component.clone(), mode).await?;
 
@@ -402,19 +414,30 @@ async fn get_or_start_service(
 ) -> Result<Arc<ServedIndexerService>> {
     let key = service_key(&component);
     // The lock-free path is only valid when the cached mode is the one being asked
-    // for. A mismatch has to reach the slow path so it can be retired.
+    // for *and* the entry is still live. A mismatch has to reach the slow path so it
+    // can be retired, and so does a retired entry: retirement sets the flag before it
+    // awaits endpoint shutdown, so the map advertises a retired service for the whole
+    // of that window. Handing one back here would let a same-mode caller spin its
+    // bounded retry against a service that can never accept a binding, and would wedge
+    // the key permanently if the retiring task were cancelled before it removed it.
     if let Some(existing) = cached_service(&key)
         && existing.mode == mode
+        && !existing.is_retired()
     {
         return Ok(existing);
     }
 
     let _guard = SERVICE_CREATION_LOCK.lock().await;
     if let Some(existing) = cached_service(&key) {
-        if existing.mode == mode {
+        if existing.mode == mode && !existing.is_retired() {
             return Ok(existing);
         }
 
+        // A retired entry observed under the lock is a leftover: retirement runs while
+        // holding this lock, so no retirement is in flight. Its bindings are empty by
+        // construction (the flag is only ever set over an empty map, and insertion
+        // refuses once it is set), so `retire_if_unused` reports true and the entry is
+        // replaced rather than returned.
         if !existing.retire_if_unused() {
             // Still in use by another router; the caller reports the conflict.
             return Ok(existing);
@@ -462,6 +485,11 @@ fn spawn_teardown_eviction(
         let Some(service) = service.upgrade() else {
             return;
         };
+        // Before the entry leaves the map, so the resurrection window the mode-switch
+        // path closes is closed here too: a caller holding an `Arc` cloned just before
+        // cancellation would otherwise bind to a service that is no longer registered
+        // and whose endpoints are being torn down.
+        service.mark_retired();
         let removed =
             SERVED_INDEXER_SERVICES.remove_if(&key, |_, entry| Arc::ptr_eq(entry, &service));
         drop(removed);
@@ -728,6 +756,7 @@ mod tests {
     /// discovery, and rejects `EventDriven` while the retired record endpoint is.
     #[tokio::test]
     async fn served_indexer_retires_and_allows_mode_switch() {
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
         let (drt, component) = registry_test_component("mode-switch").await;
         let key = service_key(&component);
 
@@ -771,10 +800,69 @@ mod tests {
         shutdown_and_settle(drt).await;
     }
 
+    /// A same-mode caller arriving mid-retirement must not be handed the retiring
+    /// service.
+    ///
+    /// Retirement sets the retired flag and only then awaits endpoint shutdown, so
+    /// there is a window — as long as two discovery round trips — in which the map
+    /// still advertises a retired service under its original mode. A caller asking
+    /// for that mode has to wait for the replacement instead of binding to the
+    /// corpse. The same state outlives the window entirely if the retiring task is
+    /// cancelled before it removes the key, and then nothing but an opposite-mode
+    /// caller would ever clear it.
+    ///
+    /// The window is reproduced by leaving the registry in exactly the state the
+    /// retiring task leaves it in while it is parked — flag set, key still present —
+    /// rather than by racing a real mode switch, because a real interleaving cannot
+    /// be pinned to that window without a production test hook.
+    #[tokio::test]
+    async fn served_indexer_mid_retirement_entry_is_not_handed_out() {
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
+        let (drt, component) = registry_test_component("mid-retirement").await;
+        let key = service_key(&component);
+
+        let handle = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::EventDriven,
+            "model-a".to_string(),
+            Indexer::None,
+        )
+        .await
+        .expect("event-driven served indexer should start");
+        drop(handle);
+
+        let retiring = cached_service(&key).expect("service should still be registered");
+        assert!(
+            retiring.retire_if_unused(),
+            "an unused service should retire"
+        );
+
+        let handle = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::EventDriven,
+            "model-a".to_string(),
+            Indexer::None,
+        )
+        .await
+        .expect("a same-mode caller must be served by a replacement, not by the retired service");
+
+        let replacement = cached_service(&key).expect("a replacement should be registered");
+        assert!(
+            !Arc::ptr_eq(&replacement, &retiring),
+            "the retired service must have been replaced, not reused"
+        );
+        assert_eq!(binding_count(&key), 1);
+
+        drop(handle);
+        drop(retiring);
+        shutdown_and_settle(drt).await;
+    }
+
     /// The guard must not degenerate into "always evict": while a model binding is
     /// live, a conflicting mode is still a genuine conflict.
     #[tokio::test]
     async fn served_indexer_live_binding_rejects_conflicting_mode() {
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
         let (drt, component) = registry_test_component("live-binding").await;
 
         let handle = ensure_served_indexer_service(
@@ -807,6 +895,7 @@ mod tests {
     /// Dropping one of two concurrent users must not retire the shared service.
     #[tokio::test]
     async fn served_indexer_survives_partial_handle_drop() {
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
         let (drt, component) = registry_test_component("shared-service").await;
         let key = service_key(&component);
 
@@ -857,6 +946,7 @@ mod tests {
     /// nothing else ever reclaims an entry belonging to a stopped runtime.
     #[tokio::test]
     async fn served_indexer_registry_evicted_on_runtime_teardown() {
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
         let (drt, component) = registry_test_component("teardown").await;
         let key = service_key(&component);
 
