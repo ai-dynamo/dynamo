@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -195,6 +196,7 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		ckpt.Status.JobName = ""
 		ckpt.Status.CreatedAt = nil
 		ckpt.Status.Message = ""
+		ckpt.Status.Source = nil
 		needsStatusUpdate = true
 	}
 	if needsStatusUpdate {
@@ -214,7 +216,7 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	case nvidiacomv1alpha1.DynamoCheckpointPhaseCreating:
 		return r.handleCreating(ctx, ckpt)
 	case nvidiacomv1alpha1.DynamoCheckpointPhaseReady:
-		return ctrl.Result{}, nil
+		return r.syncCheckpointSource(ctx, ckpt)
 	case nvidiacomv1alpha1.DynamoCheckpointPhaseFailed:
 		return ctrl.Result{}, nil
 	default:
@@ -482,6 +484,40 @@ func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvi
 	return r.markCheckpointReady(ctx, ckpt, checkpointID, podSnapshotConditionMessage(snap, nvidiacomv1alpha1.PodSnapshotConditionReady))
 }
 
+func (r *CheckpointReconciler) syncCheckpointSource(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
+	snap, err := r.findOwnedPodSnapshot(ctx, ckpt)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	contentName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, "")
+	if contentName == "" {
+		return ctrl.Result{}, nil
+	}
+	content := &nvidiacomv1alpha1.PodSnapshotContent{}
+	if err := r.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("get bound PodSnapshotContent %q: %w", contentName, err)
+	}
+	if err := verifyContentBacklink(snap, content); err != nil {
+		return ctrl.Result{}, err
+	}
+	if content.Status.Source == nil || reflect.DeepEqual(ckpt.Status.Source, content.Status.Source) {
+		return ctrl.Result{}, nil
+	}
+
+	patch := client.MergeFrom(ckpt.DeepCopy())
+	ckpt.Status.Source = content.Status.Source.DeepCopy()
+	if err := r.Status().Patch(ctx, ckpt, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update checkpoint source: %w", err)
+	}
+	return ctrl.Result{}, nil
+}
+
 // failCreating marks the DynamoCheckpoint Failed with a completion-condition reason.
 func (r *CheckpointReconciler) failCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, reason, message string) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("Checkpoint failed", "reason", reason, "message", message)
@@ -699,15 +735,16 @@ func (r *CheckpointReconciler) FinalizeResource(ctx context.Context, ckpt *nvidi
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	eventFilter := commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1alpha1.DynamoCheckpoint{}).
+		For(&nvidiacomv1alpha1.DynamoCheckpoint{}, builder.WithPredicates(eventFilter)).
 		Owns(&batchv1.Job{}, builder.WithPredicates(predicate.Funcs{
 			// Ignore creation - we don't need to reconcile when we just created the Job
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})).
+		}, eventFilter)).
 		Owns(&nvidiacomv1alpha1.PodSnapshot{}, builder.WithPredicates(predicate.Funcs{
 			// Ignore create (we just created it). Watch update (status mirror) and
 			// delete (re-enqueue to recreate / unblock). Delete is safe: reconcile
@@ -716,7 +753,12 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
-		})).
+		}, eventFilter)).
+		Watches(
+			&nvidiacomv1alpha1.PodSnapshotContent{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPodSnapshotContentToCheckpoint),
+			builder.WithPredicates(podSnapshotContentEventFilter(r.Config, r.RuntimeConfig)),
+		).
 		Watches(&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(mapSourcePodToCheckpoint),
 			builder.WithPredicates(predicate.Funcs{
@@ -728,10 +770,31 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				UpdateFunc:  func(ue event.UpdateEvent) bool { return false },
 				DeleteFunc:  func(de event.DeleteEvent) bool { return false },
 				GenericFunc: func(ge event.GenericEvent) bool { return false },
-			}),
+			}, eventFilter),
 		).
-		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
 		Complete(r)
+}
+
+func (r *CheckpointReconciler) mapPodSnapshotContentToCheckpoint(ctx context.Context, obj client.Object) []reconcile.Request {
+	ref, err := podSnapshotRefFromContentObj(obj)
+	if err != nil || ref.Name == "" {
+		return nil
+	}
+	snap := &nvidiacomv1alpha1.PodSnapshot{}
+	key := client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}
+	if err := r.Get(ctx, key, snap); err != nil {
+		return nil
+	}
+	if ref.UID != "" && ref.UID != snap.UID {
+		return nil
+	}
+	owner := metav1.GetControllerOf(snap)
+	if owner == nil ||
+		owner.APIVersion != nvidiacomv1alpha1.GroupVersion.String() ||
+		owner.Kind != consts.ResourceTypeDynamoCheckpoint {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: snap.Namespace, Name: owner.Name}}}
 }
 
 // isCheckpointSourcePod reports whether an object is a checkpoint-source pod (carries
