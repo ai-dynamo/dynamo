@@ -262,13 +262,6 @@ spec:
                           description: Node is the source node name.
                           type: string
                       type: object
-                    runtimeManagedMounts:
-                      description: |-
-                        RuntimeManagedMounts is the number of additional mounts recreated by the
-                        container runtime or kubelet.
-                      format: int32
-                      minimum: 0
-                      type: integer
                   type: object
               type: object
           type: object

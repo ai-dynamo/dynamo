@@ -86,16 +86,14 @@ func TestSourceMountsForContainer(t *testing.T) {
 }
 
 func TestCheckpointSourceFromManifest(t *testing.T) {
-	runtimeManaged := 3
 	createdAt := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
 	manifest := &snapshottypes.CheckpointManifest{
 		CheckpointID: "checkpoint-1",
 		CreatedAt:    createdAt,
 		K8s: snapshottypes.SourcePodManifest{
-			SourceNode:           "node-a",
-			PodNamespace:         "inference",
-			PodName:              "worker-0",
-			RuntimeManagedMounts: &runtimeManaged,
+			SourceNode:   "node-a",
+			PodNamespace: "inference",
+			PodName:      "worker-0",
 			Mounts: []snapshottypes.SourceMountManifest{
 				{Path: "/model-cache", Volume: "model", ProvidedBy: "PersistentVolumeClaim/model-pvc"},
 				{Path: "", Volume: "invalid", ProvidedBy: "EmptyDir"},
@@ -116,8 +114,6 @@ func TestCheckpointSourceFromManifest(t *testing.T) {
 	require.Len(t, source.Mounts, 1)
 	require.NotNil(t, source.MountCount)
 	assert.Equal(t, int32(1), *source.MountCount)
-	require.NotNil(t, source.RuntimeManagedMounts)
-	assert.Equal(t, int32(3), *source.RuntimeManagedMounts)
 }
 
 func TestCheckpointSourceFromManifestKeepsAvailableFacts(t *testing.T) {
@@ -155,22 +151,17 @@ func TestCheckpointSourceFromManifestKeepsMountOnlyFacts(t *testing.T) {
 	assert.Equal(t, int32(1), *source.MountCount)
 }
 
-func TestCheckpointSourceFromManifestOmitsOversizedCount(t *testing.T) {
-	oversized := int(1 << 31)
+func TestCheckpointSourceFromManifestKeepsKnownZeroMountCount(t *testing.T) {
 	manifest := &snapshottypes.CheckpointManifest{
 		CheckpointID: "checkpoint-1",
-		K8s: snapshottypes.SourcePodManifest{
-			SourceNode:           "node-a",
-			RuntimeManagedMounts: &oversized,
-		},
+		K8s:          snapshottypes.SourcePodManifest{Mounts: []snapshottypes.SourceMountManifest{}},
 	}
 
 	source := checkpointSourceFromManifest(manifest)
 
 	require.NotNil(t, source)
-	require.NotNil(t, source.Provenance)
-	assert.Equal(t, "node-a", source.Provenance.Node)
-	assert.Nil(t, source.RuntimeManagedMounts)
+	require.NotNil(t, source.MountCount)
+	assert.Zero(t, *source.MountCount)
 }
 
 func TestCheckpointSourcePatchFailurePreservesReady(t *testing.T) {

@@ -117,7 +117,6 @@ _Appears in:_
 | `provenance` _[CheckpointSourceProvenance](#checkpointsourceprovenance)_ | Provenance identifies the source node. |  | Optional: \{\} <br /> |
 | `mounts` _[CheckpointSourceMount](#checkpointsourcemount) array_ | Mounts lists source pod mounts required by the checkpoint. Mounted volume<br />contents are not captured in the checkpoint. |  | Optional: \{\} <br /> |
 | `mountCount` _integer_ | MountCount is the number of source pod mounts required by the checkpoint. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `runtimeManagedMounts` _integer_ | RuntimeManagedMounts is the number of additional mounts recreated by the<br />container runtime or kubelet. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### CheckpointSourceGPU

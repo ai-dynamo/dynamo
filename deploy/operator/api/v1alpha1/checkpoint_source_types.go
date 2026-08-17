@@ -24,12 +24,6 @@ type CheckpointSource struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MountCount *int32 `json:"mountCount,omitempty"`
-
-	// RuntimeManagedMounts is the number of additional mounts recreated by the
-	// container runtime or kubelet.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	RuntimeManagedMounts *int32 `json:"runtimeManagedMounts,omitempty"`
 }
 
 // CheckpointSourceHardware contains available source hardware facts.

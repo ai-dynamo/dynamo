@@ -537,18 +537,13 @@ func checkpointSourceFromManifest(manifest *snapshottypes.CheckpointManifest) *n
 			ProvidedBy: mount.ProvidedBy,
 		})
 	}
-	if len(source.Mounts) > 0 || manifest.K8s.Mounts != nil || manifest.K8s.RuntimeManagedMounts != nil {
+	if len(source.Mounts) > 0 || manifest.K8s.Mounts != nil {
 		if mountCount, ok := nonnegativeInt32(len(source.Mounts)); ok {
 			source.MountCount = &mountCount
 		}
 	}
-	if manifest.K8s.RuntimeManagedMounts != nil {
-		if runtimeManagedMounts, ok := nonnegativeInt32(*manifest.K8s.RuntimeManagedMounts); ok {
-			source.RuntimeManagedMounts = &runtimeManagedMounts
-		}
-	}
 
-	if source.Hardware == nil && source.Provenance == nil && source.MountCount == nil && source.RuntimeManagedMounts == nil {
+	if source.Hardware == nil && source.Provenance == nil && source.MountCount == nil {
 		return nil
 	}
 	return source

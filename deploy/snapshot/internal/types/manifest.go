@@ -77,9 +77,7 @@ type SourcePodManifest struct {
 	PodName      string                `yaml:"podName"`
 	PodNamespace string                `yaml:"podNamespace"`
 	PodIP        string                `yaml:"podIP,omitempty"`
-	Mounts       []SourceMountManifest `yaml:"mounts,omitempty"`
-
-	RuntimeManagedMounts *int `yaml:"runtimeManagedMounts,omitempty"`
+	Mounts       []SourceMountManifest `yaml:"mounts"`
 
 	// StdioFDs holds readlink targets for FDs 0, 1, 2 (e.g. "pipe:[12345]").
 	StdioFDs []string `yaml:"stdioFDs,omitempty"`
