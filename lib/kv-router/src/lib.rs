@@ -74,8 +74,9 @@ pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolic
 pub use scheduling::{
     KvSchedulerError, PotentialLoad, QueueAdmissionDecision, QueueAdmissionEvent, QueueAdmissionId,
     QueueAdmissionPolicy, QueueAdmissionRequest, QueueAdmissionWorker,
-    QueueAdmissionWorkerSnapshot, SchedulingRequest, SchedulingResponse, SessionContext,
-    WorkerSelectionInputTrigger, WorkerSelectionKvHints, WorkerSelectionPolicyError,
+    QueueAdmissionWorkerSnapshot, RequestProgress, SchedulingRequest, SchedulingResponse,
+    SessionContext, WorkerSelectionInputTrigger, WorkerSelectionKvHints,
+    WorkerSelectionPolicyError,
 };
 pub use selector::{
     DefaultWorkerSelector, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter,

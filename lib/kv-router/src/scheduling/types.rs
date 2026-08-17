@@ -12,6 +12,7 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
+use super::queue_admission::RequestProgressUpdater;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
@@ -124,6 +125,10 @@ pub struct SchedulingResponse {
     pub target_cached_prefix_blocks: u32,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub potential_decode_blocks: usize,
+    /// Stream-owned updater for a custom queue-admission policy, when one manages this request.
+    ///
+    /// The ordinary scheduler path leaves this as `None` and performs no live-progress updates.
+    pub request_progress: Option<RequestProgressUpdater>,
 }
 
 /// A routing decision that selected less KV overlap than another eligible worker.

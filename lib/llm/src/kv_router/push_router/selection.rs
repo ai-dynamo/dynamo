@@ -8,7 +8,7 @@ use dynamo_kv_router::{
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
     router_hint::RouterHint,
-    scheduling::RoutingEligibility,
+    scheduling::{RequestProgressUpdater, RoutingEligibility},
     selector::WorkerSelector,
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
@@ -33,6 +33,7 @@ pub(super) struct WorkerSelection {
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) router_hint: Option<RouterHint>,
+    pub(super) request_progress: Option<RequestProgressUpdater>,
 }
 
 #[derive(Clone, Copy)]
@@ -119,6 +120,7 @@ where
                 potential_decode_blocks: _,
                 routing_hashes,
                 router_hint,
+                request_progress,
             } => Ok(WorkerSelection {
                 worker,
                 overlap_amount: overlap_blocks,
@@ -126,6 +128,7 @@ where
                 cached_tokens,
                 routing_hashes,
                 router_hint,
+                request_progress,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
