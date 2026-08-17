@@ -2312,7 +2312,7 @@ spec:
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			}
 
-			By("creating a DGDR without a total GPU budget")
+			GinkgoT().Log("creating a DGDR without a total GPU budget")
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdrName,
@@ -2336,7 +2336,7 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			By("creating two eight-GPU nodes for node-label discovery")
+			GinkgoT().Log("creating two eight-GPU nodes for node-label discovery")
 			gpuNodes := make([]*corev1.Node, 0, 2)
 			for _, nodeName := range []string{"gpu-worker-budget-1", "gpu-worker-budget-2"} {
 				node := &corev1.Node{
@@ -2358,11 +2358,12 @@ spec:
 				}
 			}()
 
+			GinkgoT().Log("enabling node-label GPU discovery on the reconciler")
 			reconciler.RuntimeConfig.Gate = features.Defaults()
 			reconciler.GPUDiscovery = nil
 			reconciler.APIReader = k8sClient
 
-			By("validating the request and persisting discovered hardware")
+			GinkgoT().Log("validating the request and persisting discovered hardware")
 			_, err := reconciler.Reconcile(ctx, request)
 			Expect(err).NotTo(HaveOccurred())
 			_, err = reconciler.Reconcile(ctx, request)
@@ -2374,7 +2375,7 @@ spec:
 			Expect(persisted.Spec.Hardware.TotalGPUs).NotTo(BeNil())
 			Expect(*persisted.Spec.Hardware.TotalGPUs).To(Equal(int32(16)))
 
-			By("creating the profiling Job from the persisted DGDR")
+			GinkgoT().Log("creating the profiling Job from the persisted DGDR")
 			_, err = reconciler.Reconcile(ctx, request)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -2384,7 +2385,7 @@ spec:
 			}, job)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, job) }()
 
-			By("verifying the profiler receives the discovered budget in its inline config")
+			GinkgoT().Log("verifying the profiler receives the discovered budget in its inline config")
 			profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
 			Expect(profiler).NotTo(BeNil())
 
