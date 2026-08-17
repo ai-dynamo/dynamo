@@ -41,7 +41,7 @@ Aggregated no-MTP fallback manifests are also included under `vllm/agg-*-256k-no
 
 ### Refresh Profiles
 
-Refresh profiles add 256K and 1M aggregated agentic configurations and 1M disaggregated 1P1D configurations for B200, GB200, and H200. They use the following runtime image:
+Refresh profiles add 256K and 1M aggregated and disaggregated 1P1D agentic configurations for B200, GB200, and H200. They use the following runtime image:
 
 ```text
 nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
@@ -55,13 +55,27 @@ nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81
 | GB200 | 1M | 2 × TP4 | disabled | 32 | 49152 | 48 | `vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml` |
 | H200 | 256K | 2 × TP8 | 5 tokens | 48 | 24576 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
 | H200 | 1M | 2 × TP8 | disabled | 32 | 24576 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
-| B200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 24 (validation) | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
-| GB200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 24 (validation) | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
-| H200 | 1M | 1P TP8 + 1D TP8 | disabled | 32 | 24576 | 16 (validation) | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
+| B200 | 256K | 1P TP4 + 1D TP4 | disabled | 64 | 32768 | 72 | `vllm/disagg-b200-agentic-256k-1p1d/deploy.yaml` |
+| B200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 24 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
+| GB200 | 256K | 1P TP4 + 1D TP4 | disabled | 64 | 32768 | 64 | `vllm/disagg-gb200-agentic-256k-1p1d/deploy.yaml` |
+| GB200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 24 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
+| H200 | 256K | 1P TP8 + 1D TP8 | disabled | 48 | 24576 | 36 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
+| H200 | 1M | 1P TP8 + 1D TP8 | disabled | 32 | 24576 | 16 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
 
 The Refresh manifests enable KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and hybrid KV cache management. Expert Parallelism is disabled.
 
 The H200 and B200 1P1D profiles use UCX/RDMA and request one `rdma/ib` resource per GPU. The GB200 1P1D profile uses UCX/TCP and does not require an RDMA device resource.
+
+The following 1P1D reference points passed the 50 output tok/s/user SLA on the complete 3,541-row agentic trace. The 256K rows are the highest passing concurrency tested for each profile; the 1M rows are initial passing anchors.
+
+| GPU | Context | Concurrency | Output tok/s/GPU | Output tok/s/user | TTFT p50 (ms) | ITL p50 (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| B200 | 256K | 72 | 418.37 | 54.57 | 4969.22 | 18.32 |
+| B200 | 1M | 24 | 188.95 | 71.34 | 490.28 | 14.02 |
+| GB200 | 256K | 64 | 351.59 | 51.00 | 1973.98 | 19.61 |
+| GB200 | 1M | 24 | 166.58 | 67.45 | 1654.12 | 14.83 |
+| H200 | 256K | 36 | 118.35 | 61.04 | 4351.00 | 16.38 |
+| H200 | 1M | 16 | 64.44 | 77.34 | 681.17 | 12.93 |
 
 ## Supported Features
 
@@ -146,16 +160,17 @@ kubectl apply -f vllm/${PROFILE}/deploy.yaml -n ${NAMESPACE}
 
 The aggregated DGD name is `ultra-agg-<gpu>-<context>-2w-kv`.
 
-For a Refresh 1M disaggregated deployment, use the corresponding 1P1D profile:
+For a Refresh disaggregated deployment, use the corresponding 1P1D profile:
 
 ```bash
 GPU=h200       # b200, gb200, or h200
-PROFILE=disagg-${GPU}-agentic-1m-1p1d
+CONTEXT=256k   # 256k or 1m
+PROFILE=disagg-${GPU}-agentic-${CONTEXT}-1p1d
 
 kubectl apply -f vllm/${PROFILE}/deploy.yaml -n ${NAMESPACE}
 ```
 
-The disaggregated DGD name is `ultra-disagg-<gpu>-1m-1p1d`.
+The disaggregated DGD name is `ultra-disagg-<gpu>-<context>-1p1d`.
 
 ### 3. Smoke Test
 
@@ -175,7 +190,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### 4. Benchmark
 
-See [`perf/README.md`](perf/README.md) for the full benchmark workflow. Day-0 profiles use [`perf/perf.yaml`](perf/perf.yaml); the aggregated Refresh profiles share [`perf/refresh-perf.yaml`](perf/refresh-perf.yaml) and [`perf/refresh-runner.configmap.yaml`](perf/refresh-runner.configmap.yaml).
+See [`perf/README.md`](perf/README.md) for the full benchmark workflow. Day-0 profiles use [`perf/perf.yaml`](perf/perf.yaml); all Refresh profiles share [`perf/refresh-perf.yaml`](perf/refresh-perf.yaml) and [`perf/refresh-runner.configmap.yaml`](perf/refresh-runner.configmap.yaml).
 
 ## Benchmark Results
 
@@ -254,8 +269,11 @@ recipes/nemotron-3-ultra/
     agg-gb200-agentic-1m-2w-kv/deploy.yaml
     agg-h200-agentic-256k-2w-kv/deploy.yaml
     agg-h200-agentic-1m-2w-kv/deploy.yaml
+    disagg-b200-agentic-256k-1p1d/deploy.yaml
     disagg-b200-agentic-1m-1p1d/deploy.yaml
+    disagg-gb200-agentic-256k-1p1d/deploy.yaml
     disagg-gb200-agentic-1m-1p1d/deploy.yaml
+    disagg-h200-agentic-256k-1p1d/deploy.yaml
     disagg-h200-agentic-1m-1p1d/deploy.yaml
   perf/
     README.md                 # benchmark workflow
