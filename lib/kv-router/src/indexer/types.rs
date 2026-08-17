@@ -7,6 +7,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+use crate::identity::CacheOwnerId;
 use crate::protocols::*;
 use crate::router_hint::RouterHintRootCandidates;
 use dynamo_tokens::SequenceHash;
@@ -65,6 +66,70 @@ pub struct AnchorTask {
 // Distributed router - Worker KV Query types
 // -------
 
+/// Immutable protocol selected for one state-agent lifecycle.
+///
+/// A live worker/handler never switches this value. Upgrading the protocol
+/// requires a fresh publisher incarnation and discovery advertisement.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum KvStateProtocolVersion {
+    V2,
+}
+
+/// Exact identity returned by the state agent's callable status endpoint.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct KvStateAgentIdentity {
+    pub cache_owner_id: CacheOwnerId,
+    pub publisher_id: u64,
+    pub protocol_version: KvStateProtocolVersion,
+}
+
+/// Current engine attachment observed by a state agent.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct KvStateAttachmentStatus {
+    pub generation: u64,
+    pub worker: WorkerWithDpRank,
+    pub ready: bool,
+    pub cache_readable: bool,
+    pub ready_at_outbound_cursor: u64,
+}
+
+/// Lightweight liveness response served without entering the dump queue.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct KvStateAgentStatus {
+    pub identity: KvStateAgentIdentity,
+    pub attachment: Option<KvStateAttachmentStatus>,
+    /// False after a CacheOwner local/recovery transaction becomes uncertain.
+    pub cache_owner_ready: bool,
+    pub outbound_cursor: u64,
+}
+
+/// Proof that recovery completed against one exact state-agent incarnation.
+///
+/// The attachment generation is present when the response contains ephemeral
+/// Worker ownership. CacheOwner-only recovery is fenced by the source identity.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct KvStateRecoveryReceipt {
+    pub identity: KvStateAgentIdentity,
+    pub attachment_generation: Option<u64>,
+    pub recovered_through_cursor: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerKvQueryKind {
+    #[default]
+    Recovery,
+    StateAgentRecovery {
+        expected: KvStateAgentIdentity,
+        expected_attachment_generation: Option<u64>,
+    },
+    Status {
+        expected: KvStateAgentIdentity,
+        expected_attachment_generation: Option<u64>,
+    },
+}
+
 /// Request to query a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WorkerKvQueryRequest {
@@ -84,19 +149,33 @@ pub struct WorkerKvQueryRequest {
     /// Named MessagePack clients that predate this field deserialize it as false.
     #[serde(default)]
     pub supports_tree_dump_failed: bool,
+
+    /// Recovery remains the default for old clients. Status is an explicit v2
+    /// control-path request and never queues behind a full tree dump.
+    #[serde(default)]
+    pub kind: WorkerKvQueryKind,
 }
 
 /// Response from a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[non_exhaustive]
 pub enum WorkerKvQueryResponse {
+    /// Callable liveness and identity fence for a v2 state agent.
+    Status(KvStateAgentStatus),
+    /// Recovery payload and proof returned only for an explicit state-agent
+    /// recovery request after identity/attachment revalidation.
+    StateAgentRecovery {
+        response: Box<WorkerKvQueryResponse>,
+        receipt: KvStateRecoveryReceipt,
+    },
     /// Events served from the circular buffer with original event IDs. The batch
     /// is recovery-equivalent to replaying the requested `start_event_id` through
     /// the current buffered tail. If the rank stream contains one or more `Cleared`
-    /// events, the source may omit events before the latest clear while preserving
-    /// that clear event and all following events. `last_event_id` is taken from the
-    /// same buffer snapshot and should be used as the recovery watermark after
-    /// applying the batch.
+    /// all-domain `Cleared` events, the source may omit events before the latest such
+    /// clear while preserving that clear event and all following events. Domain-scoped
+    /// clears remain ordinary ordered events. `last_event_id` is taken from the same
+    /// buffer snapshot and should be used as the recovery watermark after applying the
+    /// batch.
     Events {
         events: Vec<RouterEvent>,
         last_event_id: u64,
@@ -107,10 +186,14 @@ pub enum WorkerKvQueryResponse {
     TreeDump {
         events: Vec<RouterEvent>,
         last_event_id: u64,
+        /// Scope authoritatively represented by this snapshot. Legacy responses
+        /// omitted this field and always represented the whole rank.
+        #[serde(default)]
+        reset_scope: ResetScope,
     },
     /// The exact tree dump could not be produced. This is distinct from an
-    /// authoritative empty tree so recovery can apply its explicit fail-open
-    /// reset policy without mistaking an indexer failure for exact state.
+    /// authoritative empty tree; recovery must leave indexed state and its
+    /// admission cursor unchanged.
     TreeDumpFailed { last_event_id: u64, message: String },
     /// Requested range is newer than available data
     TooNew {

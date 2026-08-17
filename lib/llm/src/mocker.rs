@@ -1285,7 +1285,7 @@ pub async fn make_mocker_engine(
     let engine = Arc::new(MockerExecutionContext::new(args));
     let startup_engine = Arc::clone(&engine);
     let cancel_token = distributed_runtime.primary_token();
-    tokio::spawn(async move {
+    distributed_runtime.runtime().primary().spawn(async move {
         let component = loop {
             if cancel_token.is_cancelled() {
                 tracing::debug!("Mocker engine startup cancelled");

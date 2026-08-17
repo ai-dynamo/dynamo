@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Optional
 
+from dynamo.planner.config.planner_config import resolve_min_endpoint
 from dynamo.planner.core.types import FpmObservations, ScalingDecision
 
 if TYPE_CHECKING:
@@ -198,8 +199,8 @@ class LoadScalingMixin:
             final_d = max(final_d, self._throughput_lower_bound_d)
         post_floor_p, post_floor_d = final_p, final_d
 
-        final_p = max(final_p, self._config.min_endpoint)
-        final_d = max(final_d, self._config.min_endpoint)
+        final_p = max(final_p, resolve_min_endpoint(self._config, "prefill"))
+        final_d = max(final_d, resolve_min_endpoint(self._config, "decode"))
         final_p, final_d = self._apply_global_budget(final_p, final_d)
 
         # Per-component reasons
@@ -285,7 +286,7 @@ class LoadScalingMixin:
                 return None
 
             original_desired = desired
-            desired = max(desired, self._config.min_endpoint)
+            desired = max(desired, resolve_min_endpoint(self._config, "decode"))
             if self._config.enable_throughput_scaling:
                 desired = max(desired, self._throughput_lower_bound_d)
             desired = self._apply_single_budget(desired, "decode")
@@ -353,7 +354,7 @@ class LoadScalingMixin:
             desired = num_workers
 
         original_desired = desired
-        desired = max(desired, self._config.min_endpoint)
+        desired = max(desired, resolve_min_endpoint(self._config, "decode"))
         if self._config.enable_throughput_scaling:
             desired = max(desired, self._throughput_lower_bound_d)
         desired = self._apply_single_budget(desired, "decode")
@@ -478,6 +479,7 @@ class LoadScalingMixin:
             self._config.ttft_ms,
             num_workers,
             "prefill TTFT",
+            resolve_min_endpoint(self._config, "prefill"),
             can_scale_down=can_scale_down,
         )
         if decision is None and consolidation_refused:
@@ -560,6 +562,7 @@ class LoadScalingMixin:
             self._config.itl_ms,
             num_workers,
             "decode ITL",
+            resolve_min_endpoint(self._config, "decode"),
             can_scale_down=can_scale_down,
         )
         if decision is None and consolidation_refused:
@@ -635,6 +638,7 @@ class LoadScalingMixin:
             self._config.ttft_ms,
             num_workers,
             "agg TTFT",
+            resolve_min_endpoint(self._config, "decode"),
             can_scale_down=can_scale_down,
         )
         if decision is None and consolidation_refused:
@@ -711,6 +715,7 @@ class LoadScalingMixin:
             self._config.itl_ms,
             num_workers,
             "agg ITL",
+            resolve_min_endpoint(self._config, "decode"),
             can_scale_down=can_scale_down,
         )
         if decision is None and consolidation_refused:
@@ -799,7 +804,10 @@ class LoadScalingMixin:
         if num_workers > 1:
             if is_load:
                 if all(v <= down_thresh for v in values):
-                    desired = max(num_workers - 1, self._config.min_endpoint)
+                    desired = max(
+                        num_workers - 1,
+                        resolve_min_endpoint(self._config, "prefill"),
+                    )
                     logger.info(
                         f"Load prefill: all engines at or below scale-down "
                         f"threshold ({down_thresh}), -> {desired}"
@@ -808,14 +816,20 @@ class LoadScalingMixin:
             elif is_latency:
                 # For latency mode, scale down when ALL queues are empty
                 if all(v <= down_thresh for v in values):
-                    desired = max(num_workers - 1, self._config.min_endpoint)
+                    desired = max(
+                        num_workers - 1,
+                        resolve_min_endpoint(self._config, "prefill"),
+                    )
                     logger.info(
                         f"Easy prefill: all engines at zero queue, -> {desired}"
                     )
                     return desired
             else:
                 if all(v < down_thresh for v in values):
-                    desired = max(num_workers - 1, self._config.min_endpoint)
+                    desired = max(
+                        num_workers - 1,
+                        resolve_min_endpoint(self._config, "prefill"),
+                    )
                     logger.info(
                         f"Easy prefill: all engines below scale-down threshold "
                         f"({down_thresh}), -> {desired}"
@@ -891,7 +905,7 @@ class LoadScalingMixin:
             else all(u < down_thresh for u in utils)
         )
         if num_workers > 1 and scale_down:
-            desired = max(num_workers - 1, self._config.min_endpoint)
+            desired = max(num_workers - 1, resolve_min_endpoint(self._config, "decode"))
             logger.info(
                 f"Easy decode: all engines below scale-down threshold "
                 f"({down_thresh}), -> {desired}"
@@ -969,7 +983,7 @@ class LoadScalingMixin:
             else all(u < down_thresh for u in utils)
         )
         if num_workers > 1 and scale_down:
-            desired = max(num_workers - 1, self._config.min_endpoint)
+            desired = max(num_workers - 1, resolve_min_endpoint(self._config, "decode"))
             logger.info(
                 f"Easy agg: all engines below scale-down threshold "
                 f"({down_thresh}), -> {desired}"
@@ -989,6 +1003,7 @@ class LoadScalingMixin:
         sla: float,
         num_workers: int,
         label: str,
+        min_endpoint: int,
         *,
         can_scale_down: bool,
     ) -> Optional[int]:
@@ -1025,7 +1040,7 @@ class LoadScalingMixin:
             return num_workers + 1
 
         if num_workers > 1 and can_scale_down:
-            desired = max(num_workers - 1, self._config.min_endpoint)
+            desired = max(num_workers - 1, min_endpoint)
             logger.info(
                 f"Load-based {label}: post-consolidation prediction within "
                 f"sensitivity, -> {desired}"

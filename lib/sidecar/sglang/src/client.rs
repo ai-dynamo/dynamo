@@ -8,15 +8,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
+use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::{Channel, Endpoint};
 
-use crate::args::TransportConfig;
 use crate::proto as pb;
 use crate::proto::sglang_service_client::SglangServiceClient;
-
-const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
 pub type Client = SglangServiceClient<Channel>;
 
@@ -32,8 +30,8 @@ pub struct Discovery {
 }
 
 pub async fn connect(
-    uri: &str,
-    cfg: &TransportConfig,
+    uri: &GrpcEndpoint,
+    cfg: &GrpcTransportConfig,
     deadline: Instant,
 ) -> Result<Client, DynamoError> {
     let endpoint = Endpoint::from_shared(uri.to_string())
@@ -47,10 +45,10 @@ pub async fn connect(
                 if Instant::now() >= deadline {
                     return Err(cannot_connect(format!(
                         "could not reach SGLang gRPC at {uri} within {:?}: {last_err}",
-                        cfg.deadline
+                        cfg.startup_deadline
                     )));
                 }
-                tokio::time::sleep_until((Instant::now() + cfg.poll_interval).min(deadline)).await;
+                tokio::time::sleep_until((Instant::now() + cfg.retry_interval).min(deadline)).await;
             }
         }
     }
@@ -58,7 +56,7 @@ pub async fn connect(
 
 async fn try_connect_once(
     endpoint: &Endpoint,
-    cfg: &TransportConfig,
+    cfg: &GrpcTransportConfig,
     deadline: Instant,
 ) -> Result<Client, String> {
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -67,7 +65,7 @@ async fn try_connect_once(
     }
     let endpoint = endpoint
         .clone()
-        .connect_timeout(cfg.connect_timeout.min(remaining));
+        .connect_timeout(cfg.connect_attempt_timeout.min(remaining));
     let channel = timeout_at(deadline, endpoint.connect())
         .await
         .map_err(|_| "startup deadline elapsed while connecting".to_string())?
@@ -77,8 +75,8 @@ async fn try_connect_once(
 
 fn client_from_channel(channel: Channel) -> Client {
     SglangServiceClient::new(channel)
-        .max_decoding_message_size(MAX_MESSAGE_SIZE)
-        .max_encoding_message_size(MAX_MESSAGE_SIZE)
+        .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+        .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
 }
 
 /// Fixed-size pool of independent HTTP/2 connections. Generation calls are
@@ -90,12 +88,11 @@ pub struct Pool {
 
 impl Pool {
     pub async fn connect(
-        uri: &str,
-        cfg: &TransportConfig,
-        size: usize,
+        uri: &GrpcEndpoint,
+        cfg: &GrpcTransportConfig,
         deadline: Instant,
     ) -> Result<Self, DynamoError> {
-        let size = size.max(1);
+        let size = cfg.connections.get();
         let mut clients = Vec::with_capacity(size);
         for _ in 0..size {
             clients.push(connect(uri, cfg, deadline).await?);
@@ -309,14 +306,12 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
 mod tests {
     use std::time::Duration;
 
-    use dynamo_backend_common::{BackendError, ErrorType};
     use serde_json::json;
     use tokio::net::TcpListener;
-    use tokio::time::{Instant, timeout};
+    use tokio::time::Instant;
     use tonic::transport::Endpoint;
 
-    use super::{client_from_channel, connect, discover, json_u32, json_u64, parse_discovery};
-    use crate::args::TransportConfig;
+    use super::{client_from_channel, discover, json_u32, json_u64, parse_discovery};
     use crate::proto as pb;
 
     #[test]
@@ -362,29 +357,5 @@ mod tests {
 
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
-    }
-
-    #[tokio::test]
-    async fn malformed_endpoint_fails_before_retrying() {
-        let transport = TransportConfig {
-            poll_interval: Duration::from_secs(5),
-            deadline: Duration::from_secs(30),
-            ..TransportConfig::default()
-        };
-        let result = timeout(
-            Duration::from_secs(1),
-            connect("http://", &transport, Instant::now() + transport.deadline),
-        )
-        .await
-        .expect("invalid endpoint should not enter the retry loop");
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("invalid endpoint unexpectedly connected"),
-        };
-
-        assert_eq!(
-            error.error_type(),
-            ErrorType::Backend(BackendError::InvalidArgument)
-        );
     }
 }
