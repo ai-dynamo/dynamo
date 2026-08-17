@@ -435,7 +435,7 @@ impl AddressedPushRouter {
 
     /// Bidirectional generation. Note that it doesn't implement the AsyncEngine trait directly
     /// because there is no trivial way to wrap (instance and address) into ManyIn style.
-    /// May wrap as SingleIn<AddressedStreamRequest<T>> and unwrap here but really just syntax
+    /// May wrap as `SingleIn<AddressedStreamRequest<T>>` and unwrap here but really just syntax
     /// sugar, so we just do it inline here. Will consider only if we do want to call this from
     /// typed erased AsyncEngine impls.
     pub async fn dispatch_bidirectional<T, U>(

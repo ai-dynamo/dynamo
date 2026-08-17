@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -21,57 +20,19 @@ const JobFileEnv = "CUDA_CHECKPOINT_JOB_FILE"
 // StageJobFile copies a launch-job file into the checkpoint artifact and
 // returns the host-visible path to the source pod's live job file. Capture
 // helpers must use that live file so they join the same CUDA job as the target
-// processes; the artifact copy is only a seed for later restore pods. A process
-// may only name the job file created for this checkpoint; the privileged agent
-// must not copy an arbitrary container path into shared storage.
-func StageJobFile(hostProcPath string, cudaPIDs []int, checkpointDir string, sourceGPUCount int) (string, error) {
-	if len(cudaPIDs) == 0 {
-		return "", nil
-	}
-
-	jobFile := ""
-	jobFilePID := 0
-	missingPIDs := make([]int, 0, len(cudaPIDs))
-	for _, pid := range cudaPIDs {
-		value, err := processEnvironmentValue(hostProcPath, pid, JobFileEnv)
-		if err != nil {
-			return "", err
-		}
-		if value == "" {
-			missingPIDs = append(missingPIDs, pid)
-			continue
-		}
-		if jobFile == "" {
-			jobFile = value
-			jobFilePID = pid
-			continue
-		}
-		if value != jobFile {
-			return "", fmt.Errorf("CUDA processes do not share one %s: %q != %q", JobFileEnv, jobFile, value)
-		}
-	}
-	if jobFile == "" {
-		if sourceGPUCount > 1 {
-			return "", fmt.Errorf("multi-GPU CUDA processes are missing %s", JobFileEnv)
-		}
-		return "", nil
-	}
-	if len(missingPIDs) > 0 {
-		return "", fmt.Errorf("CUDA processes %v are missing %s while other CUDA processes use it", missingPIDs, JobFileEnv)
-	}
-	if !filepath.IsAbs(jobFile) || filepath.Clean(jobFile) != jobFile {
-		return "", fmt.Errorf("%s must be an absolute, clean path, got %q", JobFileEnv, jobFile)
-	}
-	if jobFile == "/proc" || strings.HasPrefix(jobFile, "/proc/") {
-		return "", fmt.Errorf("%s must be persisted outside procfs before checkpoint, got %q", JobFileEnv, jobFile)
-	}
-	if jobFile != snapshotprotocol.CUDAJobFilePath {
-		return "", fmt.Errorf("%s is %q, want checkpoint job file %q", JobFileEnv, jobFile, snapshotprotocol.CUDAJobFilePath)
-	}
-
-	sourcePath := filepath.Join(hostProcPath, strconv.Itoa(jobFilePID), "root", strings.TrimPrefix(jobFile, string(os.PathSeparator)))
+// processes; the artifact copy is only a seed for later restore pods. The
+// launch wrapper persists the driver-created file at a fixed path before
+// starting the workload.
+func StageJobFile(sourceRootPath, checkpointDir string, sourceGPUCount int) (string, error) {
+	sourcePath := filepath.Join(sourceRootPath, strings.TrimPrefix(snapshotprotocol.CUDAJobFilePath, string(os.PathSeparator)))
 	destinationPath := filepath.Join(checkpointDir, snapshotprotocol.CUDAJobFileName)
 	if err := copyJobFile(sourcePath, destinationPath); err != nil {
+		if os.IsNotExist(err) {
+			if sourceGPUCount > 1 {
+				return "", fmt.Errorf("multi-GPU CUDA source is missing %s; source must be launched under cuda-checkpoint --launch-job", snapshotprotocol.CUDAJobFilePath)
+			}
+			return "", nil
+		}
 		return "", fmt.Errorf("stage CUDA checkpoint job file: %w", err)
 	}
 	return sourcePath, nil
@@ -92,7 +53,7 @@ func refreshJobFileArtifact(liveJobFile, checkpointDir string) error {
 }
 
 // PrepareLiveJobFile materializes the immutable capture-time launch-job state
-// at the stable path recorded in the checkpointed process environment. It runs
+// at the fixed launch-job path. It runs
 // inside the restore container's namespaces before CRIU recreates processes.
 // The returned path is the per-restore working copy that CUDA helpers must use;
 // the staged artifact remains immutable so it can seed later restores.
@@ -117,20 +78,6 @@ func JobFileFromCheckpoint(checkpointDir string) (string, error) {
 		return "", fmt.Errorf("CUDA checkpoint job file %q is not a regular file", jobFile)
 	}
 	return jobFile, nil
-}
-
-func processEnvironmentValue(hostProcPath string, pid int, name string) (string, error) {
-	content, err := os.ReadFile(filepath.Join(hostProcPath, strconv.Itoa(pid), "environ"))
-	if err != nil {
-		return "", fmt.Errorf("read environment for CUDA process %d: %w", pid, err)
-	}
-	prefix := name + "="
-	for _, entry := range strings.Split(string(content), "\x00") {
-		if strings.HasPrefix(entry, prefix) {
-			return strings.TrimPrefix(entry, prefix), nil
-		}
-	}
-	return "", nil
 }
 
 func copyJobFile(sourcePath, destinationPath string) error {

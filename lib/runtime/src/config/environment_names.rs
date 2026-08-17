@@ -64,7 +64,7 @@ pub mod logging {
         pub const OTEL_EXPORTER_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
         /// OTLP exporter endpoint URL for traces
-        /// Spec: https://opentelemetry.io/docs/specs/otel/protocol/exporter/
+        /// Spec: <https://opentelemetry.io/docs/specs/otel/protocol/exporter/>
         pub const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
         /// OTLP exporter endpoint URL for logs. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT or the protocol default when unset.
@@ -289,7 +289,7 @@ pub mod kvbm {
     /// NIXL backend configuration
     pub mod nixl {
         /// Prefix for NIXL backend environment variables
-        /// Pattern: DYN_KVBM_NIXL_BACKEND_<backend>=true/false
+        /// Pattern: `DYN_KVBM_NIXL_BACKEND_<backend>`=true/false
         /// Example: DYN_KVBM_NIXL_BACKEND_UCX=true
         pub const PREFIX: &str = "DYN_KVBM_NIXL_BACKEND_";
     }
@@ -435,7 +435,7 @@ pub mod llm {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
         pub const DYN_METRICS_PREFIX: &str = "DYN_METRICS_PREFIX";
 
-        /// Histogram bucket configuration (pattern: <PREFIX>_MIN, <PREFIX>_MAX, <PREFIX>_COUNT)
+        /// Histogram bucket configuration (pattern: `<PREFIX>_MIN`, `<PREFIX>_MAX`, `<PREFIX>_COUNT`)
         /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
@@ -747,7 +747,7 @@ pub mod event_plane {
 /// ZMQ Broker environment variables
 pub mod zmq_broker {
     /// Explicit ZMQ broker URL (takes precedence over discovery)
-    /// Format: "xsub=<url1>[;<url2>...] , xpub=<url1>[;<url2>...]"
+    /// Format: `"xsub=<url1>[;<url2>...] , xpub=<url1>[;<url2>...]"`
     /// Example: "xsub=tcp://broker:5555 , xpub=tcp://broker:5556"
     pub const DYN_ZMQ_BROKER_URL: &str = "DYN_ZMQ_BROKER_URL";
 

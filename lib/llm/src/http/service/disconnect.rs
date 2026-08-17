@@ -25,7 +25,7 @@
 //! cancel the request or not.
 //!
 //! The [`ConnectionHandle`] is also used to signal to the client that the request has been cancelled. This is
-//! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "[DONE]".
+//! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "`[DONE]`".
 //!
 
 use axum::response::sse::Event;

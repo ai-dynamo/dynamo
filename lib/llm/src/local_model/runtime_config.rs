@@ -242,7 +242,7 @@ pub struct ModelRuntimeConfig {
 
     /// Immutable KV event source mode for this worker lifecycle.
     ///
-    /// Accepted values are `framework_v1` and `residency_v2`. Missing means the
+    /// Accepted values are `framework_v1` and `state_agent_v2`. Missing means the
     /// legacy Worker-only source. Unknown explicit values must disable KV-aware
     /// routing rather than falling back within the same worker lifecycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -187,13 +188,7 @@ fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
 /// the readiness path handles that by not topology-gating namespaces that
 /// still contain legacy cards — see `Model::is_workers_ready`.)
 fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType) -> WorkerType {
-    worker_type.unwrap_or_else(|| {
-        if model_type.supports_prefill() {
-            WorkerType::Prefill
-        } else {
-            WorkerType::Aggregated
-        }
-    })
+    ModelDeploymentCard::resolve_worker_type(worker_type, model_type)
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +225,8 @@ where
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
+    require_typed_worker_role: bool,
 }
 
 pub(crate) struct PreparedWorkerSet {
@@ -328,8 +325,12 @@ impl ModelWatcher<DefaultWorkerSelector> {
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
+            false,
             Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+                DefaultWorkerSelector::new(
+                    Some(config.clone()),
+                    worker_type.default_selector_label(),
+                )
             }),
         )
     }
@@ -349,6 +350,7 @@ where
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
+        require_typed_worker_role: bool,
         worker_selector_factory: WorkerSelectorFactory<Sel>,
     ) -> Self {
         Self {
@@ -368,6 +370,7 @@ where
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
             worker_selector_factory,
+            require_typed_worker_role,
         }
     }
 
@@ -464,9 +467,13 @@ where
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
+        validate_selector_worker_role(card, self.require_typed_worker_role)?;
+
         // Use per-worker-set router config if the worker provided one in its MDC,
-        // otherwise fall back to the frontend-level global config.
-        let router_config = card.router_config.as_ref().unwrap_or(&self.router_config);
+        // otherwise fall back to the frontend-level global config. Policy selections
+        // are process-local, so preserve them when the MDC supplies the base config.
+        let router_config =
+            effective_router_config(card.router_config.as_ref(), &self.router_config);
 
         let component = self
             .drt
@@ -582,7 +589,7 @@ where
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
                     let selector = (self.worker_selector_factory)(
                         &router_config.kv_router_config,
-                        WORKER_TYPE_DECODE,
+                        effective_worker_type(card.worker_type, card.model_type),
                         RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
                     );
                     let mut chooser = self
@@ -1282,6 +1289,38 @@ fn materialization_fingerprint(
     Ok(blake3::hash(&bytes).to_string())
 }
 
+fn effective_router_config<'a>(
+    worker_config: Option<&'a RouterConfig>,
+    frontend_config: &'a RouterConfig,
+) -> Cow<'a, RouterConfig> {
+    let Some(worker_config) = worker_config else {
+        return Cow::Borrowed(frontend_config);
+    };
+
+    let mut effective = worker_config.clone();
+    effective.kv_router_config.router_prefill_policy = frontend_config
+        .kv_router_config
+        .router_prefill_policy
+        .clone();
+    effective.kv_router_config.router_decode_policy = frontend_config
+        .kv_router_config
+        .router_decode_policy
+        .clone();
+    Cow::Owned(effective)
+}
+
+fn validate_selector_worker_role(
+    card: &ModelDeploymentCard,
+    require_typed_worker_role: bool,
+) -> anyhow::Result<()> {
+    if require_typed_worker_role && card.worker_type.is_none() {
+        anyhow::bail!(
+            "custom worker-selection policies require model cards with an explicit worker_type"
+        );
+    }
+    Ok(())
+}
+
 fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<String> {
     let mut value = serde_json::json!({
         "display_name": &card.display_name,
@@ -1887,6 +1926,16 @@ mod tests {
     }
 
     #[test]
+    fn custom_selector_requires_explicit_worker_type() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        assert!(validate_selector_worker_role(&card, false).is_ok());
+        assert!(validate_selector_worker_role(&card, true).is_err());
+
+        card.worker_type = Some(WorkerType::Decode);
+        assert!(validate_selector_worker_role(&card, true).is_ok());
+    }
+
+    #[test]
     fn materialization_fingerprint_normalizes_legacy_prefill_topology() {
         let mut legacy = ModelDeploymentCard::with_name_only("model");
         legacy.model_type = ModelType::Prefill;
@@ -1935,6 +1984,34 @@ mod tests {
             materialization_fingerprint(&legacy_wire, &RouterConfig::default()).unwrap(),
             materialization_fingerprint(&current_wire, &RouterConfig::default()).unwrap()
         );
+    }
+
+    #[test]
+    fn worker_router_config_preserves_frontend_policy_selections() {
+        let mut frontend = RouterConfig::default();
+        frontend.kv_router_config.router_prefill_policy = Some("frontend-prefill".to_string());
+        frontend.kv_router_config.router_decode_policy = Some("frontend-decode".to_string());
+
+        let mut worker = RouterConfig::default();
+        worker.kv_router_config.router_temperature = 0.75;
+        worker.kv_router_config.router_policy_config = Some("worker-policy.yaml".to_string());
+
+        let effective = effective_router_config(Some(&worker), &frontend);
+        assert_eq!(effective.kv_router_config.router_temperature, 0.75);
+        assert_eq!(
+            effective.kv_router_config.router_policy_config.as_deref(),
+            Some("worker-policy.yaml")
+        );
+        assert_eq!(
+            effective.kv_router_config.router_prefill_policy.as_deref(),
+            Some("frontend-prefill")
+        );
+        assert_eq!(
+            effective.kv_router_config.router_decode_policy.as_deref(),
+            Some("frontend-decode")
+        );
+        assert!(worker.kv_router_config.router_prefill_policy.is_none());
+        assert!(worker.kv_router_config.router_decode_policy.is_none());
     }
 
     #[tokio::test]

@@ -32,6 +32,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "aisimulate-core"
+version = "0.1.0-dev.1"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "ddsketchy",
+ "derive_builder",
+ "indicatif 0.18.4",
+ "rand 0.9.4",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1631,7 +1651,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "dynamo-kv-hashing",
@@ -1643,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -1654,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1690,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -1782,7 +1802,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -1799,33 +1819,27 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
+ "aisimulate-core",
  "anyhow",
  "blake3",
  "bytes",
  "dashmap",
- "ddsketchy",
- "derive-getters",
  "derive_builder",
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
- "dynamo-truthy",
  "futures",
- "indicatif 0.18.4",
- "kvbm-logical",
  "ndarray",
  "ndarray-interp",
  "ndarray-npy",
- "rand 0.9.4",
+ "parking_lot",
  "rmp-serde",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "serde_path_to_error",
- "slotmap",
- "smallvec",
  "tmq",
  "tokio",
  "tokio-timerfd",
@@ -1912,7 +1926,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1926,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1954,6 +1968,7 @@ dependencies = [
  "humantime",
  "k8s-openapi",
  "kube",
+ "libc",
  "local-ip-address",
  "log",
  "lru",
@@ -2020,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2035,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
 ]
@@ -3819,7 +3834,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-logical"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3844,7 +3859,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-py3"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -7378,7 +7393,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

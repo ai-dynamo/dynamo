@@ -110,6 +110,7 @@ _SGLANG_PARSER_NAME_ALIASES = {
     "minimax_m3_nom": "minimax-m3",
     "minimax-m3-nom": "minimax-m3",
     "kimi-k3": "kimi_k3",
+    "gemma-4": "gemma4",
 }
 
 

@@ -17,28 +17,21 @@ import (
 )
 
 func TestStageJobFile(t *testing.T) {
-	procRoot := t.TempDir()
+	sourceRoot := t.TempDir()
 	checkpointDir := t.TempDir()
 	jobFile := snapshotprotocol.CUDAJobFilePath
-
-	for _, pid := range []string{"101", "202"} {
-		processRoot := filepath.Join(procRoot, pid, "root")
-		if err := os.MkdirAll(filepath.Join(processRoot, filepath.Dir(jobFile)), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(procRoot, pid, "environ"), []byte("OTHER=value\x00"+JobFileEnv+"="+jobFile+"\x00"), 0600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(filepath.Join(sourceRoot, filepath.Dir(jobFile)), 0700); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(procRoot, "101", "root", jobFile), []byte("job-state"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceRoot, jobFile), []byte("job-state"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	helperJobFile, err := StageJobFile(procRoot, []int{101, 202}, checkpointDir, 2)
+	helperJobFile, err := StageJobFile(sourceRoot, checkpointDir, 2)
 	if err != nil {
 		t.Fatalf("StageJobFile() error = %v", err)
 	}
-	wantHelperJobFile := filepath.Join(procRoot, "101", "root", jobFile)
+	wantHelperJobFile := filepath.Join(sourceRoot, jobFile)
 	if helperJobFile != wantHelperJobFile {
 		t.Fatalf("StageJobFile() = %q, want %q", helperJobFile, wantHelperJobFile)
 	}
@@ -52,57 +45,23 @@ func TestStageJobFile(t *testing.T) {
 	}
 }
 
-func TestStageJobFileRejectsTransientProcPath(t *testing.T) {
-	procRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(procRoot, "101"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(procRoot, "101", "environ"), []byte(JobFileEnv+"=/proc/1/fd/3\x00"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := StageJobFile(procRoot, []int{101}, t.TempDir(), 1)
-	if err == nil || !strings.Contains(err.Error(), "persisted outside procfs") {
-		t.Fatalf("expected transient procfs error, got %v", err)
-	}
-}
-
-func TestStageJobFileRejectsUnexpectedContainerPath(t *testing.T) {
-	procRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(procRoot, "101"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(procRoot, "101", "environ"), []byte(JobFileEnv+"=/etc/shadow\x00"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := StageJobFile(procRoot, []int{101}, t.TempDir(), 1)
-	if err == nil || !strings.Contains(err.Error(), "want checkpoint job file") {
-		t.Fatalf("expected unexpected-path error, got %v", err)
-	}
-}
-
 func TestStageJobFileRejectsSymlink(t *testing.T) {
-	procRoot := t.TempDir()
+	sourceRoot := t.TempDir()
 	checkpointDir := t.TempDir()
 	jobFile := snapshotprotocol.CUDAJobFilePath
-	processRoot := filepath.Join(procRoot, "101", "root")
-	if err := os.MkdirAll(filepath.Join(processRoot, filepath.Dir(jobFile)), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(sourceRoot, filepath.Dir(jobFile)), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(procRoot, "101", "environ"), []byte(JobFileEnv+"="+jobFile+"\x00"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	secret := filepath.Join(processRoot, "secret")
+	secret := filepath.Join(sourceRoot, "secret")
 	if err := os.WriteFile(secret, []byte("must-not-copy"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	source := filepath.Join(processRoot, jobFile)
+	source := filepath.Join(sourceRoot, jobFile)
 	if err := os.Symlink(filepath.Join("..", "secret"), source); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := StageJobFile(procRoot, []int{101}, checkpointDir, 1)
+	_, err := StageJobFile(sourceRoot, checkpointDir, 1)
 	if err == nil {
 		t.Fatal("expected symlink source to be rejected")
 	}
@@ -138,22 +97,14 @@ func TestRefreshJobFileArtifactCapturesPostCheckpointState(t *testing.T) {
 }
 
 func TestStageJobFileRequiresLaunchJobStateForMultiGPU(t *testing.T) {
-	procRoot := t.TempDir()
-	for _, pid := range []string{"101", "202"} {
-		if err := os.MkdirAll(filepath.Join(procRoot, pid), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(procRoot, pid, "environ"), []byte("OTHER=value\x00"), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	sourceRoot := t.TempDir()
 
-	jobFile, err := StageJobFile(procRoot, []int{101}, t.TempDir(), 1)
+	jobFile, err := StageJobFile(sourceRoot, t.TempDir(), 1)
 	if err != nil || jobFile != "" {
 		t.Fatalf("legacy single-GPU StageJobFile() = %q, %v", jobFile, err)
 	}
-	_, err = StageJobFile(procRoot, []int{101, 202}, t.TempDir(), 2)
-	if err == nil || !strings.Contains(err.Error(), "multi-GPU CUDA processes are missing") {
+	_, err = StageJobFile(sourceRoot, t.TempDir(), 2)
+	if err == nil || !strings.Contains(err.Error(), "source must be launched under cuda-checkpoint --launch-job") {
 		t.Fatalf("expected missing multi-GPU launch-job error, got %v", err)
 	}
 }

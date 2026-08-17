@@ -3,7 +3,7 @@
 
 //! NVTX timeline-annotation helpers for Nsight Systems profiling.
 //!
-//! Delegates to [`cudarc::nvtx`] for the actual NVTX calls
+//! Delegates to `cudarc::nvtx` for the actual NVTX calls
 //!
 //! # Gating (two-level)
 //!

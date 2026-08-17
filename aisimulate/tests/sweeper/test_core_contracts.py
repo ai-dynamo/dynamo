@@ -28,6 +28,7 @@ from aisimulate.sweeper.replay import (
     REPLAY_SPEC_API_VERSION,
     BackendDeploymentSpec,
     HookCapability,
+    ReplayOutputRequirements,
     ReplayReport,
     ReplaySpec,
     RunnerCapabilities,
@@ -106,6 +107,10 @@ def test_contracts_pickle_and_canonical_json_round_trip():
         deployment,
         _replay_spec(hook=hook),
         ReplayReport(metrics={"output_throughput_tok_s": 10.0}),
+        ReplayOutputRequirements(
+            include_raw_report=True,
+            capture_per_request=True,
+        ),
         RunnerCapabilities(
             supported_backend_topologies=(("vllm", "agg"),),
             supported_hooks=(HookCapability("dynamo.planner", "scaling", 1),),
