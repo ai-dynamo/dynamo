@@ -80,7 +80,7 @@ pub struct TraceThroughputStats {
 /// Goodput: throughput restricted to the requests that satisfy the SLA. Present
 /// on the report only when an SLA was supplied to the collector (goodput is
 /// undefined without one). A completed request counts as "good" per
-/// [`SlaThresholds::is_good`].
+/// `SlaThresholds::is_good`.
 #[derive(Debug, Clone)]
 pub struct TraceGoodputStats {
     /// Completed requests that satisfied the SLA.
@@ -597,7 +597,7 @@ pub(crate) struct TraceRequestStatsSnapshot {
     pub first_admission_reused_input_tokens: usize,
 }
 
-/// SLA thresholds used to classify requests for goodput. Mirrors Spica's
+/// SLA thresholds used to classify requests for goodput. Mirrors Sweeper's
 /// `SLATarget` shape: set `ttft_ms` + `itl_ms` together, or `e2e_ms` alone.
 /// Only the thresholds that are set are checked, so an e2e-only SLA gates on
 /// e2e and a ttft+itl SLA gates on both. All-`None` (the default) means "no
@@ -1766,6 +1766,7 @@ mod tests {
                     token_id: Some(10),
                     completed: false,
                     rejected: false,
+                    cached_tokens: None,
                     handoff_delay_ms: None,
                 },
                 OutputSignal {
@@ -1773,6 +1774,7 @@ mod tests {
                     token_id: Some(11),
                     completed: false,
                     rejected: false,
+                    cached_tokens: None,
                     handoff_delay_ms: None,
                 },
                 OutputSignal {
@@ -1780,6 +1782,7 @@ mod tests {
                     token_id: Some(12),
                     completed: true,
                     rejected: true,
+                    cached_tokens: None,
                     handoff_delay_ms: None,
                 },
                 OutputSignal {
@@ -1787,6 +1790,7 @@ mod tests {
                     token_id: Some(20),
                     completed: true,
                     rejected: false,
+                    cached_tokens: None,
                     handoff_delay_ms: None,
                 },
             ],

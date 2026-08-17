@@ -21,7 +21,7 @@ use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, PotentialLoad, ScheduleMode,
-    ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
+    ScheduleRequest, SessionContext, TieredOverlapRefresher, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
@@ -46,16 +46,8 @@ use super::types::{
     SelectResponse, SelectionWorkerConfig, WORKER_TYPE, WorkerCatalogRecord, WorkerLifecycle,
     WorkerPatchRequest, WorkerRequest,
 };
-
-pub(crate) type SelectionWorkerPolicyFactory = Box<
-    dyn for<'a> Fn(
-            &crate::config::KvRouterConfig,
-            &'static str,
-            crate::identity::RoutingPartitionRef<'a>,
-        ) -> WorkerSelectionPolicy
-        + Send
-        + Sync,
->;
+use crate::WorkerSelectionPolicyFactory;
+use crate::WorkerType;
 
 type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
@@ -125,7 +117,7 @@ pub struct SelectionCore {
     entries: RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<SelectionEntry>>>>>,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
-    worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
     /// Booking inputs captured by `select`, keyed by `selection_id`, so a later
@@ -207,7 +199,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
-        worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
@@ -229,7 +221,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
-        worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
         signal_indexer_ready: bool,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
@@ -513,7 +505,7 @@ impl SelectionCore {
                 ));
                 let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
                     || WorkerSelectionPolicy::default(self.kv_router_config.clone(), WORKER_TYPE),
-                    |factory| factory(&self.kv_router_config, WORKER_TYPE, key.as_ref()),
+                    |factory| factory(&self.kv_router_config, WorkerType::Aggregated, key.as_ref()),
                 );
                 let profile = self
                     .kv_router_config
@@ -527,6 +519,8 @@ impl SelectionCore {
                     selector,
                     None,
                     Some(overlap_refresh),
+                    None,
+                    // Standalone selection has no router Client snapshot.
                     None,
                     self.kv_router_config.router_queue_recheck_interval(),
                     self.kv_router_config.router_track_prefill_tokens,
@@ -794,12 +788,15 @@ impl SelectionCore {
             block_hashes: Some(block_hashes),
             isl_tokens,
             overlap,
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             router_config_override,
             lora_name: prompt.lora_name,
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            session_context: session_id
+                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -1606,7 +1603,8 @@ mod tests {
         entry
             .indexer
             .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
-            .await;
+            .await
+            .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
 
         for worker_id in [1, 2] {
@@ -1670,7 +1668,8 @@ mod tests {
         entry
             .indexer
             .apply_event_routed(store_event(2, 0, 1, &[], &[11, 12], StorageTier::Device))
-            .await;
+            .await
+            .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
         tokio::time::advance(Duration::from_secs(11)).await;
         core.free_reservation("occupy-2")

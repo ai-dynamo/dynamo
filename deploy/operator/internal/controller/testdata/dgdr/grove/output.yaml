@@ -35,6 +35,8 @@ spec:
                 - --aic-perf-model
                 - --aic-backend
                 - vllm
+                - --aic-backend-version
+                - 0.14.0
                 - --aic-system
                 - h100_sxm
                 - --aic-tp-size
@@ -77,6 +79,8 @@ spec:
                 - --aic-perf-model
                 - --aic-backend
                 - vllm
+                - --aic-backend-version
+                - 0.14.0
                 - --aic-system
                 - h100_sxm
                 - --aic-tp-size
@@ -234,6 +238,8 @@ spec:
                   - --aic-perf-model
                   - --aic-backend
                   - vllm
+                  - --aic-backend-version
+                  - 0.14.0
                   - --aic-system
                   - h100_sxm
                   - --aic-tp-size
@@ -369,6 +375,8 @@ spec:
                   - --aic-perf-model
                   - --aic-backend
                   - vllm
+                  - --aic-backend-version
+                  - 0.14.0
                   - --aic-system
                   - h100_sxm
                   - --aic-tp-size

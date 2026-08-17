@@ -275,6 +275,9 @@ pub mod frontend_service {
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
+    /// Time from detecting a migratable failure until recovery, terminal failure, or cancellation
+    pub const MODEL_MIGRATION_DURATION_SECONDS: &str = "model_migration_duration_seconds";
+
     /// Total number of times migration was disabled because the sequence length
     /// exceeded the configured max_seq_len limit
     pub const MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL: &str =
@@ -339,6 +342,9 @@ pub mod frontend_service {
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
+    /// Label name for the outcome of a migration
+    pub const MIGRATION_OUTCOME_LABEL: &str = "outcome";
+
     /// Label name for tokenizer operation
     pub const OPERATION_LABEL: &str = "operation";
 
@@ -358,6 +364,18 @@ pub mod frontend_service {
 
         /// Migration during ongoing request (stream disconnected)
         pub const ONGOING_REQUEST: &str = "ongoing_request";
+    }
+
+    /// Migration outcome label values
+    pub mod migration_outcome {
+        /// Migration recovered on another worker
+        pub const SUCCESS: &str = "success";
+
+        /// Migration ended without recovery
+        pub const FAILURE: &str = "failure";
+
+        /// Migration ended because the request was cancelled
+        pub const CANCELLED: &str = "cancelled";
     }
 
     /// Status label values
@@ -446,8 +464,9 @@ pub mod work_handler {
     pub const QUEUE_CAPACITY: &str = "queue_capacity";
 
     /// Total times enqueuing work failed because the dispatcher channel was closed.
-    /// Note: tokio bounded mpsc applies backpressure on full — it does NOT increment
-    /// this counter. Saturation shows up as rising `QUEUE_DEPTH` toward `QUEUE_CAPACITY`.
+    /// A full queue is shed via try_reserve() and counted under
+    /// `dynamo_rejection_request_total`. Saturation shows up as rising `QUEUE_DEPTH`
+    /// toward `QUEUE_CAPACITY`.
     pub const ENQUEUE_REJECTED_TOTAL: &str = "enqueue_rejected_total";
 
     /// Time spent waiting to acquire a worker-pool permit (histogram)
@@ -824,12 +843,22 @@ pub mod kvstats {
 
     /// GPU cache usage as a percentage (0.0-1.0)
     pub const GPU_CACHE_USAGE_PERCENT: &str = "gpu_cache_usage_percent";
+
+    /// Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
+    pub const KV_CACHE_HIT_RATE: &str = "kv_cache_hit_rate";
 }
 
 // Model information metrics
 pub mod model_info {
     /// Model load time in seconds
     pub const LOAD_TIME_SECONDS: &str = "model_load_time_seconds";
+}
+
+// Worker-lifecycle timing gauges. Set once per worker run by the framework, not by the engine.
+pub mod lifecycle {
+    pub const CLEANUP_TIME_SECONDS: &str = "cleanup_time_seconds";
+
+    pub const DRAIN_TIME_SECONDS: &str = "drain_time_seconds";
 }
 
 // Shared regex patterns for Prometheus sanitization

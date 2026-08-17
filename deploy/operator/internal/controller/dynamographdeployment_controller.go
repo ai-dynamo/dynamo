@@ -21,16 +21,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -51,12 +52,14 @@ import (
 )
 
 const (
-	reasonFailedToInitializeWorkerHash Reason = "failed_to_initialize_worker_hash"
-	reasonFailedToMigrateWorkerHash    Reason = "failed_to_migrate_worker_hash"
-	reasonNoMultinodeOrchestrator      Reason = "no_multinode_orchestrator_available"
-	reasonFailedToReconcileResources   Reason = "failed_to_reconcile_the_resources"
-	reasonRollingUpdateFailed          Reason = "rolling_update_failed"
-	reasonWaitingForCheckpoint         Reason = "waiting_for_checkpoint"
+	reasonFailedToInitializeWorkerHash        Reason = "failed_to_initialize_worker_hash"
+	reasonFailedToMigrateWorkerHash           Reason = "failed_to_migrate_worker_hash"
+	reasonNoMultinodeOrchestrator             Reason = "no_multinode_orchestrator_available"
+	reasonFailedToReconcileResources          Reason = "failed_to_reconcile_the_resources"
+	reasonRollingUpdateFailed                 Reason = "rolling_update_failed"
+	reasonWaitingForCheckpoint                Reason = "waiting_for_checkpoint"
+	reasonSelectedWorkloadProviderUnavailable Reason = "selected_workload_provider_unavailable"
+	reasonUnsupportedWorkloadProvider         Reason = "unsupported_workload_provider"
 
 	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
@@ -72,8 +75,8 @@ type DynamoGraphDeploymentReconciler struct {
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
-	Recorder              record.EventRecorder
-	DockerSecretRetriever dockerSecretRetriever
+	Recorder              events.EventRecorder
+	DockerSecretRetriever DockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
 	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
@@ -128,6 +131,24 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// Lock in the provider before allowing any other reconciliation effects.
+	provider, err := r.ensureWorkloadProvider(ctx, dynamoDeployment)
+
+	// Keep adoption and patch failures retryable while making an invalid stored selection terminal.
+	if err != nil {
+		if !errors.Is(err, errUnsupportedWorkloadProvider) {
+			return ctrl.Result{}, err
+		}
+
+		// Persist the invalid selection diagnosis before suppressing automatic retries.
+		programResult := newWorkloadProgramResult(dynamoDeployment)
+		programResult.Fail(dynamoDeployment.Generation, reasonUnsupportedWorkloadProvider, err)
+		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+			return programResult.Result, statusErr
+		}
+		return programResult.Result, reconcile.TerminalError(err)
+	}
+
 	// Reject unsupported stored configurations before any primary-resource mutation.
 	var compatibilityErrs []error
 	for i := range dynamoDeployment.Spec.Components {
@@ -160,7 +181,11 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	program := r.selectWorkloadProgram(dynamoDeployment)
+	// Dispatch exclusively through the persisted provider.
+	program, err := r.selectWorkloadProgram(provider)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	programResult, programErr := program.Reconcile(ctx, workloadProgramRequest{
 		DGD: dynamoDeployment,
 	})
@@ -189,15 +214,10 @@ func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 	}
 	if r.Recorder != nil {
 		for _, event := range result.Events {
-			r.Recorder.Event(dgd, event.Type, event.Reason, event.Message)
+			r.Recorder.Eventf(dgd, nil, event.Type, event.Reason, "Update", "%s", event.Message)
 		}
 	}
 	return nil
-}
-
-func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	return r.RuntimeConfig.Gate.Enabled(features.Grove) && (dgd.Annotations == nil ||
-		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
@@ -262,7 +282,22 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
+		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+	if r.RuntimeConfig.Gate.Enabled(features.DRA) {
+		ctrlBuilder = ctrlBuilder.Watches(
+			&resourcev1.ResourceClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.mapResourceClaimToDGDRequests),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).Watches(
+			&resourcev1.ResourceClaimTemplate{},
+			handler.EnqueueRequestsFromMapFunc(r.mapResourceClaimTemplateToDGDRequests),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).Watches(
+			&resourcev1.DeviceClass{},
+			handler.EnqueueRequestsFromMapFunc(r.mapDeviceClassToDGDRequests),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		)
+	}
 	if r.RuntimeConfig.Gate.Enabled(features.Istio) {
 		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -271,15 +306,18 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		}))
 	}
+
+	// Register Grove-owned workload watches only when the Grove feature is enabled.
 	if r.RuntimeConfig.Gate.Enabled(features.Grove) {
 		ctrlBuilder = newGroveWatchSetup(r.Client).addTo(ctrlBuilder)
 	}
+
 	// Wrap with metrics collection
 	observedReconciler := observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeployment)
 	return ctrlBuilder.Complete(observedReconciler)
 }
 
-func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
+func (r *DynamoGraphDeploymentReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }
 

@@ -121,10 +121,14 @@ The ratio is defined only when the model has an active L1 cache and observed tok
 
 ### Migration
 
-Counters for [request migration](../../kubernetes/fault-tolerance/request-migration.md), the mechanism that continues in-flight requests on a healthy worker when the original worker fails. See [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) for the internals.
+Metrics for [request migration](../../kubernetes/fault-tolerance/request-migration.md), the mechanism that continues in-flight requests on a healthy worker when the original worker fails. See [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) for the internals.
 
 <ParamField path="dynamo_frontend_model_migration_total" type="counter">
   Total request migrations due to worker unavailability. Labeled by `model` and [`migration_type`](metric-labels.mdx#metric-specific-labels) (`new_request` for an initial connection failure, `ongoing_request` for a mid-stream disconnection).
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_migration_duration_seconds" type="histogram">
+  Time from detecting a migratable worker failure until the replacement response stream is established, migration ends without recovery, or the request is cancelled. Labeled by `model`, [`migration_type`](metric-labels.mdx#metric-specific-labels), and [`outcome`](metric-labels.mdx#metric-specific-labels). Use the histogram's `_count` series to count completed migration events by outcome. The duration excludes work completed before the failure and generation after the replacement stream is established.
 </ParamField>
 
 <ParamField path="dynamo_frontend_model_migration_max_seq_len_exceeded_total" type="counter">
@@ -140,7 +144,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 </ParamField>
 
 <ParamField path="dynamo_frontend_model_rejection_total" type="counter">
-  Total requests rejected because all workers were busy (surfaced to the client as HTTP 529 by default). Incremented when the router returns `ResourceExhausted`. Labeled by `model` and `endpoint` (the API route).
+  Total overload responses surfaced to the client as HTTP 529 by default. Incremented for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. Labeled by `model` and `endpoint` (the API route).
 </ParamField>
 
 ### Per-worker load and timing gauges

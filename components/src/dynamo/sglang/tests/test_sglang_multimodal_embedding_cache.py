@@ -11,6 +11,11 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import torch
 
+from dynamo.common.http.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
@@ -26,6 +31,10 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.multimodal,
     pytest.mark.gpu_0,
+    # These are sub-second unit tests. A generous cap so a hang here fails this
+    # test instead of stalling the whole session: an unstubbed network call once
+    # cost ~400s of teardown and took the CI container down with it.
+    pytest.mark.timeout(60),
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
     pytest.mark.skipif(Modality is None, reason="SGLang Modality is required"),
@@ -33,8 +42,42 @@ pytestmark = [
 
 
 @pytest.fixture
-def cache_handler() -> MultimodalEncodeWorkerHandler:
-    """Create a lightweight handler instance for cache-path unit tests."""
+def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
+    """Create a lightweight handler instance for cache-path unit tests.
+
+    Default test-world assumption: a software video decoder exists, so the
+    URL/bytes flow under test is reachable -- the codec-compliant test image
+    ships none, and without this stub the handler's decoder preflight fires
+    before the cache logic these tests exercise. Tests about decoder ABSENCE
+    override the stub explicitly.
+
+    URL validation is stubbed out for the same reason: it resolves the
+    hostname (``loop.getaddrinfo``) to check the address against the blocked
+    ranges, and the CPU test container has no DNS, so a real lookup blocks
+    until the job is killed rather than failing. Tests about validation
+    itself restore the real function.
+    """
+    monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
+
+    async def _passthrough_url(url, _policy):
+        return url
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.validate_media_url", _passthrough_url)
+
+    # No unit test may reach the network. Giving the handler a real url policy
+    # (below) removed the AttributeError that used to abort _maybe_nvdec_decoder
+    # before it fetched, so on an NVDEC-capable host these cache tests started
+    # issuing a real request for their example.com URL: ~400s of teardown while
+    # the event loop waited on the connection, which killed the CI job. The
+    # broad except in _maybe_nvdec_decoder turns this into the URL passthrough
+    # the cache tests already expected; tests that exercise fetching stub it
+    # with their own payload.
+    async def _no_network(*_args, **_kwargs):
+        raise AssertionError(
+            "unit tests must not fetch over the network; stub fetch_bytes"
+        )
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", _no_network)
 
     class _DummyEncoder:
         def __init__(self) -> None:
@@ -64,6 +107,9 @@ def cache_handler() -> MultimodalEncodeWorkerHandler:
         capacity_bytes=32 * 1024 * 1024
     )
     handler._cache_publisher = None
+    # The real __init__ always sets this (UrlValidationPolicy.from_env); the
+    # video paths read it, so a handler built with __new__ needs it too.
+    handler._url_policy = UrlValidationPolicy()
     handler.encoder = _DummyEncoder()
     return handler
 
@@ -459,12 +505,57 @@ async def test_video_cache_key_includes_sampling_config(
 _HANDLER_MOD = "dynamo.sglang.request_handlers.multimodal.encode_worker_handler"
 
 
+# A data: URI passes the url policy without touching the network, so the
+# decoder-gating tests below exercise gating rather than DNS.
+_INLINE_VIDEO = "data:video/mp4;base64,AAAAIGZ0eXBpc29t"
+# http:// is refused on scheme alone (allow_http defaults False), so the
+# validation tests are deterministic and offline too.
+_BLOCKED_URL = "http://169.254.169.254/latest/meta-data/"
+
+
 @pytest.fixture
 def nvdec_handler(cache_handler) -> MultimodalEncodeWorkerHandler:
     """cache_handler wired with the attributes the NVDEC path reads."""
     cache_handler.num_video_frames = 32
-    cache_handler._url_policy = SimpleNamespace()
     return cache_handler
+
+
+@pytest.mark.asyncio
+async def test_disabled_nvdec_without_software_decoder_is_actionable(
+    nvdec_handler, monkeypatch
+) -> None:
+    """NVDEC off (env/CPU/gated model) + no software decoder: the URLs would
+    go straight to SGLang and die deep with the payload-blob error, so
+    _build_encode_inputs must raise the actionable error up front.
+
+    This is the deployment class MOST likely to lack a decoder entirely --
+    reviewers caught that the preflight originally lived only on the
+    NVDEC-enabled path and never ran here.
+    """
+    from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
+
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: False
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await nvdec_handler._build_encode_inputs([_INLINE_VIDEO], "VIDEO")
+
+    assert "install_media_decoders sglang" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_disabled_nvdec_with_software_decoder_passes_urls(
+    nvdec_handler, monkeypatch
+) -> None:
+    """NVDEC off but a software decoder exists: URLs pass through unchanged
+    (SGLang fetches and decodes them itself, as before)."""
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
+    monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
+
+    out = await nvdec_handler._build_encode_inputs([_INLINE_VIDEO], "VIDEO")
+    assert out == [_INLINE_VIDEO]
 
 
 def test_nvdec_video_enabled_gating(nvdec_handler, monkeypatch) -> None:
@@ -584,6 +675,11 @@ async def test_maybe_nvdec_decoder_returns_bytes_for_non_hw_codec(
     monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "vp9")
     monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda c: c == "h264")
+    # The passthrough contract now holds only when SGLang can actually decode
+    # the bytes; the codec-compliant test image ships no software decoder, so
+    # stub the preflight probe. The absent-decoder leg (actionable error) is
+    # covered in test_sglang_multimodal_video.py.
+    monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
 
     out = await nvdec_handler._maybe_nvdec_decoder("https://x/clip.webm")
 
@@ -699,9 +795,74 @@ async def test_decode_failure_falls_back_to_the_fetched_bytes(
         raise RuntimeError("NVDEC init failed")
 
     monkeypatch.setattr(f"{_HANDLER_MOD}.NvdecVideoDecoder", _boom)
+    # Bytes fallback is only valid when SGLang can decode them; stub the
+    # preflight probe (the image ships no software decoder).
+    monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
     assert await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4") == b"bytes"
-    out = await nvdec_handler._build_encode_inputs(["https://x/clip.mp4"], "VIDEO")
+    out = await nvdec_handler._build_encode_inputs([_INLINE_VIDEO], "VIDEO")
     assert out == [b"bytes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("software_decoder_present", [False, True])
+async def test_disabled_nvdec_validates_url_before_reporting_decoders(
+    nvdec_handler, monkeypatch, software_decoder_present
+) -> None:
+    """A source the policy refuses must be refused here, whatever the decoders.
+
+    With NVDEC off, SGLang fetches these URLs with its own session and never
+    consults our policy, so this is the only place the policy can apply. Two
+    failures this pins, both reproduced on the real image: a blocked URL was
+    handed back for SGLang to fetch when a decoder was present, and answered
+    with "install decord2" -- deployment configuration, in response to a
+    request we should refuse -- when one was not.
+    """
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}._software_video_decoder_imports",
+        lambda: software_decoder_present,
+    )
+    # Undo the fixture's passthrough: validation is what this test asserts.
+    # The URL below is refused on scheme, so this still performs no lookup.
+    monkeypatch.setattr(f"{_HANDLER_MOD}.validate_media_url", validate_media_url)
+
+    with pytest.raises(UrlValidationError):
+        await nvdec_handler._build_encode_inputs([_BLOCKED_URL], "VIDEO")
+
+
+@pytest.mark.asyncio
+async def test_decode_failure_without_software_decoder_is_actionable(
+    nvdec_handler, monkeypatch
+) -> None:
+    """NVDEC failed AND no software decoder exists: the bytes would only die
+    deep inside SGLang with the payload repr in the message, so the fallback
+    must raise the actionable error instead of passing them on."""
+    from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.mp4"),
+    )
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda _c: True)
+
+    def _boom(_data):
+        raise RuntimeError("NVDEC init failed")
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.NvdecVideoDecoder", _boom)
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: False
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4")
+
+    # h264 + NVDEC "available" but failing: the message still leads with the
+    # capability/hardware framing and carries the install remedy.
+    assert "install_media_decoders sglang" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

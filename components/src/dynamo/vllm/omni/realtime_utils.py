@@ -13,6 +13,7 @@ import asyncio
 import logging
 
 from dynamo import prometheus_names
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
@@ -69,6 +70,7 @@ async def init_omni_realtime(
         await shutdown_event.wait()
         return
 
+    register_model_taint_route(runtime, generate_endpoint)
     model_label = config.served_model_name or config.model
     try:
         await register_model(

@@ -28,7 +28,7 @@ use crate::tracker::{StoreInput, Tracker};
 use crate::wire::vllm_in::{KvEventBatch, RawKvEvent};
 use crate::zmq_util::{connect_sub_socket, multipart_message};
 use dynamo_kv_router::protocols::StorageTier;
-use dynamo_kv_router::zmq_wire::Locality;
+use dynamo_kv_router::zmq_wire::{KvEventSourceKind, Locality};
 
 /// Spawn the ZMQ listener. Returns immediately with a [`JoinHandle`] for the task.
 pub async fn spawn(
@@ -91,15 +91,22 @@ pub async fn spawn(
 }
 
 fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventSource) {
+    // Compatibility with v1.2 framework-only producers during v1.4 rolling upgrades.
+    // TODO(v1.5): Remove with the legacy consolidator subscription after v1.2
+    // leaves N-2 and residency-v2 producers use only the versioned source.
+    if event.source_kind() != Ok(KvEventSourceKind::Framework) {
+        tracing::warn!("Ignoring non-framework event on the legacy consolidator stream");
+        return;
+    }
     // G1-only ingress: this source is the engine's local device (G1) cache.
-    // Non-local events (REMOTE / unknown locality) and native lower-tier media
-    // (CPU offload, vLLM STORAGE) belong to other systems — KVBM offload arrives
-    // via its own source — so they must not be tracked as G1 here.
+    // Non-local events (REMOTE / unknown locality), native lower-tier media
+    // (CPU offload, vLLM STORAGE), and unrecognized media (fail-closed) belong
+    // to other systems — KVBM offload arrives via its own source — so they must
+    // not be tracked as G1 here.
     if matches!(event.locality(), Some(Locality::Remote | Locality::Unknown))
         || event
             .medium()
-            .and_then(StorageTier::from_kv_medium)
-            .is_some_and(|tier| !tier.is_gpu())
+            .is_some_and(|m| StorageTier::from_kv_medium(m) != Some(StorageTier::Device))
     {
         return;
     }
@@ -190,7 +197,7 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             }
         }
 
-        RawKvEvent::AllBlocksCleared => {
+        RawKvEvent::AllBlocksCleared { .. } => {
             tracker.handle_clear_all();
         }
 
@@ -219,12 +226,13 @@ mod tests {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality,
+            source_kind: None,
         }
     }
 
     /// G1-only ingress contract: only local device (G1) events reach the
-    /// tracker. Native lower-tier media (vLLM STORAGE, CPU offload) and non-local
-    /// (REMOTE / unknown locality) events are dropped.
+    /// tracker. Native lower-tier media (vLLM STORAGE, CPU offload), unrecognized
+    /// media (FS), and non-local (REMOTE / unknown locality) events are dropped.
     #[test]
     fn process_event_tracks_only_g1_device_events() {
         let mut tracker = Tracker::new(None);
@@ -237,6 +245,11 @@ mod tests {
         process_event(
             &mut tracker,
             stored_event(Some("CPU"), None),
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("FS"), None),
             EventSource::Vllm,
         );
         process_event(

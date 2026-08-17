@@ -884,6 +884,7 @@ mod tests {
         let expected = dynamo_protocols::types::ChatCompletionTokenLogprob {
             token: "token_id:100".to_string(),
             logprob: -9999.0,
+            token_id: None,
             bytes: Some(b"token_id:100".to_vec()),
             top_logprobs: vec![
                 dynamo_protocols::types::TopLogprobs {

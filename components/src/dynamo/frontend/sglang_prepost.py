@@ -110,6 +110,7 @@ _SGLANG_PARSER_NAME_ALIASES = {
     "minimax_m3_nom": "minimax-m3",
     "minimax-m3-nom": "minimax-m3",
     "kimi-k3": "kimi_k3",
+    "gemma-4": "gemma4",
 }
 
 
@@ -598,6 +599,17 @@ def build_tool_call_guided_decoding(
                 parallel_tool_calls=parallel_tool_calls,
             ),
         )
+    # TODO: this applies a structural-tag constraint for tool_choice="auto"
+    # whenever a tool-call parser is configured, and reads NONE of
+    # structural_tag_mode / structural_tag_scope / structural_tag_schema. Those
+    # knobs are accepted on the CLI and published into the model card by
+    # sglang/register.py, so an operator setting the mode to "off" still gets a
+    # constraint on this path. prepost.py requires structural_tag_mode == "on"
+    # (_should_build_tool_call_guidance) and preprocessor/structural_tag.rs
+    # requires StructuralTagMode != Off, so at the default mode ("off") the same
+    # request is unconstrained on both of those paths and constrained here.
+    # Also unlike them, "auto" is never gated on scope/strict, so this behaves as
+    # scope="always" with no way to narrow it.
     elif tool_call_parser_name:
         tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
         parser = FunctionCallParser(
@@ -819,6 +831,18 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
+    # TODO: response_format wins here even when tool_choice is "required" or names
+    # a function, so a request that demanded a tool call can come back with none
+    # -- the tool constraint is dropped and only logged. The other two paths do
+    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
+    # and keeps the tool constraint, and prepost.py does the same after narrowing
+    # its conflict check. response_format is scoped by the OpenAI spec to the
+    # message the model returns to the user, not to tool calls, so the tool
+    # constraint is the one that must survive.
+    #
+    # This path also never reads the legacy guided_json / guided_regex /
+    # guided_grammar / guided_choice fields at all, so those are dropped silently
+    # while both other paths honor them (and reject them against a forced choice).
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
@@ -979,6 +1003,8 @@ class SglangStreamingPostProcessor:
         # incomplete byte-fallback sequence.
         self._decode_context_ids = list((prompt_token_ids or [])[-5:])
         self._pending_decode_ids: list[int] = []
+        self._logprob_context_ids: list[int] = []
+        self._pending_logprobs_content: list[dict[str, Any]] = []
         self._has_emitted_role: bool = False
         # Tool call accumulation.  SGLang's streaming parser returns
         # deltas (name in one chunk, argument fragments across subsequent
@@ -1044,6 +1070,108 @@ class SglangStreamingPostProcessor:
         self._pending_decode_ids = []
         return delta_text
 
+    def _build_openai_logprobs(
+        self,
+        log_probs: list[float],
+        top_logprobs: list[list[dict[str, Any]]] | None,
+        token_ids: list[int],
+    ) -> dict[str, Any] | None:
+        if len(log_probs) != len(token_ids):
+            return None
+
+        content: list[dict[str, Any]] = []
+        for index, (token_id, logprob) in enumerate(zip(token_ids, log_probs)):
+            context_token_ids = (self._logprob_context_ids + token_ids[:index])[-4:]
+            token = self._decode_logprob_token(token_id, None, context_token_ids)
+            candidates = top_logprobs[index] if top_logprobs else []
+            openai_top_logprobs = []
+            for candidate in candidates:
+                candidate_token = self._decode_logprob_token(
+                    candidate.get("token_id"),
+                    candidate.get("token"),
+                    context_token_ids,
+                )
+                candidate_bytes = candidate.get("bytes")
+                if candidate_bytes is None:
+                    candidate_bytes = (
+                        list(candidate_token.encode("utf-8"))
+                        if candidate_token
+                        else None
+                    )
+                openai_top_logprobs.append(
+                    {
+                        "token": candidate_token,
+                        "logprob": float(candidate["logprob"]),
+                        "bytes": candidate_bytes,
+                    }
+                )
+            content.append(
+                {
+                    "token": token,
+                    "logprob": float(logprob),
+                    "bytes": list(token.encode("utf-8")) if token else None,
+                    "top_logprobs": openai_top_logprobs,
+                }
+            )
+
+        return {"content": content, "refusal": None} if content else None
+
+    def _decode_logprob_token(
+        self,
+        token_id: int | None,
+        token: str | None,
+        context_token_ids: list[int],
+    ) -> str:
+        if token is None:
+            if token_id is None:
+                return ""
+            token = self.tokenizer.decode([token_id], skip_special_tokens=False)
+
+        if not token.endswith("\ufffd") or token_id is None:
+            return token
+
+        for context_size in range(1, min(len(context_token_ids), 4) + 1):
+            context = context_token_ids[-context_size:]
+            decoded = self.tokenizer.decode(
+                context + [token_id], skip_special_tokens=False
+            )
+            if decoded.endswith("\ufffd"):
+                continue
+
+            clean_end = len(context)
+            for context_index in range(len(context) - 1, -1, -1):
+                context_token = self.tokenizer.decode(
+                    [context[context_index]], skip_special_tokens=False
+                )
+                if context_token.endswith("\ufffd"):
+                    clean_end = context_index
+                else:
+                    break
+
+            clean_prefix = (
+                self.tokenizer.decode(context[:clean_end], skip_special_tokens=False)
+                if clean_end
+                else ""
+            )
+            if decoded.startswith(clean_prefix):
+                return decoded[len(clean_prefix) :]
+
+            common_prefix_length = 0
+            for prefix_char, decoded_char in zip(clean_prefix, decoded):
+                if prefix_char != decoded_char:
+                    break
+                common_prefix_length += 1
+            return decoded[common_prefix_length:]
+
+        return ""
+
+    def _take_pending_logprobs(self) -> dict[str, Any] | None:
+        if not self._pending_logprobs_content:
+            return None
+        content = self._pending_logprobs_content
+        self._pending_logprobs_content = []
+        return {"content": content, "refusal": None}
+
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
     ) -> tuple[str | None, str]:
@@ -1106,14 +1234,30 @@ class SglangStreamingPostProcessor:
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
+        log_probs = engine_response.get("log_probs")
+        top_logprobs = engine_response.get("top_logprobs")
         if finish_reason is not None:
+            raw_token_count = len(token_ids)
             token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
+            retained_token_count = len(token_ids)
+            if log_probs is not None and len(log_probs) == raw_token_count:
+                log_probs = log_probs[:retained_token_count]
+            if top_logprobs is not None and len(top_logprobs) == raw_token_count:
+                top_logprobs = top_logprobs[:retained_token_count]
 
         delta_text = (
             self._incremental_decode(token_ids, flush=finish_reason is not None)
             if token_ids or finish_reason is not None
             else ""
         )
+        openai_logprobs = None
+        if log_probs is not None:
+            openai_logprobs = self._build_openai_logprobs(
+                log_probs, top_logprobs, token_ids
+            )
+            if openai_logprobs is not None:
+                self._pending_logprobs_content.extend(openai_logprobs["content"])
+        self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
 
         if self._fast_plain_text:
             if delta_text:
@@ -1121,14 +1265,14 @@ class SglangStreamingPostProcessor:
                     "index": 0,
                     "delta": self._with_initial_role({"content": delta_text}),
                     "finish_reason": finish_reason,
-                    "logprobs": None,
+                    "logprobs": self._take_pending_logprobs(),
                 }
             elif finish_reason:
                 return {
                     "index": 0,
                     "delta": self._with_initial_role({}),
                     "finish_reason": finish_reason,
-                    "logprobs": None,
+                    "logprobs": self._take_pending_logprobs(),
                 }
             return None
 
@@ -1345,7 +1489,7 @@ class SglangStreamingPostProcessor:
                 "index": 0,
                 "delta": self._with_initial_role(delta),
                 "finish_reason": effective_finish,
-                "logprobs": None,
+                "logprobs": self._take_pending_logprobs(),
             }
 
         return None

@@ -452,6 +452,7 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     server_args = SimpleNamespace(
         kv_events_config='{"endpoint": "tcp://*:5557"}',
         page_size=16,
+        dcp_size=2,
         dp_size=8,
         enable_dp_attention=True,
         nnodes=2,
@@ -478,6 +479,7 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert len(publishers) == 4
     assert [call["dp_rank"] for call in calls] == [4, 5, 6, 7]
     assert {call["worker_id"] for call in calls} == {1234}
+    assert {call["kv_block_size"] for call in calls} == {32}
 
 
 def test_init_kv_event_publish_uses_effective_kv_event_setting():

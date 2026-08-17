@@ -209,7 +209,7 @@ the operator defaults it to
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 > [!NOTE]
@@ -241,7 +241,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 **Step 2: Apply the DGDR**
@@ -427,7 +427,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"  # dynamo-frontend for Dynamo < 1.1.0
 
   searchStrategy: rapid  # or thorough
   autoApply: true
@@ -491,7 +491,9 @@ Pass arguments to the SLA planner via the features section:
 ```yaml
 features:
   planner:
-    min_endpoint: 2                            # Minimum endpoints to maintain
+    # Minimum for agg, both roles in disagg, or the active single role when
+    # its role-specific field is unset
+    min_endpoint: 2
     load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
     throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
     load_predictor: arima                      # Load prediction method
@@ -761,4 +763,4 @@ Ensure image pull secrets are configured in your namespace for the container reg
 - [Profiler README](overview.md) — Quick overview and feature matrix
 - [Profiler Examples](profiler-examples.md) — Complete DGDR YAML examples
 - [Planner Guide](../planner/planner-guide.md) — PlannerConfig reference and scaling modes
-- [DGDR API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md) — Full DGDR specification
+- [DGDR API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx) — Full DGDR specification

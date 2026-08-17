@@ -29,17 +29,17 @@ dynamo:
   planner_build_image: python
   planner_build_image_tag: 3.12-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.12-v4.0.3
+  planner_runtime_image_tag: 3.12-v4.0.9
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@043085f9
+  planner_baseline_sbom: python@ec133be9
   python_version: "3.12"
   # Every stage must use the same uv: stages share one BuildKit uv cache mount,
   # and uv rejects cache entries written by a newer version.
   uv_version: "0.12.0"
 
-  nats_version: v2.10.28
-  etcd_version: v3.5.30
+  nats_version: v2.12.14
+  etcd_version: v3.5.33
 
   nixl_ref: v1.0.1
   nixl_ucx_ref: v1.21.0
@@ -89,7 +89,7 @@ vllm:
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
   flashinf_ref: v0.6.14
   vllm_omni_ref: "v0.26.0rc1"
-  nixl_ref: v1.3.1
+  nixl_ref: v1.3.2
   max_jobs: "10"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"

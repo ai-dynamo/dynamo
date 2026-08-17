@@ -371,6 +371,31 @@ impl DeltaAggregator {
                 // (tool_choice=required/named or structural-tag, gated by
                 // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
                 // keep the v1 finalize path.
+                // Extract the truncated tail BEFORE parsing so a second <tool_call>
+                // truncated after a complete first one is not silently dropped.
+                // Token strings come from the parser config so this stays in sync
+                // with any override, and matches the streaming path in preprocessor.rs.
+                let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
+                let glm47_truncated_tail = if parser == "glm47"
+                    && matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    ) {
+                    choice
+                        .text
+                        .rfind(glm47_cfg.tool_call_start.as_str())
+                        .and_then(|start| {
+                            let tail = &choice.text[start..];
+                            if !tail.contains(glm47_cfg.tool_call_end.as_str()) {
+                                Some(tail.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
+
                 let parse_result = if super::tool_parser_v2::enabled()
                     && super::tool_parser_v2::supports_family(parser)
                     && parsing_options.experimental_v2_batch_eligible
@@ -402,6 +427,34 @@ impl DeltaAggregator {
                     choice.text = content.unwrap_or_default();
                 } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
                     choice.text = content.unwrap_or_default();
+                } else if parser == "glm47"
+                    && matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    )
+                    && choice.text.contains(glm47_cfg.tool_call_start.as_str())
+                {
+                    tracing::warn!(
+                        parser,
+                        "glm47: partial <tool_call> returned as content on length finish"
+                    );
+                }
+
+                // Recover any tail saved before parsing — the parser drops a truncated
+                // second block silently when an earlier complete block was already parsed.
+                if let Some(tail) = glm47_truncated_tail
+                    && !choice.text.contains(&tail)
+                {
+                    tracing::warn!(
+                        parser,
+                        tail_bytes = tail.len(),
+                        "glm47: truncated later <tool_call> appended as content"
+                    );
+                    if choice.text.is_empty() {
+                        choice.text = tail;
+                    } else {
+                        choice.text.push_str(&tail);
+                    }
                 }
             }
         }
@@ -414,6 +467,38 @@ impl DeltaAggregator {
                     && calls.len() > 1
                 {
                     calls.truncate(1);
+                }
+            }
+        }
+
+        // for non-streaming `force_nonempty_content=true`
+        // requests, a reasoning-only turn leaves `content` empty because all
+        // output was split into `reasoning_content`. The chat template promised
+        // non-empty content, so surface the reasoning as content. Only when no
+        // content and no tool calls were produced; when content exists,
+        // reasoning stays in `reasoning_content`.
+        if parsing_options.move_reasoning_to_content_when_empty {
+            for choice in aggregator.choices.values_mut() {
+                let has_tool_calls = choice
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty());
+                // `content_parts` (multimodal) counts as content too — `From<DeltaChoice>`
+                // prefers parts over `text`, so moving reasoning into `text` here would be
+                // dropped. Only move when there is no content of either kind.
+                // Whitespace-only text counts as empty — matching vLLM's
+                // NemotronV3ReasoningParser (`not final_content.strip()`): a
+                // trailing newline after `</think>` must not block the move and
+                // leave semantically empty content.
+                if choice.text.trim().is_empty()
+                    && choice.content_parts.is_empty()
+                    && !has_tool_calls
+                    && choice
+                        .reasoning_content
+                        .as_deref()
+                        .is_some_and(|r| !r.trim().is_empty())
+                {
+                    choice.text = choice.reasoning_content.take().unwrap_or_default();
                 }
             }
         }
@@ -592,6 +677,7 @@ mod tests {
                 content: Some(vec![dynamo_protocols::types::ChatCompletionTokenLogprob {
                     token: token.clone(),
                     logprob: lp,
+                    token_id: None,
                     bytes: token_to_utf8_bytes(&token),
                     top_logprobs: vec![],
                 }]),
@@ -627,6 +713,184 @@ mod tests {
             comment: None,
             error: None,
         }
+    }
+
+    /// Build a stream delta with `reasoning_content` set and optional (possibly
+    /// empty) text content — mirrors what the reasoning parser emits after
+    /// splitting think tags. Used by the force_nonempty_content test.
+    fn create_reasoning_delta(
+        index: u32,
+        content: &str,
+        reasoning_content: &str,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        // ALLOW: function_call is deprecated
+        #[allow(deprecated)]
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: Some(ChatCompletionMessageContent::Text(content.to_string())),
+            function_call: None,
+            tool_calls: None,
+            role: Some(dynamo_protocols::types::Role::Assistant),
+            refusal: None,
+            reasoning_content: Some(reasoning_content.to_string()),
+        };
+        let choice = dynamo_protocols::types::ChatChoiceStream {
+            index,
+            delta,
+            finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                model: "nvidia/nvidia-nemotron-3-ultra".to_string(),
+                created: 1234567890,
+                service_tier: None,
+                usage: None,
+                system_fingerprint: None,
+                choices: vec![choice],
+                object: "chat.completion".to_string(),
+            },
+            nvext: None,
+            llm_metrics: None,
+        };
+        Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    /// with Nemotron `force_nonempty_content=true`, a non-streaming
+    /// reasoning-only turn must surface its reasoning as `content` (the chat
+    /// template promised non-empty content), but only when no content was
+    /// generated. Gated by `ParsingOptions::move_reasoning_to_content_when_empty`.
+    #[tokio::test]
+    async fn test_move_reasoning_to_content_when_empty() {
+        let reasoning_only = || {
+            Box::pin(stream::iter(vec![create_reasoning_delta(
+                0,
+                "",
+                "Let me think.",
+            )]))
+        };
+
+        // Repro: without the flag, a reasoning-only turn leaves content empty
+        // (None) even though force_nonempty_content promised non-empty content.
+        let resp = DeltaAggregator::apply(reasoning_only(), ParsingOptions::default())
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert!(
+            msg.content.is_none(),
+            "repro: content empty without the flag"
+        );
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Let me think."));
+
+        // Fixed: with the flag, reasoning is moved into content and cleared.
+        let opts = ParsingOptions::default().with_move_reasoning_to_content_when_empty(true);
+        let resp = DeltaAggregator::apply(reasoning_only(), opts.clone())
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert_eq!(
+            msg.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Let me think.".to_string()),
+        );
+        assert_eq!(msg.reasoning_content, None);
+
+        // Whitespace-only content counts as empty (a trailing newline after
+        // `</think>` from the incremental parser) — matches vLLM's
+        // `not final_content.strip()` check; the move must still fire.
+        let whitespace_content = Box::pin(stream::iter(vec![create_reasoning_delta(
+            0,
+            "\n",
+            "Let me think.",
+        )]));
+        let resp = DeltaAggregator::apply(whitespace_content, opts.clone())
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert_eq!(
+            msg.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Let me think.".to_string()),
+        );
+        assert_eq!(msg.reasoning_content, None);
+
+        // When content WAS generated, reasoning stays in reasoning_content.
+        let with_content = Box::pin(stream::iter(vec![create_reasoning_delta(
+            0,
+            "The answer is 42.",
+            "Let me think.",
+        )]));
+        let resp = DeltaAggregator::apply(with_content, opts).await.unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert_eq!(
+            msg.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("The answer is 42.".to_string()),
+        );
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Let me think."));
+    }
+
+    /// Multimodal content lives in `content_parts`, and `From<DeltaChoice>` prefers
+    /// parts over `text` — so reasoning must NOT be moved when parts are present
+    /// (it would be silently dropped). Guards the `content_parts` half of the
+    /// no-content check.
+    #[tokio::test]
+    async fn test_move_reasoning_skips_when_content_parts_present() {
+        #[allow(deprecated)]
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: Some(ChatCompletionMessageContent::Parts(vec![
+                dynamo_protocols::types::ChatCompletionResponseContentPart::Text(
+                    dynamo_protocols::types::ChatCompletionResponseContentPartText {
+                        text: "an image".to_string(),
+                    },
+                ),
+            ])),
+            function_call: None,
+            tool_calls: None,
+            role: Some(dynamo_protocols::types::Role::Assistant),
+            refusal: None,
+            reasoning_content: Some("thinking".to_string()),
+        };
+        let choice = dynamo_protocols::types::ChatChoiceStream {
+            index: 0,
+            delta,
+            finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                model: "m".to_string(),
+                created: 1,
+                service_tier: None,
+                usage: None,
+                system_fingerprint: None,
+                choices: vec![choice],
+                object: "chat.completion".to_string(),
+            },
+            nvext: None,
+            llm_metrics: None,
+        };
+        let annotated = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let opts = ParsingOptions::default().with_move_reasoning_to_content_when_empty(true);
+        let resp = DeltaAggregator::apply(Box::pin(stream::iter(vec![annotated])), opts)
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert!(matches!(
+            msg.content.as_ref().unwrap(),
+            ChatCompletionMessageContent::Parts(_)
+        ));
+        assert_eq!(msg.reasoning_content.as_deref(), Some("thinking"));
     }
 
     /// Build a stream delta carrying a raw list of tool-call chunks (no content).
@@ -1808,6 +2072,121 @@ mod tests {
             "content key must be serialized as null when absent"
         );
         assert!(json.get("reasoning_content").is_some());
+    }
+
+    // --- glm47 truncation recovery tests ---
+    //
+    // Reproduces the drop confirmed on dynamo-parsers 5.1.3:
+    //   in:  <tool_call>get_weather<arg_key>city</arg_key><arg_value>Bos   (finish_reason=length)
+    //   out: finish=length  tool_calls=None  content=""
+    // The parser sees an incomplete XML block and returns no tool call and no
+    // content, so the client gets an empty turn. The recovery path appends the
+    // raw partial markup as content so the caller can at least surface it.
+
+    #[tokio::test]
+    async fn test_glm47_single_truncated_call_recovered_as_content() {
+        let text = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Bos";
+        let delta = create_test_delta(
+            0,
+            text,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Length),
+            None,
+            None,
+        );
+        let stream = Box::pin(stream::iter(vec![delta]));
+        let result =
+            DeltaAggregator::apply(stream, ParsingOptions::new(Some("glm47".to_string()), None))
+                .await
+                .unwrap();
+
+        let choice = &result.inner.choices[0];
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+        assert!(
+            choice.message.tool_calls.is_none(),
+            "incomplete call must not produce a structured tool_call"
+        );
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(text.to_string())),
+            "truncated markup must be returned as raw content"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_glm47_complete_call_then_truncated_second_recovered() {
+        // First call complete, second truncated mid-argument.
+        let text = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_time<arg_key>tz</arg_key><arg_value>US/E";
+        let delta = create_test_delta(
+            0,
+            text,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Length),
+            None,
+            None,
+        );
+        let stream = Box::pin(stream::iter(vec![delta]));
+        let result =
+            DeltaAggregator::apply(stream, ParsingOptions::new(Some("glm47".to_string()), None))
+                .await
+                .unwrap();
+
+        let choice = &result.inner.choices[0];
+        // First complete call is parsed into tool_calls.
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "first complete call must be structured"
+        );
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        // Truncated second block is in content, not dropped.
+        let content = choice
+            .message
+            .content
+            .as_ref()
+            .expect("truncated second call must be in content");
+        let ChatCompletionMessageContent::Text(t) = content else {
+            panic!("content must be Text")
+        };
+        assert!(
+            t.contains("<tool_call>get_time"),
+            "truncated second call markup must be in content"
+        );
+        assert!(!t.contains("</tool_call>"), "must not contain closing tag");
+    }
+
+    #[tokio::test]
+    async fn test_glm47_complete_call_stop_no_recovery() {
+        // Complete call with finish_reason=Stop: no recovery needed.
+        let text = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Boston</arg_value></tool_call>";
+        let delta = create_test_delta(
+            0,
+            text,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        let stream = Box::pin(stream::iter(vec![delta]));
+        let result =
+            DeltaAggregator::apply(stream, ParsingOptions::new(Some("glm47".to_string()), None))
+                .await
+                .unwrap();
+
+        let choice = &result.inner.choices[0];
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+        assert!(choice.message.tool_calls.is_some());
+        assert!(
+            choice.message.content.is_none(),
+            "no content for a clean complete call"
+        );
     }
 
     #[tokio::test]
