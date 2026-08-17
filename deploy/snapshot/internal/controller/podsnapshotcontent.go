@@ -25,6 +25,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
+	snapshottypes "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -70,7 +71,16 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 	if content.Spec.Source.NodeName != w.config.NodeName {
 		return
 	}
-	if isContentTerminal(content) {
+	if nvidiacomv1alpha1.IsPodSnapshotContentSucceeded(content) {
+		if content.Status.Source != nil {
+			return
+		}
+		if err := w.publishReadyCheckpointSource(ctx, content); err != nil {
+			logger.Error(err, "Failed to publish ready checkpoint source")
+		}
+		return
+	}
+	if nvidiacomv1alpha1.IsPodSnapshotContentFailed(content) {
 		return
 	}
 
@@ -101,6 +111,53 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 	if err := w.labelCaptureEligible(ctx, pod); err != nil {
 		logger.Error(err, "Failed to mark source pod capture-eligible", "pod", pod.Name)
 	}
+}
+
+func (w *NodeController) publishReadyCheckpointSource(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent) error {
+	pod := &corev1.Pod{}
+	key := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: content.Spec.Source.PodRef.Name}
+	if err := w.client.Get(ctx, key, pod); err != nil {
+		return fmt.Errorf("get source pod %q: %w", key.String(), err)
+	}
+	if content.Spec.Source.PodRef.UID != "" && pod.UID != content.Spec.Source.PodRef.UID {
+		return fmt.Errorf("source pod %q UID %q does not match work order UID %q", pod.Name, pod.UID, content.Spec.Source.PodRef.UID)
+	}
+
+	checkpointID := strings.TrimSpace(pod.Labels[snapshotprotocol.CheckpointIDLabel])
+
+	hostPID := 0
+	if strings.TrimSpace(w.config.Storage.AccessMode) == snapshottypes.StorageAccessModePodMount {
+		containerName, err := singleTargetContainer(content)
+		if err != nil {
+			return err
+		}
+		containerID := containerIDForName(pod, containerName)
+		if containerID == "" {
+			return fmt.Errorf("could not resolve container %q ID", containerName)
+		}
+		hostPID, _, err = w.runtime.ResolveContainer(ctx, containerID)
+		if err != nil {
+			return fmt.Errorf("resolve container %q: %w", containerName, err)
+		}
+	}
+
+	loc, err := w.checkpointLocationsFromPod(pod, checkpointID, hostPID)
+	if err != nil {
+		return err
+	}
+	source, err := checkpointSourceAtPath(loc.HostPath)
+	if err != nil {
+		return err
+	}
+	if source == nil {
+		return nil
+	}
+	patch := client.MergeFrom(content.DeepCopy())
+	content.Status.Source = source
+	if err := w.client.Status().Patch(ctx, content, patch); err != nil {
+		return fmt.Errorf("patch PodSnapshotContent %q source: %w", content.Name, err)
+	}
+	return nil
 }
 
 // singleTargetContainer returns the one capture-target container from the work order. The CRD
@@ -215,7 +272,10 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	// status write did not. The artifact dir exists only after the executor's atomic rename,
 	// so its presence means a completed dump.
 	if artifactPresent(loc.HostPath) {
-		return w.setSnapshotContentSucceeded(ctx, content)
+		if err := w.setSnapshotContentSucceeded(ctx, content, loc.HostPath); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(id)}
@@ -292,7 +352,7 @@ func (w *NodeController) runCheckpoint(
 		return
 	}
 
-	if err := w.setSnapshotContentSucceeded(ctx, content); err != nil {
+	if err := w.setSnapshotContentSucceeded(ctx, content, loc.HostPath); err != nil {
 		logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 	}
 }
@@ -407,9 +467,8 @@ func (w *NodeController) removeCaptureEligibleLabel(ctx context.Context, pod *co
 	}
 }
 
-// setSnapshotContentSucceeded patches status with the Ready condition. On any error the caller
-// should surface it so the next reconcile iteration retries.
-func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent) error {
+// setSnapshotContentSucceeded patches Ready and available source facts together.
+func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent, checkpointPath string) error {
 	patch := client.MergeFrom(content.DeepCopy())
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    nvidiacomv1alpha1.PodSnapshotConditionReady,
@@ -417,7 +476,54 @@ func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, conten
 		Reason:  "Captured",
 		Message: "Checkpoint captured and verified",
 	})
+	if checkpointPath != "" {
+		source, err := checkpointSourceAtPath(checkpointPath)
+		if err != nil {
+			logr.FromContextOrDiscard(ctx).Error(err, "Failed to read checkpoint source", "content", content.Name)
+		} else {
+			content.Status.Source = source
+		}
+	}
 	return w.client.Status().Patch(ctx, content, patch)
+}
+
+func checkpointSourceAtPath(checkpointPath string) (*nvidiacomv1alpha1.CheckpointSource, error) {
+	manifest, err := snapshottypes.ReadManifest(checkpointPath)
+	if err != nil {
+		return nil, fmt.Errorf("read checkpoint source: %w", err)
+	}
+	return checkpointSourceFromManifest(manifest), nil
+}
+
+func checkpointSourceFromManifest(manifest *snapshottypes.CheckpointManifest) *nvidiacomv1alpha1.CheckpointSource {
+	source := &nvidiacomv1alpha1.CheckpointSource{}
+
+	gpus := make([]nvidiacomv1alpha1.CheckpointSourceGPU, 0, len(manifest.CUDA.SourceGPUUUIDs))
+	for _, uuid := range manifest.CUDA.SourceGPUUUIDs {
+		if uuid != "" {
+			gpus = append(gpus, nvidiacomv1alpha1.CheckpointSourceGPU{UUID: uuid})
+		}
+	}
+	if len(gpus) > 0 {
+		gpuCount := int32(len(gpus))
+		source.Hardware = &nvidiacomv1alpha1.CheckpointSourceHardware{
+			GPUCount: &gpuCount,
+			GPUs:     gpus,
+		}
+	}
+
+	source.Node = manifest.K8s.SourceNode
+
+	if manifest.K8s.Mounts != nil {
+		source.Mounts = manifest.K8s.Mounts
+		mountCount := int32(len(source.Mounts))
+		source.MountCount = &mountCount
+	}
+
+	if source.Hardware == nil && source.Node == "" && source.MountCount == nil {
+		return nil
+	}
+	return source
 }
 
 // setSnapshotContentFailed patches status with the Failed condition. Uses optimistic locking so
@@ -450,6 +556,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		PodName:            params.Pod.Name,
 		PodNamespace:       params.Pod.Namespace,
 		PodIP:              params.Pod.Status.PodIP,
+		SourceMounts:       sourceMountsForContainer(params.Pod, params.ContainerName),
 		Clientset:          w.clientset,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
@@ -471,6 +578,104 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		return fmt.Errorf("write snapshot-complete sentinel: %w", err)
 	}
 	return nil
+}
+
+func sourceMountsForContainer(pod *corev1.Pod, containerName string) []nvidiacomv1alpha1.CheckpointSourceMount {
+	volumes := make(map[string]corev1.Volume, len(pod.Spec.Volumes))
+	for _, volume := range pod.Spec.Volumes {
+		volumes[volume.Name] = volume
+	}
+
+	for _, container := range pod.Spec.Containers {
+		if container.Name != containerName {
+			continue
+		}
+
+		mounts := make([]nvidiacomv1alpha1.CheckpointSourceMount, 0, len(container.VolumeMounts))
+		for _, mount := range container.VolumeMounts {
+			volume, found := volumes[mount.Name]
+			if sourceMountIsManaged(mount, volume, found) {
+				continue
+			}
+			volumeSource := "Volume/" + mount.Name
+			if found {
+				volumeSource = describeVolumeSource(volume)
+			}
+			mounts = append(mounts, nvidiacomv1alpha1.CheckpointSourceMount{
+				Path:         mount.MountPath,
+				Volume:       mount.Name,
+				VolumeSource: volumeSource,
+			})
+		}
+		return mounts
+	}
+
+	return nil
+}
+
+func sourceMountIsManaged(mount corev1.VolumeMount, volume corev1.Volume, found bool) bool {
+	if mount.Name == snapshotprotocol.SnapshotControlVolumeName || mount.Name == snapshotprotocol.CheckpointVolumeName {
+		return true
+	}
+	if !found || mount.MountPath != "/var/run/secrets/kubernetes.io/serviceaccount" || volume.Projected == nil ||
+		!strings.HasPrefix(mount.Name, "kube-api-access-") {
+		return false
+	}
+
+	var token, rootCA, namespace bool
+	for _, source := range volume.Projected.Sources {
+		switch {
+		case source.ServiceAccountToken != nil:
+			token = source.ServiceAccountToken.Path == "token"
+		case source.ConfigMap != nil:
+			rootCA = source.ConfigMap.Name == "kube-root-ca.crt" &&
+				len(source.ConfigMap.Items) == 1 &&
+				source.ConfigMap.Items[0].Key == "ca.crt" &&
+				source.ConfigMap.Items[0].Path == "ca.crt"
+		case source.DownwardAPI != nil:
+			namespace = len(source.DownwardAPI.Items) == 1 &&
+				source.DownwardAPI.Items[0].Path == "namespace" &&
+				source.DownwardAPI.Items[0].FieldRef != nil &&
+				source.DownwardAPI.Items[0].FieldRef.FieldPath == "metadata.namespace"
+		default:
+			return false
+		}
+	}
+	return len(volume.Projected.Sources) == 3 && token && rootCA && namespace
+}
+
+func describeVolumeSource(volume corev1.Volume) string {
+	switch {
+	case volume.PersistentVolumeClaim != nil:
+		return namedVolumeSource("PersistentVolumeClaim", volume.PersistentVolumeClaim.ClaimName)
+	case volume.ConfigMap != nil:
+		return namedVolumeSource("ConfigMap", volume.ConfigMap.Name)
+	case volume.Secret != nil:
+		return namedVolumeSource("Secret", volume.Secret.SecretName)
+	case volume.HostPath != nil:
+		return namedVolumeSource("HostPath", volume.HostPath.Path)
+	case volume.CSI != nil:
+		return namedVolumeSource("CSI", volume.CSI.Driver)
+	case volume.NFS != nil:
+		return namedVolumeSource("NFS", volume.NFS.Server)
+	case volume.EmptyDir != nil:
+		return "EmptyDir"
+	case volume.Projected != nil:
+		return "Projected"
+	case volume.DownwardAPI != nil:
+		return "DownwardAPI"
+	case volume.Ephemeral != nil:
+		return "Ephemeral"
+	default:
+		return "Volume/" + volume.Name
+	}
+}
+
+func namedVolumeSource(kind, name string) string {
+	if name == "" {
+		return kind
+	}
+	return kind + "/" + name
 }
 
 // killCheckpointProcess signals the CUDA-locked process so it does not hang after a failed dump.

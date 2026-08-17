@@ -328,7 +328,6 @@ func TestReconcileSourcePod_GuardSurvivesWorkOrderRecreation(t *testing.T) {
 func TestReconcileSourcePod_InvalidCheckpointIDFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod("x")
-	// Replace the valid ID with one that contains an uppercase letter — not a valid DNS-1123 label.
 	pod.Labels[snapshotprotocol.CheckpointIDLabel] = "Bad_ID"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
