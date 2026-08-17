@@ -104,36 +104,6 @@ fn setup_kv_publishers(
     Ok(publishers)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn zmq_source_preserves_image_token_id() {
-        let config = zmq_source_config(
-            "tcp://127.0.0.1:5557".to_string(),
-            "events".to_string(),
-            Some(151655),
-        );
-        assert!(matches!(
-            config,
-            KvEventSourceConfig::Zmq {
-                image_token_id: Some(151655),
-                ..
-            }
-        ));
-
-        let config = zmq_source_config(String::new(), String::new(), None);
-        assert!(matches!(
-            config,
-            KvEventSourceConfig::Zmq {
-                image_token_id: None,
-                ..
-            }
-        ));
-    }
-}
-
 /// Build one `WorkerMetricsPublisher` per declared dp_rank. Each owns a
 /// NATS endpoint advertising the rank's `kv_used_blocks` signal to the
 /// KV router. Constructed eagerly so the `SnapshotPublisher` can route
@@ -217,4 +187,34 @@ pub(crate) async fn setup_publishers(
         kv_publishers,
         snapshot_publisher,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zmq_source_preserves_image_token_id() {
+        let config = zmq_source_config(
+            "tcp://127.0.0.1:5557".to_string(),
+            "events".to_string(),
+            Some(151655),
+        );
+        assert!(matches!(
+            config,
+            KvEventSourceConfig::Zmq {
+                image_token_id: Some(151655),
+                ..
+            }
+        ));
+
+        let config = zmq_source_config(String::new(), String::new(), None);
+        assert!(matches!(
+            config,
+            KvEventSourceConfig::Zmq {
+                image_token_id: None,
+                ..
+            }
+        ));
+    }
 }
