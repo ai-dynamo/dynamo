@@ -211,11 +211,11 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.setSnapshotContentFailed(ctx, content, "ContainerChanged", err)
 	}
 
-	// Resume: a present artifact with unwritten status means a prior dump finished but the
-	// status write did not. The artifact dir exists only after the executor's atomic rename,
-	// so its presence means a completed dump.
+	// Resume: a present artifact with unwritten status means a prior dump finished before the
+	// Ready-and-release sequence completed. The artifact dir exists only after the executor's
+	// atomic rename, so its presence means a completed dump.
 	if artifactPresent(loc.HostPath) {
-		return w.setSnapshotContentSucceeded(ctx, content)
+		return w.markCheckpointReadyAndRelease(ctx, content, containerPID)
 	}
 
 	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(id)}
@@ -232,9 +232,9 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	return nil
 }
 
-// runCheckpoint executes the dump under a renewed lease and writes the terminal status.
-// The container ID, host PID, and resolved locations are pre-resolved by the reconciler so
-// the dump does not re-resolve them.
+// runCheckpoint executes the dump under a renewed lease, writes the Ready status, then releases
+// the target process. The container ID, host PID, and resolved locations are pre-resolved by the
+// reconciler so the dump does not re-resolve them.
 func (w *NodeController) runCheckpoint(
 	ctx context.Context,
 	content *nvidiacomv1alpha1.PodSnapshotContent,
@@ -292,8 +292,8 @@ func (w *NodeController) runCheckpoint(
 		return
 	}
 
-	if err := w.setSnapshotContentSucceeded(ctx, content); err != nil {
-		logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
+	if err := w.markCheckpointReadyAndRelease(ctx, content, containerPID); err != nil {
+		return
 	}
 }
 
@@ -420,6 +420,23 @@ func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, conten
 	return w.client.Status().Patch(ctx, content, patch)
 }
 
+// markCheckpointReadyAndRelease makes Ready durable before allowing the target process to exit.
+// A failed Ready patch leaves the target blocked. A failed release kills it so the Job cannot
+// report success with an unreleased target.
+func (w *NodeController) markCheckpointReadyAndRelease(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent, containerPID int) error {
+	logger := logr.FromContextOrDiscard(ctx)
+	if err := w.setSnapshotContentSucceeded(ctx, content); err != nil {
+		logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
+		return err
+	}
+	if err := w.releaseCheckpointFn(containerPID); err != nil {
+		logger.Error(err, "Failed to write snapshot-complete sentinel", "content", content.Name)
+		w.killCheckpointProcess(logger, containerPID, "checkpoint sentinel failed")
+		return fmt.Errorf("write snapshot-complete sentinel: %w", err)
+	}
+	return nil
+}
+
 // setSnapshotContentFailed patches status with the Failed condition. Uses optimistic locking so
 // that a concurrent failure write wins and this patch is rejected rather than overwriting it.
 func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent, reason string, cause error) error {
@@ -434,9 +451,9 @@ func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *
 }
 
 // executorCheckpoint is the production checkpointFn. The reconciler has already resolved the
-// container ID and host PID. It runs executor.Checkpoint to the destination, verifies the
-// artifact directory, and writes the snapshot-complete sentinel. On dump or verification
-// failure it SIGKILLs the CUDA-locked process before returning the error.
+// container ID and host PID. It runs executor.Checkpoint to the destination and verifies the
+// artifact directory. On dump or verification failure it SIGKILLs the CUDA-locked process before
+// returning the error.
 func (w *NodeController) executorCheckpoint(ctx context.Context, params CheckpointParams) error {
 	log := logr.FromContextOrDiscard(ctx)
 
@@ -466,10 +483,6 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		return fmt.Errorf("verify checkpoint path %s: not a directory", params.HostPath)
 	}
 
-	if err := snapshotruntime.WriteControlSentinel(params.ContainerPID, snapshotprotocol.SnapshotCompleteFile); err != nil {
-		w.killCheckpointProcess(log, params.ContainerPID, "checkpoint sentinel failed")
-		return fmt.Errorf("write snapshot-complete sentinel: %w", err)
-	}
 	return nil
 }
 
