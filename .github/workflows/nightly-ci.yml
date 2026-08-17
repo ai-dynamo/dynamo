@@ -718,7 +718,7 @@ jobs:
       dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-g5-12x-test-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -798,7 +798,7 @@ jobs:
       dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-g5-12x-test-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -874,7 +874,7 @@ jobs:
       dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-g5-12x-test-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
