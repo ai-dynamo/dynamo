@@ -592,6 +592,7 @@ mod tests {
     use crate::protocols::common::{
         OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
     };
+    use crate::protocols::openai::validate::MAX_STOP_SEQUENCES;
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
 
@@ -777,6 +778,65 @@ mod tests {
             serde_json::from_value(invalid_stop_token_ids).expect("Failed to deserialize request");
         let err = ValidateRequest::validate(&request).expect_err("invalid stop_token_ids");
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn test_stop_extraction_uses_shared_limit() {
+        let stop_sequences = (0..MAX_STOP_SEQUENCES)
+            .map(|index| format!("stop-{index}"))
+            .collect::<Vec<_>>();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": stop_sequences
+        }))
+        .expect("Failed to deserialize request");
+        request
+            .extract_stop_conditions()
+            .expect("32 stop sequences must be accepted");
+
+        let stop_sequences = (0..=MAX_STOP_SEQUENCES)
+            .map(|index| format!("stop-{index}"))
+            .collect::<Vec<_>>();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": stop_sequences
+        }))
+        .expect("Failed to deserialize request");
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("33 stop sequences must be rejected");
+        assert_eq!(
+            err.to_string(),
+            "Maximum of 32 stop sequences allowed, got 33"
+        );
+
+        let stop_token_ids = (0..MAX_STOP_SEQUENCES as u32).collect::<Vec<_>>();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": stop_token_ids
+        }))
+        .expect("Failed to deserialize request");
+        request
+            .extract_stop_conditions()
+            .expect("32 stop token IDs must be accepted");
+
+        let stop_token_ids = (0..=MAX_STOP_SEQUENCES as u32).collect::<Vec<_>>();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": stop_token_ids
+        }))
+        .expect("Failed to deserialize request");
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("33 stop token IDs must be rejected");
+        assert_eq!(
+            err.to_string(),
+            "Maximum of 32 stop token IDs allowed, got 33"
+        );
     }
 
     #[test]

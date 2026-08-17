@@ -146,8 +146,15 @@ fn validate_no_unsupported_fields_with_ignore(
         anyhow::bail!("`cache_salt` must be a string");
     }
     if let Some(value) = unsupported_fields.get("stop_token_ids") {
-        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+        let token_ids = serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
             .map_err(|_| anyhow::anyhow!("`stop_token_ids` must be an array of token IDs"))?;
+        if token_ids.len() > MAX_STOP_SEQUENCES {
+            anyhow::bail!(
+                "Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                token_ids.len()
+            );
+        }
     }
     if let Some(value) = unsupported_fields.get("detokenize")
         && !value.is_boolean()
@@ -933,5 +940,20 @@ mod tests {
         let err =
             validate_no_unsupported_fields_with_ignore(&unsupported_fields, true).unwrap_err();
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_too_many_stop_token_ids() {
+        let token_ids: Vec<u32> = (0..=MAX_STOP_SEQUENCES as u32).collect();
+        let unsupported_fields = HashMap::from([("stop_token_ids".to_string(), json!(token_ids))]);
+
+        let err = validate_no_unsupported_fields(&unsupported_fields).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Maximum of {MAX_STOP_SEQUENCES} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES + 1
+            )
+        );
     }
 }
