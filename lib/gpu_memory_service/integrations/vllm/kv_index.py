@@ -402,6 +402,10 @@ def on_wake_up(engine_core) -> None:
         adopted = False
 
     mirror, reason, installed, live, trusted = None, "not_adopted", [], 0, 0
+    # vLLM's own index as we find it, BEFORE we touch anything. Sleep clears it,
+    # so this must be 0 -- replay is only doing real work if it rebuilds from
+    # nothing rather than riding on labels that survived in process memory.
+    pool_labeled_before = sum(1 for b in pool.blocks if b.block_hash is not None)
     if adopted:
         mirror, reason = MirrorFile.open_for_replay(
             path, identity=identity, num_blocks=num_blocks
@@ -422,6 +426,7 @@ def on_wake_up(engine_core) -> None:
         path,
         adopted=adopted,
         reason=reason,
+        pool_labeled_before=pool_labeled_before,
         live=live if adopted and mirror is not None else 0,
         trusted=trusted if adopted and mirror is not None else 0,
         installed=len(installed),
