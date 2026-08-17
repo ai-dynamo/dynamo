@@ -182,5 +182,3 @@ pub fn py_exception_to_error_type(py: Python<'_>, err: &PyErr) -> Option<(ErrorT
     }
     None
 }
-
-
