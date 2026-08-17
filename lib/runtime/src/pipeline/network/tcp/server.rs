@@ -46,9 +46,7 @@ use crate::pipeline::{
         tcp::StreamType,
     },
 };
-use crate::utils::ip_resolver::{
-    ResolvedHost, fallback_loopback, resolve_host_or_interface, resolve_local_ip,
-};
+use crate::utils::ip_resolver::{resolve_host_or_interface, resolve_local_host};
 use anyhow::{Context, Result, anyhow as error};
 
 pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
@@ -62,6 +60,8 @@ pub struct ServerOptions {
     pub port: u16,
 
     #[builder(default)]
+    /// IP literal, bracketed IPv6 literal, wildcard, or network interface name.
+    /// The field name is retained for source compatibility.
     pub interface: Option<String>,
 }
 
@@ -176,18 +176,9 @@ impl TcpStreamServer {
                 ))
             })?
         } else {
-            match resolve_local_ip(&resolver) {
-                Ok(address) => ResolvedHost::same_address(address),
-                Err(error) if error.is_no_usable_address() => {
-                    let loopback = fallback_loopback(&resolver);
-                    ResolvedHost::loopback_fallback(loopback)
-                }
-                Err(error) => {
-                    return Err(PipelineError::Generic(format!(
-                        "Failed to resolve local IP address: {error}"
-                    )));
-                }
-            }
+            resolve_local_host(&resolver).map_err(|error| {
+                PipelineError::Generic(format!("Failed to resolve local IP address: {error}"))
+            })?
         };
 
         if resolved_host.used_loopback_fallback() {
@@ -212,7 +203,7 @@ impl TcpStreamServer {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {error}"))
             })?;
         let advertised_address =
-            advertised_socket_address(resolved_host.advertise_ip(), local_address);
+            SocketAddr::new(resolved_host.advertise_ip(), local_address.port());
         let address = advertised_address.to_string();
 
         tracing::debug!(%local_address, %advertised_address, "tcp transport service started");
@@ -565,10 +556,6 @@ impl ResponseService for TcpStreamServer {
             recv_stream,
         }
     }
-}
-
-fn advertised_socket_address(advertise_ip: IpAddr, local_address: SocketAddr) -> SocketAddr {
-    SocketAddr::new(advertise_ip, local_address.port())
 }
 
 // Type aliases for boxed split halves used throughout the nested handlers below.
@@ -1208,21 +1195,12 @@ mod tests {
         connection_info.try_into().unwrap()
     }
 
-    #[test]
-    fn advertised_ipv6_socket_address_uses_brackets_and_bound_port() {
-        let bound_address = SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 41234);
-        let advertised =
-            advertised_socket_address(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), bound_address);
-
-        assert_eq!(advertised.to_string(), "[::1]:41234");
-    }
-
     #[tokio::test]
     async fn wildcard_bind_advertises_concrete_ipv4_with_bound_port() {
-        let resolver = StubResolver::new(
-            ProbeOutcome::Address("192.0.2.20".parse().unwrap()),
-            ProbeOutcome::Address("2001:db8::20".parse().unwrap()),
-        );
+        let mut resolver = StubResolver::not_found();
+        resolver
+            .interfaces
+            .push(("eth0", "192.0.2.20".parse().unwrap()));
         let options = ServerOptions::builder()
             .port(0)
             .interface(Some("0.0.0.0".to_string()))
@@ -1240,8 +1218,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires IPv6 loopback support"]
     async fn real_bracketed_ipv6_host_binds_and_registers() {
+        if let Err(error) = std::net::TcpListener::bind("[::1]:0") {
+            eprintln!("Skipping IPv6 loopback bind test: {error}");
+            return;
+        }
+
         let options = ServerOptions::builder()
             .port(0)
             .interface(Some("[::1]".to_string()))
@@ -1263,19 +1245,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tcp_server_combines_ipv4_and_ipv6_errors() {
-        let resolver = StubResolver::new(
-            ProbeOutcome::Strategy("IPv4 probe failed"),
-            ProbeOutcome::Platform("test-platform"),
-        );
+    async fn tcp_server_preserves_interface_enumeration_error() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interface_error = Some(ProbeOutcome::Platform("test-platform"));
         let options = ServerOptions::builder().port(0).build().unwrap();
         let error = TcpStreamServer::new_with_resolver(options, resolver)
             .await
             .err()
-            .expect("a resolver failure must not fall back to loopback");
+            .expect("an interface enumeration failure must be returned");
 
         let error = error.to_string();
-        assert!(error.contains("IPv4 probe failed"), "{error}");
+        assert!(
+            error.contains("failed to enumerate network interfaces"),
+            "{error}"
+        );
         assert!(error.contains("test-platform"), "{error}");
     }
 

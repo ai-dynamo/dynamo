@@ -5,13 +5,12 @@
 
 use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
 use std::{
-    fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::OnceLock,
 };
 
 const DEFAULT_LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
-static LOCAL_IP_FOR_ADVERTISE: OnceLock<String> = OnceLock::new();
+static LOCAL_IP_FOR_ADVERTISE: OnceLock<IpAddr> = OnceLock::new();
 
 /// IP address operations used by the runtime.
 ///
@@ -20,7 +19,10 @@ static LOCAL_IP_FOR_ADVERTISE: OnceLock<String> = OnceLock::new();
 pub trait IpResolver {
     fn local_ip(&self) -> Result<IpAddr, Error>;
     fn local_ipv6(&self) -> Result<IpAddr, Error>;
-    fn list_afinet_netifas(&self) -> Result<Vec<(String, IpAddr)>, Error>;
+
+    fn list_afinet_netifas(&self) -> Result<Vec<(String, IpAddr)>, Error> {
+        list_afinet_netifas()
+    }
 }
 
 /// The system IP resolver.
@@ -34,62 +36,10 @@ impl IpResolver for DefaultIpResolver {
     fn local_ipv6(&self) -> Result<IpAddr, Error> {
         local_ipv6()
     }
-
-    fn list_afinet_netifas(&self) -> Result<Vec<(String, IpAddr)>, Error> {
-        list_afinet_netifas()
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum ProbeDiagnostic {
-    NotFound,
-    Unusable(IpAddr),
-    Failed(Error),
-    UnexpectedFamily {
-        expected: &'static str,
-        actual: IpAddr,
-    },
-}
-
-impl ProbeDiagnostic {
-    fn is_no_address(&self) -> bool {
-        matches!(self, Self::NotFound | Self::Unusable(_))
-    }
-}
-
-impl fmt::Display for ProbeDiagnostic {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotFound => write!(formatter, "no address found"),
-            Self::Unusable(address) => write!(formatter, "unusable address {address}"),
-            Self::Failed(error) => write!(formatter, "{error}"),
-            Self::UnexpectedFamily { expected, actual } => {
-                write!(formatter, "expected {expected}, got {actual}")
-            }
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum IpResolutionError {
-    #[error("no usable local IP address found (IPv4: {ipv4}; IPv6: {ipv6})")]
-    NoUsableAddress {
-        ipv4: ProbeDiagnostic,
-        ipv6: ProbeDiagnostic,
-    },
-
-    #[error("local IP address probes failed (IPv4: {ipv4}; IPv6: {ipv6})")]
-    ProbeFailure {
-        ipv4: ProbeDiagnostic,
-        ipv6: ProbeDiagnostic,
-    },
-
-    #[error("{family} address probe failed: {diagnostic}")]
-    FamilyProbeFailure {
-        family: &'static str,
-        diagnostic: ProbeDiagnostic,
-    },
-
     #[error("failed to enumerate network interfaces: {0}")]
     InterfaceEnumeration(#[source] Error),
 
@@ -104,12 +54,6 @@ pub(crate) enum IpResolutionError {
 
     #[error("invalid IP literal: {0}")]
     InvalidLiteral(String),
-}
-
-impl IpResolutionError {
-    pub(crate) fn is_no_usable_address(&self) -> bool {
-        matches!(self, Self::NoUsableAddress { .. })
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,26 +93,94 @@ impl ResolvedHost {
     }
 }
 
-/// Resolve a usable local address, trying IPv6 after any IPv4 probe result.
-///
-/// A no-address result is returned only when both families are absent or
-/// unusable. Other failures retain both probe diagnostics.
-pub(crate) fn resolve_local_ip<R: IpResolver>(resolver: &R) -> Result<IpAddr, IpResolutionError> {
-    let ipv4 = match probe_ipv4(resolver) {
-        Ok(address) => return Ok(IpAddr::V4(address)),
-        Err(diagnostic) => diagnostic,
-    };
+#[derive(Default)]
+struct AddressCandidates {
+    ipv4: Option<Ipv4Addr>,
+    ipv6: Option<Ipv6Addr>,
+    ipv4_loopback: Option<Ipv4Addr>,
+    ipv6_loopback: Option<Ipv6Addr>,
+}
 
-    let ipv6 = match probe_ipv6(resolver) {
-        Ok(address) => return Ok(IpAddr::V6(address)),
-        Err(diagnostic) => diagnostic,
-    };
+impl AddressCandidates {
+    fn consider(&mut self, address: IpAddr) {
+        if !is_usable(address) {
+            return;
+        }
 
-    if ipv4.is_no_address() && ipv6.is_no_address() {
-        Err(IpResolutionError::NoUsableAddress { ipv4, ipv6 })
-    } else {
-        Err(IpResolutionError::ProbeFailure { ipv4, ipv6 })
+        match address {
+            IpAddr::V4(address) if address.is_loopback() => {
+                self.ipv4_loopback.get_or_insert(address);
+            }
+            IpAddr::V4(address) => {
+                self.ipv4.get_or_insert(address);
+            }
+            IpAddr::V6(address) if address.is_loopback() => {
+                self.ipv6_loopback.get_or_insert(address);
+            }
+            IpAddr::V6(address) => {
+                self.ipv6.get_or_insert(address);
+            }
+        }
     }
+
+    fn preferred_non_loopback(&self) -> Option<IpAddr> {
+        self.ipv4
+            .map(IpAddr::V4)
+            .or_else(|| self.ipv6.map(IpAddr::V6))
+    }
+
+    fn preferred_loopback(&self) -> Option<IpAddr> {
+        self.ipv4_loopback
+            .map(IpAddr::V4)
+            .or_else(|| self.ipv6_loopback.map(IpAddr::V6))
+    }
+
+    fn non_loopback_for(&self, family: IpAddr) -> Option<IpAddr> {
+        match family {
+            IpAddr::V4(_) => self.ipv4.map(IpAddr::V4),
+            IpAddr::V6(_) => self.ipv6.map(IpAddr::V6),
+        }
+    }
+
+    fn loopback_for(&self, family: IpAddr) -> Option<IpAddr> {
+        match family {
+            IpAddr::V4(_) => self.ipv4_loopback.map(IpAddr::V4),
+            IpAddr::V6(_) => self.ipv6_loopback.map(IpAddr::V6),
+        }
+    }
+
+    fn other_non_loopback(&self, family: IpAddr) -> Option<IpAddr> {
+        match family {
+            IpAddr::V4(_) => self.ipv6.map(IpAddr::V6),
+            IpAddr::V6(_) => self.ipv4.map(IpAddr::V4),
+        }
+    }
+}
+
+fn local_candidates<R: IpResolver>(resolver: &R) -> Result<AddressCandidates, IpResolutionError> {
+    let interfaces = resolver
+        .list_afinet_netifas()
+        .map_err(IpResolutionError::InterfaceEnumeration)?;
+    let mut candidates = AddressCandidates::default();
+    for (_, address) in interfaces {
+        candidates.consider(address);
+    }
+    Ok(candidates)
+}
+
+/// Resolve the preferred local bind and advertisement address from one
+/// interface snapshot.
+pub(crate) fn resolve_local_host<R: IpResolver>(
+    resolver: &R,
+) -> Result<ResolvedHost, IpResolutionError> {
+    let candidates = local_candidates(resolver)?;
+    if let Some(address) = candidates.preferred_non_loopback() {
+        return Ok(ResolvedHost::same_address(address));
+    }
+
+    Ok(ResolvedHost::loopback_fallback(
+        candidates.preferred_loopback().unwrap_or(DEFAULT_LOOPBACK),
+    ))
 }
 
 /// Resolve a configured host value as an IP literal or interface name.
@@ -181,7 +193,7 @@ pub(crate) fn resolve_host_or_interface<R: IpResolver>(
 ) -> Result<ResolvedHost, IpResolutionError> {
     if let Some(address) = parse_ip_literal(host_or_interface)? {
         if address.is_unspecified() {
-            return resolve_wildcard(address, resolver);
+            return resolve_wildcard(address, &local_candidates(resolver)?);
         }
 
         validate_configured_address(address)?;
@@ -192,8 +204,7 @@ pub(crate) fn resolve_host_or_interface<R: IpResolver>(
         .list_afinet_netifas()
         .map_err(IpResolutionError::InterfaceEnumeration)?;
     let mut interface_found = false;
-    let mut first_ipv4 = None;
-    let mut first_ipv6 = None;
+    let mut candidates = AddressCandidates::default();
 
     for (name, address) in interfaces {
         if name != host_or_interface {
@@ -201,15 +212,7 @@ pub(crate) fn resolve_host_or_interface<R: IpResolver>(
         }
 
         interface_found = true;
-        match address {
-            IpAddr::V4(address) if is_usable_ipv4(address) && first_ipv4.is_none() => {
-                first_ipv4 = Some(address);
-            }
-            IpAddr::V6(address) if is_usable_ipv6(address) && first_ipv6.is_none() => {
-                first_ipv6 = Some(address);
-            }
-            _ => {}
-        }
+        candidates.consider(address);
     }
 
     if !interface_found {
@@ -218,100 +221,71 @@ pub(crate) fn resolve_host_or_interface<R: IpResolver>(
         ));
     }
 
-    first_ipv4
-        .map(IpAddr::V4)
-        .or_else(|| first_ipv6.map(IpAddr::V6))
+    candidates
+        .preferred_non_loopback()
+        .or_else(|| candidates.preferred_loopback())
         .map(ResolvedHost::same_address)
         .ok_or_else(|| IpResolutionError::NoUsableInterfaceAddress(host_or_interface.to_string()))
 }
 
-/// Select the loopback address to use for compatibility fallback.
-///
-/// Prefer IPv4 when a non-loopback IPv4 address exists. Otherwise use IPv6
-/// loopback on an IPv6-only host. Preserve the historical IPv4 default when
-/// neither case can be established.
-pub(crate) fn fallback_loopback<R: IpResolver>(resolver: &R) -> IpAddr {
-    let Ok(interfaces) = resolver.list_afinet_netifas() else {
-        return DEFAULT_LOOPBACK;
-    };
-
-    if interfaces
-        .iter()
-        .any(|(_, address)| matches!(address, IpAddr::V4(address) if !address.is_loopback()))
-    {
-        return DEFAULT_LOOPBACK;
-    }
-
-    if interfaces
-        .iter()
-        .any(|(_, address)| matches!(address, IpAddr::V6(address) if address.is_loopback()))
-    {
-        return IpAddr::V6(Ipv6Addr::LOCALHOST);
-    }
-
-    DEFAULT_LOOPBACK
-}
-
-fn probe_ipv4<R: IpResolver>(resolver: &R) -> Result<Ipv4Addr, ProbeDiagnostic> {
-    match resolver.local_ip() {
-        Ok(IpAddr::V4(address)) if is_usable_ipv4(address) => Ok(address),
-        Ok(IpAddr::V4(address)) => Err(ProbeDiagnostic::Unusable(IpAddr::V4(address))),
-        Ok(address) => Err(ProbeDiagnostic::UnexpectedFamily {
-            expected: "IPv4",
-            actual: address,
-        }),
-        Err(Error::LocalIpAddressNotFound) => Err(ProbeDiagnostic::NotFound),
-        Err(error) => Err(ProbeDiagnostic::Failed(error)),
-    }
-}
-
-fn probe_ipv6<R: IpResolver>(resolver: &R) -> Result<Ipv6Addr, ProbeDiagnostic> {
-    match resolver.local_ipv6() {
-        Ok(IpAddr::V6(address)) if is_usable_ipv6(address) => Ok(address),
-        Ok(IpAddr::V6(address)) => Err(ProbeDiagnostic::Unusable(IpAddr::V6(address))),
-        Ok(address) => Err(ProbeDiagnostic::UnexpectedFamily {
-            expected: "IPv6",
-            actual: address,
-        }),
-        Err(Error::LocalIpAddressNotFound) => Err(ProbeDiagnostic::NotFound),
-        Err(error) => Err(ProbeDiagnostic::Failed(error)),
-    }
-}
-
-fn resolve_wildcard<R: IpResolver>(
+fn resolve_wildcard(
     wildcard: IpAddr,
-    resolver: &R,
+    candidates: &AddressCandidates,
 ) -> Result<ResolvedHost, IpResolutionError> {
-    let (advertise_ip, used_loopback_fallback) = match wildcard {
-        IpAddr::V4(_) => match probe_ipv4(resolver) {
-            Ok(address) => (IpAddr::V4(address), false),
-            Err(diagnostic) if diagnostic.is_no_address() => (DEFAULT_LOOPBACK, true),
-            Err(diagnostic) => {
-                return Err(IpResolutionError::FamilyProbeFailure {
-                    family: "IPv4",
-                    diagnostic,
-                });
-            }
-        },
-        IpAddr::V6(_) => match probe_ipv6(resolver) {
-            Ok(address) => (IpAddr::V6(address), false),
-            Err(diagnostic) if diagnostic.is_no_address() => {
-                (IpAddr::V6(Ipv6Addr::LOCALHOST), true)
-            }
-            Err(diagnostic) => {
-                return Err(IpResolutionError::FamilyProbeFailure {
-                    family: "IPv6",
-                    diagnostic,
-                });
-            }
-        },
-    };
+    if let Some(advertise_ip) = candidates.non_loopback_for(wildcard) {
+        return Ok(ResolvedHost {
+            bind_ip: wildcard,
+            advertise_ip,
+            used_loopback_fallback: false,
+        });
+    }
 
+    if let Some(advertise_ip) = candidates.other_non_loopback(wildcard) {
+        return Ok(ResolvedHost {
+            bind_ip: unspecified_for(advertise_ip),
+            advertise_ip,
+            used_loopback_fallback: false,
+        });
+    }
+
+    let advertise_ip = candidates.preferred_loopback().unwrap_or(DEFAULT_LOOPBACK);
     Ok(ResolvedHost {
-        bind_ip: wildcard,
+        bind_ip: unspecified_for(advertise_ip),
         advertise_ip,
-        used_loopback_fallback,
+        used_loopback_fallback: true,
     })
+}
+
+/// Resolve an advertisement address that is served by an existing listener.
+/// Wildcard listeners stay in their bound family.
+pub(crate) fn resolve_advertise_ip_for_bind<R: IpResolver>(
+    bind_ip: IpAddr,
+    resolver: &R,
+) -> Result<IpAddr, IpResolutionError> {
+    if !bind_ip.is_unspecified() {
+        validate_configured_address(bind_ip)?;
+        return Ok(bind_ip);
+    }
+
+    let candidates = local_candidates(resolver)?;
+    Ok(candidates
+        .non_loopback_for(bind_ip)
+        .or_else(|| candidates.loopback_for(bind_ip))
+        .unwrap_or_else(|| loopback_for(bind_ip)))
+}
+
+fn unspecified_for(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    }
+}
+
+fn loopback_for(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+    }
 }
 
 fn parse_ip_literal(value: &str) -> Result<Option<IpAddr>, IpResolutionError> {
@@ -340,7 +314,7 @@ fn parse_ip_literal(value: &str) -> Result<Option<IpAddr>, IpResolutionError> {
 }
 
 fn looks_like_ip_literal(value: &str) -> bool {
-    value.contains(':')
+    value.bytes().filter(|byte| *byte == b':').count() >= 2
         || (value.contains('.')
             && value
                 .chars()
@@ -348,34 +322,30 @@ fn looks_like_ip_literal(value: &str) -> bool {
 }
 
 fn validate_configured_address(address: IpAddr) -> Result<(), IpResolutionError> {
-    let is_usable = match address {
-        IpAddr::V4(address) => is_usable_ipv4(address),
-        IpAddr::V6(address) => is_usable_ipv6(address),
-    };
-
-    if is_usable {
+    if is_usable(address) {
         Ok(())
     } else {
         Err(IpResolutionError::UnusableAddress(address))
     }
 }
 
-fn is_usable_ipv4(address: Ipv4Addr) -> bool {
-    !address.is_unspecified()
-        && !address.is_multicast()
-        && !address.is_link_local()
-        && !address.is_broadcast()
-}
-
-fn is_usable_ipv6(address: Ipv6Addr) -> bool {
-    !address.is_unspecified() && !address.is_multicast() && !address.is_unicast_link_local()
+fn is_usable(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            !address.is_unspecified() && !address.is_multicast() && !address.is_broadcast()
+        }
+        IpAddr::V6(address) => {
+            !address.is_unspecified() && !address.is_multicast() && !address.is_unicast_link_local()
+        }
+    }
 }
 
 /// Resolve the local IP for advertising endpoints, with loopback fallback.
 ///
 /// IPv6 addresses are bracketed (for example, `[::1]`) so the result is safe
 /// to interpolate into a `host:port` URL. Resolution is cached for the process
-/// lifetime so system probes and fallback warnings occur once.
+/// lifetime only after a non-loopback address is found. Enumeration failures
+/// and loopback fallbacks are retried on the next call.
 pub fn local_ip_for_advertise() -> String {
     cached_local_ip_for_advertise(&LOCAL_IP_FOR_ADVERTISE, &DefaultIpResolver)
 }
@@ -385,27 +355,42 @@ pub fn tcp_rpc_host_from_env() -> String {
     std::env::var("DYN_TCP_RPC_HOST").unwrap_or_else(|_| local_ip_for_advertise())
 }
 
-fn cached_local_ip_for_advertise<R: IpResolver>(cache: &OnceLock<String>, resolver: &R) -> String {
-    cache.get_or_init(|| resolve(resolver)).clone()
-}
+fn cached_local_ip_for_advertise<R: IpResolver>(cache: &OnceLock<IpAddr>, resolver: &R) -> String {
+    if let Some(address) = cache.get() {
+        return format_host(*address);
+    }
 
-fn resolve<R: IpResolver>(resolver: &R) -> String {
-    let ip = match resolve_local_ip(resolver) {
-        Ok(ip) => ip,
+    match resolve_local_host(resolver) {
+        Ok(resolved) if !resolved.used_loopback_fallback() => {
+            let address = resolved.advertise_ip();
+            if cache.set(address).is_err() {
+                return format_host(*cache.get().expect("advertisement cache was initialized"));
+            }
+            format_host(address)
+        }
+        Ok(resolved) => {
+            let loopback = resolved.advertise_ip();
+            tracing::warn!(
+                %loopback,
+                "No usable non-loopback IP address found; advertising loopback"
+            );
+            format_host(loopback)
+        }
         Err(error) => {
-            let loopback = fallback_loopback(resolver);
             tracing::warn!(
                 %error,
-                %loopback,
+                loopback = %DEFAULT_LOOPBACK,
                 "Failed to resolve a usable local IP address; advertising loopback"
             );
-            loopback
+            format_host(DEFAULT_LOOPBACK)
         }
-    };
+    }
+}
 
-    match ip {
-        IpAddr::V6(_) => format!("[{ip}]"),
-        IpAddr::V4(_) => ip.to_string(),
+fn format_host(address: IpAddr) -> String {
+    match address {
+        IpAddr::V6(_) => format!("[{address}]"),
+        IpAddr::V4(_) => address.to_string(),
     }
 }
 
@@ -416,7 +401,6 @@ pub(crate) mod test_support {
 
     #[derive(Clone, Copy)]
     pub(crate) enum ProbeOutcome {
-        Address(IpAddr),
         NotFound,
         Strategy(&'static str),
         Platform(&'static str),
@@ -425,7 +409,6 @@ pub(crate) mod test_support {
     impl ProbeOutcome {
         fn result(self) -> Result<IpAddr, Error> {
             match self {
-                Self::Address(address) => Ok(address),
                 Self::NotFound => Err(Error::LocalIpAddressNotFound),
                 Self::Strategy(message) => Err(Error::StrategyError(message.to_string())),
                 Self::Platform(platform) => Err(Error::PlatformNotSupported(platform.to_string())),
@@ -444,6 +427,7 @@ pub(crate) mod test_support {
         pub(crate) interface_error: Option<ProbeOutcome>,
         pub(crate) ipv4_calls: Cell<usize>,
         pub(crate) ipv6_calls: Cell<usize>,
+        pub(crate) interface_calls: Cell<usize>,
     }
 
     impl StubResolver {
@@ -454,11 +438,11 @@ pub(crate) mod test_support {
                 interfaces: vec![
                     ("lo", IpAddr::V4(Ipv4Addr::LOCALHOST)),
                     ("lo", IpAddr::V6(Ipv6Addr::LOCALHOST)),
-                    ("eth0", IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
                 ],
                 interface_error: None,
                 ipv4_calls: Cell::new(0),
                 ipv6_calls: Cell::new(0),
+                interface_calls: Cell::new(0),
             }
         }
 
@@ -479,6 +463,7 @@ pub(crate) mod test_support {
         }
 
         fn list_afinet_netifas(&self) -> Result<Vec<(String, IpAddr)>, Error> {
+            self.interface_calls.set(self.interface_calls.get() + 1);
             if let Some(error) = self.interface_error {
                 return Err(error.error());
             }
@@ -496,68 +481,47 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{ProbeOutcome, StubResolver};
     use super::*;
-    use ProbeOutcome::{Address, NotFound, Platform, Strategy};
+    use ProbeOutcome::{NotFound, Platform, Strategy};
 
     fn ip(address: &str) -> IpAddr {
         address.parse().unwrap()
     }
 
-    fn eth0(addresses: &[&str]) -> Vec<(&'static str, IpAddr)> {
+    fn interface(name: &'static str, addresses: &[&str]) -> Vec<(&'static str, IpAddr)> {
         addresses
             .iter()
-            .map(|address| ("eth0", ip(address)))
+            .map(|address| (name, ip(address)))
             .collect()
     }
 
     #[test]
-    fn advertisement_formats_ipv4_and_ipv6() {
-        let ipv4 = StubResolver::new(Address(ip("192.168.1.100")), NotFound);
-        assert_eq!(resolve(&ipv4), "192.168.1.100");
+    fn ipv6_only_inventory_uses_global_ipv6_without_family_probes() {
+        let mut resolver = StubResolver::new(Strategy("IPv4 failed"), NotFound);
+        resolver.interfaces = vec![
+            ("lo", ip("127.0.0.1")),
+            ("lo", ip("::1")),
+            ("eth0", ip("2001:db8::5")),
+        ];
 
-        let ipv6 = StubResolver::new(NotFound, Address(ip("2001:db8::1")));
-        assert_eq!(resolve(&ipv6), "[2001:db8::1]");
-    }
-
-    #[test]
-    fn ipv4_not_found_or_failure_uses_usable_ipv6() {
-        for ipv4 in [NotFound, Strategy("IPv4 strategy failed")] {
-            let resolver = StubResolver::new(ipv4, Address(ip("2001:db8::1")));
-            assert_eq!(resolve_local_ip(&resolver).unwrap(), ip("2001:db8::1"));
-        }
-    }
-
-    #[test]
-    fn probe_failures_retain_both_diagnostics() {
-        let resolver = StubResolver::new(Strategy("IPv4 probe failed"), Platform("test-platform"));
-
-        let result = resolve_local_ip(&resolver).unwrap_err().to_string();
-        assert!(result.contains("IPv4 probe failed"), "{result}");
-        assert!(result.contains("test-platform"), "{result}");
-    }
-
-    #[test]
-    fn absent_and_unusable_results_are_no_address() {
-        let assert_no_address = |resolver: StubResolver, expected_diagnostic: &str| {
-            let error = resolve_local_ip(&resolver).unwrap_err();
-            assert!(error.is_no_usable_address(), "{error}");
-            assert!(error.to_string().contains(expected_diagnostic), "{error}");
-        };
-
-        assert_no_address(
-            StubResolver::new(NotFound, Address(ip("fe80::1"))),
-            "fe80::1",
-        );
-        assert_no_address(
-            StubResolver::new(Address(ip("0.0.0.0")), NotFound),
-            "0.0.0.0",
-        );
+        let resolved = resolve_local_host(&resolver).unwrap();
+        assert_eq!(resolved.bind_ip(), ip("2001:db8::5"));
+        assert!(!resolved.used_loopback_fallback());
+        assert_eq!(resolver.ipv4_calls.get(), 0);
+        assert_eq!(resolver.ipv6_calls.get(), 0);
+        assert_eq!(resolver.interface_calls.get(), 1);
     }
 
     #[test]
     fn configured_literals_are_parsed_and_validated() {
         let resolver = StubResolver::not_found();
 
-        for literal in ["192.0.2.10", "2001:db8::2", "[2001:db8::2]", "fd00::2"] {
+        for literal in [
+            "192.0.2.10",
+            "169.254.1.1",
+            "2001:db8::2",
+            "[2001:db8::2]",
+            "fd00::2",
+        ] {
             let resolved = resolve_host_or_interface(literal, &resolver).unwrap();
             assert_eq!(
                 resolved.bind_ip(),
@@ -573,25 +537,20 @@ mod tests {
             assert!(error.contains("invalid IP literal"), "{error}");
         }
 
-        for literal in [
-            "169.254.1.1",
-            "224.0.0.1",
-            "255.255.255.255",
-            "fe80::1",
-            "ff02::1",
-        ] {
+        for literal in ["224.0.0.1", "255.255.255.255", "fe80::1", "ff02::1"] {
             let error = resolve_host_or_interface(literal, &resolver).unwrap_err();
             assert!(matches!(error, IpResolutionError::UnusableAddress(_)));
         }
     }
 
     #[test]
-    fn wildcards_keep_bind_family_and_advertise_concrete_address() {
-        let resolver = StubResolver::new(Address(ip("192.0.2.20")), Address(ip("2001:db8::20")));
+    fn wildcard_switches_bind_family_before_using_loopback() {
+        let mut resolver = StubResolver::new(NotFound, NotFound);
+        resolver.interfaces = interface("eth0", &["192.0.2.20"]);
         let cases = [
             ("0.0.0.0", ip("0.0.0.0"), ip("192.0.2.20")),
-            ("::", ip("::"), ip("2001:db8::20")),
-            ("[::]", ip("::"), ip("2001:db8::20")),
+            ("::", ip("0.0.0.0"), ip("192.0.2.20")),
+            ("[::]", ip("0.0.0.0"), ip("192.0.2.20")),
         ];
 
         for (literal, bind_ip, advertise_ip) in cases {
@@ -602,25 +561,12 @@ mod tests {
     }
 
     #[test]
-    fn interface_selection_preserves_order_and_filters_unusable_addresses() {
+    fn interface_alias_preserves_order_and_accepts_ipv4_link_local() {
         let mut resolver = StubResolver::not_found();
-        let cases = [
-            (
-                &["2001:db8::2", "192.0.2.20", "192.0.2.10"][..],
-                ip("192.0.2.20"),
-            ),
-            (&["169.254.10.5", "2001:db8::10"][..], ip("2001:db8::10")),
-            (
-                &["fe80::1", "2001:db8::20", "2001:db8::10"][..],
-                ip("2001:db8::20"),
-            ),
-        ];
+        resolver.interfaces = interface("eth0:1", &["2001:db8::2", "169.254.10.5", "192.0.2.10"]);
 
-        for (addresses, expected) in cases {
-            resolver.interfaces = eth0(addresses);
-            let resolved = resolve_host_or_interface("eth0", &resolver).unwrap();
-            assert_eq!(resolved.advertise_ip(), expected);
-        }
+        let resolved = resolve_host_or_interface("eth0:1", &resolver).unwrap();
+        assert_eq!(resolved.advertise_ip(), ip("169.254.10.5"));
     }
 
     #[test]
@@ -650,37 +596,84 @@ mod tests {
     }
 
     #[test]
-    fn loopback_selection_matches_host_capability() {
+    fn loopback_only_host_preserves_ipv4_compatibility() {
         let mut resolver = StubResolver::not_found();
-        assert_eq!(fallback_loopback(&resolver), DEFAULT_LOOPBACK);
-
         resolver.interfaces = vec![
             ("lo", IpAddr::V4(Ipv4Addr::LOCALHOST)),
             ("lo", IpAddr::V6(Ipv6Addr::LOCALHOST)),
-            ("eth0", ip("2001:db8::10")),
         ];
-        assert_eq!(
-            fallback_loopback(&resolver),
-            IpAddr::V6(Ipv6Addr::LOCALHOST)
-        );
-        assert_eq!(resolve(&resolver), "[::1]");
 
-        resolver.interface_error = Some(Platform("test-platform"));
-        assert_eq!(fallback_loopback(&resolver), DEFAULT_LOOPBACK);
+        let resolved = resolve_local_host(&resolver).unwrap();
+        assert_eq!(resolved.advertise_ip(), DEFAULT_LOOPBACK);
+        assert!(resolved.used_loopback_fallback());
     }
 
     #[test]
-    fn advertised_ip_resolution_is_cached() {
-        let cache = OnceLock::new();
-        let resolver = StubResolver::new(NotFound, Address(ip("2001:db8::10")));
+    fn bound_wildcard_advertisement_stays_in_bound_family() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![
+            ("lo", ip("127.0.0.1")),
+            ("lo", ip("::1")),
+            ("eth0", ip("2001:db8::20")),
+        ];
 
-        for _ in 0..2 {
-            assert_eq!(
-                cached_local_ip_for_advertise(&cache, &resolver),
-                "[2001:db8::10]"
-            );
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("0.0.0.0"), &resolver).unwrap(),
+            ip("127.0.0.1")
+        );
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("::"), &resolver).unwrap(),
+            ip("2001:db8::20")
+        );
+    }
+
+    #[test]
+    fn transient_fallbacks_are_not_cached_but_success_is() {
+        let cache = OnceLock::new();
+        let mut enumeration_error = StubResolver::not_found();
+        enumeration_error.interface_error = Some(Platform("transient"));
+        assert_eq!(
+            cached_local_ip_for_advertise(&cache, &enumeration_error),
+            "127.0.0.1"
+        );
+        assert!(cache.get().is_none());
+
+        let loopback = StubResolver::not_found();
+        assert_eq!(
+            cached_local_ip_for_advertise(&cache, &loopback),
+            "127.0.0.1"
+        );
+        assert!(cache.get().is_none());
+
+        let mut success = StubResolver::not_found();
+        success.interfaces.push(("eth0", ip("2001:db8::10")));
+        assert_eq!(
+            cached_local_ip_for_advertise(&cache, &success),
+            "[2001:db8::10]"
+        );
+        assert_eq!(cache.get(), Some(&ip("2001:db8::10")));
+
+        assert_eq!(
+            cached_local_ip_for_advertise(&cache, &loopback),
+            "[2001:db8::10]"
+        );
+    }
+
+    #[test]
+    fn legacy_resolver_implementation_remains_source_compatible() {
+        struct LegacyResolver;
+
+        impl IpResolver for LegacyResolver {
+            fn local_ip(&self) -> Result<IpAddr, Error> {
+                Err(Error::LocalIpAddressNotFound)
+            }
+
+            fn local_ipv6(&self) -> Result<IpAddr, Error> {
+                Err(Error::LocalIpAddressNotFound)
+            }
         }
-        assert_eq!(resolver.ipv4_calls.get(), 1);
-        assert_eq!(resolver.ipv6_calls.get(), 1);
+
+        fn assert_resolver<T: IpResolver>() {}
+        assert_resolver::<LegacyResolver>();
     }
 }

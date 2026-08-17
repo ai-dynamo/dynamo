@@ -24,6 +24,7 @@ pub use zmq_transport::{
 // Re-export transport kind from discovery for convenience
 pub use crate::discovery::{EventScope, EventTransportKind};
 
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,7 +48,7 @@ use crate::discovery::{
 };
 use crate::protocols::EndpointId;
 use crate::traits::DistributedRuntimeProvider;
-use crate::utils::local_ip_for_advertise;
+use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver, resolve_advertise_ip_for_bind};
 
 // ============================================================================
 // Broker Resolution Logic
@@ -459,14 +460,8 @@ impl EventPublisher {
                     .join()
                     .expect("Failed to join ZMQ initialization thread");
 
-                    // Get local IP for public endpoint
-                    let actual_port: u16 = actual_bind_endpoint
-                        .rsplit(':')
-                        .next()
-                        .and_then(|s| s.parse().ok())
-                        .expect("Failed to parse port from bind endpoint");
-                    let local_ip = local_ip_for_advertise();
-                    let public_endpoint = format!("tcp://{}:{}", local_ip, actual_port);
+                    let public_endpoint =
+                        direct_zmq_public_endpoint(&actual_bind_endpoint, &DefaultIpResolver)?;
 
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                     TransportSetup::ZmqDirect(
@@ -579,6 +574,24 @@ impl EventPublisher {
     pub fn transport_kind(&self) -> EventTransportKind {
         self.transport_kind
     }
+}
+
+fn direct_zmq_public_endpoint<R: IpResolver>(
+    actual_bind_endpoint: &str,
+    resolver: &R,
+) -> Result<String> {
+    let bind_address = actual_bind_endpoint
+        .strip_prefix("tcp://")
+        .ok_or_else(|| anyhow::anyhow!("invalid ZMQ TCP bind endpoint: {actual_bind_endpoint}"))?
+        .parse::<SocketAddr>()
+        .map_err(|error| {
+            anyhow::anyhow!("invalid ZMQ TCP bind endpoint '{actual_bind_endpoint}': {error}")
+        })?;
+    let advertise_ip = resolve_advertise_ip_for_bind(bind_address.ip(), resolver)?;
+    Ok(format!(
+        "tcp://{}",
+        SocketAddr::new(advertise_ip, bind_address.port())
+    ))
 }
 
 impl Drop for EventPublisher {
@@ -922,6 +935,26 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::environment_names::zmq_broker as broker_env;
+    use crate::utils::ip_resolver::test_support::StubResolver;
+
+    #[test]
+    fn direct_zmq_advertisement_matches_bound_family() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![
+            ("lo", "127.0.0.1".parse().unwrap()),
+            ("lo", "::1".parse().unwrap()),
+            ("eth0", "2001:db8::20".parse().unwrap()),
+        ];
+
+        assert_eq!(
+            direct_zmq_public_endpoint("tcp://0.0.0.0:4321", &resolver).unwrap(),
+            "tcp://127.0.0.1:4321"
+        );
+        assert_eq!(
+            direct_zmq_public_endpoint("tcp://[::]:4321", &resolver).unwrap(),
+            "tcp://[2001:db8::20]:4321"
+        );
+    }
 
     #[test]
     fn publisher_ids_survive_a_json_number_round_trip() {
