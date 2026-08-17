@@ -416,9 +416,7 @@ def test_set_pre_publish_server_args_uses_late_resolution():
 
     set_pre_publish_server_args(server_args, enable_forward_pass_metrics=False)
 
-    assert server_args.calls == [
-        ("dynamo", {"enable_forward_pass_metrics": False})
-    ]
+    assert server_args.calls == [("dynamo", {"enable_forward_pass_metrics": False})]
 
 
 def test_set_pre_publish_server_args_uses_legacy_override():

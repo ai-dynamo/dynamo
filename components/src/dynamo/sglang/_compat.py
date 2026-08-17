@@ -37,7 +37,8 @@ def set_pre_publish_server_args(server_args: Any, **fields: Any) -> None:
         late_resolution("dynamo", **fields)
         return
 
-    # SGLang 0.5.16 exposes override() as its post-resolution mutation API.
+    # SGLang 0.5.16 exposes override() as its post-resolution mutation API;
+    # remove when 0.5.16 leaves the support window.
     override = getattr(server_args, "override", None)
     if callable(override):
         override("dynamo", **fields)
