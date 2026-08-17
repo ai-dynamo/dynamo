@@ -117,16 +117,7 @@ setup(
         "console_scripts": [
             "gpu-memory-service=gpu_memory_service.cli.runner:main",
             "gms-storage-client=gpu_memory_service.cli.storage_runner:main",
-        ],
-        # vLLM loads general plugins from EngineCore.__init__, which is the
-        # process that owns the scheduler and its BlockPool -- at any TP.
-        # Importing the GMS worker module is not enough: at TP>1 that happens
-        # only in the worker children. Self-disables unless GMS_KV_INDEX_PATH
-        # is set.
-        "vllm.general_plugins": [
-            "gms_kv_index="
-            "gpu_memory_service.integrations.vllm.kv_index:enable_kv_index",
-        ],
+        ]
     },
     ext_modules=_create_ext_modules(),
     cmdclass={"build_ext": BuildExtension},

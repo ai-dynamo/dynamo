@@ -445,8 +445,18 @@ def _record_takeover(path: str, **fields) -> None:
     try:
         with open(f"{path}.status.jsonl", "a") as f:
             f.write(json.dumps(fields) + "\n")
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("[kv_index] could not record takeover: %s", e)
+
+
+def _disarm(path: str | None) -> None:
+    """Remove the mirror so no successor can trust it."""
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError as e:
+        logger.warning("[kv_index] could not disarm mirror %s: %s", path, e)
 
 
 def _install_watermark(scheduler, mirror: MirrorFile) -> None:
@@ -492,6 +502,11 @@ def enable_kv_index() -> None:
             on_wake_up(self)
         except Exception as e:  # persistence must never break serving
             logger.warning("[kv_index] takeover failed (%s); continuing cold", e)
+            # Disarm. Serving cold is fine; leaving a mirror behind that nobody
+            # is maintaining is not -- this generation would overwrite the very
+            # blocks it still describes, and the next takeover would find every
+            # gate satisfied and replay them.
+            _disarm(mirror_path())
         finally:
             # Back to serving: a reset now means what it says. Cleared even on
             # failure, or an RLHF reset would silently stop invalidating.

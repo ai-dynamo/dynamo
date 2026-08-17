@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Does the vLLM prefix cache survive a real GMS engine failover?
@@ -38,7 +39,7 @@ ENGINE_A_LOG="$LOG_DIR/engine_a.log"; ENGINE_B_LOG="$LOG_DIR/engine_b.log"
 FRONTEND_LOG="$LOG_DIR/frontend.log"
 A_PORT=8100; B_PORT=8101
 
-GMS_PIDS=(); A_PID=""; B_PID=""; FRONTEND_PID=""
+GMS_PIDS=(); LOAD_PIDS=(); A_PID=""; B_PID=""; FRONTEND_PID=""
 pass_count=0; fail_count=0
 pass() { pass_count=$((pass_count+1)); echo "  PASS: $1"; }
 fail() { fail_count=$((fail_count+1)); echo "  FAIL: $1"; }
@@ -50,7 +51,7 @@ PROMPT=$(python3 -c 'print("The quick brown fox jumps over the lazy dog. " * 90,
 
 cleanup() {
     echo ""; echo "=== Cleaning up ==="
-    for pid in "$FRONTEND_PID" "$A_PID" "$B_PID" "${GMS_PIDS[@]:-}"; do
+    for pid in "$FRONTEND_PID" "$A_PID" "$B_PID" "${LOAD_PIDS[@]:-}" "${GMS_PIDS[@]:-}"; do
         [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
     done
     pkill -9 -f "dynamo[.]vllm"        2>/dev/null
@@ -183,7 +184,6 @@ echo ""; echo "=== Phase 5: Failover (SIGKILL) ==="
 # idle. That is the case the publication fence exists for: labels are attached
 # during schedule(), before their KV is computed, so an engine killed mid-batch
 # must not hand those labels to its successor.
-LOAD_PIDS=()
 if [ "${KVIDX_KILL_UNDER_LOAD:-0}" = "1" ]; then
     echo "Firing concurrent traffic so the kill lands mid-batch..."
     for i in $(seq 1 8); do

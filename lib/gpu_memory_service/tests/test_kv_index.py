@@ -32,7 +32,13 @@ from vllm.v1.core.kv_cache_utils import (  # noqa: E402
     make_block_hash_with_group_id,
 )
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.core,
+    pytest.mark.gpu_0,
+]
 
 N_BLOCKS = 32
 HASH_BLOCK_SIZE = 16

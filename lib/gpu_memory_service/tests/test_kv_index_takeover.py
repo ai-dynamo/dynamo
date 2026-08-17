@@ -32,7 +32,13 @@ from vllm.v1.core.kv_cache_utils import (  # noqa: E402
     make_block_hash_with_group_id,
 )
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.core,
+    pytest.mark.gpu_0,
+]
 
 N_BLOCKS = 64
 BLOCK_SIZE = 16
@@ -111,7 +117,7 @@ def new_pool():
     return BlockPool(N_BLOCKS, True, BLOCK_SIZE)
 
 
-def populate(engine, pool, n=5):
+def populate(pool, n=5):
     """Serve a little: label n blocks and let their batch complete."""
     pool._dyn_mirror.on_schedule()
     blocks = pool.get_new_blocks(n)
@@ -136,7 +142,7 @@ def test_sleep_does_not_wipe_the_mirror(path):
     pool = new_pool()
     engine = FakeEngineCore(pool, adopted=False)
     wake(engine)
-    blocks = populate(engine, pool)
+    blocks = populate(pool)
     assert pool._dyn_mirror.live_block_ids() == {b.block_id for b in blocks}
 
     # Entering the sleep window, vLLM drops its own index.
@@ -153,7 +159,7 @@ def test_reset_outside_a_sleep_does_wipe_the_mirror(path):
     pool = new_pool()
     engine = FakeEngineCore(pool, adopted=False)
     wake(engine)
-    populate(engine, pool)
+    populate(pool)
 
     assert kv_index._IN_SLEEP is False
     assert pool.reset_prefix_cache() is True
@@ -171,7 +177,7 @@ def test_inherited_pages_replay(path):
     """The happy path: a successor rebuilds the predecessor's index."""
     pool_a = new_pool()
     wake(FakeEngineCore(pool_a, adopted=False))
-    blocks = populate(None, pool_a)
+    blocks = populate(pool_a)
     expected = {b.block_id: b.block_hash for b in blocks}
 
     pool_b = new_pool()  # a different engine, same geometry
@@ -190,7 +196,7 @@ def test_fresh_pages_never_replay(path):
     """
     pool_a = new_pool()
     wake(FakeEngineCore(pool_a, adopted=False))
-    populate(None, pool_a)
+    populate(pool_a)
 
     pool_b = new_pool()
     wake(FakeEngineCore(pool_b, adopted=False))  # built its own
@@ -210,7 +216,7 @@ def test_partial_adoption_across_ranks_refuses(path):
     """
     pool_a = new_pool()
     wake(FakeEngineCore(pool_a, adopted=False))
-    populate(None, pool_a)
+    populate(pool_a)
 
     pool_b = new_pool()
     engine = FakeEngineCore(pool_b, adopted=True)
@@ -224,7 +230,7 @@ def test_a_probe_that_fails_refuses(path):
     """Losing the signal is a miss, never a guess."""
     pool_a = new_pool()
     wake(FakeEngineCore(pool_a, adopted=False))
-    populate(None, pool_a)
+    populate(pool_a)
 
     pool_b = new_pool()
     engine = FakeEngineCore(pool_b, adopted=True)
@@ -246,7 +252,7 @@ def test_a_different_ruler_refuses(path):
     """Same block id, different meaning: the one failure that is not a miss."""
     pool_a = new_pool()
     wake(FakeEngineCore(pool_a, adopted=False))
-    populate(None, pool_a)
+    populate(pool_a)
 
     class Changed(_Cfg):
         class cache_config(_Cfg.cache_config):
@@ -263,7 +269,7 @@ def test_a_different_ruler_refuses(path):
 def test_a_different_block_count_refuses(path):
     pool_a = new_pool()
     wake(FakeEngineCore(pool_a, adopted=False))
-    populate(None, pool_a)
+    populate(pool_a)
 
     pool_b = BlockPool(N_BLOCKS * 2, True, BLOCK_SIZE)
     wake(FakeEngineCore(pool_b, adopted=True))
@@ -290,7 +296,7 @@ def test_known_gap_a_non_participating_engine_is_invisible(path):
     """
     pool_a = new_pool()
     wake(FakeEngineCore(pool_a, adopted=False))
-    blocks = populate(None, pool_a)
+    blocks = populate(pool_a)
     stale = {b.block_id: b.block_hash for b in blocks}
 
     # Engine B adopts the same pages with the feature off: it never opens the
@@ -316,7 +322,7 @@ def test_a_wake_that_did_not_follow_a_sleep_does_nothing(path):
     """
     pool = new_pool()
     wake(FakeEngineCore(pool, adopted=False))
-    populate(None, pool)
+    populate(pool)
     before = pool._dyn_mirror.live_block_ids()
     assert before, "nothing to protect -- test is vacuous"
 
