@@ -31,7 +31,7 @@ use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
 use super::errors::{
-    error_type_for_http_like_code, extract_http_like_error, py_exception_to_backend_error,
+    extract_http_like_error, py_exception_to_backend_error, py_exception_to_error_type,
 };
 use crate::python_payload::{PythonPayload, PythonResponseItem};
 
@@ -391,8 +391,19 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
                 .build();
         }
 
+        if let Some((error_type, message)) = py_exception_to_error_type(py, &error) {
+            return DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .build();
+        }
+
         if let Some((code, message)) = extract_http_like_error(py, &error) {
-            let error_type = error_type_for_http_like_code(code);
+            let error_type = if (400..500).contains(&code) {
+                ErrorType::Backend(BackendError::InvalidArgument)
+            } else {
+                ErrorType::Backend(BackendError::Unknown)
+            };
             let json_msg = serde_json::json!({
                 "message": message,
                 "code": code,

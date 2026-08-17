@@ -100,6 +100,7 @@ macro_rules! define_dynamo_exceptions {
                 "RouterQueueLimitExceeded",
                 m.py().get_type::<RouterQueueLimitExceeded>(),
             )?;
+            m.add("WorkerOverloaded", m.py().get_type::<WorkerOverloaded>())?;
             m.add(
                 "SelectionServiceError",
                 m.py().get_type::<SelectionServiceError>(),
@@ -143,27 +144,6 @@ define_dynamo_exceptions!(
 /// internal state, file paths, traceback strings, or backend identifiers.
 /// Non-4xx codes (including 5xx) are sanitized downstream — the original
 /// message survives in server logs only.
-/// Classify a worker-supplied HTTP-like status code into a Dynamo error type.
-///
-/// 503 is how a Python worker reports that it hit its own admission limit, e.g.
-/// "Worker local total request limit reached (32/32)". Mapping it to
-/// [`ErrorType::WorkerOverloaded`] rather than `Backend(Unknown)` puts the
-/// category in the error chain, which is what
-/// `dynamo_llm::http::service::metrics::request_was_rejected` matches on, so the
-/// frontend applies its configured overload status instead of forwarding the
-/// worker's 503.
-///
-/// `WorkerOverloaded` rather than `ResourceExhausted`: the worker is stating that
-/// *it* is full, not that the eligible pool is exhausted, so the request stays
-/// eligible for migration to another worker.
-pub fn error_type_for_http_like_code(code: u16) -> ErrorType {
-    match code {
-        503 => ErrorType::WorkerOverloaded,
-        400..=499 => ErrorType::Backend(BackendError::InvalidArgument),
-        _ => ErrorType::Backend(BackendError::Unknown),
-    }
-}
-
 pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
     let value = err.value(py);
     let code = value
@@ -180,38 +160,27 @@ pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, Stri
     Some((code, message))
 }
 
-#[cfg(test)]
-mod http_like_code_tests {
-    use super::error_type_for_http_like_code;
-    use dynamo_runtime::error::{BackendError, ErrorType};
+// Raised by a Python worker to state that *it* is out of capacity.
+//
+// The category belongs in the error chain, not in an HTTP status inside the
+// message: request_was_rejected (dynamo_llm::http::service::metrics) matches the
+// chain, and the frontend owns the HTTP mapping. A worker that encodes the
+// condition as `code = 503` cannot be told apart from a worker relaying a 503
+// from an upstream service it called, which would take a healthy worker out of
+// rotation for someone else's outage.
+//
+// WorkerOverloaded rather than ResourceExhausted: the worker reports its own
+// limit, not pool exhaustion, so the request stays eligible for migration.
+pyo3::create_exception!(dynamo._core, WorkerOverloaded, DynamoException);
 
-    #[test]
-    fn worker_capacity_rejection_is_typed_not_backend_unknown() {
-        // A Python worker rejecting on its own admission limit reports 503.
-        // Before this mapping it fell through to Backend(Unknown), which
-        // request_was_rejected does not match, so the worker's 503 reached the
-        // client instead of the frontend's configured overload status.
-        assert_eq!(
-            error_type_for_http_like_code(503),
-            ErrorType::WorkerOverloaded
-        );
+/// Map a Python exception to a top-level [`ErrorType`], for categories that are
+/// not [`BackendError`] variants and so cannot come from
+/// [`py_exception_to_backend_error`].
+pub fn py_exception_to_error_type(py: Python<'_>, err: &PyErr) -> Option<(ErrorType, String)> {
+    if err.is_instance_of::<WorkerOverloaded>(py) {
+        return Some((ErrorType::WorkerOverloaded, err.value(py).to_string()));
     }
-
-    #[test]
-    fn client_errors_stay_invalid_argument_and_other_server_errors_stay_unknown() {
-        for code in [400, 404, 422, 499] {
-            assert_eq!(
-                error_type_for_http_like_code(code),
-                ErrorType::Backend(BackendError::InvalidArgument),
-                "code {code}"
-            );
-        }
-        for code in [500, 502, 504] {
-            assert_eq!(
-                error_type_for_http_like_code(code),
-                ErrorType::Backend(BackendError::Unknown),
-                "code {code}"
-            );
-        }
-    }
+    None
 }
+
+
