@@ -154,19 +154,51 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         }
 
         let guided_decoding_backend = self.get_guided_decoding_backend();
-        let guided_json = self.get_guided_json();
-        let guided_regex = self.get_guided_regex();
-        let guided_grammar = self.get_guided_grammar();
-        let guided_choice = self.get_guided_choice();
+        let structured_outputs = self.get_structured_outputs();
+        let guided_json = self.get_guided_json().or_else(|| {
+            structured_outputs.as_ref().and_then(|structured| {
+                structured.json.clone().or_else(|| {
+                    structured
+                        .json_object
+                        .map(|_| serde_json::json!({"type": "object"}))
+                })
+            })
+        });
+        let guided_regex = self.get_guided_regex().or_else(|| {
+            structured_outputs
+                .as_ref()
+                .and_then(|structured| structured.regex.clone())
+        });
+        let guided_grammar = self.get_guided_grammar().or_else(|| {
+            structured_outputs
+                .as_ref()
+                .and_then(|structured| structured.grammar.clone())
+        });
+        let guided_choice = self.get_guided_choice().or_else(|| {
+            structured_outputs
+                .as_ref()
+                .and_then(|structured| structured.choice.clone())
+        });
         let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
-        let guided_decoding = match common::GuidedDecodingOptions::from_optional(
+        let guided_whitespace_pattern = guided_whitespace_pattern.or_else(|| {
+            structured_outputs
+                .as_ref()
+                .and_then(|structured| structured.whitespace_pattern.clone())
+        });
+        let structural_tag = structured_outputs.as_ref().and_then(|structured| {
+            structured
+                .structural_tag
+                .clone()
+                .map(serde_json::Value::String)
+        });
+        let mut guided_decoding = match common::GuidedDecodingOptions::from_optional(
             guided_json,
             guided_regex,
             guided_choice,
             guided_grammar,
             guided_decoding_backend,
             guided_whitespace_pattern,
-            None,
+            structural_tag,
         ) {
             Ok(options) => options,
             Err(e) => {
@@ -175,6 +207,13 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 return Err(e);
             }
         };
+        if let (Some(options), Some(structured)) =
+            (guided_decoding.as_mut(), structured_outputs.as_ref())
+        {
+            options.disable_any_whitespace = structured.disable_any_whitespace;
+            options.disable_additional_properties = structured.disable_additional_properties;
+        }
+
         Ok(common::SamplingOptions {
             n,
             best_of,

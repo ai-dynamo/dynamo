@@ -148,7 +148,8 @@ impl OpenAIPreprocessor {
 }
 
 fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
-    request.common.guided_json.is_some()
+    request.common.structured_outputs.is_some()
+        || request.common.guided_json.is_some()
         || request.common.guided_regex.is_some()
         || request
             .common
@@ -269,6 +270,7 @@ mod tests {
             json!({"guided_regex": "[a-z]+"}),
             json!({"guided_choice": ["a", "b"]}),
             json!({"guided_grammar": "root ::= 'a'"}),
+            json!({"structured_outputs": {"regex": "[a-z]+"}}),
         ];
 
         for constraint in constraints {

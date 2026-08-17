@@ -160,9 +160,13 @@ fn guided_decoding(
     let Some(guided) = request.sampling_options.guided_decoding.as_ref() else {
         return Ok(None);
     };
-    if guided.backend.is_some() || guided.whitespace_pattern.is_some() {
+    if guided.backend.is_some()
+        || guided.whitespace_pattern.is_some()
+        || guided.disable_any_whitespace
+        || guided.disable_additional_properties
+    {
         return Err(client::invalid_argument(
-            "guided decoding backend and whitespace_pattern are not supported by TensorRT-LLM gRPC",
+            "guided decoding backend and structured-output modifiers are not supported by TensorRT-LLM gRPC",
         ));
     }
 

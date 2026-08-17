@@ -732,6 +732,10 @@ def build_sampling_params(
             regex=guided_decoding.get("regex"),
             choice=guided_decoding.get("choice"),
             grammar=guided_decoding.get("grammar"),
+            disable_any_whitespace=guided_decoding.get("disable_any_whitespace", False),
+            disable_additional_properties=guided_decoding.get(
+                "disable_additional_properties", False
+            ),
             whitespace_pattern=guided_decoding.get("whitespace_pattern"),
             structural_tag=serialize_structural_tag(
                 guided_decoding.get("structural_tag")

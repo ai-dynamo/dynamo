@@ -395,9 +395,13 @@ fn structured_output(
     let Some(guided) = guided else {
         return Ok(None);
     };
-    if guided.backend.is_some() || guided.whitespace_pattern.is_some() {
+    if guided.backend.is_some()
+        || guided.whitespace_pattern.is_some()
+        || guided.disable_any_whitespace
+        || guided.disable_additional_properties
+    {
         return Err(client::invalid_argument(
-            "guided decoding backend and whitespace_pattern are not supported by vLLM gRPC v0.25.1",
+            "guided decoding backend and structured-output modifiers are not supported by vLLM gRPC v0.25.1",
         ));
     }
 

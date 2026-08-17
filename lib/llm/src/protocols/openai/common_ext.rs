@@ -5,6 +5,59 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
 
+/// vLLM-compatible structured-output request options.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default)]
+pub struct StructuredOutputs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grammar: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_object: Option<bool>,
+    #[serde(default)]
+    pub disable_any_whitespace: bool,
+    #[serde(default)]
+    pub disable_additional_properties: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whitespace_pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_tag: Option<String>,
+}
+
+impl StructuredOutputs {
+    fn validate(&self) -> Result<(), anyhow::Error> {
+        let constraints = [
+            self.json.is_some(),
+            self.regex.is_some(),
+            self.choice.is_some(),
+            self.grammar.is_some(),
+            self.json_object.is_some(),
+            self.structural_tag.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+
+        anyhow::ensure!(
+            constraints == 1,
+            "structured_outputs requires exactly one of json, regex, choice, grammar, json_object, or structural_tag"
+        );
+        anyhow::ensure!(
+            self.json_object != Some(false),
+            "structured_outputs.json_object must be true when specified"
+        );
+        anyhow::ensure!(
+            self.choice.as_ref().is_none_or(|choice| !choice.is_empty()),
+            "structured_outputs.choice must not be empty"
+        );
+        Ok(())
+    }
+}
+
 /// Common extensions for OpenAI API requests that are not part of the standard OpenAI spec
 /// but are commonly needed across different request types.
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
@@ -72,8 +125,12 @@ pub struct CommonExt {
     /// If specified, the output will follow the whitespace pattern. Can be a string or null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    #[allow(unused)] // Not used
     pub guided_whitespace_pattern: Option<String>,
+
+    /// vLLM's replacement for the legacy guided_* request fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub structured_outputs: Option<StructuredOutputs>,
 
     /// Whether to skip special tokens in the decoded output.
     /// When true, special tokens (like EOS, BOS, PAD) are removed from the output text.
@@ -93,6 +150,24 @@ impl CommonExt {
     pub fn builder() -> CommonExtBuilder {
         CommonExtBuilder::default()
     }
+
+    pub fn validate_structured_outputs(&self) -> Result<(), anyhow::Error> {
+        let Some(structured_outputs) = self.structured_outputs.as_ref() else {
+            return Ok(());
+        };
+        structured_outputs.validate()?;
+
+        let legacy_constraint = self.guided_json.is_some()
+            || self.guided_regex.is_some()
+            || self.guided_grammar.is_some()
+            || self.guided_choice.is_some()
+            || self.guided_whitespace_pattern.is_some();
+        anyhow::ensure!(
+            !legacy_constraint,
+            "structured_outputs cannot be combined with legacy guided_* fields"
+        );
+        Ok(())
+    }
 }
 
 /// Trait for types that provide CommonExt fields
@@ -106,8 +181,12 @@ pub trait CommonExtProvider {
     fn get_guided_grammar(&self) -> Option<String>;
     fn get_guided_choice(&self) -> Option<Vec<String>>;
     fn get_guided_decoding_backend(&self) -> Option<String>;
-    #[allow(unused)] // Not used
     fn get_guided_whitespace_pattern(&self) -> Option<String>;
+
+    fn get_structured_outputs(&self) -> Option<StructuredOutputs> {
+        self.common_ext()
+            .and_then(|common| common.structured_outputs.clone())
+    }
 
     /// Other sampling Options
     fn get_top_k(&self) -> Option<i32>;
@@ -142,8 +221,67 @@ mod tests {
         assert_eq!(common_ext.guided_grammar, None);
         assert_eq!(common_ext.guided_choice, None);
         assert_eq!(common_ext.guided_decoding_backend, None);
+        assert!(common_ext.structured_outputs.is_none());
         assert_eq!(common_ext.include_stop_str_in_output, None);
         assert_eq!(common_ext.skip_special_tokens, None);
+    }
+
+    #[test]
+    fn test_structured_outputs_validation() {
+        let valid = CommonExt {
+            structured_outputs: Some(StructuredOutputs {
+                json: Some(serde_json::json!({"type": "object"})),
+                disable_any_whitespace: true,
+                disable_additional_properties: true,
+                whitespace_pattern: Some("[ ]?".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(valid.validate_structured_outputs().is_ok());
+
+        let missing_constraint = CommonExt {
+            structured_outputs: Some(StructuredOutputs::default()),
+            ..Default::default()
+        };
+        assert!(missing_constraint.validate_structured_outputs().is_err());
+
+        let multiple_constraints = CommonExt {
+            structured_outputs: Some(StructuredOutputs {
+                regex: Some("a+".to_string()),
+                choice: Some(vec!["a".to_string()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(multiple_constraints.validate_structured_outputs().is_err());
+
+        for invalid in [
+            StructuredOutputs {
+                json_object: Some(false),
+                ..Default::default()
+            },
+            StructuredOutputs {
+                choice: Some(Vec::new()),
+                ..Default::default()
+            },
+        ] {
+            let common = CommonExt {
+                structured_outputs: Some(invalid),
+                ..Default::default()
+            };
+            assert!(common.validate_structured_outputs().is_err());
+        }
+
+        let mixed_legacy = CommonExt {
+            guided_regex: Some("a+".to_string()),
+            structured_outputs: Some(StructuredOutputs {
+                grammar: Some("root ::= \"a\"".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(mixed_legacy.validate_structured_outputs().is_err());
     }
 
     #[test]
@@ -216,6 +354,7 @@ mod tests {
             guided_choice: None,
             guided_decoding_backend: None,
             guided_whitespace_pattern: None,
+            structured_outputs: None,
             skip_special_tokens: None,
             prompt_logprobs: None,
         };

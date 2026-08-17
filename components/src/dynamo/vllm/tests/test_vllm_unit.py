@@ -1373,6 +1373,34 @@ def test_build_sampling_params_maps_guided_decoding(constraint_name, constraint_
         assert getattr(sp.structured_outputs, field) == expected
 
 
+def test_build_sampling_params_maps_structured_output_modifiers():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    structural_tag = '{"format":{"type":"structural_tag"}}'
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {
+            "guided_decoding": {
+                "structural_tag": structural_tag,
+                "disable_any_whitespace": True,
+                "disable_additional_properties": True,
+                "whitespace_pattern": "[ ]?",
+            },
+        },
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+    structured = build_sampling_params(
+        request, default_sampling_params={}
+    ).structured_outputs
+
+    assert structured.structural_tag == structural_tag
+    assert structured.disable_any_whitespace is True
+    assert structured.disable_additional_properties is True
+    assert structured.whitespace_pattern == "[ ]?"
+
+
 @pytest.mark.parametrize(
     "schema",
     [

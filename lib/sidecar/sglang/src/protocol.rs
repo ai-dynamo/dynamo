@@ -219,6 +219,8 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
                 .as_ref()
                 .is_some_and(|value| !value.is_empty())
             || guided.whitespace_pattern.is_some()
+            || guided.disable_any_whitespace
+            || guided.disable_additional_properties
             || guided.structural_tag.is_some())
     {
         return Err(client::invalid_arg(

@@ -79,6 +79,23 @@ pytestmark = [
 MODEL = "Qwen/Qwen3-0.6B"
 _DEFAULT_MM_DATA = object()
 
+
+def test_structured_outputs_modifiers_map_to_guided_decoding():
+    structured = StructuredOutputsParams(
+        json={"type": "object"},
+        disable_any_whitespace=True,
+        disable_additional_properties=True,
+        whitespace_pattern="[ ]?",
+    )
+
+    assert prepost_module._guided_decoding_from_structured_outputs(structured) == {
+        "json": {"type": "object"},
+        "disable_any_whitespace": True,
+        "disable_additional_properties": True,
+        "whitespace_pattern": "[ ]?",
+    }
+
+
 TOOL_REQUEST = {
     "model": MODEL,
     "messages": [{"role": "user", "content": "Hello"}],

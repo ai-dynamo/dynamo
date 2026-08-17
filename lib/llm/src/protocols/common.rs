@@ -430,7 +430,8 @@ pub struct SamplingOptions {
 
 /// Guided Decoding Options
 ///
-/// Only one of `json`, `regex`, `choice`, or `grammar` should be set.
+/// Only one of `json`, `regex`, `choice`, `grammar`, or `structural_tag` should be set.
+/// The whitespace fields modify JSON guidance rather than selecting another constraint.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GuidedDecodingOptions {
     /// If specified, the output will follow the JSON schema. Can be a string, an object, or null.
@@ -460,6 +461,14 @@ pub struct GuidedDecodingOptions {
     /// If specified, xgrammar structural tag constraint for guided decoding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structural_tag: Option<serde_json::Value>,
+
+    /// If true, JSON output contains no optional whitespace.
+    #[serde(default)]
+    pub disable_any_whitespace: bool,
+
+    /// If true, JSON schemas disallow unspecified object properties.
+    #[serde(default)]
+    pub disable_additional_properties: bool,
 }
 
 impl GuidedDecodingOptions {
@@ -481,6 +490,8 @@ impl GuidedDecodingOptions {
             backend,
             whitespace_pattern,
             structural_tag,
+            disable_any_whitespace: false,
+            disable_additional_properties: false,
         }
     }
 
@@ -547,7 +558,6 @@ impl GuidedDecodingOptions {
             self.regex.is_some(),
             self.choice.as_ref().is_some_and(|v| !v.is_empty()),
             self.grammar.is_some(),
-            self.whitespace_pattern.is_some(),
             self.structural_tag.is_some(),
         ]
         .iter()

@@ -481,6 +481,7 @@ impl ValidateRequest for NvCreateCompletionRequest {
         // none for metadata
 
         // Common Ext
+        self.common.validate_structured_outputs()?;
         validate::validate_repetition_penalty(self.get_repetition_penalty())?;
         validate::validate_min_p(self.get_min_p())?;
         validate::validate_top_k(self.get_top_k())?;

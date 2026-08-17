@@ -578,6 +578,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_repetition_penalty(self.get_repetition_penalty())?;
         validate::validate_min_p(self.get_min_p())?;
         validate::validate_top_k(self.get_top_k())?;
+        self.common.validate_structured_outputs()?;
         // Cross-field validation
         validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
 
@@ -636,6 +637,70 @@ mod tests {
         }))
         .expect("Failed to deserialize request");
         assert!(ValidateRequest::validate(&invalid_request).is_err());
+    }
+
+    #[test]
+    fn test_structured_outputs_extracts_all_vllm_variants() {
+        let cases = [
+            (json!({"json": {"type": "object"}}), "json"),
+            (json!({"regex": "[a-z]+"}), "regex"),
+            (json!({"choice": ["a", "b"]}), "choice"),
+            (json!({"grammar": "root ::= \"a\""}), "grammar"),
+            (json!({"json_object": true}), "json_object"),
+            (
+                json!({"structural_tag": "{\"format\":{\"type\":\"structural_tag\"}}"}),
+                "structural_tag",
+            ),
+        ];
+
+        for (structured_outputs, expected) in cases {
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "structured_outputs": structured_outputs,
+            }))
+            .expect("request must deserialize");
+            ValidateRequest::validate(&request).expect("request must validate");
+            let guided = request
+                .extract_sampling_options()
+                .expect("sampling options must extract")
+                .guided_decoding
+                .expect("structured outputs must become guided decoding");
+
+            match expected {
+                "json" | "json_object" => assert!(guided.json.is_some()),
+                "regex" => assert_eq!(guided.regex.as_deref(), Some("[a-z]+")),
+                "choice" => assert_eq!(guided.choice, Some(vec!["a".into(), "b".into()])),
+                "grammar" => assert_eq!(guided.grammar.as_deref(), Some("root ::= \"a\"")),
+                "structural_tag" => assert!(guided.structural_tag.is_some()),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_structured_outputs_extracts_json_modifiers() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "structured_outputs": {
+                "json": {"type": "object"},
+                "disable_any_whitespace": true,
+                "disable_additional_properties": true,
+                "whitespace_pattern": "[ ]?"
+            },
+        }))
+        .expect("request must deserialize");
+        ValidateRequest::validate(&request).expect("request must validate");
+        let guided = request
+            .extract_sampling_options()
+            .expect("sampling options must extract")
+            .guided_decoding
+            .expect("structured outputs must become guided decoding");
+
+        assert!(guided.disable_any_whitespace);
+        assert!(guided.disable_additional_properties);
+        assert_eq!(guided.whitespace_pattern.as_deref(), Some("[ ]?"));
     }
 
     #[test]
