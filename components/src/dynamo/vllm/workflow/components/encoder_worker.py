@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from typing import Any
 
+from dynamo.common.constants import EmbeddingTransferMode
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     resolve_vision_encoder_backend_class,
 )
+from dynamo.vllm.workflow.components.embedding_transfer import NixlWriteTensorCarrier
 from dynamo.vllm.workflow.components.stages import EncoderStage
 from dynamo.workflow import NixlTensorCarrier, RemoteStageServer
 
@@ -24,6 +27,7 @@ async def encoder_worker(
     model: str,
     custom_encoder_class: str,
     stage_id: str = "encoder",
+    embedding_transfer_mode: str = EmbeddingTransferMode.NIXL_WRITE.value,
     nixl_send_pool_capacity: int = 0,
     nixl_send_pool_bytes: int = 0,
     batch_queue_wait_ms: float = 0.0,
@@ -43,12 +47,18 @@ async def encoder_worker(
         ),
         name=f"workflow-{stage_id}",
     )
-    carrier: NixlTensorCarrier | None = None
+    carrier: Any = None
     try:
-        carrier = NixlTensorCarrier(
-            send_pool_capacity=nixl_send_pool_capacity,
-            send_pool_bytes=nixl_send_pool_bytes,
-        )
+        transfer_mode = EmbeddingTransferMode(embedding_transfer_mode)
+        if transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
+            carrier = NixlWriteTensorCarrier()
+        elif transfer_mode == EmbeddingTransferMode.NIXL_READ:
+            carrier = NixlTensorCarrier(
+                send_pool_capacity=nixl_send_pool_capacity,
+                send_pool_bytes=nixl_send_pool_bytes,
+            )
+        else:
+            raise ValueError("remote workflow encoder requires nixl-write or nixl-read")
         server = RemoteStageServer(stage_id, stage, carrier)
         await runtime.endpoint(endpoint_id).serve_endpoint(server.generate)
     finally:
@@ -69,6 +79,14 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--custom-encoder-class", required=True)
     parser.add_argument("--stage-id", default="encoder")
+    parser.add_argument(
+        "--embedding-transfer-mode",
+        choices=(
+            EmbeddingTransferMode.NIXL_WRITE.value,
+            EmbeddingTransferMode.NIXL_READ.value,
+        ),
+        default=EmbeddingTransferMode.NIXL_WRITE.value,
+    )
     parser.add_argument("--nixl-send-pool-capacity", type=int, default=0)
     parser.add_argument("--nixl-send-pool-bytes", type=int, default=0)
     parser.add_argument("--batch-queue-wait-ms", type=float, default=0.0)
@@ -80,6 +98,7 @@ def main() -> None:
             args.model,
             args.custom_encoder_class,
             args.stage_id,
+            args.embedding_transfer_mode,
             args.nixl_send_pool_capacity,
             args.nixl_send_pool_bytes,
             args.batch_queue_wait_ms,

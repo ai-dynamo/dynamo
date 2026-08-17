@@ -10,7 +10,9 @@ import pytest
 import torch
 from vllm.inputs import EmbedsPrompt
 
+from dynamo.common.constants import EmbeddingTransferMode
 from dynamo.common.external_encoder import ExternalEncoderResult
+from dynamo.common.multimodal.embedding_transfer import TransferRequest
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.handlers import DecodeWorkerHandler
 from dynamo.vllm.multimodal_utils.external_encoder import ExternalEncoderPromptLoader
@@ -39,8 +41,15 @@ def _model_config(
     )
 
 
-def _engine_args(*, enable_prompt_embeds: bool = True) -> SimpleNamespace:
-    return SimpleNamespace(enable_prompt_embeds=enable_prompt_embeds)
+def _engine_args(
+    *,
+    enable_prompt_embeds: bool = True,
+    embedding_transfer_mode: EmbeddingTransferMode = EmbeddingTransferMode.NIXL_READ,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        enable_prompt_embeds=enable_prompt_embeds,
+        embedding_transfer_mode=embedding_transfer_mode,
+    )
 
 
 def _encoder_result(
@@ -106,6 +115,39 @@ async def test_loader_reuses_lazy_importer():
 
     factory.assert_called_once_with()
     assert importer.import_tensor.await_count == 2
+
+
+async def test_loader_uses_write_receiver_and_releases_ring_slice() -> None:
+    packed = torch.arange(12, dtype=torch.bfloat16).reshape(3, _HIDDEN)
+    receiver = SimpleNamespace(
+        receive_embeddings=AsyncMock(return_value=(17, packed)),
+        release_tensor=MagicMock(),
+    )
+    factory = MagicMock(return_value=receiver)
+    transfer = TransferRequest(
+        embeddings_shape=[3, _HIDDEN],
+        embedding_dtype_str="bfloat16",
+        serialized_request="opaque-write-request",
+    )
+    result = ExternalEncoderResult(
+        features=transfer.model_dump(),
+        row_splits=(0, 2, 3),
+        image_token_id=_IMAGE_TOKEN_ID,
+    ).to_dict()
+    loader = ExternalEncoderPromptLoader(
+        _model_config(),
+        _engine_args(embedding_transfer_mode=EmbeddingTransferMode.NIXL_WRITE),
+        receiver_factory=factory,
+    )
+
+    prompt = await loader.load(
+        result,
+        [1, _IMAGE_TOKEN_ID, 2, _IMAGE_TOKEN_ID, 3],
+    )
+
+    assert prompt["prompt_token_ids"] == [1, 99, 99, 2, 99, 3]
+    receiver.receive_embeddings.assert_awaited_once_with(transfer)
+    receiver.release_tensor.assert_called_once_with(17)
 
 
 @pytest.mark.parametrize(
@@ -181,6 +223,7 @@ async def test_handler_assembles_external_prompt_through_shared_loader():
     loader.load.assert_awaited_once_with(
         request["encoder_result"],
         request["token_ids"],
+        trace_id="req-1",
     )
 
 

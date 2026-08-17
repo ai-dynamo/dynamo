@@ -145,21 +145,114 @@ class NixlTensorRef:
 
 
 @dataclass(frozen=True)
+class EmbeddingTransferRef:
+    """Existing multimodal ``TransferRequest`` carried on one workflow edge."""
+
+    shape: tuple[int, ...]
+    dtype: str
+    serialized_request: Any
+    transfer_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        shape = tuple(self.shape)
+        if any(
+            isinstance(dimension, bool)
+            or not isinstance(dimension, int)
+            or dimension < 0
+            for dimension in shape
+        ):
+            raise WorkflowExecutionError(
+                "embedding transfer shape must contain non-negative integers"
+            )
+        if not isinstance(self.dtype, str) or not self.dtype:
+            raise WorkflowExecutionError(
+                "embedding transfer dtype must be a non-empty string"
+            )
+        if self.transfer_id is not None and (
+            not isinstance(self.transfer_id, str) or not self.transfer_id
+        ):
+            raise WorkflowExecutionError(
+                "embedding transfer id must be a non-empty string when set"
+            )
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "dtype", self.dtype.removeprefix("torch."))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "embeddings_shape": list(self.shape),
+            "embedding_dtype_str": self.dtype,
+            "serialized_request": self.serialized_request,
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        transfer_id: Optional[str] = None,
+    ) -> "EmbeddingTransferRef":
+        if not isinstance(data, Mapping):
+            raise WorkflowExecutionError(
+                "embedding transfer reference must be an object"
+            )
+        _check_keys(
+            data,
+            {
+                "embeddings_shape",
+                "embedding_dtype_str",
+                "serialized_request",
+            },
+        )
+        shape = data["embeddings_shape"]
+        if not isinstance(shape, list):
+            raise WorkflowExecutionError("embedding transfer shape must be an array")
+        return cls(
+            shape=tuple(shape),
+            dtype=data["embedding_dtype_str"],
+            serialized_request=data["serialized_request"],
+            transfer_id=transfer_id,
+        )
+
+
+TensorTransferRef = NixlTensorRef | EmbeddingTransferRef
+
+
+def tensor_transfer_ref_from_dict(
+    data: Mapping[str, Any],
+    *,
+    transfer_id: Optional[str] = None,
+) -> TensorTransferRef:
+    """Parse either the legacy READ reference or a multimodal transfer request."""
+
+    if isinstance(data, Mapping) and data.get("schema") == NIXL_TENSOR_SCHEMA:
+        reference = NixlTensorRef.from_dict(data)
+        if transfer_id is not None and reference.transfer_id != transfer_id:
+            raise WorkflowExecutionError(
+                "NIXL tensor fanout key does not match transfer id"
+            )
+        return reference
+    return EmbeddingTransferRef.from_dict(data, transfer_id=transfer_id)
+
+
+@dataclass(frozen=True)
 class NixlTensorFanout:
     """Per-consumer NIXL references for one logical tensor output."""
 
-    transfers: Mapping[str, NixlTensorRef]
+    transfers: Mapping[str, TensorTransferRef]
 
     def __post_init__(self) -> None:
         if not isinstance(self.transfers, Mapping) or not self.transfers:
             raise WorkflowExecutionError("NIXL tensor fanout requires transfers")
-        transfers: dict[str, NixlTensorRef] = {}
+        transfers: dict[str, TensorTransferRef] = {}
         for transfer_id, reference in sorted(self.transfers.items()):
-            if not isinstance(reference, NixlTensorRef):
+            if not isinstance(reference, (NixlTensorRef, EmbeddingTransferRef)):
                 raise WorkflowExecutionError(
-                    "NIXL tensor fanout values must use NixlTensorRef"
+                    "NIXL tensor fanout values must use a tensor transfer reference"
                 )
-            if transfer_id != reference.transfer_id:
+            if (
+                reference.transfer_id is not None
+                and transfer_id != reference.transfer_id
+            ):
                 raise WorkflowExecutionError(
                     "NIXL tensor fanout key does not match transfer id"
                 )
@@ -189,12 +282,14 @@ class NixlTensorFanout:
             )
         return cls(
             {
-                transfer_id: NixlTensorRef.from_dict(reference)
+                transfer_id: tensor_transfer_ref_from_dict(
+                    reference, transfer_id=transfer_id
+                )
                 for transfer_id, reference in transfers.items()
             }
         )
 
-    def for_transfer(self, transfer_id: str) -> NixlTensorRef:
+    def for_transfer(self, transfer_id: str) -> TensorTransferRef:
         try:
             return self.transfers[transfer_id]
         except KeyError as error:

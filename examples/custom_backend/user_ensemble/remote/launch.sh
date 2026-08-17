@@ -17,8 +17,12 @@ ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.hitchhikers_vision_e
 CUSTOM_JINJA_TEMPLATE="${DYN_CUSTOM_JINJA_TEMPLATE:-$REPO_ROOT/examples/custom_encoder/templates/qwen_vl.jinja}"
 NIXL_SEND_POOL_CAPACITY="${DYN_NIXL_SEND_POOL_CAPACITY:-0}"
 NIXL_SEND_POOL_BYTES="${DYN_NIXL_SEND_POOL_BYTES:-0}"
-ENCODER_BATCH_QUEUE_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_WAIT_MS:-2}"
-ENCODER_BATCH_QUEUE_MAX_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS:-50}"
+EMBEDDING_TRANSFER_MODE="${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-nixl-write}"
+SKIP_CLASSIFIER="${DYN_BENCH_SKIP_CLASSIFIER:-0}"
+WORKFLOW_NAMESPACE="${DYN_USER_ENSEMBLE_NAMESPACE:-user-ensemble}"
+WORKFLOW_PROVIDER="${DYN_BENCH_WORKFLOW_PROVIDER:-examples.custom_backend.user_ensemble.remote.provider:provide_workflow}"
+ENCODER_BATCH_QUEUE_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_WAIT_MS:-0}"
+ENCODER_BATCH_QUEUE_MAX_WAIT_MS="${DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS:-0}"
 ENCODER_GPU="${DYN_ENCODER_GPU:-}"
 DECODER_GPU="${DYN_DECODER_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -47,29 +51,33 @@ python3 -m dynamo.frontend \
     --model-name "$SERVED_MODEL_NAME" \
     --custom-jinja-template "$CUSTOM_JINJA_TEMPLATE" \
     --workflow-provider \
-    examples.custom_backend.user_ensemble.remote.provider:provide_workflow &
+    "$WORKFLOW_PROVIDER" &
 
 CUDA_VISIBLE_DEVICES="$ENCODER_GPU" \
 DYN_SYSTEM_PORT="${DYN_ENCODER_SYSTEM_PORT:-8081}" \
 python3 -m dynamo.vllm.workflow.components.encoder_worker \
-    --endpoint-id user-ensemble.encoder.generate \
+    --endpoint-id "$WORKFLOW_NAMESPACE.encoder.generate" \
     --model "$ENCODER_MODEL" \
     --custom-encoder-class "$ENCODER_CLASS" \
+    --embedding-transfer-mode "$EMBEDDING_TRANSFER_MODE" \
     --nixl-send-pool-capacity "$NIXL_SEND_POOL_CAPACITY" \
     --nixl-send-pool-bytes "$NIXL_SEND_POOL_BYTES" \
     --batch-queue-wait-ms "$ENCODER_BATCH_QUEUE_WAIT_MS" \
     --batch-queue-max-wait-ms "$ENCODER_BATCH_QUEUE_MAX_WAIT_MS" &
 
-CUDA_VISIBLE_DEVICES= \
-DYN_SYSTEM_PORT="${DYN_CLASSIFIER_SYSTEM_PORT:-8082}" \
-python3 -m examples.custom_backend.user_ensemble.remote.classifier_worker &
+if [[ "$SKIP_CLASSIFIER" != 1 ]]; then
+    CUDA_VISIBLE_DEVICES= \
+    DYN_SYSTEM_PORT="${DYN_CLASSIFIER_SYSTEM_PORT:-8082}" \
+    python3 -m examples.custom_backend.user_ensemble.remote.classifier_worker &
+fi
 
 CUDA_VISIBLE_DEVICES="$DECODER_GPU" \
 DYN_SYSTEM_PORT="${DYN_DECODER_SYSTEM_PORT:-8083}" \
 python3 -m dynamo.vllm \
     --model "$MODEL" \
-    --endpoint dyn://user-ensemble.generator.generate \
+    --endpoint "dyn://$WORKFLOW_NAMESPACE.generator.generate" \
     --enable-prompt-embeds \
+    --embedding-transfer-mode "$EMBEDDING_TRANSFER_MODE" \
     --max-model-len "$MAX_MODEL_LEN" \
     $GPU_MEM_ARGS \
     "$@" &

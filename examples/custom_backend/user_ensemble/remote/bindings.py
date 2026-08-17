@@ -3,6 +3,8 @@
 
 """Remote placement for two workflow workers and one stock vLLM worker."""
 
+import os
+
 from dynamo.workflow import (
     DeploymentSpec,
     ExecutionPlan,
@@ -13,9 +15,10 @@ from dynamo.workflow import (
 )
 from examples.custom_backend.user_ensemble.workflow import define_workflow
 
-ENCODER_ENDPOINT = "user-ensemble.encoder.generate"
-CLASSIFIER_ENDPOINT = "user-ensemble.classifier.generate"
-GENERATOR_ENDPOINT = "user-ensemble.generator.generate"
+WORKFLOW_NAMESPACE = os.environ.get("DYN_USER_ENSEMBLE_NAMESPACE", "user-ensemble")
+ENCODER_ENDPOINT = f"{WORKFLOW_NAMESPACE}.encoder.generate"
+CLASSIFIER_ENDPOINT = f"{WORKFLOW_NAMESPACE}.classifier.generate"
+GENERATOR_ENDPOINT = f"{WORKFLOW_NAMESPACE}.generator.generate"
 
 
 def compile_remote_workflow() -> ExecutionPlan:

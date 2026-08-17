@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 from dynamo.workflow.generate import GenerateEndpointInvoker
-from dynamo.workflow.nixl import NixlTensorFanout
+from dynamo.workflow.nixl import NixlTensorFanout, tensor_transfer_ref_from_dict
 from dynamo.workflow.plan import (
     NIXL_CARRIER,
     ExecutionPlan,
@@ -21,6 +22,8 @@ from dynamo.workflow.plan import (
 from dynamo.workflow.remote import NixlCarriedValue, RemoteStageClient
 from dynamo.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
 from dynamo.workflow.types import StageContract, ValueRef, WorkflowValidationError
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -174,9 +177,12 @@ class StageDispatcher:
                 raise WorkflowValidationError(
                     f"remote endpoint {endpoint_id!r} cannot mix stage protocols"
                 )
+            logger.info("Binding workflow endpoint %r", endpoint_id)
             endpoint = runtime.endpoint(endpoint_id)
             client = await endpoint.client()
+            logger.info("Waiting for workflow endpoint %r", endpoint_id)
             await client.wait_for_instances()
+            logger.info("Workflow endpoint %r is available", endpoint_id)
             clients[endpoint_id] = (
                 GenerateEndpointInvoker(client)
                 if protocols == {GenerateEndpointBinding}
@@ -202,6 +208,22 @@ class StageDispatcher:
                 f"missing={sorted(expected_inputs - actual_inputs)}, "
                 f"extra={sorted(actual_inputs - expected_inputs)}"
             )
+        binding = self._plan.bindings[stage_id]
+        for input_name, spec in contract.inputs.items():
+            value_spec = _require_value_spec(
+                spec, f"stage {stage_id!r} input {input_name!r}"
+            )
+            value = inputs[input_name]
+            location = f"stage {stage_id!r} input {input_name!r}"
+            if isinstance(binding, RemoteBinding) and value_spec.type == "tensor":
+                reference = tensor_transfer_ref_from_dict(value)
+                _validate_value(
+                    value_spec,
+                    SimpleNamespace(dtype=reference.dtype, shape=reference.shape),
+                    location,
+                )
+            else:
+                _validate_value(value_spec, value, location)
 
         binding = self._plan.bindings[stage_id]
         frozen_inputs = MappingProxyType(dict(inputs))

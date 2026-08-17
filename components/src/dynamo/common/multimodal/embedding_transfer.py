@@ -433,6 +433,14 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         if state_update_task is not None:
             state_update_task.cancel()
 
+    async def close(self) -> None:
+        """Stop the background progress task during an orderly worker shutdown."""
+
+        if self._state_update_task.done():
+            return
+        self._state_update_task.cancel()
+        await asyncio.gather(self._state_update_task, return_exceptions=True)
+
     async def _state_update(self):
         """Long-running async task that processes transfer requests."""
         inflight_transfers = {}
@@ -662,6 +670,54 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
 
         self.id_counter = MonolithicCounter()
         self.to_buffer_id = {}
+        # One receiver-side progress loop owns NIXL notification polling. A
+        # coroutine per request used to call update_notifs() every millisecond;
+        # under open-loop load that produced hundreds of redundant native calls
+        # per event-loop tick and starved request processing.
+        self._completion_waiters: dict[tuple[str, bytes], asyncio.Future[None]] = {}
+        self._progress_wakeup = asyncio.Event()
+        self._state_update_task: asyncio.Task[None] | None = None
+
+    def __del__(self):
+        state_update_task = getattr(self, "_state_update_task", None)
+        if state_update_task is not None:
+            state_update_task.cancel()
+
+    def _ensure_state_update_task(self) -> None:
+        if self._state_update_task is None:
+            self._state_update_task = asyncio.create_task(self._state_update())
+
+    async def close(self) -> None:
+        """Stop receiver progress and cancel any unfinished transfers."""
+
+        if self._state_update_task is not None:
+            self._state_update_task.cancel()
+            await asyncio.gather(self._state_update_task, return_exceptions=True)
+            self._state_update_task = None
+        for waiter in self._completion_waiters.values():
+            if not waiter.done():
+                waiter.cancel()
+        self._completion_waiters.clear()
+
+    async def _state_update(self) -> None:
+        """Poll once per tick and dispatch completions to request futures."""
+
+        while True:
+            await self._progress_wakeup.wait()
+            self._progress_wakeup.clear()
+            while self._completion_waiters:
+                notifs = self.nixl_agent.update_notifs()
+                for remote_agent_id, notifications in notifs.items():
+                    for notif in list(notifications):
+                        key = (remote_agent_id, notif)
+                        waiter = self._completion_waiters.pop(key, None)
+                        if waiter is None:
+                            continue
+                        self.nixl_agent.notifs[remote_agent_id].remove(notif)
+                        if not waiter.done():
+                            waiter.set_result(None)
+                if self._completion_waiters:
+                    await asyncio.sleep(0.001)
 
     async def receive_embeddings(
         self, request: TransferRequest, receive_timeout=60
@@ -745,35 +801,35 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
                 self.agent_metadata if nixl_request.agent_metadata else b"",
             )
         )
-        self.nixl_agent.send_notif(nixl_request.sender_agent_id, notif_msg=notif_msg)
-
-        # await for write notification
-        start_time = time.perf_counter()
+        # Await the write notification through the shared receiver progress
+        # loop. Register before sending the handshake so a fast local transfer
+        # cannot complete before its waiter exists.
         done_signal = str(tensor_id).encode()
-        found = False
-        while not found:
-            # parse notifications to find done signal, we can't use 'check_remote_xfer_done' API
-            # because it match requested string pattern in substring of the notifications instead
-            # of exact match, which is not what we want, i.e. for two done signal "1" and "11",
-            # 'check_remote_xfer_done("1")' will return True for both signal and "11" will be cleared
-            # as a result, leading the subsequent 'check_remote_xfer_done("1")' returns False.
-            notifs = self.nixl_agent.update_notifs()
-            if nixl_request.sender_agent_id in notifs:
-                for notif in notifs[nixl_request.sender_agent_id]:
-                    if notif == done_signal:
-                        self.nixl_agent.notifs[nixl_request.sender_agent_id].remove(
-                            notif
-                        )
-                        found = True
-                        break
+        completion_key = (nixl_request.sender_agent_id, done_signal)
+        completion = asyncio.get_running_loop().create_future()
+        self._completion_waiters[completion_key] = completion
+        self._ensure_state_update_task()
+        self._progress_wakeup.set()
 
-            await asyncio.sleep(0.001)
-            # Waited for too long without transfer completion, log for debugging
-            if (time.perf_counter() - start_time) > receive_timeout:
+        start_time = time.perf_counter()
+        transfer_complete = False
+        try:
+            self.nixl_agent.send_notif(
+                nixl_request.sender_agent_id, notif_msg=notif_msg
+            )
+            await asyncio.wait_for(completion, timeout=receive_timeout)
+            transfer_complete = True
+        except TimeoutError as error:
+            raise TimeoutError(
+                "Timeout while waiting for transfer completion for tensor_id "
+                f"{tensor_id} for more than {receive_timeout} seconds"
+            ) from error
+        except BaseException:
+            raise
+        finally:
+            self._completion_waiters.pop(completion_key, None)
+            if not transfer_complete:
                 self.ring_buffer.release_buffer(buffer_id)
-                raise TimeoutError(
-                    f"Timeout while waiting for transfer completion for tensor_id {tensor_id} for more than {receive_timeout} seconds"
-                )
         logger.debug(
             f"Transfer completed for tensor_id {tensor_id}, total wait time: {time.perf_counter() - start_time:.2f} seconds"
         )
