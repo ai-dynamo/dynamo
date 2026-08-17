@@ -1,12 +1,16 @@
-.PHONY: test verify-v0-checksum verify-implementation-checksum syntax plan
+.PHONY: test verify-v0-checksum verify-v2-checksum verify-implementation-checksum syntax plan
 
-test: verify-v0-checksum
+test: verify-v0-checksum verify-v2-checksum
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s verification/v0/tests -v
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s implementation/tests -v
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s diagnostics/tests -v
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s verification/v2/tests -v
 
 verify-v0-checksum:
 	sha256sum --check verification/v0/SHA256SUMS
+
+verify-v2-checksum:
+	sha256sum --check verification/v2/SHA256SUMS
 
 verify-implementation-checksum:
 	sha256sum --check implementation/SHA256SUMS

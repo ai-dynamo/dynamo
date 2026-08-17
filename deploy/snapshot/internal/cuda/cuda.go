@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -348,11 +350,9 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap 
 	var timings RestorePhaseTimings
 
 	start := time.Now()
-	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
-		}
+	if err := restoreProcesses(ctx, cudaPIDs, deviceMap, log, cudaRestoreWorkers()); err != nil {
+		timings.TotalDuration = time.Since(start)
+		return timings, err
 	}
 
 	for _, pid := range cudaPIDs {
@@ -369,4 +369,82 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap 
 	timings.TotalDuration = time.Since(start)
 
 	return timings, nil
+}
+
+// cudaRestoreWorkers is intentionally opt-in. CUDA restore has historically
+// run one process at a time; callers can trial independent process restores on
+// the same GPU without changing the safe default. Values outside the bounded
+// 1/2/4 ladder fail closed to one worker.
+func cudaRestoreWorkers() int {
+	workers, err := strconv.Atoi(os.Getenv("DYN_SNAPSHOT_CUDA_RESTORE_WORKERS"))
+	if err != nil || (workers != 2 && workers != 4) {
+		return 1
+	}
+	return workers
+}
+
+func restoreProcesses(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger, workers int) error {
+	return restoreProcessesWith(ctx, cudaPIDs, deviceMap, log, workers, restoreProcess)
+}
+
+type restoreProcessFunc func(context.Context, int, string, logr.Logger) error
+
+func restoreProcessesWith(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger, workers int, restoreOne restoreProcessFunc) error {
+	if workers <= 1 || len(cudaPIDs) <= 1 {
+		for _, pid := range cudaPIDs {
+			if err := restoreOne(ctx, pid, deviceMap, log); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if workers > len(cudaPIDs) {
+		workers = len(cudaPIDs)
+	}
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan int)
+	var firstErr error
+	var errOnce sync.Once
+	var workerGroup sync.WaitGroup
+	for range workers {
+		workerGroup.Add(1)
+		go func() {
+			defer workerGroup.Done()
+			for {
+				select {
+				case <-workCtx.Done():
+					return
+				case pid, ok := <-jobs:
+					if !ok {
+						return
+					}
+					if err := restoreOne(workCtx, pid, deviceMap, log); err != nil {
+						errOnce.Do(func() {
+							firstErr = err
+							cancel()
+						})
+					}
+				}
+			}
+		}()
+	}
+	for _, pid := range cudaPIDs {
+		select {
+		case <-workCtx.Done():
+			break
+		case jobs <- pid:
+		}
+		if workCtx.Err() != nil {
+			break
+		}
+	}
+	close(jobs)
+	workerGroup.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return workCtx.Err()
 }

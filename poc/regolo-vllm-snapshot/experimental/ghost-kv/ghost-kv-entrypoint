@@ -1,0 +1,66 @@
+#!/bin/sh
+# Start vLLM with CuMem sleep mode and expose snapshot readiness only after
+# level-1 sleep has unmapped the KV cache. This is a candidate-only entrypoint.
+set -eu
+
+control_dir=${DYN_SNAPSHOT_CONTROL_DIR:-/snapshot-control}
+socket=${DYN_KV_L1_SOCKET:-"$control_dir/kv-l1.sock"}
+sleep_level=${GHOST_KV_SLEEP_LEVEL:-1}
+case "$sleep_level" in 1|2|3) ;; *) echo "ghost-kv-entrypoint: invalid sleep level" >&2; exit 64 ;; esac
+
+# A restore target is only a namespace placeholder. The snapshot agent restores
+# the captured process tree into it, so this process must not bind the vLLM
+# socket or start a second engine.
+if [ "${DYN_SNAPSHOT_RESTORE_STANDBY:-0}" = "1" ]; then
+  exec sleep infinity
+fi
+
+mkdir -p "$control_dir"
+rm -f "$socket" "$control_dir/ready-for-snapshot"
+
+python3 /usr/local/bin/kv-l1-control --serve "$socket" &
+control_pid=$!
+cleanup() {
+  kill -TERM "$control_pid" 2>/dev/null || true
+  kill -TERM "${server_pid:-}" 2>/dev/null || true
+}
+trap cleanup INT TERM EXIT
+
+if [ "${1:-}" = "--" ]; then shift; fi
+if [ "$#" -eq 0 ]; then
+  echo "ghost-kv-entrypoint: missing vLLM command" >&2
+  exit 64
+fi
+
+"$@" &
+server_pid=$!
+python3 - "$server_pid" <<'PY'
+import os, sys, time, urllib.error, urllib.request
+
+pid = int(sys.argv[1])
+deadline = time.monotonic() + 1800
+while time.monotonic() < deadline:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        raise SystemExit("vLLM exited before Ghost KV sleep")
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2) as r:
+            if r.status == 200:
+                break
+    except (urllib.error.URLError, TimeoutError):
+        time.sleep(0.25)
+else:
+    raise SystemExit("Ghost KV readiness timed out")
+
+request = urllib.request.Request(
+    "http://127.0.0.1:8000/sleep?level=" + os.environ["GHOST_KV_SLEEP_LEVEL"] + "&mode=abort",
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=300) as response:
+    if response.status != 200:
+        raise SystemExit("Ghost KV sleep failed")
+PY
+
+touch "$control_dir/ready-for-snapshot"
+wait "$server_pid"

@@ -1,0 +1,434 @@
+diff --git a/criu/arch/x86/include/asm/restorer.h b/criu/arch/x86/include/asm/restorer.h
+index 57736dc..3491ad8 100644
+--- a/criu/arch/x86/include/asm/restorer.h
++++ b/criu/arch/x86/include/asm/restorer.h
+@@ -86,7 +86,7 @@ static inline int set_compat_robust_list(uint32_t head_ptr, uint32_t len)
+ #define RUN_CLONE3_RESTORE_FN(ret, clone_args, size, args,		\
+ 			      clone_restore_fn)				\
+ 	asm volatile(							\
+-		     "clone3_emul:				\n"	\
++		     "clone3_emul%=:				\n"	\
+ 	/*
+ 	 * Prepare stack pointer for child process. The kernel does
+ 	 * stack + stack_size before passing the stack pointer to the
+@@ -124,12 +124,12 @@ static inline int set_compat_robust_list(uint32_t head_ptr, uint32_t len)
+ 	 * '0' is returned. Jump to the child function handler.
+ 	 */								\
+ 		     "testq %%rax,%%rax				\n"	\
+-		     "jz thread3_run				\n"	\
++		     "jz thread3_run%=				\n"	\
+ 	/* Return the PID to the parent process. */			\
+ 		     "movq %%rax, %0				\n"	\
+-		     "jmp clone3_end				\n"	\
++		     "jmp clone3_end%=				\n"	\
+ 									\
+-		     "thread3_run:	/* Child process */	\n"	\
++		     "thread3_run%=:	/* Child process */	\n"	\
+ 	/* Clear the frame pointer */					\
+ 		     "xorq %%rbp, %%rbp				\n"	\
+ 	/* Pop the child function from the stack */			\
+@@ -145,7 +145,7 @@ static inline int set_compat_robust_list(uint32_t head_ptr, uint32_t len)
+ 	 * and do exit() itself.
+ 	 */								\
+ 									\
+-		     "clone3_end:				\n"	\
++		     "clone3_end%=:				\n"	\
+ 		     : "=r"(ret)					\
+ 	/*
+ 	 * This uses the "r" modifier for all parameters
+diff --git a/criu/cr-restore.c b/criu/cr-restore.c
+index 7579639..43bb8a0 100644
+--- a/criu/cr-restore.c
++++ b/criu/cr-restore.c
+@@ -1722,6 +1722,7 @@ err:
+ 	stop_asyncd();
+ 	if (current->parent == NULL)
+ 		futex_abort_and_wake(&task_entries->nr_in_progress);
++	futex_abort_and_wake(&task_entries->buffered_restore_barrier);
+ 	exit(1);
+ }
+ 
+diff --git a/criu/include/rst_info.h b/criu/include/rst_info.h
+index c2d7eb0..0739327 100644
+--- a/criu/include/rst_info.h
++++ b/criu/include/rst_info.h
+@@ -18,6 +18,8 @@ struct task_entries {
+ 	mutex_t userns_sync_lock;
+ 	mutex_t cgroupd_sync_lock;
+ 	mutex_t last_pid_mutex;
++	futex_t buffered_restore_barrier;
++	int buffered_restore_participants;
+ 	struct decompression_shared_budget decompression_budget;
+ 	int asyncd_sk_id;
+ };
+diff --git a/criu/pie/restorer.c b/criu/pie/restorer.c
+index 59b7c6b..2971ae4 100644
+--- a/criu/pie/restorer.c
++++ b/criu/pie/restorer.c
+@@ -177,6 +177,7 @@ static void sigchld_handler(int signal, siginfo_t *siginfo, void *data)
+ 	pr_info("Task %d %s %d\n", siginfo->si_pid, r, siginfo->si_status);
+ 
+ 	futex_abort_and_wake(&task_entries_local->nr_in_progress);
++	futex_abort_and_wake(&task_entries_local->buffered_restore_barrier);
+ 	/* sa_restorer may be unmaped, so we can't go back to userspace*/
+ 	sys_kill(sys_getpid(), SIGSTOP);
+ 	sys_exit_group(1);
+@@ -868,6 +869,7 @@ __visible long __export_restore_thread(struct thread_restore_args *args)
+ core_restore_end:
+ 	pr_err("Restorer abnormal termination for %ld\n", sys_getpid());
+ 	futex_abort_and_wake(&task_entries_local->nr_in_progress);
++	futex_abort_and_wake(&task_entries_local->buffered_restore_barrier);
+ 	sys_exit_group(1);
+ 	return -1;
+ }
+@@ -1839,9 +1841,127 @@ static int validate_direct_vma_io(struct restore_vma_io *rio)
+ 	return 0;
+ }
+ 
++#define BUFFERED_RESTORE_THREADS 8
++#define BUFFERED_RESTORE_CHUNK_BYTES (32UL << 20)
++#define BUFFERED_RESTORE_STACK_SIZE (64UL << 10)
++#define BUFFERED_RESTORE_STACK_STRIDE (BUFFERED_RESTORE_STACK_SIZE + 16)
++
++struct buffered_restore_job {
++	void *addr;
++	size_t len;
++	loff_t off;
++	bool zero;
++};
++
++struct buffered_restore_shared {
++	struct task_restore_args *args;
++	struct buffered_restore_job *jobs;
++	unsigned int nr_jobs;
++	unsigned int next_job;
++	int error;
++	futex_t remaining;
++};
++
++struct buffered_restore_worker_arg {
++	struct buffered_restore_shared *shared;
++	pid_t pid;
++};
++
++static int restore_vma_buffered_job(struct task_restore_args *args, struct restore_vma_io *rio)
++{
++	int j;
++
++	switch (rio->storage) {
++	case VMA_IO_UNCOMPRESSED:
++		return restore_vma_preadv_one(args, rio, true);
++	case VMA_IO_PACKED_RAW:
++		return restore_vma_preadv_one(args, rio, false);
++	case VMA_IO_ZERO:
++		for (j = 0; j < rio->nr_iovs; j++)
++			memset(rio->iovs[j].iov_base, 0, rio->iovs[j].iov_len);
++		return 0;
++	default:
++		return -1;
++	}
++}
++
++static int restore_vma_buffered_sequential(struct task_restore_args *args)
++{
++	struct restore_vma_io *rio = args->vma_ios;
++	unsigned int i;
++
++	for (i = 0; i < args->vma_ios_n; i++) {
++		if (restore_vma_buffered_job(args, rio))
++			return -1;
++		rio = (struct restore_vma_io *)((char *)rio + RIO_SIZE(rio->nr_iovs));
++	}
++	return 0;
++}
++
++static int restore_vma_buffered_chunk(struct task_restore_args *args,
++				      struct buffered_restore_job *job)
++{
++	struct iovec iov = { .iov_base = job->addr, .iov_len = job->len };
++	loff_t off = job->off;
++
++	if (job->zero) {
++		memset(job->addr, 0, job->len);
++		return 0;
++	}
++	while (iov.iov_len) {
++		ssize_t n = sys_preadv(args->vma_ios_fd, &iov, 1, off);
++
++		if (n <= 0)
++			return -1;
++		iov.iov_base = (char *)iov.iov_base + n;
++		iov.iov_len -= n;
++		off += n;
++	}
++	return 0;
++}
++
++static long restore_vma_buffered_worker(struct buffered_restore_worker_arg *arg)
++{
++	struct buffered_restore_shared *shared = arg->shared;
++
++	while (!__atomic_load_n(&shared->error, __ATOMIC_RELAXED)) {
++		unsigned int index = __atomic_fetch_add(&shared->next_job, 1, __ATOMIC_RELAXED);
++		int expected = 0;
++
++		if (index >= shared->nr_jobs)
++			break;
++		if (restore_vma_buffered_chunk(shared->args, &shared->jobs[index]))
++			__atomic_compare_exchange_n(&shared->error, &expected, -1, false,
++						    __ATOMIC_RELAXED, __ATOMIC_RELAXED);
++	}
++	futex_dec_and_wake(&shared->remaining);
++	sys_exit(0);
++	return 0;
++}
++
++static int wait_buffered_restore_barrier(void)
++{
++	futex_t *barrier = &task_entries_local->buffered_restore_barrier;
++
++	if (!task_entries_local->buffered_restore_participants)
++		return 0;
++	futex_dec_and_wake(barrier);
++	futex_wait_until(barrier, 0);
++	if (futex_get(barrier) & FUTEX_ABORT_FLAG) {
++		pr_err("Buffered VMA restore barrier aborted\n");
++		return -1;
++	}
++	return 0;
++}
++
+ static int restore_vma_preadv_mixed(struct task_restore_args *args)
+ {
+ 	struct restore_vma_io *rio = args->vma_ios;
++	struct buffered_restore_shared *shared = NULL;
++	struct buffered_restore_worker_arg worker_args[BUFFERED_RESTORE_THREADS];
++	void *stacks = NULL;
++	unsigned long shared_size = 0, nr_jobs = 0;
++	unsigned int nr_workers = 0, started = 0;
+ 	unsigned int i;
+ 	int ret = -1;
+ 
+@@ -1851,50 +1971,142 @@ static int restore_vma_preadv_mixed(struct task_restore_args *args)
+ 	 * packed raw-fallback blocks, or zero blocks, all of which PIE can
+ 	 * restore with native syscalls.
+ 	 */
++	if (args->vma_ios_fd == -1) {
++		pr_err("No pages image fd for buffered VMA restore\n");
++		goto out;
++	}
++	if (args->auto_dedup) {
++		ret = restore_vma_buffered_sequential(args);
++		goto out;
++	}
+ 	for (i = 0; i < args->vma_ios_n; i++) {
+-		if (rio->storage == VMA_IO_UNCOMPRESSED) {
+-			if (args->vma_ios_fd == -1) {
+-				pr_err("No pages image fd for uncompressed VMA IO entry\n");
+-				goto out;
+-			}
++		int j;
+ 
+-			if (restore_vma_preadv_one(args, rio, true))
+-				goto out;
+-			goto next;
+-		}
+ 		if (rio->storage == VMA_IO_PACKED_RAW) {
+-			if (args->vma_ios_fd == -1) {
+-				pr_err("No pages image fd for packed-raw VMA IO entry\n");
+-				goto out;
+-			}
+-			if (validate_direct_vma_io(rio) ||
+-			    restore_vma_preadv_one(args, rio, false))
++			if (validate_direct_vma_io(rio))
+ 				goto out;
+-			goto next;
+-		}
+-		if (rio->storage == VMA_IO_ZERO) {
+-			int j;
+-
++		} else if (rio->storage == VMA_IO_ZERO) {
+ 			if (validate_direct_vma_io(rio))
+ 				goto out;
+-			for (j = 0; j < rio->nr_iovs; j++)
+-				memset(rio->iovs[j].iov_base, 0,
+-				       rio->iovs[j].iov_len);
+-			goto next;
+-		}
+-		if (rio->storage != VMA_IO_ENCODED) {
++		} else if (rio->storage != VMA_IO_UNCOMPRESSED) {
+ 			pr_err("Unknown VMA IO storage kind %d\n", rio->storage);
+ 			goto out;
+ 		}
+-		pr_err("Delayed VMA IO unexpectedly contains an LZ4 block\n");
++		for (j = 0; j < rio->nr_iovs; j++) {
++			unsigned long chunks = (rio->iovs[j].iov_len +
++				BUFFERED_RESTORE_CHUNK_BYTES - 1) / BUFFERED_RESTORE_CHUNK_BYTES;
++
++			if (nr_jobs > ULONG_MAX - chunks)
++				goto out;
++			nr_jobs += chunks;
++		}
++		rio = (struct restore_vma_io *)((char *)rio + RIO_SIZE(rio->nr_iovs));
++	}
++
++	if (!nr_jobs || nr_jobs > UINT_MAX ||
++	    __builtin_mul_overflow(nr_jobs, sizeof(*shared->jobs), &shared_size) ||
++	    __builtin_add_overflow(shared_size, sizeof(*shared), &shared_size)) {
++		ret = restore_vma_buffered_sequential(args);
++		goto out;
++	}
++	shared = (void *)sys_mmap(NULL, shared_size, PROT_READ | PROT_WRITE,
++				 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++	if (IS_ERR(shared)) {
++		shared = NULL;
++		ret = restore_vma_buffered_sequential(args);
+ 		goto out;
++	}
++	shared->args = args;
++	shared->jobs = (void *)(shared + 1);
++	shared->nr_jobs = 0;
++	shared->next_job = 0;
++	shared->error = 0;
++	futex_init(&shared->remaining);
++	rio = args->vma_ios;
++	for (i = 0; i < args->vma_ios_n; i++) {
++		loff_t off = rio->off;
++		int j;
+ 
+-next:
++		for (j = 0; j < rio->nr_iovs; j++) {
++			char *addr = rio->iovs[j].iov_base;
++			size_t remaining = rio->iovs[j].iov_len;
++
++			while (remaining) {
++				size_t len = min(remaining, BUFFERED_RESTORE_CHUNK_BYTES);
++
++				shared->jobs[shared->nr_jobs++] = (struct buffered_restore_job){
++					.addr = addr, .len = len, .off = off,
++					.zero = rio->storage == VMA_IO_ZERO,
++				};
++				addr += len;
++				remaining -= len;
++				off += len;
++			}
++		}
+ 		rio = (struct restore_vma_io *)((char *)rio + RIO_SIZE(rio->nr_iovs));
+ 	}
+ 
+-	ret = 0;
++	nr_workers = min_t(unsigned int, BUFFERED_RESTORE_THREADS, shared->nr_jobs);
++	stacks = (void *)sys_mmap(NULL, nr_workers * BUFFERED_RESTORE_STACK_STRIDE,
++				 PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++	if (IS_ERR(stacks)) {
++		stacks = NULL;
++		ret = restore_vma_buffered_sequential(args);
++		goto out;
++	}
++	for (i = 0; i < nr_workers; i++) {
++		struct _clone_args clone_args = {};
++		long clone_ret;
++
++		worker_args[i].shared = shared;
++		clone_args.flags = CLONE_VM | CLONE_FILES | CLONE_SIGHAND |
++			CLONE_SYSVSEM | CLONE_FS;
++		clone_args.stack = (unsigned long)stacks + i * BUFFERED_RESTORE_STACK_STRIDE;
++		clone_args.stack_size = BUFFERED_RESTORE_STACK_SIZE;
++		futex_inc(&shared->remaining);
++		RUN_CLONE3_RESTORE_FN(clone_ret, clone_args, sizeof(clone_args),
++				      &worker_args[i], restore_vma_buffered_worker);
++		if (clone_ret < 0) {
++			futex_dec_and_wake(&shared->remaining);
++			break;
++		}
++		worker_args[i].pid = clone_ret;
++		pr_info("Buffered VMA reader started with pid %ld\n", clone_ret);
++		started++;
++	}
++	if (!started) {
++		ret = restore_vma_buffered_sequential(args);
++		goto out;
++	}
++	futex_wait_until(&shared->remaining, 0);
++	/* Reap every helper before clone3(set_tid) restores application threads. */
++	for (i = 0; i < started; i++) {
++		int status;
++		long waited;
++
++		do {
++			waited = sys_wait4(worker_args[i].pid, &status, __WCLONE, NULL);
++		} while (waited == -EINTR);
++		if (waited == -ECHILD) {
++			pr_err("Buffered VMA reader %d was reaped unexpectedly\n", worker_args[i].pid);
++			shared->error = -1;
++			break;
++		}
++		if (waited != worker_args[i].pid || !WIFEXITED(status) || WEXITSTATUS(status)) {
++			shared->error = -1;
++			break;
++		}
++		pr_info("Buffered VMA reader %d reaped\n", worker_args[i].pid);
++	}
++	if (!shared->error)
++		ret = 0;
+ out:
++	if (ret < 0)
++		futex_abort_and_wake(&task_entries_local->buffered_restore_barrier);
++	if (stacks)
++		sys_munmap(stacks, nr_workers * BUFFERED_RESTORE_STACK_STRIDE);
++	if (shared)
++		sys_munmap(shared, shared_size);
+ 	if (args->vma_ios_fd != -1) {
+ 		sys_close(args->vma_ios_fd);
+ 		args->vma_ios_fd = -1;
+@@ -2440,6 +2652,8 @@ __visible long __export_restore_task(struct task_restore_args *args)
+ 		if (rc < 0)
+ 			goto core_restore_end;
+ 	}
++	if (wait_buffered_restore_barrier())
++		goto core_restore_end;
+ 
+ 	/*
+ 	 * Proxify vDSO.
+@@ -2685,7 +2899,8 @@ __visible long __export_restore_task(struct task_restore_args *args)
+ 						     args->clone_restore_fn);
+ 			}
+ 			if (ret != thread_args[i].pid) {
+-				pr_err("Unable to create a thread: %ld\n", ret);
++				pr_err("Unable to create thread %d: %ld (kill0=%ld)\n",
++				       thread_args[i].pid, ret, sys_kill(thread_args[i].pid, 0));
+ 				sys_close(fd);
+ 				mutex_unlock(&task_entries_local->last_pid_mutex);
+ 				goto core_restore_end;
+@@ -2837,6 +3052,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
+ 
+ core_restore_end:
+ 	futex_abort_and_wake(&task_entries_local->nr_in_progress);
++	futex_abort_and_wake(&task_entries_local->buffered_restore_barrier);
+ 	pr_err("Restorer fail %ld\n", sys_getpid());
+ 	sys_exit_group(1);
+ 	return -1;
+diff --git a/criu/pstree.c b/criu/pstree.c
+index 099b089..10a91cc 100644
+--- a/criu/pstree.c
++++ b/criu/pstree.c
+@@ -1076,7 +1076,18 @@ int prepare_pstree(void)
+ 		 * restore_one_alive_task(), so that's the only
+ 		 * way to transfer that data to the main CRIU process.
+ 		 */
++	if (!ret)
+ 		ret = prepare_pstree_rseqs();
++	if (!ret) {
++		struct pstree_item *item;
++		int participants = 0;
++
++		for_each_pstree_item(item)
++			if (task_alive(item))
++				participants++;
++		task_entries->buffered_restore_participants = participants;
++		futex_set(&task_entries->buffered_restore_barrier, participants);
++	}
+ 
+ 	return ret;
+ }
+

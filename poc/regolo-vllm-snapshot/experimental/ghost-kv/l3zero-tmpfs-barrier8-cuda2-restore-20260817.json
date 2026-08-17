@@ -1,0 +1,49 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "ghost-kv-l3zero-tmpfs-barrier8-cuda2",
+    "namespace": "dynamo-snapshot-poc",
+    "labels": {"app.kubernetes.io/name": "vllm-snapshot-poc", "poc.regolo.ai/lane": "ghost-kv-l3zero-tmpfs-barrier8-cuda2"},
+    "annotations": {"nvidia.com/snapshot-target-containers": "server"}
+  },
+  "spec": {
+    "automountServiceAccountToken": false,
+    "restartPolicy": "Never",
+    "runtimeClassName": "nvidia",
+    "nodeSelector": {"kubernetes.io/hostname": "ec213103"},
+    "securityContext": {"seccompProfile": {"type": "Localhost", "localhostProfile": "profiles/block-iouring.json"}},
+    "containers": [{
+      "name": "server",
+      "image": "docker.io/library/regolo-vllm-snapshot:ghost-kv-kvonly4zero-20260814",
+      "imagePullPolicy": "Never",
+      "command": ["/usr/local/bin/snapshot-entrypoint", "--"],
+      "args": ["vllm", "serve", "openai/gpt-oss-20b", "--revision", "6cee5e81ee83917806bbde320786a8fb61efebee", "--host", "0.0.0.0", "--port", "8000", "--max-model-len", "4096", "--gpu-memory-utilization", "0.85", "--enable-sleep-mode"],
+      "env": [
+        {"name": "SNAPSHOT_READY_URL", "value": "http://127.0.0.1:8000/health"},
+        {"name": "DYN_SNAPSHOT_CONTROL_DIR", "value": "/snapshot-control"},
+        {"name": "DYN_SNAPSHOT_RESTORE_STANDBY", "value": "1"},
+        {"name": "VLLM_SERVER_DEV_MODE", "value": "1"},
+        {"name": "DYN_KV_L1_SOCKET", "value": "/snapshot-control/kv-l1.sock"},
+        {"name": "GHOST_KV_SLEEP_LEVEL", "value": "3"},
+        {"name": "LOCAL_SNAPSHOT_CACHE", "value": "true"},
+        {"name": "DYN_SNAPSHOT_CUDA_RESTORE_WORKERS", "value": "2"}
+      ],
+      "resources": {"requests": {"nvidia.com/gpu": 1}, "limits": {"nvidia.com/gpu": 1}},
+      "volumeMounts": [
+        {"name": "snapshot-control", "mountPath": "/snapshot-control"},
+        {"name": "model-cache", "mountPath": "/root/.cache/huggingface"},
+        {"name": "checkpoint-cache", "mountPath": "/checkpoints/manual-snapshot-1786735776611579414/versions/1", "subPath": "images", "readOnly": true},
+        {"name": "criu-candidate", "mountPath": "/usr/local/sbin/criu", "readOnly": true},
+        {"name": "nsrestore-candidate", "mountPath": "/usr/local/bin/nsrestore", "readOnly": true}
+      ]
+    }],
+    "volumes": [
+      {"name": "snapshot-control", "emptyDir": {}},
+      {"name": "model-cache", "hostPath": {"path": "/var/lib/regolo-vllm-poc/hf-cache", "type": "Directory"}},
+      {"name": "checkpoint-cache", "hostPath": {"path": "/dev/shm/dynamo-snapshot-tmpfs-20260815/dce244ed475468960506f1578753fb6a2e3d7436cabe6559d41820d8e72e02fb", "type": "Directory"}},
+      {"name": "criu-candidate", "hostPath": {"path": "/var/lib/regolo-vllm-poc/criu-candidates/criu-b47c692-buffered-barrier8-glibc235", "type": "File"}},
+      {"name": "nsrestore-candidate", "hostPath": {"path": "/var/lib/regolo-vllm-poc/nsrestore-candidates/nsrestore-cuda-parallel2-barrier8", "type": "File"}}
+    ]
+  }
+}

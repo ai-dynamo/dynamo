@@ -1,0 +1,5 @@
+FROM regolo-criu:parallel-buffered-chunk8-diag-jammy-20260815 AS criu
+
+FROM regolo-vllm-snapshot:ghost-kv-kvonly4zero-20260814
+COPY --from=criu /criu-install/usr/local/sbin/criu /usr/local/sbin/criu
+COPY --from=criu /criu-install/usr/local/share/snapshot/criu-build.json /usr/local/share/snapshot/criu-build.json

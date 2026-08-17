@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Pod-local, Unix-socket-only bridge for vLLM level-1 sleep and wake."""
+
+import argparse
+import json
+import os
+import socket
+import socketserver
+import stat
+import time
+import urllib.error
+import urllib.request
+
+
+BASE_URL = "http://127.0.0.1:8000"
+TIMEOUT_SECONDS = 300.0
+
+
+def request(path, method="GET"):
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(BASE_URL + path, method=method),
+            timeout=TIMEOUT_SECONDS,
+        ) as response:
+            body = response.read()
+            if response.status != 200:
+                raise RuntimeError("vLLM control returned non-200")
+            return body
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError("vLLM loopback control is unavailable") from exc
+
+
+def sleeping():
+    try:
+        value = json.loads(request("/is_sleeping"))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("vLLM sleep state is malformed") from exc
+    if set(value) != {"is_sleeping"} or not isinstance(value["is_sleeping"], bool):
+        raise RuntimeError("vLLM sleep state is malformed")
+    return value["is_sleeping"]
+
+
+def transition(operation):
+    if operation == "sleep":
+        if sleeping():
+            raise RuntimeError("engine is already sleeping")
+        request("/sleep?level=1&mode=abort", method="POST")
+        expected = True
+    elif operation == "wake":
+        if not sleeping():
+            raise RuntimeError("engine is not sleeping")
+        request("/wake_up", method="POST")
+        expected = False
+    elif operation == "state":
+        return {"is_sleeping": sleeping()}
+    elif operation == "wake_canary":
+        if sleeping():
+            request("/wake_up", method="POST")
+        deadline = time.monotonic() + TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if not sleeping():
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("vLLM wake transition timed out")
+        try:
+            models = json.loads(request("/v1/models"))
+            model = models["data"][0]["id"]
+            if not isinstance(model, str) or not model:
+                raise ValueError("invalid model")
+            payload = json.dumps({"model": model, "prompt": "0+0=", "max_tokens": 1, "temperature": 0}).encode()
+            req = urllib.request.Request(BASE_URL + "/v1/completions", data=payload, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as response:
+                canary = json.loads(response.read())
+            token = canary["choices"][0]["text"]
+            if not isinstance(token, str) or token.strip() != "0":
+                raise ValueError("invalid completion")
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError, urllib.error.URLError, TimeoutError) as exc:
+            raise RuntimeError("vLLM completion canary failed") from exc
+        return {"is_sleeping": False, "canary": "passed"}
+    else:
+        raise RuntimeError("unsupported control operation")
+    deadline = time.monotonic() + TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if sleeping() is expected:
+            return {"is_sleeping": expected}
+        time.sleep(0.1)
+    raise RuntimeError("vLLM sleep transition timed out")
+
+
+class ControlServer(socketserver.ThreadingUnixStreamServer):
+    allow_reuse_address = False
+
+
+class Handler(socketserver.StreamRequestHandler):
+    def handle(self):
+        credentials = self.request.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+        peer_pid = int.from_bytes(credentials[0:4], "little")
+        peer_uid = int.from_bytes(credentials[4:8], "little")
+        if peer_pid <= 0 or peer_uid != 0:
+            self.wfile.write(b'{"error":"unauthorized peer"}\n')
+            return
+        try:
+            raw = self.rfile.readline(4096)
+            if not raw or len(raw) == 4096:
+                raise RuntimeError("invalid control request")
+            value = json.loads(raw)
+            if not isinstance(value, dict) or set(value) != {"operation"}:
+                raise RuntimeError("invalid control request")
+            result = transition(value["operation"])
+            response = {"ok": True, **result}
+        except (RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            response = {"ok": False, "error": str(exc)}
+        self.wfile.write((json.dumps(response, sort_keys=True) + "\n").encode())
+
+
+def client(path, operation):
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        connection.connect(path)
+        connection.sendall(json.dumps({"operation": operation}).encode() + b"\n")
+        response = connection.makefile("rb").readline(4096)
+    finally:
+        connection.close()
+    try:
+        value = json.loads(response)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit("kv-l1-control: invalid server response") from exc
+    if not isinstance(value, dict) or value.get("ok") is not True:
+        raise SystemExit("kv-l1-control: " + str(value.get("error", "control failed")))
+    print(json.dumps(value, sort_keys=True))
+
+
+def serve(path):
+    if os.path.lexists(path):
+        raise SystemExit("kv-l1-control: refusing existing socket path")
+    server = ControlServer(path, Handler)
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        server.serve_forever(poll_interval=0.2)
+    finally:
+        server.server_close()
+        if os.path.lexists(path):
+            os.unlink(path)
+
+
+parser = argparse.ArgumentParser()
+mode = parser.add_mutually_exclusive_group(required=True)
+mode.add_argument("--serve", metavar="SOCKET")
+mode.add_argument("--client", metavar="SOCKET")
+parser.add_argument("operation", nargs="?", choices=("sleep", "wake", "state", "wake_canary"))
+args = parser.parse_args()
+if args.serve:
+    if args.operation is not None:
+        parser.error("server takes no operation")
+    serve(args.serve)
+if args.operation is None:
+    parser.error("client requires an operation")
+client(args.client, args.operation)

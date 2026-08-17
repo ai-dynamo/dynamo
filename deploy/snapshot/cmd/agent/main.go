@@ -55,6 +55,19 @@ func main() {
 		"restricted_namespace", cfg.RestrictedNamespace,
 		"runtime", *runtimeType,
 	)
+	if criuInfo, err := readCRIUBuildInfo(criuBuildInfoPath); err != nil {
+		agentLog.Error(err, "CRIU build metadata unavailable; fast-restore provenance cannot be verified")
+	} else {
+		agentLog.Info("Verified CRIU fast-restore build",
+			"criu_ref", criuInfo.CRIURef,
+			"private_vma_native_aio_pr", criuInfo.FastRestore.PrivateVMANativeAIO.OriginPR,
+			"private_vma_native_aio_depth", criuInfo.FastRestore.PrivateVMANativeAIO.Depth,
+			"parallel_memfd_fill_pr", criuInfo.FastRestore.ParallelMemfdFill.OriginPR,
+			"parallel_memfd_fill_max_threads", criuInfo.FastRestore.ParallelMemfdFill.MaxThreads,
+			"direct_io_fallback", criuInfo.FastRestore.DirectIOFallback,
+			"parallel_buffered_readers", criuInfo.FastRestore.ParallelBufferedReaders,
+		)
+	}
 
 	// The node controller handles both restore and capture paths.
 	nodeController, err := controller.NewNodeController(cfg, rt, rootLog.WithName("controller"))

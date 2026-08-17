@@ -23,6 +23,16 @@ ARG GO_VERSION=1.26.3
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=b47c692bb3a73ae45ee1c4ab215a8f6869d40efd
+# The pinned ref below contains the upstreamed implementations of CRIU PRs
+# #3022 (native AIO for private VMA restore) and #3021 (parallel memfd fill).
+# Keep the originating PR heads here for provenance; the actual build remains
+# pinned to the newer, tested upstream CRIU ref above.
+ARG CRIU_FAST_RESTORE_AIO_PR=7a61b3cf01da455b876bedddac50c73a5137f024
+ARG CRIU_FAST_RESTORE_MEMFD_PR=5654b9b9c834ed38f8823a73185204766d89ab0e
+ARG CRIU_AIO_DEPTH=128
+ARG CRIU_ASYNCD_THREADS=16
+ARG CRIU_BUFFERED_THREADS=0
+ARG CRIU_BUILDER_IMAGE=ubuntu:24.04
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 # For placeholder target only - this default allows agent builds to succeed,
@@ -141,10 +151,15 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 # =============================================================================
-FROM ubuntu:24.04 AS criu-builder
+FROM ${CRIU_BUILDER_IMAGE} AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
+ARG CRIU_FAST_RESTORE_AIO_PR
+ARG CRIU_FAST_RESTORE_MEMFD_PR
+ARG CRIU_AIO_DEPTH
+ARG CRIU_ASYNCD_THREADS
+ARG CRIU_BUFFERED_THREADS
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -161,6 +176,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-c-compiler \
     protobuf-compiler \
     python3 \
+    python3-pip \
     python3-protobuf \
     libgnutls28-dev \
     libnftables-dev \
@@ -171,9 +187,60 @@ RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
     && git fetch --depth 1 origin ${CRIU_REF} \
-    && git checkout FETCH_HEAD \
+    && git checkout FETCH_HEAD
+
+COPY criu-parallel-buffered-restore.patch /tmp/criu-parallel-buffered-restore.patch
+RUN set -eux; \
+    case "${CRIU_BUFFERED_THREADS}" in \
+      0) ;; \
+      1|2|4|8) \
+        git -C /tmp/criu apply --check /tmp/criu-parallel-buffered-restore.patch; \
+        git -C /tmp/criu apply /tmp/criu-parallel-buffered-restore.patch; \
+        sed -i "s/^#define BUFFERED_RESTORE_THREADS 8$/#define BUFFERED_RESTORE_THREADS ${CRIU_BUFFERED_THREADS}/" \
+          /tmp/criu/criu/pie/restorer.c; \
+        grep -qx "#define BUFFERED_RESTORE_THREADS ${CRIU_BUFFERED_THREADS}" \
+          /tmp/criu/criu/pie/restorer.c ;; \
+      *) exit 64 ;; \
+    esac
+
+# Reader concurrency is a compile-time property of CRIU's PIE restorer and
+# async fill daemon. Keep the accepted ladder deliberately small so an invalid
+# or unbounded build cannot exhaust native-AIO slots or restore-time threads.
+RUN set -eux; \
+    case "${CRIU_AIO_DEPTH}" in 64|128|256|512) ;; *) exit 64 ;; esac; \
+    case "${CRIU_ASYNCD_THREADS}" in 8|16|32) ;; *) exit 64 ;; esac; \
+    sed -i "s/^#define AIO_BATCH 128$/#define AIO_BATCH ${CRIU_AIO_DEPTH}/" \
+      /tmp/criu/criu/pie/restorer.c; \
+    sed -i "s/^#define ASYNC_THREAD_NR_MAX 16$/#define ASYNC_THREAD_NR_MAX ${CRIU_ASYNCD_THREADS}/" \
+      /tmp/criu/criu/asyncd.c; \
+    grep -qx "#define AIO_BATCH ${CRIU_AIO_DEPTH}" /tmp/criu/criu/pie/restorer.c; \
+    grep -qx "#define ASYNC_THREAD_NR_MAX ${CRIU_ASYNCD_THREADS}" /tmp/criu/criu/asyncd.c
+
+RUN cd /tmp/criu \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
+
+# Fail the image build if the pinned CRIU source ever loses either fast
+# restore implementation.  Runtime strings alone are insufficient: both
+# paths must be wired in the compiled source, while O_DIRECT retains CRIU's
+# buffered-I/O fallback on filesystems that reject it.
+RUN set -eux; \
+    test "$(git -C /tmp/criu rev-parse HEAD)" = "${CRIU_REF}"; \
+    grep -q 'restore_vma_aio' /tmp/criu/criu/pie/restorer.c; \
+    grep -q 'sys_io_submit' /tmp/criu/criu/pie/restorer.c; \
+    grep -q 'start_asyncd' /tmp/criu/criu/cr-restore.c; \
+    grep -q 'asyncd.h' /tmp/criu/criu/memfd.c; \
+    grep -q 'PR_ASYNC' /tmp/criu/criu/shmem.c; \
+    grep -q 'O_DIRECT rejected at read time' /tmp/criu/criu/pagemap.c; \
+    case "${CRIU_BUFFERED_THREADS}" in \
+      0) ! grep -q 'restore_vma_buffered_worker' /tmp/criu/criu/pie/restorer.c ;; \
+      *) grep -q 'restore_vma_buffered_worker' /tmp/criu/criu/pie/restorer.c ;; \
+    esac; \
+    mkdir -p /criu-install/usr/local/share/snapshot; \
+    printf '{"criu_ref":"%s","fast_restore":{"private_vma_native_aio":{"origin_pr":"3022","origin_head":"%s","depth":%s},"parallel_memfd_fill":{"origin_pr":"3021","origin_head":"%s","max_threads":%s},"direct_io_fallback":"buffered","parallel_buffered_readers":%s}}\n' \
+      "${CRIU_REF}" "${CRIU_FAST_RESTORE_AIO_PR}" "${CRIU_AIO_DEPTH}" \
+      "${CRIU_FAST_RESTORE_MEMFD_PR}" "${CRIU_ASYNCD_THREADS}" "${CRIU_BUFFERED_THREADS}" \
+      > /criu-install/usr/local/share/snapshot/criu-build.json
 
 COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
 RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \

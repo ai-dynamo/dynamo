@@ -1,0 +1,17 @@
+FROM regolo-criu:parallel-buffered-chunk8-diag-jammy-20260815 AS build
+
+COPY deploy/snapshot/criu-parallel-buffered-restore.patch /tmp/barrier.patch
+
+RUN set -eux; \
+    git -C /tmp/criu reset --hard HEAD; \
+    git -C /tmp/criu clean -fdx; \
+    git -C /tmp/criu apply --check /tmp/barrier.patch; \
+    git -C /tmp/criu apply /tmp/barrier.patch; \
+    grep -qx '#define BUFFERED_RESTORE_THREADS 8' /tmp/criu/criu/pie/restorer.c; \
+    cd /tmp/criu; \
+    make -j"$(nproc)"; \
+    make DESTDIR=/criu-install-barrier8 install-criu
+
+FROM regolo-vllm-snapshot:ghost-kv-kvonly4zero-20260814
+
+COPY --from=build /criu-install-barrier8/usr/local/sbin/criu /usr/local/sbin/criu

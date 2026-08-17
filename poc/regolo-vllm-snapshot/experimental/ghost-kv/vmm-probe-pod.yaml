@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ghost-kv-vmm-probe
+  namespace: dynamo-snapshot-poc
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  nodeName: ec213103
+  containers:
+    - name: probe
+      image: docker.io/library/regolo-vllm-snapshot@sha256:84e626a76456827946ada12120fd6842ae7eefc4b2a4005663bab137385f030a
+      imagePullPolicy: IfNotPresent
+      command: ["/probe/ghost_kv_vmm"]
+      env:
+        - name: GHOST_KV_BYTES
+          value: "19327352832"
+      resources:
+        requests: {nvidia.com/gpu: "1"}
+        limits: {nvidia.com/gpu: "1"}
+      volumeMounts:
+        - name: probe-binary
+          mountPath: /probe
+          readOnly: true
+  volumes:
+    - name: probe-binary
+      hostPath:
+        path: /root/snapshot/dynamo-massaindustries/poc/regolo-vllm-snapshot/experimental/ghost-kv
+        type: Directory

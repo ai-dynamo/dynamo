@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,49 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
+
+func TestCudaRestoreWorkers(t *testing.T) {
+	t.Setenv("DYN_SNAPSHOT_CUDA_RESTORE_WORKERS", "")
+	if got := cudaRestoreWorkers(); got != 1 {
+		t.Fatalf("default workers = %d, want 1", got)
+	}
+	t.Setenv("DYN_SNAPSHOT_CUDA_RESTORE_WORKERS", "2")
+	if got := cudaRestoreWorkers(); got != 2 {
+		t.Fatalf("workers = %d, want 2", got)
+	}
+	t.Setenv("DYN_SNAPSHOT_CUDA_RESTORE_WORKERS", "3")
+	if got := cudaRestoreWorkers(); got != 1 {
+		t.Fatalf("unsupported workers = %d, want 1", got)
+	}
+}
+
+func TestRestoreProcessesWithRunsBoundedParallelWorkers(t *testing.T) {
+	started := make(chan int, 4)
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	var seenMu sync.Mutex
+	seen := make(map[int]bool)
+	restoreOne := func(_ context.Context, pid int, _ string, _ logr.Logger) error {
+		seenMu.Lock()
+		seen[pid] = true
+		seenMu.Unlock()
+		started <- pid
+		<-release
+		return nil
+	}
+	go func() {
+		done <- restoreProcessesWith(context.Background(), []int{1, 2, 3, 4}, "", logr.Discard(), 2, restoreOne)
+	}()
+	<-started
+	<-started
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("restoreProcessesWith failed: %v", err)
+	}
+	if len(seen) != 4 {
+		t.Fatalf("restored %d PIDs, want 4", len(seen))
+	}
+}
 
 func TestBuildDeviceMap(t *testing.T) {
 	tests := []struct {

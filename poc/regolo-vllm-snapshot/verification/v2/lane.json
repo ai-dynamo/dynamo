@@ -1,0 +1,26 @@
+{
+  "baseline_group": "v1-driver580-v3",
+  "digest": "700572c1e646cf846434fdf0e3dd26e1207bf5d9ae194fcbd84efb2e464346ef",
+  "identity": {
+    "args": ["serve", "openai/gpt-oss-20b", "--revision", "6cee5e81ee83917806bbde320786a8fb61efebee", "--host", "0.0.0.0", "--port", "8000", "--max-model-len", "4096", "--gpu-memory-utilization", "0.85"],
+    "baseline_phase_analysis_sha256": "e6dec04dcf1b0cf484889587126dec50f11582f39527d9c2c81fcf716b91a36d",
+    "baseline_protocol_sha256": "1a380518c87764574e08940b24fac63882f6e87108ab23f4a68ada22075b9511",
+    "baseline_protocol_version": "V0.1",
+    "baseline_results_sha256": "b55e89421e759c06a3be0a57a6030b7e12445662d01988efc566e2ed848b91f6",
+    "candidate_image": "docker.io/library/regolo-vllm-snapshot@sha256:84e626a76456827946ada12120fd6842ae7eefc4b2a4005663bab137385f030a",
+    "command": ["vllm"],
+    "compatibility_hash": "a42c07d50e863d43838bcf0ec3c07c544324579f3df80cc08047191838e1e805",
+    "driver_version": "580.178.04",
+    "dynamo_commit": "8ce9e22f11576402102ea9d8b8e46233f5430a0d",
+    "dynamo_version": "v1.3.0",
+    "gpu_product": "NVIDIA L40S",
+    "model": "openai/gpt-oss-20b",
+    "model_revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+    "node": "ec213103",
+    "protocol_version": "V2.0-draft",
+    "source_image": "docker.io/vllm/vllm-openai@sha256:c2f3b1b964e47809b722b5e75b61b1e7b39a50f70388cf2bf2418f16a9f31da2"
+  },
+  "seed": 20260814,
+  "single_mutation": "observer_only_phase_collection",
+  "workload": {"kind": "synthetic", "prompt": "The answer to 1+1 is"}
+}
