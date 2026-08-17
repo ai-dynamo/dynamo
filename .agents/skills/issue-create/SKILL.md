@@ -142,8 +142,16 @@ cat >"$body_file" <<'EOF'
 <reviewed issue body>
 EOF
 
-title='<template prefix><concise title>'
-labels=('<template label>')
+IFS= read -r title <<'EOF'
+<template prefix><concise title>
+EOF
+
+labels=()
+while IFS= read -r label; do
+  labels+=("$label")
+done <<'EOF'
+<template label>
+EOF
 
 args=(--repo ai-dynamo/dynamo --title "$title" --body-file "$body_file")
 for label in "${labels[@]}"; do
@@ -153,8 +161,8 @@ done
 gh issue create "${args[@]}"
 ```
 
-Quoting the title this way keeps values such as `Fix user's cache` intact, and the array supports any
-number of labels.
+The quoted heredoc preserves title text such as `Fix user's cache` without evaluating it as shell
+syntax, and the array supports any number of repository-defined labels.
 
 For a DEP, add the selected area label to `labels`. Prefer explicit title, labels, and body over
 `--template` so the submitted issue is deterministic and can be reviewed before the external write.

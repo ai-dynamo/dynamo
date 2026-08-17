@@ -170,21 +170,23 @@ than from the current directory's default repository:
 ```bash
 gh auth status
 
-origin_repo="$(gh repo view "$(git remote get-url origin)" \
-  --json nameWithOwner,isFork,parent \
-  --jq '.nameWithOwner')"
+origin_url="$(git remote get-url origin)"
+origin_repo="$(gh repo view "$origin_url" --json nameWithOwner --jq '.nameWithOwner')"
 origin_owner="${origin_repo%%/*}"
+origin_source="$(gh api "repos/$origin_repo" --jq '.source.full_name // empty')"
 ```
 
 `origin` is a valid head repository when it is `ai-dynamo/dynamo` itself — a feature branch pushed
-directly to upstream is legitimate — or a fork whose parent is `ai-dynamo/dynamo`. Stop when it is
-neither:
+directly to upstream is legitimate — or a fork whose source is `ai-dynamo/dynamo`. The REST `source`
+field is used after resolving the remote URL because `gh repo view <git-url> --json parent` can omit
+the parent repository. Stop when `origin` is neither upstream nor part of its fork network:
 
 ```bash
-gh repo view "$(git remote get-url origin)" --json nameWithOwner,isFork,parent \
-  --jq 'select(.nameWithOwner == "ai-dynamo/dynamo"
-    or (.isFork and .parent.nameWithOwner == "ai-dynamo/dynamo"))
-    | .nameWithOwner'
+if [ "$origin_repo" != 'ai-dynamo/dynamo' ] && \
+   [ "$origin_source" != 'ai-dynamo/dynamo' ]; then
+  echo "origin resolves to $origin_repo, not ai-dynamo/dynamo or one of its forks." >&2
+  exit 1
+fi
 ```
 
 Push the captured branch to `origin` without force:
@@ -203,7 +205,9 @@ Open the pull request explicitly against upstream `main`, reusing the same deriv
 branch, and quoted title and body file:
 
 ```bash
-title='<type(scope): summary>'
+IFS= read -r title <<'EOF'
+<type(scope): summary>
+EOF
 
 gh pr create \
   --repo ai-dynamo/dynamo \
