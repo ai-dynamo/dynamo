@@ -48,6 +48,7 @@ use std::{
     pin::Pin,
     sync::Arc,
 };
+use tokio_util::sync::CancellationToken;
 use tracing;
 
 use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
@@ -747,6 +748,11 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
+    /// Shutdown signal handed to detached speculative-prefill tasks. `None`
+    /// for callers that have no runtime to derive a token from (the C
+    /// bindings, the ext-proc gateway, tests); those tasks are still bounded
+    /// by the module's own timeout.
+    speculative_prefill_cancel: Option<CancellationToken>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -1398,6 +1404,19 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
+        Self::new_with_parts_and_cancel(mdc, formatter, tokenizer, None)
+    }
+
+    /// Same as [`OpenAIPreprocessor::new_with_parts`], plus the shutdown token
+    /// that detached speculative-prefill tasks watch. Pass the owning
+    /// runtime's token so those tasks end with the runtime; `None` leaves them
+    /// bounded only by their own timeout.
+    pub fn new_with_parts_and_cancel(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: crate::tokenizers::Tokenizer,
+        speculative_prefill_cancel: Option<CancellationToken>,
+    ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
@@ -1617,6 +1636,7 @@ impl OpenAIPreprocessor {
             normalize_tool_call_args,
             media_loader,
             token_budget,
+            speculative_prefill_cancel,
             #[cfg(feature = "mm-routing")]
             image_token_counter,
             #[cfg(feature = "mm-routing")]
@@ -5079,6 +5099,7 @@ impl
             &next,
             &self.formatter,
             &self.tokenizer,
+            self.speculative_prefill_cancel.as_ref(),
         );
 
         let final_stream = crate::request_trace::wrap_chat_request_end_stream(
