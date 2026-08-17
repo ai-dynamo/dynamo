@@ -315,7 +315,7 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 24
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 32
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml
   benchmark:
@@ -323,7 +323,7 @@ targets:
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
     available: true
-    summary: 71.34 tok/s/user, 188.95 tok/s/GPU @ c24 (full 3,541-row trace; SLA pass)
+    summary: 60.52 tok/s/user, 213.66 tok/s/GPU @ c32 (full 3,541-row trace; closed SLA boundary)
 - id: refresh-disagg-gb200-256k
   recommended: true
   hardware:
@@ -367,7 +367,7 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 24
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 28
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml
   benchmark:
@@ -375,7 +375,7 @@ targets:
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
     available: true
-    summary: 67.45 tok/s/user, 166.58 tok/s/GPU @ c24 (full 3,541-row trace; SLA pass)
+    summary: 65.45 tok/s/user, 187.86 tok/s/GPU @ c28 (full 3,541-row trace; SLA-passing anchor)
 - id: refresh-disagg-h200-256k
   recommended: true
   hardware:
@@ -419,7 +419,7 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 16
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 32
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml
   benchmark:
@@ -427,7 +427,7 @@ targets:
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
     available: true
-    summary: 77.34 tok/s/user, 64.44 tok/s/GPU @ c16 (full 3,541-row trace; SLA pass)
+    summary: 59.59 tok/s/user, 91.42 tok/s/GPU @ c32 (full 3,541-row trace; closed SLA boundary)
 related_benchmarks: []
 maintainer: null
 gaps:

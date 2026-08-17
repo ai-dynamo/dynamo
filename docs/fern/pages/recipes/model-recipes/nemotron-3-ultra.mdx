@@ -63,7 +63,7 @@ The target picker covers the original Day-0 vLLM deployments of Nemotron-3-Ultra
 
 ## Refresh Profiles
 
-Refresh profiles include two-worker aggregated and 1P1D disaggregated agentic deployments with KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and Expert Parallelism disabled. Aggregated 256K profiles use five-token MTP; aggregated 1M and all 1P1D profiles run without MTP.
+Refresh profiles include two-worker aggregated and 1P1D disaggregated agentic deployments with KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, decoupled weights, and Expert Parallelism disabled. Aggregated 256K profiles use five-token MTP; aggregated 1M and all 1P1D profiles run without MTP.
 
 <Info>
 The Refresh manifests use the pinned `vllm-runtime:1.4.0-rc.4` image digest shown in the source recipe. Review the image and cluster-specific placement before deployment.
@@ -78,11 +78,13 @@ The Refresh manifests use the pinned `vllm-runtime:1.4.0-rc.4` image digest show
 | H200 | 256K | Aggregated | 2 × TP8 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
 | H200 | 1M | Aggregated | 2 × TP8 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
 | B200 | 256K | Disaggregated | 1P TP4 + 1D TP4 | 72 | `vllm/disagg-b200-agentic-256k-1p1d/deploy.yaml` |
-| B200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 24 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
+| B200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 32 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
 | GB200 | 256K | Disaggregated | 1P TP4 + 1D TP4 | 64 | `vllm/disagg-gb200-agentic-256k-1p1d/deploy.yaml` |
-| GB200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 24 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
+| GB200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 28 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
 | H200 | 256K | Disaggregated | 1P TP8 + 1D TP8 | 36 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
-| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | 16 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
+| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | 32 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
+
+The 256K 1P1D rows and the H200/B200 1M 1P1D rows are closed concurrency boundaries. GB200 1M concurrency 28 is the current complete SLA-passing anchor; the next boundary point remains to be rerun after an infrastructure interruption.
 
 Deploy a Refresh profile by selecting the GPU and context length:
 
@@ -128,7 +130,7 @@ See the [benchmark workflow](https://github.com/ai-dynamo/dynamo/blob/main/recip
 - A Kubernetes cluster with the Dynamo Platform installed (DGD CRDs served) and **4x B200 per aggregated worker** available (8x B200 for the disaggregated fallback).
 - An NGC image pull secret named `nvcr-secret` for `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1`.
 - A Hugging Face token with access to `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4`.
-- A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi).
+- A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi). Weights are decoupled from the runtime image: they are downloaded and validated onto this PVC independently, not baked into the container.
 
 </div>
 
@@ -137,7 +139,7 @@ See the [benchmark workflow](https://github.com/ai-dynamo/dynamo/blob/main/recip
 - A Kubernetes cluster with the Dynamo Platform installed (DGD CRDs served) and **8x H200 per worker** available.
 - An NGC image pull secret named `nvcr-secret` for `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1`.
 - A Hugging Face token with access to `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4`.
-- A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi).
+- A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi). Weights are decoupled from the runtime image: they are downloaded and validated onto this PVC independently, not baked into the container.
 
 </div>
 
