@@ -590,7 +590,7 @@ engine:
 | `engine.workers.<role>.startup_seconds` | `0` | `x` | `-` | Nonnegative. |
 | `engine.kv_transfer.bytes_per_token` | `auto` | `x` | `-` | Positive when concrete; disaggregated mode only. |
 | `engine.kv_transfer.bandwidth_gb_per_second` | `null` | `x` | `-` | Positive when set; `null` disables transfer delay. |
-| `engine.kv_transfer.timing_mode` | `full_prompt` | `{choices: [full_prompt, destination_missing]}` | `-` | Disaggregated mode only. |
+| `engine.kv_transfer.timing_mode` | `full_prompt` | `x` | `-` | `full_prompt` or `destination_missing`; disaggregated mode only. |
 
 `engine.hardware: auto` is valid only in `recommend` and requires the hardware inventory under
 `optimization.hardware`. The recommender searches the listed hardware SKUs subject to their available
@@ -796,8 +796,8 @@ integers, including when sampled from a log range.
 
 A field accepts at most one domain form. Domains are allowed only where **Default Range** is not `x`:
 
-- Engine mode, backend, `hardware: auto`, parallelism leaves, scheduler, transfer timing, and
-  supported backend-specific fields.
+- Engine mode, backend, `hardware: auto`, parallelism leaves, scheduler, and supported
+  backend-specific fields.
 - Router policy, load model, and supported policy-specific fields.
 - Planner policy and supported Planner-specific fields.
 - Traffic load intensity and timing fields marked `-` in the table.
