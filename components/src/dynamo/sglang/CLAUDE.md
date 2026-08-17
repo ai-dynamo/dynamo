@@ -70,6 +70,11 @@ Worker dispatch (main.py:60-132):
    have `max_running_requests`, `dllm_algorithm_config`, or other LLM-specific fields.
    Use `getattr()` when accessing fields that may not exist on the stub.
 
+SGLang 0.5.17 makes a resolved `ServerArgs` unconditionally read-only. Apply Dynamo's
+post-resolution startup overrides through `_compat.override_server_args()`; control-plane
+updates after engine creation should use the tokenizer manager's update API instead of
+assigning fields on `server_args`.
+
 **DynamoConfig** combines `DynamoRuntimeConfig` (common flags like `--namespace`,
 `--output-modalities`, `--media-output-fs-url`) with `DynamoSGLangConfig` (sglang-specific
 flags like `--enable-multimodal`, `--dedicated-mm-encoder`, `--embedding-worker`).
