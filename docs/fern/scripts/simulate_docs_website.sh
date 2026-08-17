@@ -94,6 +94,7 @@ rm -rf "$WT/fern/components"; cp -r "$SRC/components" "$WT/fern/components"
 rm -rf "$WT/fern/products"
 cp "$SRC/pages/home/index.mdx" "$WT/fern/index.mdx"
 perl -pi -e 's|\.\./\.\./assets/|./assets/|g' "$WT/fern/index.mdx"
+"$PY" "$SRC/scripts/gen_llms_tables.py" --assets-only
 [ -d "$SRC/assets" ] && cp -r "$SRC/assets/." "$WT/fern/assets/" || true
 if [ -d "$SRC/pages/blog/_assets" ]; then
   mkdir -p "$WT/fern/digest"; cp -r "$SRC/pages/blog/_assets/." "$WT/fern/digest/"
