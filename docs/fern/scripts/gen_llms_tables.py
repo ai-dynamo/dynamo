@@ -1334,16 +1334,20 @@ def main(argv: list[str]) -> int:
             if path.is_relative_to(REFERENCE_DIR)
             else path.name
         )
-        old_text = path.read_text(encoding="utf-8") if path.is_file() else None
-        if new_text == old_text:
+        # Compare and write raw bytes: read_text() would normalize CRLF away,
+        # letting a wrongly-encoded output pass as "unchanged" (and --check
+        # as fresh) without ever being healed.
+        old_bytes = path.read_bytes() if path.is_file() else None
+        new_bytes = new_text.encode("utf-8")
+        if new_bytes == old_bytes:
             print(f"{name}: unchanged")
             continue
         stale.append(name)
         if args.check:
             print(f"{name}: STALE (regeneration would change it)")
         else:
-            path.write_text(new_text, encoding="utf-8")
-            print(f"{name}: wrote {len(new_text.encode('utf-8'))} bytes")
+            path.write_bytes(new_bytes)
+            print(f"{name}: wrote {len(new_bytes)} bytes")
 
     if args.check and stale:
         print(

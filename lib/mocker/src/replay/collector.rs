@@ -80,7 +80,7 @@ pub struct TraceThroughputStats {
 /// Goodput: throughput restricted to the requests that satisfy the SLA. Present
 /// on the report only when an SLA was supplied to the collector (goodput is
 /// undefined without one). A completed request counts as "good" per
-/// [`SlaThresholds::is_good`].
+/// `SlaThresholds::is_good`.
 #[derive(Debug, Clone)]
 pub struct TraceGoodputStats {
     /// Completed requests that satisfied the SLA.

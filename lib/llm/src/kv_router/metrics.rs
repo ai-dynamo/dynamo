@@ -31,7 +31,7 @@
 //!   - Standalone router (`python -m dynamo.router`): available on `DYN_SYSTEM_PORT`
 //!     when set (default is `-1`, disabled), populated per-request
 //!
-//! - [`KvPublisherMetrics`]: Worker-local KV event publisher and ZMQ relay counters.
+//! - `KvPublisherMetrics`: Worker-local KV event publisher and ZMQ relay counters.
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
 //!   Populated by `KvEventPublisher` and the ZMQ listener when engines publish KV
 //!   events.

@@ -10,6 +10,10 @@ model:
   hf_id: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
   precision: NVFP4
 status: experimental
+artifacts:
+  recipe_specific_images:
+  - nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
+  - nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
 targets:
 - id: vllm-agg-b200-dspark
   recommended: true

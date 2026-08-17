@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod direct_zmq;
+mod recovery_lane;
 mod source_health;
+mod state_agent;
 mod subscriber;
 mod target;
 mod worker_query;
@@ -10,6 +12,7 @@ mod worker_query_endpoint;
 mod worker_query_state;
 mod worker_query_transport;
 
+pub(crate) use state_agent::start_state_agent_router;
 pub(crate) use subscriber::{
     KvEventSubscriptionHandle, RecoverySupervisor, start_subscriber, start_target_subscriber,
 };

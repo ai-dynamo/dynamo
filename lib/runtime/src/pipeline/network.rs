@@ -200,7 +200,7 @@ impl Drop for Cleanup {
 }
 
 /// Awaitable handle for a stream sender or receiver. Drop without calling
-/// [`into_parts()`] runs the optional cleanup closure, removing the
+/// `into_parts()` runs the optional cleanup closure, removing the
 /// registration from the stream server's maps.
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
