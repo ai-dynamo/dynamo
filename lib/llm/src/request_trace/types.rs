@@ -282,6 +282,7 @@ impl From<RequestTraceToolEventIngress> for RequestTraceRecord {
                 session_id: ingress.session_id,
                 parent_session_id: ingress.parent_session_id,
                 session_final: None,
+                compaction: None,
                 kv_hints: None,
                 input_trigger: None,
             }),

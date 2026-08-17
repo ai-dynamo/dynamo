@@ -268,6 +268,8 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 		annotations      map[string]string
 		components       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 		wantMinAvailable map[string]*int32
+		wantProvider     string
+		wantUnselected   bool
 	}{
 		{
 			name:         "CREATE defaults nil replicas to minAvailable 1 on Grove pathway",
@@ -281,15 +283,32 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:         "UPDATE defaults positive replicas to minAvailable 1 on Grove pathway",
+			name:         "CREATE ignores a user-supplied provider and follows routing intent",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			annotations: map[string]string{
+				consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				consts.KubeAnnotationEnableGrove:      consts.KubeLabelValueFalse,
+			},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+			wantProvider: consts.WorkloadProviderComponent,
+		},
+		{
+			name:         "legacy UPDATE remains unselected for controller adoption",
 			op:           admissionv1.Update,
 			groveEnabled: true,
 			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
 			},
 			wantMinAvailable: map[string]*int32{
-				"Worker": ptr.To(int32(1)),
+				"Worker": nil,
 			},
+			wantUnselected: true,
 		},
 		{
 			name:         "defaults zero replicas to minAvailable 1 on Grove pathway",
@@ -393,10 +412,40 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 				"Worker": nil,
 			},
 		},
+		{
+			name:         "selected Grove provider remains authoritative when the feature gate is disabled",
+			op:           admissionv1.Update,
+			groveEnabled: false,
+			annotations: map[string]string{
+				consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				consts.KubeAnnotationEnableGrove:      consts.KubeLabelValueFalse,
+			},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "selected component provider remains authoritative when Grove is enabled",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			annotations: map[string]string{
+				consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+			},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a DGD and defaulter for the provider-defaulting scenario")
 			defaulter := NewDGDDefaulter("0.9.0")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -411,10 +460,22 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 			ctx = features.WithGate(ctx, features.Gates{Grove: tt.groveEnabled})
 
+			t.Log("Apply level-based component defaults")
 			if err := defaulter.Default(ctx, dgd); err != nil {
 				t.Fatalf("Default() unexpected error: %v", err)
 			}
 
+			t.Log("Verify provider selection and component minimum availability")
+			if tt.wantProvider != "" {
+				if got := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
+					t.Errorf("workload provider = %q, want %q", got, tt.wantProvider)
+				}
+			}
+			if tt.wantUnselected {
+				if _, exists := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]; exists {
+					t.Errorf("provider annotation was materialized before controller adoption")
+				}
+			}
 			for name, want := range tt.wantMinAvailable {
 				component := dgd.GetComponentByName(name)
 				if component == nil {

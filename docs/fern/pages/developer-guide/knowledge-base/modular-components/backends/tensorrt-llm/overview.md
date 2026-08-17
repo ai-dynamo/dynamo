@@ -28,7 +28,7 @@ example.
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
 | [**Disaggregated Serving**](../../../concepts/system-architecture/disaggregated-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../../concepts/system-architecture/disaggregated-serving.md) | 🚧 | Not supported yet |
+| [**Conditional Disaggregation**](../../../../advanced-customizations/conditional-disaggregation.md) | ✅ | Requires KV-aware routing and `--publish-kv-events` on prefill and decode workers |
 | [**KV-Aware Routing**](../../router/overview.md) | ✅ |  |
 | [**SLA-Based Planner**](../../planner/planner-guide.md) | ✅ |  |
 | [**Load Based Planner**](../../planner/overview.md) | 🚧 | Planned |
@@ -93,7 +93,7 @@ docker compose -f dev/docker-compose.yml up -d
 **Step 2 (host terminal):** Pull and run the prebuilt container:
 
 ```bash
-DYNAMO_VERSION=1.0.2
+DYNAMO_VERSION=1.4.0
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION
 docker run --gpus all -it --network host --ipc host \
   nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION

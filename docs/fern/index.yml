@@ -453,6 +453,9 @@ navigation:
           - page: Kimi-K3
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
+          - page: Qwen3.8-2.4T-A95B
+            path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b-fp8.mdx
+            slug: qwen-3-8-2-4t-a95b-fp8
           - page: GLM-5.2
             path: pages/recipes/model-recipes/glm-5-2.mdx
             slug: glm-5-2
@@ -489,6 +492,9 @@ navigation:
           - page: Qwen3-32B
             path: pages/recipes/model-recipes/qwen3-32b.mdx
             slug: qwen3-32b
+          - page: Qwen3.5-122B-A10B
+            path: pages/recipes/model-recipes/qwen3-5-122b.mdx
+            slug: qwen3-5-122b
           - page: Qwen3-235B-A22B FP8
             path: pages/recipes/model-recipes/qwen3-235b-a22b-fp8.mdx
             slug: qwen3-235b-a22b-fp8
@@ -879,6 +885,8 @@ navigation:
             path: pages/developer-guide/advanced-customizations/building-from-source.md
           - page: Write Custom Routing Strategies
             path: pages/developer-guide/advanced-customizations/custom-worker-selection.mdx
+          - page: Conditional Disaggregation
+            path: pages/developer-guide/advanced-customizations/conditional-disaggregation.md
           - page: Custom Vision Encoders
             slug: custom-vision-encoders
             path: pages/developer-guide/advanced-customizations/custom-vision-encoders.md
