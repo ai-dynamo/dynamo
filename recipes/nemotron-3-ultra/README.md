@@ -56,26 +56,28 @@ nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81
 | H200 | 256K | 2 × TP8 | 5 tokens | 48 | 24576 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
 | H200 | 1M | 2 × TP8 | disabled | 32 | 24576 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
 | B200 | 256K | 1P TP4 + 1D TP4 | disabled | 64 | 32768 | 72 | `vllm/disagg-b200-agentic-256k-1p1d/deploy.yaml` |
-| B200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 24 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
+| B200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 32 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
 | GB200 | 256K | 1P TP4 + 1D TP4 | disabled | 64 | 32768 | 64 | `vllm/disagg-gb200-agentic-256k-1p1d/deploy.yaml` |
-| GB200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 24 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
+| GB200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 28 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
 | H200 | 256K | 1P TP8 + 1D TP8 | disabled | 48 | 24576 | 36 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
-| H200 | 1M | 1P TP8 + 1D TP8 | disabled | 32 | 24576 | 16 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
+| H200 | 1M | 1P TP8 + 1D TP8 | disabled | 32 | 24576 | 32 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
 
 The Refresh manifests enable KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and hybrid KV cache management. Expert Parallelism is disabled.
 
 The H200 and B200 1P1D profiles use UCX/RDMA and request one `rdma/ib` resource per GPU. The GB200 1P1D profile uses UCX/TCP and does not require an RDMA device resource.
 
-The following 1P1D reference points passed the 50 output tok/s/user SLA on the complete 3,541-row agentic trace. The 256K rows are the highest passing concurrency tested for each profile; the 1M rows are initial passing anchors.
+The following 1P1D reference points passed the 50 output tok/s/user SLA on the complete 3,541-row agentic trace. The 256K rows and the H200/B200 1M rows are closed boundaries: each is the highest passing concurrency before the first complete SLA-failing point. GB200 1M concurrency 28 is the current passing anchor; its next boundary point remains to be rerun after an infrastructure interruption.
 
 | GPU | Context | Concurrency | Output tok/s/GPU | Output tok/s/user | TTFT p50 (ms) | ITL p50 (ms) |
 |---|---:|---:|---:|---:|---:|---:|
 | B200 | 256K | 72 | 418.37 | 54.57 | 4969.22 | 18.32 |
-| B200 | 1M | 24 | 188.95 | 71.34 | 490.28 | 14.02 |
+| B200 | 1M | 32 | 213.66 | 60.52 | 904.54 | 16.52 |
 | GB200 | 256K | 64 | 351.59 | 51.00 | 1973.98 | 19.61 |
-| GB200 | 1M | 24 | 166.58 | 67.45 | 1654.12 | 14.83 |
-| H200 | 256K | 36 | 118.35 | 61.04 | 4351.00 | 16.38 |
-| H200 | 1M | 16 | 64.44 | 77.34 | 681.17 | 12.93 |
+| GB200 | 1M | 28 | 187.86 | 65.45 | 3077.87 | 15.28 |
+| H200 | 256K | 36 | 118.35 | 61.04 | 4351.19 | 16.38 |
+| H200 | 1M | 32 | 91.42 | 59.59 | 4574.20 | 16.78 |
+
+All six aggregate two-worker profiles have selected concurrency values. Exact checked-in-runtime confirmation is complete for H200 256K/1M, B200 1M, and GB200 256K. B200 256K at concurrency 94 and GB200 1M at concurrency 48 remain selected candidates pending exact release-runtime confirmation; no additional aggregate knob sweep is planned for those two profiles.
 
 ## Supported Features
 
@@ -84,6 +86,7 @@ The following 1P1D reference points passed the 50 output tok/s/user SLA on the c
 - Tool calling with `qwen3_coder`
 - Ultra reasoning parser support through the model-local `ultra_v3_reasoning_parser.py`
 - Raw Moontrace replay through AIPerf
+- Decoupled weights: model weights are downloaded and validated onto the `shared-model-cache` PVC (`model-cache/model-download.yaml`, `model-cache/model-validate.yaml`) independently of the runtime image, instead of being baked into it
 
 ## Prerequisites
 
