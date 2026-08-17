@@ -423,29 +423,6 @@ async fn stale_invalidation_releases_its_lease_after_a_concurrent_rebind() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn stale_legacy_invalidation_preserves_a_newer_fenced_target() {
-    let coordinator = coordinator();
-    let stale_target = target(7, Some(0));
-    let current_target = target(8, Some(0));
-    assert_eq!(
-        coordinator.apply_replica_revision_for_test(session_id().as_str(), stale_target, 0, 10,),
-        ReplicaApplyOutcome::Inserted
-    );
-    let stale = coordinator.acquire(&session_id(), None).await.unwrap();
-    assert_eq!(
-        coordinator.apply_replica_revision_for_test(session_id().as_str(), current_target, 0, 11,),
-        ReplicaApplyOutcome::ReplacedLegacy
-    );
-
-    stale.invalidate();
-
-    assert_eq!(
-        coordinator.query_target(&session_id(), None).unwrap(),
-        Some(current_target)
-    );
-}
-
-#[tokio::test(start_paused = true)]
 async fn failed_migration_preserves_the_existing_affinity_target() {
     let coordinator = coordinator();
     let original_target = target(7, Some(0));
@@ -736,107 +713,6 @@ async fn session_affinity_replica_replaces_only_with_a_newer_revision() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_legacy_conflict_wins_during_rolling_upgrade() {
-    let coordinator = coordinator();
-    let migrated_target = target(8, Some(0));
-    let legacy_target = target(7, Some(0));
-
-    assert_eq!(
-        coordinator.apply_replica_revision_for_test("replicated", migrated_target, 100, 99),
-        ReplicaApplyOutcome::Inserted
-    );
-    assert_eq!(
-        coordinator.apply_replica_revision_for_test("replicated", legacy_target, 0, 42),
-        ReplicaApplyOutcome::ReplacedLegacy
-    );
-    assert_eq!(
-        coordinator
-            .query_target(&SessionAffinityId::new("replicated"), None)
-            .unwrap(),
-        Some(legacy_target)
-    );
-    assert!(
-        coordinator
-            .query_binding(&SessionAffinityId::new("replicated"))
-            .unwrap()
-            .unwrap()
-            .hard_constraint
-    );
-
-    let active = coordinator
-        .acquire(&SessionAffinityId::new("replicated"), None)
-        .await
-        .unwrap();
-    assert_eq!(
-        coordinator.apply_replica_revision_for_test("replicated", target(9, Some(0)), 50, 77,),
-        ReplicaApplyOutcome::IgnoredStale
-    );
-    let newest_target = target(10, Some(0));
-    assert_eq!(
-        coordinator.apply_replica_revision_for_test("replicated", newest_target, 101, 99),
-        ReplicaApplyOutcome::DeferredLegacy
-    );
-    assert_eq!(
-        coordinator
-            .query_target(&SessionAffinityId::new("replicated"), None)
-            .unwrap(),
-        Some(legacy_target)
-    );
-    tokio::time::advance(Duration::from_secs(11)).await;
-    assert_eq!(
-        coordinator
-            .query_target(&SessionAffinityId::new("replicated"), None)
-            .unwrap(),
-        Some(newest_target)
-    );
-    assert!(
-        !coordinator
-            .query_binding(&SessionAffinityId::new("replicated"))
-            .unwrap()
-            .unwrap()
-            .hard_constraint
-    );
-    drop(active);
-}
-
-#[tokio::test(start_paused = true)]
-async fn session_affinity_legacy_fence_restores_the_last_versioned_target() {
-    let coordinator = coordinator();
-    let versioned_target = target(8, Some(0));
-    let legacy_target = target(7, Some(0));
-
-    assert_eq!(
-        coordinator.apply_replica_revision_for_test("replicated", versioned_target, 100, 99),
-        ReplicaApplyOutcome::Inserted
-    );
-    assert_eq!(
-        coordinator.apply_replica_revision_for_test("replicated", legacy_target, 0, 42),
-        ReplicaApplyOutcome::ReplacedLegacy
-    );
-
-    let active = coordinator
-        .acquire(&SessionAffinityId::new("replicated"), None)
-        .await
-        .unwrap();
-    tokio::time::advance(Duration::from_secs(11)).await;
-
-    assert_eq!(
-        coordinator
-            .query_target(&SessionAffinityId::new("replicated"), None)
-            .unwrap(),
-        Some(versioned_target)
-    );
-    assert!(
-        !coordinator
-            .query_binding(&SessionAffinityId::new("replicated"))
-            .unwrap()
-            .unwrap()
-            .hard_constraint
-    );
-    drop(active);
-}
-
-#[tokio::test(start_paused = true)]
 async fn session_affinity_replica_duplicate_refreshes_local_ttl() {
     let coordinator = coordinator();
     let replicated_id = SessionAffinityId::new("replicated");
@@ -913,62 +789,6 @@ async fn session_affinity_successful_initialization_orders_after_a_deferred_repl
         Some(local_target)
     );
     drop(stream);
-}
-
-#[tokio::test(start_paused = true)]
-async fn session_affinity_deferred_legacy_binding_fences_local_initialization() {
-    let coordinator = coordinator();
-    let mut updates = coordinator.enable_test_replica(99, 2);
-    let AffinityAcquire::Initialize(initializing) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
-    else {
-        panic!("first request must initialize");
-    };
-    let legacy_target = target(7, Some(0));
-    assert_eq!(
-        coordinator.apply_replica_revision_for_test(session_id().as_str(), legacy_target, 0, 10,),
-        ReplicaApplyOutcome::DeferredInitializing
-    );
-
-    let stream = AffinityAcquire::Initialize(initializing)
-        .into_stream(target(8, Some(0)), response_stream(1))
-        .unwrap();
-    assert_eq!(
-        coordinator.query_target(&session_id(), None).unwrap(),
-        Some(legacy_target)
-    );
-    assert!(updates.try_recv().is_err());
-    drop(stream);
-    assert!(updates.try_recv().is_err());
-}
-
-#[tokio::test(start_paused = true)]
-async fn session_affinity_legacy_binding_is_versioned_after_the_rollout_fence_expires() {
-    let coordinator = coordinator();
-    let mut updates = coordinator.enable_test_replica(99, 2);
-    let legacy_target = target(7, Some(0));
-    assert_eq!(
-        coordinator.apply_replica_revision_for_test(session_id().as_str(), legacy_target, 0, 10,),
-        ReplicaApplyOutcome::Inserted
-    );
-
-    let active = coordinator.acquire(&session_id(), None).await.unwrap();
-    let active_stream = active
-        .into_stream(legacy_target, response_stream(1))
-        .unwrap();
-    assert!(updates.try_recv().is_err());
-    tokio::time::advance(Duration::from_secs(11)).await;
-    drop(active_stream);
-    assert!(updates.try_recv().is_err());
-
-    let promote = coordinator.acquire(&session_id(), None).await.unwrap();
-    let promoted_stream = promote
-        .into_stream(legacy_target, response_stream(1))
-        .unwrap();
-    let update = updates.recv().await.unwrap();
-    assert!(update.revision > 0);
-    assert_eq!(update.worker_id, legacy_target.worker_id);
-    drop(promoted_stream);
 }
 
 #[tokio::test(start_paused = true)]

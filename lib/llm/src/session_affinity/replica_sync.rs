@@ -33,15 +33,8 @@ pub(super) struct SessionAffinityUpdate {
     pub session_id: String,
     pub worker_id: u64,
     pub dp_rank: Option<u32>,
-    /// Identifies the process that sent this update.
     pub router_id: u64,
-    // Compatibility with v1.2-v1.3 routers during v1.4-v1.5 rolling upgrades.
-    // TODO(v1.6): Remove the default when those routers leave the N-2 window.
-    #[serde(default)]
     pub revision: u64,
-    /// Identifies the process that originally created `revision`.
-    // Default to the immediate sender for updates from v1.4 routers.
-    #[serde(default)]
     pub revision_router_id: u64,
 }
 
@@ -99,11 +92,7 @@ impl ReplicaUpdateApplier {
             target,
             AffinityRevision {
                 sequence: update.revision,
-                router_id: if update.revision_router_id == 0 {
-                    update.router_id
-                } else {
-                    update.revision_router_id
-                },
+                router_id: update.revision_router_id,
             },
         );
         drop(coordinator);
@@ -321,15 +310,6 @@ mod tests {
     };
     use std::time::Duration;
 
-    #[derive(Deserialize)]
-    struct LegacySessionAffinityUpdate {
-        session_id: String,
-        worker_id: u64,
-        dp_rank: Option<u32>,
-        router_id: u64,
-        revision: u64,
-    }
-
     fn update(router_id: u64, worker_id: u64) -> SessionAffinityUpdate {
         SessionAffinityUpdate {
             session_id: "session".to_string(),
@@ -353,31 +333,6 @@ mod tests {
         assert!(should_use_direct_sync(EventTransportKind::Zmq, true));
         assert!(!should_use_direct_sync(EventTransportKind::Zmq, false));
         assert!(!should_use_direct_sync(EventTransportKind::Nats, false));
-    }
-
-    #[test]
-    fn replica_update_without_revision_defaults_to_legacy_zero() {
-        let update: SessionAffinityUpdate = serde_json::from_str(
-            r#"{"session_id":"session","worker_id":10,"dp_rank":0,"router_id":7}"#,
-        )
-        .unwrap();
-
-        assert_eq!(update.revision, 0);
-        assert_eq!(update.revision_router_id, 0);
-    }
-
-    #[test]
-    fn legacy_reader_ignores_revision_origin() {
-        let update = update(7, 10);
-        let encoded = Codec::default().encode_payload(&update).unwrap();
-        let legacy: LegacySessionAffinityUpdate =
-            Codec::default().decode_payload(&encoded).unwrap();
-
-        assert_eq!(legacy.session_id, update.session_id);
-        assert_eq!(legacy.worker_id, update.worker_id);
-        assert_eq!(legacy.dp_rank, update.dp_rank);
-        assert_eq!(legacy.router_id, update.router_id);
-        assert_eq!(legacy.revision, update.revision);
     }
 
     #[tokio::test]

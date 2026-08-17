@@ -26,8 +26,8 @@ use super::{
     lifecycle::{AffinityAcquire, AffinityInitialization, AffinityLease, VacantEntryExt},
     replica_sync::ReplicaSyncRuntime,
     state::{
-        AffinityRevision, LegacyFence, ReplicaApplyOutcome, ReplicaBinding, apply_replica_binding,
-        normalize_expired_legacy_fence as normalize_expired_fence_state, revision_timestamp,
+        AffinityRevision, ReplicaApplyOutcome, ReplicaBinding, apply_replica_binding,
+        revision_timestamp,
     },
 };
 use crate::{
@@ -37,12 +37,6 @@ use crate::{
         timing::RequestPhase,
     },
 };
-
-#[derive(Clone, Copy)]
-pub(crate) struct AffinityRoutingBinding {
-    pub(crate) target: AffinityTarget,
-    pub(crate) hard_constraint: bool,
-}
 
 pub(super) enum AffinityEntry {
     Initializing {
@@ -57,7 +51,6 @@ pub(super) enum AffinityEntry {
         generation: u64,
         active_leases: usize,
         idle_deadline: Instant,
-        legacy_fence: Option<LegacyFence>,
     },
 }
 
@@ -233,93 +226,88 @@ impl AffinityCoordinator {
                         requested_target,
                     )));
                 }
-                Entry::Occupied(mut entry) => {
-                    normalize_expired_legacy_fence(entry.get_mut(), now);
-                    match entry.get_mut() {
-                        AffinityEntry::Initializing { notify, .. } => {
-                            #[cfg(test)]
-                            self.inner.waiter_observed.notify_one();
-                            let notified = notify.clone().notified_owned();
-                            tokio::pin!(notified);
-                            notified.as_mut().enable();
-                            drop(entry);
-                            if let Some(context) = request_context {
-                                tokio::select! {
-                                    biased;
-                                    _ = context.stopped() => {
-                                        return Err(cancelled(context.id()));
-                                    }
-                                    _ = context.killed() => {
-                                        return Err(cancelled(context.id()));
-                                    }
-                                    _ = notified => {}
+                Entry::Occupied(mut entry) => match entry.get_mut() {
+                    AffinityEntry::Initializing { notify, .. } => {
+                        #[cfg(test)]
+                        self.inner.waiter_observed.notify_one();
+                        let notified = notify.clone().notified_owned();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
+                        drop(entry);
+                        if let Some(context) = request_context {
+                            tokio::select! {
+                                biased;
+                                _ = context.stopped() => {
+                                    return Err(cancelled(context.id()));
                                 }
-                            } else {
-                                notified.await;
+                                _ = context.killed() => {
+                                    return Err(cancelled(context.id()));
+                                }
+                                _ = notified => {}
                             }
-                        }
-                        AffinityEntry::Bound {
-                            target: _,
-                            revision,
-                            active_leases,
-                            idle_deadline,
-                            ..
-                        } if *active_leases == 0 && *idle_deadline <= now => {
-                            tracing::debug!(
-                                session_id = %session_id,
-                                "session affinity miss: binding expired (idle past TTL), re-selecting worker"
-                            );
-                            let revision = self.inner.next_revision();
-                            let generation = self.inner.next_generation();
-                            let notify = Arc::new(Notify::new());
-                            *entry.get_mut() = AffinityEntry::Initializing {
-                                revision,
-                                generation,
-                                notify: notify.clone(),
-                                pending_replica: None,
-                            };
-                            drop(entry);
-                            return Ok(AffinityAcquire::Initialize(AffinityInitialization {
-                                coordinator: Arc::downgrade(&self.inner),
-                                session_id,
-                                revision,
-                                generation,
-                                notify,
-                                requested_target,
-                                active: true,
-                            }));
-                        }
-                        AffinityEntry::Bound {
-                            target,
-                            revision,
-                            generation,
-                            active_leases,
-                            legacy_fence,
-                            ..
-                        } => {
-                            tracing::debug!(
-                                session_id = %session_id,
-                                worker_id = target.worker_id,
-                                dp_rank = ?target.dp_rank,
-                                active_leases = *active_leases + 1,
-                                "session affinity hit: using preferred worker"
-                            );
-                            *active_leases += 1;
-                            let lease = AffinityLease {
-                                coordinator: Arc::downgrade(&self.inner),
-                                session_id,
-                                revision: *revision,
-                                generation: *generation,
-                                active: true,
-                            };
-                            return Ok(AffinityAcquire::Bound {
-                                target: *target,
-                                hard_constraint: legacy_fence.is_some(),
-                                lease,
-                            });
+                        } else {
+                            notified.await;
                         }
                     }
-                }
+                    AffinityEntry::Bound {
+                        target: _,
+                        revision,
+                        active_leases,
+                        idle_deadline,
+                        ..
+                    } if *active_leases == 0 && *idle_deadline <= now => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            "session affinity miss: binding expired (idle past TTL), re-selecting worker"
+                        );
+                        let revision = self.inner.next_revision();
+                        let generation = self.inner.next_generation();
+                        let notify = Arc::new(Notify::new());
+                        *entry.get_mut() = AffinityEntry::Initializing {
+                            revision,
+                            generation,
+                            notify: notify.clone(),
+                            pending_replica: None,
+                        };
+                        drop(entry);
+                        return Ok(AffinityAcquire::Initialize(AffinityInitialization {
+                            coordinator: Arc::downgrade(&self.inner),
+                            session_id,
+                            revision,
+                            generation,
+                            notify,
+                            requested_target,
+                            active: true,
+                        }));
+                    }
+                    AffinityEntry::Bound {
+                        target,
+                        revision,
+                        generation,
+                        active_leases,
+                        ..
+                    } => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            worker_id = target.worker_id,
+                            dp_rank = ?target.dp_rank,
+                            active_leases = *active_leases + 1,
+                            "session affinity hit: using preferred worker"
+                        );
+                        *active_leases += 1;
+                        let lease = AffinityLease {
+                            coordinator: Arc::downgrade(&self.inner),
+                            session_id,
+                            revision: *revision,
+                            generation: *generation,
+                            active: true,
+                        };
+                        return Ok(AffinityAcquire::Bound {
+                            target: *target,
+                            lease,
+                        });
+                    }
+                },
             }
         }
     }
@@ -329,47 +317,31 @@ impl AffinityCoordinator {
         session_id: &SessionAffinityId,
         _requested_target: Option<AffinityTarget>,
     ) -> Result<Option<AffinityTarget>, Error> {
-        Ok(self
-            .query_binding(session_id)?
-            .map(|binding| binding.target))
-    }
-
-    pub(crate) fn query_binding(
-        &self,
-        session_id: &SessionAffinityId,
-    ) -> Result<Option<AffinityRoutingBinding>, Error> {
         self.validate_session_id(session_id)?;
         let now = Instant::now();
         let Some(entry) = self.inner.entries.get(session_id.as_str()) else {
             return Ok(None);
         };
-        let fence_expired = matches!(
-            entry.value(),
-            AffinityEntry::Bound {
-                legacy_fence: Some(fence),
-                ..
-            } if fence.deadline <= now
-        );
-        let binding = if fence_expired {
-            drop(entry);
-            let Some(mut entry) = self.inner.entries.get_mut(session_id.as_str()) else {
-                return Ok(None);
-            };
-            normalize_expired_legacy_fence(entry.value_mut(), now);
-            routing_binding(entry.value(), now)
-        } else {
-            routing_binding(entry.value(), now)
+        let AffinityEntry::Bound {
+            target,
+            active_leases,
+            idle_deadline,
+            ..
+        } = entry.value()
+        else {
+            return Ok(None);
         };
-        if let Some(binding) = binding {
-            tracing::debug!(
-                session_id = %session_id.as_str(),
-                worker_id = binding.target.worker_id,
-                dp_rank = ?binding.target.dp_rank,
-                "session affinity hit: using preferred worker"
-            );
+        if *active_leases == 0 && *idle_deadline <= now {
+            return Ok(None);
         }
+        tracing::debug!(
+            session_id = %session_id.as_str(),
+            worker_id = target.worker_id,
+            dp_rank = ?target.dp_rank,
+            "session affinity hit: using preferred worker"
+        );
 
-        Ok(binding)
+        Ok(Some(*target))
     }
 
     #[cfg(test)]
@@ -456,23 +428,6 @@ impl AffinityCoordinator {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn apply_legacy_replica_for_test(
-        &self,
-        session_id: impl Into<String>,
-        target: AffinityTarget,
-        router_id: u64,
-    ) {
-        let _ = self.inner.apply_replica_update(
-            session_id.into(),
-            target,
-            AffinityRevision {
-                sequence: 0,
-                router_id,
-            },
-        );
-    }
-
     fn validate_session_id(&self, session_id: &SessionAffinityId) -> Result<(), Error> {
         if session_id.as_str().len() > self.inner.max_session_id_bytes {
             return Err(invalid_argument(format!(
@@ -489,26 +444,6 @@ impl AffinityCoordinator {
             .then_some(())
             .ok_or_else(|| resource_exhausted("session affinity entry limit reached"))
     }
-}
-
-fn routing_binding(entry: &AffinityEntry, now: Instant) -> Option<AffinityRoutingBinding> {
-    let AffinityEntry::Bound {
-        target,
-        active_leases,
-        idle_deadline,
-        legacy_fence,
-        ..
-    } = entry
-    else {
-        return None;
-    };
-    if *active_leases == 0 && *idle_deadline <= now {
-        return None;
-    }
-    Some(AffinityRoutingBinding {
-        target: *target,
-        hard_constraint: legacy_fence.is_some(),
-    })
 }
 
 impl AffinityCoordinatorInner {
@@ -572,11 +507,6 @@ impl AffinityCoordinatorInner {
 
         self.observe_revision(revision);
         let now = Instant::now();
-        // Compatibility with v1.2-v1.3 routers during v1.4-v1.5 rolling upgrades.
-        // A legacy conflict wins so old and new routers do not split the session
-        // while old routers cannot understand versioned migration updates.
-        // TODO(v1.6): Remove revision-zero handling when those routers leave the N-2 window.
-        let legacy_revision = revision.is_legacy();
         match self.entries.entry(session_id) {
             Entry::Vacant(entry) => {
                 if !self.reserve_entry() {
@@ -588,10 +518,6 @@ impl AffinityCoordinatorInner {
                     generation: self.next_generation(),
                     active_leases: 0,
                     idle_deadline: now + self.ttl,
-                    legacy_fence: legacy_revision.then_some(LegacyFence {
-                        deadline: now + self.ttl,
-                        pending_versioned_target: None,
-                    }),
                 });
                 ReplicaApplyOutcome::Inserted
             }
@@ -600,18 +526,9 @@ impl AffinityCoordinatorInner {
                     pending_replica, ..
                 } => {
                     let outcome = match pending_replica {
-                        Some(binding) => {
-                            apply_replica_binding(binding, target, revision, now, self.ttl)
-                        }
+                        Some(binding) => apply_replica_binding(binding, target, revision),
                         None => {
-                            *pending_replica = Some(ReplicaBinding {
-                                target,
-                                revision,
-                                legacy_fence: legacy_revision.then_some(LegacyFence {
-                                    deadline: now + self.ttl,
-                                    pending_versioned_target: None,
-                                }),
-                            });
+                            *pending_replica = Some(ReplicaBinding { target, revision });
                             ReplicaApplyOutcome::Inserted
                         }
                     };
@@ -625,20 +542,16 @@ impl AffinityCoordinatorInner {
                     revision: existing_revision,
                     active_leases,
                     idle_deadline,
-                    legacy_fence,
                     ..
                 } => {
                     let mut binding = ReplicaBinding {
                         target: *existing_target,
                         revision: *existing_revision,
-                        legacy_fence: *legacy_fence,
                     };
-                    let outcome =
-                        apply_replica_binding(&mut binding, target, revision, now, self.ttl);
+                    let outcome = apply_replica_binding(&mut binding, target, revision);
                     if outcome != ReplicaApplyOutcome::IgnoredStale {
                         *existing_target = binding.target;
                         *existing_revision = binding.revision;
-                        *legacy_fence = binding.legacy_fence;
                         if *active_leases == 0 {
                             *idle_deadline = now + self.ttl;
                         }
@@ -648,18 +561,6 @@ impl AffinityCoordinatorInner {
             },
         }
     }
-}
-
-fn normalize_expired_legacy_fence(entry: &mut AffinityEntry, now: Instant) {
-    let AffinityEntry::Bound {
-        target,
-        legacy_fence,
-        ..
-    } = entry
-    else {
-        return;
-    };
-    normalize_expired_fence_state(target, legacy_fence, now);
 }
 
 pub fn affinity_id(

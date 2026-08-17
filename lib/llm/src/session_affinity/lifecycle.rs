@@ -14,10 +14,9 @@ use tokio::{sync::Notify, time::Instant};
 use super::{
     AffinityTarget, LlmResponse,
     coordinator::{
-        AffinityCoordinatorInner, AffinityEntry, AffinityRoutingBinding, invalid_argument,
-        validate_bound_target,
+        AffinityCoordinatorInner, AffinityEntry, invalid_argument, validate_bound_target,
     },
-    state::{AffinityRevision, ReplicaBinding, normalize_expired_replica_fence},
+    state::AffinityRevision,
 };
 
 pub(super) trait VacantEntryExt {
@@ -61,7 +60,6 @@ pub(crate) enum AffinityAcquire {
     Initialize(AffinityInitialization),
     Bound {
         target: AffinityTarget,
-        hard_constraint: bool,
         lease: AffinityLease,
     },
 }
@@ -71,20 +69,6 @@ impl AffinityAcquire {
         match self {
             Self::Initialize(_) => None,
             Self::Bound { target, .. } => Some(*target),
-        }
-    }
-
-    pub(crate) fn routing_binding(&self) -> Option<AffinityRoutingBinding> {
-        match self {
-            Self::Initialize(_) => None,
-            Self::Bound {
-                target,
-                hard_constraint,
-                ..
-            } => Some(AffinityRoutingBinding {
-                target: *target,
-                hard_constraint: *hard_constraint,
-            }),
         }
     }
 
@@ -99,16 +83,9 @@ impl AffinityAcquire {
                 lease.publish_current();
                 Ok(lease.into_stream(stream))
             }
-            Self::Bound {
-                target, mut lease, ..
-            } => {
-                if target == selected_target {
-                    if lease.revision.is_legacy() {
-                        lease.rebind(selected_target);
-                    }
-                    lease.publish(selected_target);
-                } else if lease.rebind(selected_target) {
-                    lease.publish(selected_target);
+            Self::Bound { target, mut lease } => {
+                if target == selected_target || lease.rebind(selected_target) {
+                    lease.publish_current();
                 }
                 Ok(lease.into_stream(stream))
             }
@@ -159,7 +136,6 @@ impl AffinityInitialization {
         let AffinityEntry::Initializing {
             revision,
             generation,
-            pending_replica,
             ..
         } = entry.value()
         else {
@@ -168,26 +144,14 @@ impl AffinityInitialization {
         if *revision != self.revision || *generation != self.generation {
             return Err(invalid_argument("session affinity initialization changed"));
         }
-        let mut pending_replica = *pending_replica;
         let local_revision = inner.next_revision();
         let now = Instant::now();
-        if let Some(binding) = pending_replica.as_mut() {
-            normalize_expired_replica_fence(binding, now);
-        }
-        let binding = pending_replica
-            .filter(|binding| binding.legacy_fence.is_some())
-            .unwrap_or(ReplicaBinding {
-                target,
-                revision: local_revision,
-                legacy_fence: None,
-            });
         *entry = AffinityEntry::Bound {
-            target: binding.target,
-            revision: binding.revision,
+            target,
+            revision: local_revision,
             generation: self.generation,
             active_leases: 1,
             idle_deadline: now + inner.ttl,
-            legacy_fence: binding.legacy_fence,
         };
         drop(entry);
         self.active = false;
@@ -195,7 +159,7 @@ impl AffinityInitialization {
         Ok(AffinityLease {
             coordinator: Arc::downgrade(&inner),
             session_id: self.session_id.clone(),
-            revision: binding.revision,
+            revision: local_revision,
             generation: self.generation,
             active: true,
         })
@@ -222,15 +186,12 @@ impl Drop for AffinityInitialization {
             && *generation == self.generation
             && let Some(binding) = pending_replica.take()
         {
-            let mut binding = binding;
-            normalize_expired_replica_fence(&mut binding, Instant::now());
             *entry = AffinityEntry::Bound {
                 target: binding.target,
                 revision: binding.revision,
                 generation: self.generation,
                 active_leases: 0,
                 idle_deadline: Instant::now() + inner.ttl,
-                legacy_fence: binding.legacy_fence,
             };
             retained = true;
         }
@@ -262,10 +223,6 @@ pub(crate) struct AffinityLease {
 }
 
 impl AffinityLease {
-    fn publish(&self, _target: AffinityTarget) {
-        self.publish_current();
-    }
-
     fn publish_current(&self) {
         let Some(inner) = self.coordinator.upgrade() else {
             return;
@@ -278,14 +235,12 @@ impl AffinityLease {
                 target,
                 revision,
                 generation,
-                legacy_fence,
                 ..
             } = entry.value()
             else {
                 return;
             };
-            (*generation == self.generation && revision.is_versioned() && legacy_fence.is_none())
-                .then_some((*target, *revision))
+            (*generation == self.generation).then_some((*target, *revision))
         };
         if let Some((target, revision)) = update {
             inner.publish_replica_update(&self.session_id, target, revision);
@@ -308,7 +263,6 @@ impl AffinityLease {
             target: existing_target,
             revision: existing_revision,
             generation,
-            legacy_fence,
             ..
         } = entry.value_mut()
         else {
@@ -319,13 +273,12 @@ impl AffinityLease {
             self.active = false;
             return false;
         }
-        if *existing_revision != self.revision || legacy_fence.is_some() {
+        if *existing_revision != self.revision {
             return false;
         }
         let revision = inner.next_revision();
         *existing_target = target;
         *existing_revision = revision;
-        *legacy_fence = None;
         self.revision = revision;
         true
     }
@@ -349,7 +302,7 @@ impl AffinityLease {
         let Some(inner) = self.coordinator.upgrade() else {
             return;
         };
-        let (target, revision, fenced) = {
+        let (target, revision) = {
             let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
                 return;
             };
@@ -359,7 +312,6 @@ impl AffinityLease {
                 generation,
                 active_leases,
                 idle_deadline,
-                legacy_fence,
                 ..
             } = entry.value_mut()
             else {
@@ -370,11 +322,9 @@ impl AffinityLease {
             }
             *active_leases -= 1;
             *idle_deadline = Instant::now() + inner.ttl;
-            (*target, *revision, legacy_fence.is_some())
+            (*target, *revision)
         };
-        if revision.is_versioned() && !fenced {
-            inner.publish_replica_update(&self.session_id, target, revision);
-        }
+        inner.publish_replica_update(&self.session_id, target, revision);
     }
 
     fn invalidate(&mut self, expected_target: AffinityTarget) {

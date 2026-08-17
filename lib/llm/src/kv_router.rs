@@ -1375,38 +1375,6 @@ where
         (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
     }
 
-    /// Return true only when discovery proves an affinity target cannot be routed.
-    /// A missing runtime config is inconclusive because endpoint availability and
-    /// config discovery converge asynchronously.
-    pub(crate) fn affinity_target_is_definitively_unroutable(
-        &self,
-        target: crate::session_affinity::AffinityTarget,
-    ) -> bool {
-        if self
-            .client
-            .available_instance_ids()
-            .is_some_and(|workers| !workers.contains(&target.worker_id))
-        {
-            return true;
-        }
-        let configs = self.workers_with_configs.borrow();
-        let Some(config) = configs.get(&target.worker_id) else {
-            return false;
-        };
-        let Some(dp_rank) = target.dp_rank.or_else(|| {
-            (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
-        }) else {
-            return true;
-        };
-        let Some(dp_end) = config
-            .data_parallel_start_rank
-            .checked_add(config.data_parallel_size)
-        else {
-            return true;
-        };
-        !(config.data_parallel_start_rank..dp_end).contains(&dp_rank)
-    }
-
     pub fn add_output_block(
         &self,
         request_id: &str,

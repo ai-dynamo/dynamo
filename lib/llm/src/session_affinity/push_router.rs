@@ -114,6 +114,25 @@ impl SessionAffinityPushRouter {
         }
     }
 
+    fn query_preferred_target(
+        &self,
+        session_id: &crate::protocols::common::extensions::SessionAffinityId,
+        explicit: Option<AffinityTarget>,
+    ) -> Result<Option<AffinityTarget>, Error> {
+        let affinity = self
+            .affinity
+            .as_ref()
+            .expect("affinity query requires an enabled coordinator")
+            .query_target(session_id, explicit)?
+            .filter(|target| {
+                self.inner
+                    .client
+                    .instance_ids_avail()
+                    .contains(&target.worker_id)
+            });
+        Ok(Self::resolve_preferred_target(explicit, affinity))
+    }
+
     pub fn peek_next_worker(&self) -> Option<u64> {
         self.inner.peek_next_worker()
     }
@@ -223,12 +242,7 @@ impl SessionAffinityPushRouter {
         };
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         if is_query_only {
-            let selected = self
-                .affinity
-                .as_ref()
-                .expect("affinity query requires an enabled coordinator")
-                .query_target(&session_id, explicit)?;
-            let selected = Self::resolve_preferred_target(explicit, selected);
+            let selected = self.query_preferred_target(&session_id, explicit)?;
             return self
                 .select_and_dispatch_exact_target(request, selected, prepare)
                 .await;
@@ -316,12 +330,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         if is_query_only {
-            let target = self
-                .affinity
-                .as_ref()
-                .expect("affinity query requires an enabled coordinator")
-                .query_target(&session_id, explicit)?;
-            let target = Self::resolve_preferred_target(explicit, target);
+            let target = self.query_preferred_target(&session_id, explicit)?;
             let rank = target.and_then(|target| target.dp_rank);
             let ((tracker, target), stream) = self
                 .inner
@@ -779,6 +788,10 @@ mod tests {
                     dp_rank: None,
                 })
                 .unwrap(),
+        );
+        assert_eq!(
+            router.query_preferred_target(&session_id, None).unwrap(),
+            None
         );
 
         assert!(

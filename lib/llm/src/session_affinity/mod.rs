@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use dynamo_runtime::{component::Client, pipeline::Error};
 
+pub(crate) use coordinator::affinity_id;
 pub use coordinator::{AffinityCoordinator, explicit_target};
-pub(crate) use coordinator::{AffinityRoutingBinding, affinity_id};
 pub(crate) use lifecycle::AffinityAcquire;
 pub use push_router::SessionAffinityPushRouter;
 
