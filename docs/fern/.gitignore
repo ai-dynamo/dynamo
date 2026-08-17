@@ -1,6 +1,7 @@
 **/.preview
 **/.definition
-
+/assets/releases.json
+/assets/releases-atom.xml
 
 # Include logos
 !*.svg

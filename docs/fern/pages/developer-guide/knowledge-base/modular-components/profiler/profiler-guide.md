@@ -209,7 +209,7 @@ the operator defaults it to
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 > [!NOTE]
@@ -241,7 +241,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 **Step 2: Apply the DGDR**
@@ -427,7 +427,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"  # dynamo-frontend for Dynamo < 1.1.0
 
   searchStrategy: rapid  # or thorough
   autoApply: true
