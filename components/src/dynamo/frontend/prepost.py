@@ -67,7 +67,11 @@ _ASYNC_TOKENIZER_EXECUTORS: weakref.WeakKeyDictionary[
 ] = weakref.WeakKeyDictionary()
 # Fallback for tokenizers that do not support weak references; retains
 # entries for the process lifetime (the previous behavior for all tokenizers).
-_STRONG_ASYNC_TOKENIZER_EXECUTORS: dict[int, ThreadPoolExecutor] = {}
+# The tokenizer is stored alongside its executor so its id() cannot be
+# recycled by a different tokenizer while the entry lives.
+_STRONG_ASYNC_TOKENIZER_EXECUTORS: dict[
+    int, tuple[TokenizerLike, ThreadPoolExecutor]
+] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
 
 
@@ -358,10 +362,12 @@ def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[An
     except TypeError:
         # Tokenizer does not support weak references.
         key = id(tokenizer)
-        executor = _STRONG_ASYNC_TOKENIZER_EXECUTORS.get(key)
-        if executor is None:
+        entry = _STRONG_ASYNC_TOKENIZER_EXECUTORS.get(key)
+        if entry is None:
             executor = ThreadPoolExecutor(max_workers=1)
-            _STRONG_ASYNC_TOKENIZER_EXECUTORS[key] = executor
+            _STRONG_ASYNC_TOKENIZER_EXECUTORS[key] = (tokenizer, executor)
+        else:
+            executor = entry[1]
     return make_async(tokenizer, executor=executor)
 
 

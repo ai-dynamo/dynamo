@@ -64,6 +64,10 @@ def _clean_pools(monkeypatch):
     prepost._ASYNC_TOKENIZER_EXECUTORS.clear()
     prepost._STRONG_ASYNC_TOKENIZER_EXECUTORS.clear()
     yield
+    for executor in list(prepost._ASYNC_TOKENIZER_EXECUTORS.values()):
+        executor.shutdown()
+    for _, executor in list(prepost._STRONG_ASYNC_TOKENIZER_EXECUTORS.values()):
+        executor.shutdown()
     prepost._ASYNC_TOKENIZER_EXECUTORS.clear()
     prepost._STRONG_ASYNC_TOKENIZER_EXECUTORS.clear()
 
@@ -124,6 +128,11 @@ def test_non_weakrefable_tokenizer_falls_back_to_strong_pool():
 
     assert len(prepost._ASYNC_TOKENIZER_EXECUTORS) == 0
     assert len(prepost._STRONG_ASYNC_TOKENIZER_EXECUTORS) == 1
+
+    # The fallback entry must retain the tokenizer itself so its id() cannot
+    # be recycled by a different tokenizer while the entry lives.
+    retained_tokenizer, _ = prepost._STRONG_ASYNC_TOKENIZER_EXECUTORS[id(tokenizer)]
+    assert retained_tokenizer is tokenizer
 
     prepost._get_async_tokenizer(tokenizer)
     assert len(prepost._STRONG_ASYNC_TOKENIZER_EXECUTORS) == 1
