@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Host activation lands separately; preserve the internal policy state in this
-// foundation without forcing the public contract through a fake call site.
-#![allow(dead_code)]
-
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashSet};
 
@@ -469,11 +465,19 @@ impl<T> PolicyQueue<T> {
         }
     }
 
+    #[expect(
+        dead_code,
+        reason = "the queue-admission host installs the policy in the next stacked PR"
+    )]
     pub(crate) fn with_admission_policy(mut self, policy: Box<dyn QueueAdmissionPolicy>) -> Self {
         self.admission_policy = Some(policy);
         self
     }
 
+    #[expect(
+        dead_code,
+        reason = "the queue-admission host invokes admission in the next stacked PR"
+    )]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn admit_with_admission_policy(
         &mut self,
@@ -503,6 +507,10 @@ impl<T> PolicyQueue<T> {
         (!matches!(decision, QueueAdmissionDecision::Bypass)).then_some((id, decision))
     }
 
+    #[expect(
+        dead_code,
+        reason = "the queue-admission host emits lifecycle events in the next stacked PR"
+    )]
     pub(crate) fn admission_event(&mut self, event: QueueAdmissionEvent<'_>) -> bool {
         let Some(policy) = self.admission_policy.as_mut() else {
             return false;
@@ -632,6 +640,10 @@ impl<T> PolicyQueue<T> {
         Ok(())
     }
 
+    #[expect(
+        dead_code,
+        reason = "the queue-admission host stores deferred requests in the next stacked PR"
+    )]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn enqueue_deferred(
         &mut self,
