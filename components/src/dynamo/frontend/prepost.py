@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -55,7 +56,18 @@ class PreprocessResult:
     uses_dynamo_json_tool_call_fallback: bool = False
 
 
-_ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
+# One executor per live tokenizer. Keyed weakly by the tokenizer object
+# itself (not id(), whose reuse could alias a stale entry): when the owning
+# tokenizer is garbage-collected the entry drops out and the finalizer shuts
+# the executor down. The executor must not be captured by a cached wrapper
+# that also captures the tokenizer (vLLM's make_async closes over both) —
+# that value->key strong reference would pin the key forever.
+_ASYNC_TOKENIZER_EXECUTORS: weakref.WeakKeyDictionary[
+    TokenizerLike, ThreadPoolExecutor
+] = weakref.WeakKeyDictionary()
+# Fallback for tokenizers that do not support weak references; retains
+# entries for the process lifetime (the previous behavior for all tokenizers).
+_STRONG_ASYNC_TOKENIZER_EXECUTORS: dict[int, ThreadPoolExecutor] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
 
 
@@ -337,14 +349,20 @@ def _build_assistant_guided_decoding(
 
 
 def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
-    key = id(tokenizer)
-    async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
-    if async_tokenizer is None:
-        async_tokenizer = make_async(
-            tokenizer, executor=ThreadPoolExecutor(max_workers=1)
-        )
-        _ASYNC_TOKENIZER_POOL[key] = async_tokenizer
-    return async_tokenizer
+    try:
+        executor = _ASYNC_TOKENIZER_EXECUTORS.get(tokenizer)
+        if executor is None:
+            executor = ThreadPoolExecutor(max_workers=1)
+            _ASYNC_TOKENIZER_EXECUTORS[tokenizer] = executor
+            weakref.finalize(tokenizer, executor.shutdown)
+    except TypeError:
+        # Tokenizer does not support weak references.
+        key = id(tokenizer)
+        executor = _STRONG_ASYNC_TOKENIZER_EXECUTORS.get(key)
+        if executor is None:
+            executor = ThreadPoolExecutor(max_workers=1)
+            _STRONG_ASYNC_TOKENIZER_EXECUTORS[key] = executor
+    return make_async(tokenizer, executor=executor)
 
 
 def _materialize_assistant_tool_calls(
