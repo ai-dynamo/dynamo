@@ -146,23 +146,91 @@ matrix:
 A template selection names a source directory relative to the matrix and an
 output `path` relative to the generated overlay. The output path must be under
 `components/`; `path: components/efa` produces a normal local Component at
-`kustomize/overlays/<name>/components/efa/`. A template directory contains
-`kustomization.yaml.j2` and may contain a plain `values.yaml` mapping. The
-Jinja source must render one Kustomize `Component`.
-It receives `values` and an indexed `base` rendered from the matrix `source`.
-`base` is indexed by lower-case Kind and `metadata.name`, for example
+`kustomize/overlays/<name>/components/efa/`. A standalone template directory
+contains `kustomization.yaml.j2` and may contain a plain `values.yaml` mapping.
+The Jinja source must render one Kustomize `Component`. It receives `values` and
+an indexed `base` rendered from the matrix `source`. `base` is indexed by
+lower-case Kind and `metadata.name`, for example
 `base.configmap[values.PREFILL_CONFIG]`. When exactly one resource of a Kind is
 expected, use `base.dynamographdeployment | only`; this fails clearly if the
 source changes to contain zero or multiple such resources. Templates may use
-embedded patches or ordinary local Kustomize source paths. `unfold` materializes
-the complete template directory beneath the generated Component, so its local
-paths remain valid under Kustomize's load restrictions. It copies every template
-file except `values.yaml`; files ending in `*.j2` are rendered without that
-suffix. A template can select shared Components; when it does, `unfold` rebases
-those external Component paths for its generated location. Jinja rendering uses
-strict, immutable sandboxed values: undefined names and attempts to mutate data
-are errors. Rendering a matrix that selects templates requires `jinja2==3.1.6`,
-which is installed in the development and test dependency sets.
+embedded patches or ordinary local Kustomize source paths.
+
+#### Inheriting Template Bundles
+
+Put common files and defaults in a parent template bundle when several concrete
+instance types share the same Kustomize structure. A concrete template source
+declares its parent explicitly in `.kustomize-template.yaml`; `unfold` never
+searches parent directories for templates:
+
+```text
+aws-efa/
+├── kustomization.yaml.j2
+├── values.yaml
+└── p5/
+    ├── .kustomize-template.yaml
+    ├── values.yaml
+    └── p5.48xlarge/
+        ├── .kustomize-template.yaml
+        └── values.yaml
+```
+
+Each child metadata file contains one relative parent path:
+
+```yaml
+extends: ..
+```
+
+The matrix still selects only the concrete leaf:
+
+```yaml
+templates:
+  - source: ../../../kustomize/templates/aws-efa/p5/p5.48xlarge
+    path: components/efa
+```
+
+`unfold` resolves the explicit chain from root to leaf. For each relative file
+path, the most specific file replaces the inherited file. It does not merge YAML
+content. A directory containing `.kustomize-template.yaml` is a child bundle
+boundary and is not copied as an asset of its parent, so unselected sibling
+instance types never enter the generated Component. Values use shallow,
+top-level replacement in this order:
+
+```text
+root values.yaml -> child values.yaml -> leaf values.yaml -> matrix values
+```
+
+The effective bundle is rendered once into the selected output path. A
+Values-only leaf therefore produces the same flat Component layout as a
+standalone template. A leaf can replace `kustomization.yaml.j2` or any other
+inherited file by providing a file at the same relative path. Files inherited
+from other levels retain their source location for external Kustomize path
+rebasing.
+
+Model Kustomize layers explicitly in the source bundle when they are useful;
+the generator does not infer or merge Components. For example, a parent can
+provide `base/kustomization.yaml.j2` and a root wrapper that selects `base`. A
+specialized child can override the root wrapper and add
+`instance/kustomization.yaml.j2`, producing this ordinary generated Component:
+
+```text
+components/efa/
+├── kustomization.yaml
+├── base/
+│   └── kustomization.yaml
+└── instance/
+    └── kustomization.yaml
+```
+
+`unfold` materializes every effective template file except `values.yaml` and
+`.kustomize-template.yaml`. Files ending in `*.j2` are rendered without that
+suffix. A template can select shared Components; `unfold` rebases those external
+Component paths for the generated location. Jinja rendering uses strict,
+immutable sandboxed values: undefined names and attempts to mutate data are
+errors. Rendering a matrix that selects templates requires `jinja2==3.1.6`,
+which is installed in the development and test dependency sets. Missing parent
+directories, inheritance cycles, and chains without `kustomization.yaml.j2` are
+errors.
 
 Regenerate derived artifacts in order: `unfold` writes every checked-in Level-2
 public overlay `kustomization.yaml` file for the matrix; `render` invokes

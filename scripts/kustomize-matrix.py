@@ -31,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 OPENAPI_GENERATOR = REPO_ROOT / "scripts/generate_kustomize_openapi.py"
 KUSTOMIZATION_FILE = "kustomization.yaml"
 TEMPLATE_KUSTOMIZATION_FILE = "kustomization.yaml.j2"
+TEMPLATE_METADATA_FILE = ".kustomize-template.yaml"
 TEMPLATE_VALUES_FILE = "values.yaml"
 TEMPLATE_COMPONENTS_DIR = "components"
 LEGACY_TEMPLATE_COMPONENTS_DIR = "generated-components"
@@ -56,6 +57,13 @@ TEMPLATE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 class TemplateSelection:
     source: Path
     output_path: Path
+
+
+@dataclass(frozen=True)
+class TemplateBundle:
+    selection: TemplateSelection
+    sources: tuple[Path, ...]
+    files: dict[Path, Path]
 
 
 @dataclass(frozen=True)
@@ -201,13 +209,13 @@ def resolve_template_selections(
                 f"{TEMPLATE_COMPONENTS_DIR}/: {output_value!r}"
             )
         source = (matrix_path.parent / source_value).resolve()
-        template_file = source / TEMPLATE_KUSTOMIZATION_FILE
-        if not template_file.is_file():
+        if not source.is_dir():
             raise ValueError(
-                "Kustomize template must contain "
-                f"{TEMPLATE_KUSTOMIZATION_FILE}: {display_path(source)}"
+                f"Kustomize template is not a directory: {display_path(source)}"
             )
-        templates.append(TemplateSelection(source=source, output_path=output_path))
+        selection = TemplateSelection(source=source, output_path=output_path)
+        resolve_template_bundle(selection)
+        templates.append(selection)
     return tuple(templates)
 
 
@@ -439,26 +447,105 @@ def build_base_resource_index(source: Path) -> dict[str, ResourceCollection]:
     return index
 
 
-def template_values(template: TemplateSelection) -> dict[str, Any]:
-    values_path = template.source / TEMPLATE_VALUES_FILE
-    if not values_path.exists():
-        return {}
-    return load_variant_values(
-        load_yaml_mapping(values_path), display_path(values_path)
+def template_parent(source: Path) -> Path | None:
+    metadata_path = source / TEMPLATE_METADATA_FILE
+    if not metadata_path.exists():
+        return None
+
+    metadata = load_yaml_mapping(metadata_path)
+    if set(metadata) != {"extends"}:
+        raise ValueError(f"{display_path(metadata_path)} must contain exactly extends")
+    extends = Path(
+        require_string(
+            metadata.get("extends"), f"{display_path(metadata_path)}.extends"
+        )
     )
+    if extends.is_absolute():
+        raise ValueError(f"{display_path(metadata_path)}.extends must be relative")
+    parent = (source / extends).resolve()
+    if not parent.is_dir():
+        raise ValueError(
+            f"Kustomize template parent is not a directory: {display_path(parent)}"
+        )
+    return parent
+
+
+def template_source_chain(source: Path) -> tuple[Path, ...]:
+    chain: list[Path] = []
+    seen: set[Path] = set()
+    current = source
+    while True:
+        if current in seen:
+            cycle = " -> ".join(display_path(path) for path in (*chain, current))
+            raise ValueError(f"Kustomize template inheritance cycle: {cycle}")
+        seen.add(current)
+        chain.append(current)
+        parent = template_parent(current)
+        if parent is None:
+            return tuple(reversed(chain))
+        current = parent
+
+
+def template_source_files(source: Path) -> dict[Path, Path]:
+    files: dict[Path, Path] = {}
+    for root, directory_names, file_names in os.walk(source):
+        root_path = Path(root)
+        directory_names[:] = sorted(
+            name
+            for name in directory_names
+            if not (root_path / name / TEMPLATE_METADATA_FILE).is_file()
+        )
+        for file_name in sorted(file_names):
+            source_path = root_path / file_name
+            relative_path = source_path.relative_to(source)
+            if relative_path in {
+                Path(TEMPLATE_METADATA_FILE),
+                Path(TEMPLATE_VALUES_FILE),
+            }:
+                continue
+            files[relative_path] = source_path
+    return files
+
+
+def resolve_template_bundle(template: TemplateSelection) -> TemplateBundle:
+    sources = template_source_chain(template.source)
+    files: dict[Path, Path] = {}
+    for source in sources:
+        files.update(template_source_files(source))
+    if Path(TEMPLATE_KUSTOMIZATION_FILE) not in files:
+        raise ValueError(
+            "Kustomize template inheritance must provide "
+            f"{TEMPLATE_KUSTOMIZATION_FILE}: {display_path(template.source)}"
+        )
+    return TemplateBundle(selection=template, sources=sources, files=files)
+
+
+def template_values(template: TemplateBundle) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for source in template.sources:
+        values_path = source / TEMPLATE_VALUES_FILE
+        if not values_path.exists():
+            continue
+        merged.update(
+            load_variant_values(
+                load_yaml_mapping(values_path), display_path(values_path)
+            )
+        )
+    return merged
 
 
 def merged_template_values(
-    templates: tuple[TemplateSelection, ...], overrides: dict[str, Any]
+    templates: tuple[TemplateBundle, ...], overrides: dict[str, Any]
 ) -> dict[str, Any]:
     merged: dict[str, Any] = {}
-    value_sources: dict[str, TemplateSelection] = {}
+    value_sources: dict[str, TemplateBundle] = {}
     for template in templates:
         for key, value in template_values(template).items():
             if key in merged:
                 raise ValueError(
-                    f"templates {display_path(value_sources[key].source)} and "
-                    f"{display_path(template.source)} both define value {key!r}"
+                    "templates "
+                    f"{display_path(value_sources[key].selection.source)} and "
+                    f"{display_path(template.selection.source)} both define value {key!r}"
                 )
             merged[key] = value
             value_sources[key] = template
@@ -514,22 +601,18 @@ def render_jinja_template(
 
 
 def render_template_assets(
-    template: TemplateSelection,
+    template: TemplateBundle,
     component_dir: Path,
     base: dict[str, ResourceCollection],
     values: dict[str, Any],
 ) -> dict[Path, GeneratedContent]:
-    source_kustomization = template.source / TEMPLATE_KUSTOMIZATION_FILE
     assets: dict[Path, GeneratedContent] = {}
-    for source_path in template.source.rglob("*"):
-        if not source_path.is_file() or source_path == source_kustomization:
-            continue
-        relative_source = source_path.relative_to(template.source)
-        if relative_source == Path(TEMPLATE_VALUES_FILE):
+    for relative_source, source_path in sorted(template.files.items()):
+        if relative_source == Path(TEMPLATE_KUSTOMIZATION_FILE):
             continue
         if relative_source == Path(KUSTOMIZATION_FILE):
             raise ValueError(
-                f"template {display_path(template.source)} must not contain a plain "
+                f"template {display_path(template.selection.source)} must not contain a plain "
                 f"{KUSTOMIZATION_FILE}; the Component renders from "
                 f"{TEMPLATE_KUSTOMIZATION_FILE}"
             )
@@ -541,19 +624,46 @@ def render_template_assets(
         output_path = component_dir / relative_output
         if output_path in assets:
             raise ValueError(
-                f"template {display_path(template.source)} produces duplicate asset "
+                f"template {display_path(template.selection.source)} produces duplicate asset "
                 f"{relative_output}"
             )
-        assets[output_path] = (
-            render_jinja_template(source_path, base, values)
-            if source_path.suffix == ".j2"
-            else source_path.read_bytes()
-        )
+        if source_path.suffix == ".j2":
+            content: GeneratedContent = render_jinja_template(source_path, base, values)
+        elif relative_output.name == KUSTOMIZATION_FILE:
+            content = source_path.read_text(encoding="utf-8")
+        else:
+            content = source_path.read_bytes()
+        if relative_output.name == KUSTOMIZATION_FILE:
+            assert isinstance(content, str)
+            content = rebase_template_kustomization_paths(
+                content,
+                template,
+                source_path,
+                relative_source,
+                output_path.parent,
+            )
+        assets[output_path] = content
     return assets
 
 
+def bundle_contains_path(
+    template: TemplateBundle, relative_source: Path, reference: str
+) -> bool:
+    path = Path(os.path.normpath(relative_source.parent / reference))
+    if path.is_absolute() or path == Path("..") or ".." in path.parts:
+        return False
+    return any(
+        relative_path == path or relative_path.is_relative_to(path)
+        for relative_path in template.files
+    )
+
+
 def external_component_path_replacements(
-    component: dict[str, Any], template: TemplateSelection, component_dir: Path
+    component: dict[str, Any],
+    template: TemplateBundle,
+    source_path: Path,
+    relative_source: Path,
+    component_dir: Path,
 ) -> dict[str, str]:
     replacements: dict[str, str] = {}
     for key in ("bases", "components", "resources"):
@@ -563,15 +673,17 @@ def external_component_path_replacements(
         for reference in references:
             if not isinstance(reference, str) or "://" in reference:
                 continue
-            source = (template.source / reference).resolve()
-            if not source.is_dir() or source.is_relative_to(template.source):
+            if bundle_contains_path(template, relative_source, reference):
+                continue
+            source = (source_path.parent / reference).resolve()
+            if not source.is_dir():
                 continue
             replacements[reference] = relative_path(source, component_dir)
     return replacements
 
 
 def rebase_rendered_component_paths(
-    rendered: str, replacements: dict[str, str], template: TemplateSelection
+    rendered: str, replacements: dict[str, str], source_path: Path
 ) -> str:
     for source, replacement in replacements.items():
         pattern = re.compile(
@@ -585,29 +697,55 @@ def rebase_rendered_component_paths(
         if count == 0:
             raise ValueError(
                 f"failed to rebase Component path {source!r} in "
-                f"{display_path(template.source)}"
+                f"{display_path(source_path)}"
             )
     return rendered
 
 
+def rebase_template_kustomization_paths(
+    rendered: str,
+    template: TemplateBundle,
+    source_path: Path,
+    relative_source: Path,
+    output_dir: Path,
+) -> str:
+    try:
+        documents = list(yaml.safe_load_all(rendered))
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            f"template {display_path(source_path)} rendered invalid YAML: {exc}"
+        ) from exc
+    if len(documents) != 1 or not isinstance(documents[0], dict):
+        raise ValueError(
+            f"template {display_path(source_path)} must render one Kustomize mapping"
+        )
+    return rebase_rendered_component_paths(
+        rendered,
+        external_component_path_replacements(
+            documents[0], template, source_path, relative_source, output_dir
+        ),
+        source_path,
+    )
+
+
 def render_template_component(
-    template: TemplateSelection,
+    template: TemplateBundle,
     base: dict[str, ResourceCollection],
     values: dict[str, Any],
     component_dir: Path | None = None,
 ) -> str:
-    source_path = template.source / TEMPLATE_KUSTOMIZATION_FILE
+    source_path = template.files[Path(TEMPLATE_KUSTOMIZATION_FILE)]
     rendered = render_jinja_template(source_path, base, values)
 
     try:
         documents = list(yaml.safe_load_all(rendered))
     except yaml.YAMLError as exc:
         raise ValueError(
-            f"template {display_path(template.source)} rendered invalid YAML: {exc}"
+            f"template {display_path(template.selection.source)} rendered invalid YAML: {exc}"
         ) from exc
     if len(documents) != 1 or not isinstance(documents[0], dict):
         raise ValueError(
-            f"template {display_path(template.source)} must render one Kustomize Component mapping"
+            f"template {display_path(template.selection.source)} must render one Kustomize Component mapping"
         )
     component = documents[0]
     if (
@@ -615,13 +753,19 @@ def render_template_component(
         or component.get("kind") != "Component"
     ):
         raise ValueError(
-            f"template {display_path(template.source)} must render a v1alpha1 Kustomize Component"
+            f"template {display_path(template.selection.source)} must render a v1alpha1 Kustomize Component"
         )
     if component_dir:
         rendered = rebase_rendered_component_paths(
             rendered,
-            external_component_path_replacements(component, template, component_dir),
-            template,
+            external_component_path_replacements(
+                component,
+                template,
+                source_path,
+                Path(TEMPLATE_KUSTOMIZATION_FILE),
+                component_dir,
+            ),
+            source_path,
         )
     return rendered.rstrip() + "\n"
 
@@ -766,14 +910,20 @@ def unfold_matrix(
 
     for variant in variants:
         template_components: list[Path] = []
-        values = merged_template_values(variant.templates, variant.values)
-        for template in variant.templates:
-            component_dir = generated_template_component_path(config, variant, template)
+        templates = tuple(
+            resolve_template_bundle(template) for template in variant.templates
+        )
+        values = merged_template_values(templates, variant.values)
+        for template in templates:
+            selection = template.selection
+            component_dir = generated_template_component_path(
+                config, variant, selection
+            )
             kustomization = component_dir / KUSTOMIZATION_FILE
             assert base is not None
             expected[kustomization] = generated_template_kustomization(
                 config,
-                template,
+                selection,
                 render_template_component(template, base, values, component_dir),
             )
             assets = render_template_assets(template, component_dir, base, values)
