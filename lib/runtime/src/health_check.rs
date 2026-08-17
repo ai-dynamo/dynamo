@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Configuration for health check behavior
@@ -40,14 +41,30 @@ pub struct HealthCheckManager {
     /// Track per-endpoint health check tasks
     /// Maps: endpoint_subject -> task_handle
     endpoint_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    /// Cancelled when the owning [`DistributedRuntime`] begins shutting down.
+    ///
+    /// Every task this manager spawns holds an `Arc<Self>`, and `Self` holds a
+    /// `DistributedRuntime` whose `SystemHealth` owns the new-endpoint sender.
+    /// That is a cycle: without a cancellation signal the monitor's receiver can
+    /// never observe its last sender drop, so no task ever exits and the runtime
+    /// stays alive after its last external owner is gone. Observing this token is
+    /// what breaks the cycle — each loop drops its `Arc<Self>` on exit.
+    cancellation_token: CancellationToken,
 }
 
 impl HealthCheckManager {
     pub fn new(drt: DistributedRuntime, config: HealthCheckConfig) -> Self {
+        // Derived from `drt` rather than passed in, so no caller can supply a token
+        // belonging to a different runtime. `child_token()` descends from the
+        // endpoint-shutdown token, which `Runtime::shutdown()` cancels in phase one —
+        // i.e. the moment shutdown begins. `primary_token()` would only fire in phase
+        // three, after the graceful-shutdown budget (fifteen minutes by default).
+        let cancellation_token = drt.child_token();
         Self {
             drt,
             config,
             endpoint_tasks: Arc::new(Mutex::new(HashMap::new())),
+            cancellation_token,
         }
     }
 
@@ -81,6 +98,7 @@ impl HealthCheckManager {
         let manager = self.clone();
         let canary_wait = self.config.canary_wait_time;
         let endpoint_subject_clone = endpoint_subject.clone();
+        let token = self.cancellation_token.clone();
 
         // Get the endpoint-specific notifier
         let notifier = self
@@ -97,6 +115,15 @@ impl HealthCheckManager {
             loop {
                 // Wait for either timeout or activity notification
                 tokio::select! {
+                    // `biased;` so a task woken by its timer and by cancellation in the
+                    // same poll exits instead of firing one last canary.
+                    biased;
+
+                    _ = token.cancelled() => {
+                        debug!("Runtime shutdown started, stopping health check task for {}", endpoint_subject);
+                        break;
+                    }
+
                     _ = tokio::time::sleep(canary_wait) => {
                         // Timeout - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
@@ -105,8 +132,22 @@ impl HealthCheckManager {
                         let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
 
                         if let Some(target) = target {
-                            if let Err(e) = manager.send_health_check_request(&endpoint_subject, &target.payload).await {
-                                error!("Failed to send health check for {}: {}", endpoint_subject, e);
+                            // Race the in-flight send too: a canary against an unresponsive
+                            // endpoint is bounded only by `request_timeout`, and holding here
+                            // would hold this task's `Arc<Self>` past shutdown.
+                            tokio::select! {
+                                biased;
+
+                                _ = token.cancelled() => {
+                                    debug!("Runtime shutdown started while sending health check for {}", endpoint_subject);
+                                    break;
+                                }
+
+                                result = manager.send_health_check_request(&endpoint_subject, &target.payload) => {
+                                    if let Err(e) = result {
+                                        error!("Failed to send health check for {}: {}", endpoint_subject, e);
+                                    }
+                                }
                             }
                         } else {
                             // This should never happen - targets are registered at startup and never removed
@@ -149,6 +190,7 @@ impl HealthCheckManager {
     /// Returns an error if duplicate endpoints are detected, indicating a bug in the system
     async fn spawn_new_endpoint_monitor(self: &Arc<Self>) -> anyhow::Result<()> {
         let manager = self.clone();
+        let token = self.cancellation_token.clone();
 
         // Get the receiver (can only be taken once)
         let mut rx = manager
@@ -163,7 +205,24 @@ impl HealthCheckManager {
         tokio::spawn(async move {
             info!("Starting dynamic endpoint discovery monitor with channel-based notifications");
 
-            while let Some(endpoint_subject) = rx.recv().await {
+            loop {
+                let endpoint_subject = tokio::select! {
+                    biased;
+
+                    _ = token.cancelled() => {
+                        debug!("Runtime shutdown started, stopping endpoint discovery monitor");
+                        break;
+                    }
+
+                    // Retained even though the ownership cycle makes it unreachable while
+                    // this task is running: it is the correct exit condition, and it stops
+                    // being unreachable once cancellation lets the cycle dissolve.
+                    received = rx.recv() => match received {
+                        Some(endpoint_subject) => endpoint_subject,
+                        None => break,
+                    },
+                };
+
                 debug!(
                     "Received endpoint registration via channel: {}",
                     endpoint_subject
@@ -374,6 +433,7 @@ mod push_handler_notify_tests {
     use bytes::Bytes;
     use futures::stream;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     type TestRequest = serde_json::Value;
@@ -386,6 +446,8 @@ mod push_handler_notify_tests {
         num_chunks: usize,
         /// If set, chunks at these indices will be error responses.
         error_indices: Vec<usize>,
+        /// Number of `generate` calls this engine has served.
+        call_count: Arc<AtomicUsize>,
     }
 
     impl MockStreamingEngine {
@@ -393,6 +455,7 @@ mod push_handler_notify_tests {
             Arc::new(Self {
                 num_chunks,
                 error_indices: vec![],
+                call_count: Arc::new(AtomicUsize::new(0)),
             })
         }
 
@@ -400,6 +463,7 @@ mod push_handler_notify_tests {
             Arc::new(Self {
                 num_chunks,
                 error_indices: (0..num_chunks).collect(),
+                call_count: Arc::new(AtomicUsize::new(0)),
             })
         }
 
@@ -407,7 +471,13 @@ mod push_handler_notify_tests {
             Arc::new(Self {
                 num_chunks,
                 error_indices,
+                call_count: Arc::new(AtomicUsize::new(0)),
             })
+        }
+
+        /// Shared handle to this engine's `generate` call count.
+        fn call_count(&self) -> Arc<AtomicUsize> {
+            self.call_count.clone()
         }
     }
 
@@ -419,6 +489,7 @@ mod push_handler_notify_tests {
             &self,
             input: SingleIn<TestRequest>,
         ) -> anyhow::Result<ManyOut<TestResponse>> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
             let (_data, ctx) = input.into_parts();
             let chunks: Vec<TestResponse> = (0..self.num_chunks)
                 .map(|i| {
@@ -567,6 +638,23 @@ mod push_handler_notify_tests {
         manager.start().await.unwrap();
     }
 
+    /// Helper: start a HealthCheckManager and keep only a weak reference to it.
+    /// This mirrors production `start_health_check_manager`, which drops its `Arc`
+    /// as soon as `start()` returns, leaving the spawned tasks as the sole owners.
+    async fn start_manager_weak(
+        drt: &crate::DistributedRuntime,
+        canary_wait_ms: u64,
+    ) -> std::sync::Weak<HealthCheckManager> {
+        let config = HealthCheckConfig {
+            canary_wait_time: Duration::from_millis(canary_wait_ms),
+            request_timeout: Duration::from_secs(1),
+        };
+        let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
+        let weak = Arc::downgrade(&manager);
+        manager.start().await.unwrap();
+        weak
+    }
+
     // =================================================================
     // Test 1: Successful streaming → notification → Ready
     // Canary engine returns errors, so Ready can only come from notify.
@@ -694,6 +782,57 @@ mod push_handler_notify_tests {
             endpoint,
             HealthStatus::Ready,
             "successful chunks should set Ready despite trailing error",
+        );
+    }
+
+    // =================================================================
+    // Test 6: Runtime shutdown → manager tasks exit → no further canary
+    // Regression test for health check tasks surviving DistributedRuntime
+    // shutdown and keeping the runtime alive through an ownership cycle.
+    // =================================================================
+    #[tokio::test]
+    async fn test_manager_tasks_exit_on_runtime_shutdown() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.shutdown_stops_tasks";
+
+        let engine = MockStreamingEngine::success(1);
+        let canary_calls = engine.call_count();
+        let _notifier = register_endpoint(&drt, endpoint, engine);
+
+        let weak_manager = start_manager_weak(&drt, 50).await;
+
+        // No ingress pipeline here, so every generate call is a canary. Proving the
+        // canary ran before shutdown is what stops the post-shutdown assertion below
+        // from passing vacuously on a loop that never started.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let calls_before_shutdown = canary_calls.load(Ordering::SeqCst);
+        assert!(
+            calls_before_shutdown > 0,
+            "canary should have fired at least once before shutdown"
+        );
+
+        drt.shutdown();
+
+        // The endpoint task and the new-endpoint monitor are the only holders of a
+        // manager Arc, so this weak reference cannot fail to upgrade until both have
+        // exited — one assertion covering both tasks, and the ownership cycle with them.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while weak_manager.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("health check manager tasks should exit once runtime shutdown begins");
+
+        // Let any canary that was already in flight at shutdown settle, then confirm
+        // that several further canary intervals produce no new request.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let calls_after_shutdown = canary_calls.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            canary_calls.load(Ordering::SeqCst),
+            calls_after_shutdown,
+            "no canary request should begin after runtime shutdown"
         );
     }
 }
