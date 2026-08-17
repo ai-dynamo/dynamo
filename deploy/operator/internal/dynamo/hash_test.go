@@ -23,6 +23,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -372,6 +373,15 @@ func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestRuntimeFeatureGatesDoNotPrecedeVersionHashing(t *testing.T) {
+	t.Log("ensure runtime-gated rendering cannot change a legacy unhashed worker generation")
+	assert.GreaterOrEqual(
+		t,
+		runtimefeatures.CanaryHealthChecks.MinRuntimeVersion.Compare(minimumHashedRuntimeVersion),
+		0,
+	)
 }
 
 func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {

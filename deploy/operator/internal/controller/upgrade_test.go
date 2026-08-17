@@ -100,7 +100,7 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 							MainContainer: &corev1.Container{
 								Name:    commonconsts.MainContainerName,
-								Image:   "test-image:latest",
+								Image:   "test-image:1.4.0",
 								Command: []string{"python3"},
 								Args:    []string{"-m", "dynamo.vllm"},
 								Resources: corev1.ResourceRequirements{
@@ -144,7 +144,7 @@ spec:
           sizeLimit: 8Gi
       containers:
       - name: main
-        image: test-image:latest
+        image: test-image:1.4.0
         command:
         - python3
         args:
@@ -295,7 +295,7 @@ spec:
 						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 							MainContainer: &corev1.Container{
 								Name:    commonconsts.MainContainerName,
-								Image:   "test-image:latest",
+								Image:   "test-image:1.4.0",
 								Command: []string{"python3"},
 								Args:    []string{"-m", "dynamo.vllm"},
 								Resources: corev1.ResourceRequirements{
@@ -339,7 +339,7 @@ spec:
             sizeLimit: 8Gi
         containers:
         - name: main
-          image: test-image:latest
+          image: test-image:1.4.0
           command:
           - python3
           args:
@@ -446,7 +446,7 @@ spec:
             sizeLimit: 8Gi
         containers:
         - name: main
-          image: test-image:latest
+          image: test-image:1.4.0
           command:
           - python3
           args:
@@ -868,8 +868,8 @@ spec:
 			oldPodLabels := tt.childPodLabels(t, oldChild)
 			newPodLabels := tt.childPodLabels(t, newChild)
 
-			t.Log("compare old and new child specs; a change here would trigger a rollout")
-			require.Equal(t, specHash(t, oldChild), specHash(t, newChild), "upgrade should not change the child spec hash")
+			t.Log("compare old and new child specs; an operator-only upgrade must not trigger a rollout")
+			require.Equal(t, specHash(t, oldChild), specHash(t, newChild), "upgrade should preserve the child spec hash for a pinned older runtime")
 
 			t.Log("assert worker pod labels keep the legacy worker identity")
 			for site, subComponentType := range tt.expectedWorkerSites {

@@ -1241,7 +1241,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										},
 									},
 									MainContainer: &corev1.Container{
-										Image: "test-image:latest",
+										Image: "test-image:1.5.0",
 										Command: []string{
 											"some",
 											"dynamo",
@@ -1333,14 +1333,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									},
 									{
 										Name:    commonconsts.MainContainerName,
-										Image:   "test-image:latest",
+										Image:   "test-image:1.5.0",
 										Command: []string{"/bin/sh", "-c"},
 										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1 --distributed-executor-backend ray"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 											{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
-											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
@@ -1403,7 +1403,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											TimeoutSeconds:   4,
 											PeriodSeconds:    5,
 											SuccessThreshold: 0,
-											FailureThreshold: 1,
+											FailureThreshold: 3,
 										},
 										ReadinessProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
@@ -1474,14 +1474,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									},
 									{
 										Name:    commonconsts.MainContainerName,
-										Image:   "test-image:latest",
+										Image:   "test-image:1.5.0",
 										Command: []string{"/bin/sh", "-c"},
 										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 											{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
-											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
