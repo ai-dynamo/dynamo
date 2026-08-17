@@ -298,3 +298,116 @@ impl SystemHealth {
         &self.live_path
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::{Instance, TransportType};
+
+    const ENDPOINT: &str = "generate";
+
+    fn system_health(health_check_enabled: bool) -> SystemHealth {
+        SystemHealth::new(
+            HealthStatus::NotReady,
+            // Deprecated and ignored in practice (see RuntimeConfig::from_settings),
+            // so the realistic case is an empty vector.
+            Vec::new(),
+            health_check_enabled,
+            "/health".to_string(),
+            "/live".to_string(),
+        )
+    }
+
+    fn instance() -> Instance {
+        Instance {
+            component: "backend".to_string(),
+            endpoint: ENDPOINT.to_string(),
+            namespace: "dynamo".to_string(),
+            instance_id: 1,
+            transport: TransportType::Tcp("127.0.0.1:0".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        }
+    }
+
+    /// A worker that registers a health-check payload reports ready once its
+    /// endpoint is registered, with the canary off.
+    #[test]
+    fn registered_target_makes_the_worker_ready_with_canary_off() {
+        let health = system_health(false);
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_registered(ENDPOINT);
+
+        let (healthy, endpoints) = health.get_health_status();
+        assert!(healthy, "a registered, ready endpoint must report healthy");
+        assert_eq!(endpoints.get(ENDPOINT).map(String::as_str), Some("ready"));
+    }
+
+    /// Regression guard for the push-egress health-check bug.
+    ///
+    /// `health_check_targets` is populated ONLY by passing a
+    /// `health_check_payload` to `serve_endpoint`. An earlier revision of the
+    /// push-egress path skipped that payload to avoid the `start_with_registration`
+    /// bail, on the theory that it merely disabled the canary. It does not: with
+    /// the map empty, `get_health_status` stops consulting endpoint status at all
+    /// and falls through to the process-wide `system_health`, which starts
+    /// `NotReady` and which the TRT-LLM worker never sets. The endpoint is marked
+    /// ready and the worker still reports 503 — on default settings, since this
+    /// path does not depend on the canary being enabled.
+    #[test]
+    fn ready_endpoint_without_a_registered_target_still_reports_unhealthy() {
+        let health = system_health(false);
+        // No register_health_check_target: this is the "skip the payload" case.
+        health.set_endpoint_registered(ENDPOINT);
+
+        let (healthy, endpoints) = health.get_health_status();
+        assert_eq!(
+            endpoints.get(ENDPOINT).map(String::as_str),
+            Some("ready"),
+            "the endpoint itself is ready"
+        );
+        assert!(
+            !healthy,
+            "with no health-check target the endpoint's readiness is ignored and \
+             the worker falls back to system_health (NotReady) — this is the 503"
+        );
+    }
+
+    /// The fallthrough is only escapable by setting system health directly,
+    /// which in this repo only the vLLM worker does.
+    #[test]
+    fn without_targets_health_tracks_system_health_only() {
+        let mut health = system_health(false);
+        health.set_endpoint_registered(ENDPOINT);
+        assert!(!health.get_health_status().0);
+
+        health.set_health_status(HealthStatus::Ready);
+        assert!(
+            health.get_health_status().0,
+            "with no targets, system_health alone decides"
+        );
+    }
+
+    /// With the canary on, endpoint registration deliberately does NOT mark the
+    /// endpoint ready — the canary does, after verifying a real generation. A
+    /// push endpoint therefore needs a locally registered engine for the canary
+    /// to dispatch to, which is why `serve_endpoint` registers a pull engine
+    /// alongside the push ingress.
+    #[test]
+    fn canary_enabled_withholds_ready_until_verified() {
+        let health = system_health(true);
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_registered(ENDPOINT);
+
+        assert!(
+            !health.get_health_status().0,
+            "canary must verify before the worker reports ready"
+        );
+
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        assert!(
+            health.get_health_status().0,
+            "after the canary marks it ready the worker is healthy"
+        );
+    }
+}

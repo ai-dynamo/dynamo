@@ -23,6 +23,12 @@ When creating or editing files under `docs/`, `examples/`, or `recipes/`, follow
 
 The Dynamo Docs Bot enforces the deterministic subset pre-merge.
 
+## Generated files: commit, publish-time, or post-merge
+
+Commit the artifact when any input is external or time-varying. Generate at publish when the artifact is a pure function of sources committed in the same commit and the toolchain to compute it is already present in the publish runner. Where the toolchain is not in the publish runner, or committed history matters, regenerate post-merge: a workflow on push to main runs the generator and bot-commits changed outputs, so PRs carry source edits only.
+
+`releases.json` and `releases-atom.xml` are generated at publish time; the marker-spliced pages stay committed for review.
+
 ## Generated API references
 
 The pages under `pages/reference/api/` and `pages/reference/kubernetes-api/` are generated from

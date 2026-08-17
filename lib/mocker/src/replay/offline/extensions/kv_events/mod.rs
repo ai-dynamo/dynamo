@@ -299,6 +299,8 @@ mod canonical_digest_tests {
             RouterEvent {
                 worker_id: 7,
                 storage_tier: StorageTier::Device,
+                residency_domain: Default::default(),
+                state_source: None,
                 event: KvCacheEvent {
                     event_id: 11,
                     dp_rank: 2,
@@ -321,6 +323,8 @@ mod canonical_digest_tests {
             RouterEvent {
                 worker_id: 7,
                 storage_tier: StorageTier::HostPinned,
+                residency_domain: Default::default(),
+                state_source: None,
                 event: KvCacheEvent {
                     event_id: 12,
                     dp_rank: 2,
@@ -335,6 +339,8 @@ mod canonical_digest_tests {
             RouterEvent {
                 worker_id: 8,
                 storage_tier: StorageTier::Device,
+                residency_domain: Default::default(),
+                state_source: None,
                 event: KvCacheEvent {
                     event_id: 13,
                     dp_rank: 0,

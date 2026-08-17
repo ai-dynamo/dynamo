@@ -43,7 +43,7 @@ pub struct NvCreateCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 
-    /// When true, logprob token fields are returned as "token_id:<id>"
+    /// When true, logprob token fields are returned as `"token_id:<id>"`
     /// instead of the decoded text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,

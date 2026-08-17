@@ -474,19 +474,96 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Ok(())
     }
 
-    /// Enqueue an event and report whether the worker queue accepted it.
-    pub fn enqueue_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+    fn event_thread_indices(&self, event: &RouterEvent) -> (usize, Option<usize>) {
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
-        let thread_idx = Self::get_or_assign_thread_idx(
+        let domain = event.resolved_residency_domain();
+        let reset_scope = event.reset_scope();
+        let state_source = event.state_source;
+
+        if domain == Ok(ResidencyDomain::CacheOwner)
+            && let Some(state_source) = state_source
+        {
+            return (self.cache_owner_thread_idx(state_source), None);
+        }
+
+        let worker_idx = Self::get_or_assign_thread_idx(
             &self.worker_assignments,
             &self.worker_assignment_count,
             worker,
             self.num_workers,
         );
+        if reset_scope != Ok(Some(ResetScope::All)) {
+            return (worker_idx, None);
+        }
+        let Some(state_source) = state_source else {
+            return (worker_idx, None);
+        };
+        let cache_idx = self.cache_owner_thread_idx(state_source);
+        (worker_idx, (cache_idx != worker_idx).then_some(cache_idx))
+    }
+
+    fn cache_owner_thread_idx(&self, state_source: crate::identity::CacheOwnerId) -> usize {
+        let owner_key = ResidencyOwner::cache_owner(state_source)
+            .compact_key()
+            .digest();
+        (u64::from_be_bytes(
+            owner_key[..8]
+                .try_into()
+                .expect("residency owner digest is 16 bytes"),
+        ) % self.num_workers as u64) as usize
+    }
+
+    /// Enqueue an event and report whether the worker queue accepted it.
+    pub fn enqueue_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let (thread_idx, second_idx) = self.event_thread_indices(&event);
+        if let Some(second_idx) = second_idx {
+            self.worker_event_channels[thread_idx]
+                .send(WorkerTask::Event(event.clone()))
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            self.maybe_enqueue_cleanup(thread_idx);
+            self.worker_event_channels[second_idx]
+                .send(WorkerTask::Event(event))
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            self.maybe_enqueue_cleanup(second_idx);
+            return Ok(());
+        }
         self.worker_event_channels[thread_idx]
             .send(WorkerTask::Event(event))
             .map_err(|_| KvRouterError::IndexerOffline)?;
         self.maybe_enqueue_cleanup(thread_idx);
+        Ok(())
+    }
+
+    /// Apply one event on its worker lane and wait for the backend result.
+    pub async fn apply_event_and_wait(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let (thread_idx, second_idx) = self.event_thread_indices(&event);
+        let enqueue = |idx: usize, event: RouterEvent| {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            self.worker_event_channels[idx]
+                .send(WorkerTask::EventWithAck {
+                    event,
+                    resp: resp_tx,
+                })
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            self.maybe_enqueue_cleanup(idx);
+            Ok::<_, KvRouterError>(resp_rx)
+        };
+        let receivers = if let Some(second_idx) = second_idx {
+            vec![
+                enqueue(thread_idx, event.clone())?,
+                enqueue(second_idx, event)?,
+            ]
+        } else {
+            vec![enqueue(thread_idx, event)?]
+        };
+        for receiver in receivers {
+            let applied = receiver
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+            if !applied {
+                return Err(KvRouterError::IndexerDroppedRequest);
+            }
+        }
         Ok(())
     }
 
