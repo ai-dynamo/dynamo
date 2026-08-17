@@ -994,12 +994,12 @@ mod tests {
         assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
 
         config
-            .set_engine_specific("kv_hint.transfer.v1", true)
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, true)
             .unwrap();
         assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
 
         config
-            .set_engine_specific("kv_hint_transfer_worker_type", "prefill")
+            .set_engine_specific(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, "prefill")
             .unwrap();
         let info = config.kv_hint_transfer_metadata_for_dp_rank(0).unwrap();
         assert_eq!(info.worker_type, "prefill");
@@ -1007,7 +1007,7 @@ mod tests {
 
         config
             .set_engine_specific(
-                "kv_hint_transfer_source_control_endpoints",
+                KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
                 serde_json::json!({"0": "tcp://127.0.0.1:23280"}),
             )
             .unwrap();
@@ -1023,7 +1023,7 @@ mod tests {
         );
 
         config
-            .set_engine_specific("kv_hint.transfer.v1", "true")
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, "true")
             .unwrap();
         assert_eq!(
             config
@@ -1034,7 +1034,7 @@ mod tests {
         );
 
         config
-            .set_engine_specific("kv_hint.transfer.v1", "false")
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, "false")
             .unwrap();
         assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
     }

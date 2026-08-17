@@ -5,10 +5,11 @@
 
 from enum import Enum
 
-KV_HINT_TRANSFER_CAPABILITY_KEY = "kv_hint.transfer.v1"
-KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY = "kv_hint_transfer_worker_type"
+# TODO(DYN-3877): Rename these constants and wire values with the matching KVCC names.
+KV_HINT_TRANSFER_CAPABILITY_KEY = "router_hint"
+KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY = "router_hint_worker_type"
 KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY = (
-    "kv_hint_transfer_source_control_endpoints"
+    "router_hint_source_control_endpoints"
 )
 
 

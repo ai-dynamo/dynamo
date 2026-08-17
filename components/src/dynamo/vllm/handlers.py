@@ -121,12 +121,7 @@ _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
-_KV_HINT_PROTOCOL_VERSION: Final = "0.1"
-_KV_SOURCE_LOCATIONS_ACTION_TYPE: Final = "kv.source_locations"
-_KV_SOURCE_LOCATIONS_ACTION_VERSION: Final = "1.0"
-# Request payload key under extra_args.kv_transfer_params. This intentionally
-# matches the runtime capability string, but it lives in a different namespace.
-_ROUTER_HINT_EXTRA_ARGS_KEY: Final = "router_hint"
+_KV_HINT_EXTRA_ARGS_KEY: Final = "kv_hint"
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -840,10 +835,11 @@ def build_sampling_params(
     return sampling_params
 
 
-def _apply_source_locations_action(
-    sampling_params: SamplingParams, payload: Mapping[str, Any]
-) -> None:
-    """Lower one typed source-locations payload into vLLM's private input."""
+def _apply_kv_hints(sampling_params: SamplingParams, kv_hints: Any) -> None:
+    """Attach the complete Dynamo KV hint envelope to vLLM's private input."""
+    if not isinstance(kv_hints, Mapping):
+        return
+
     extra_args = (
         dict(sampling_params.extra_args)
         if isinstance(sampling_params.extra_args, dict)
@@ -855,44 +851,20 @@ def _apply_source_locations_action(
         if isinstance(existing_kv_transfer_params, dict)
         else {}
     )
-    kv_transfer_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = dict(payload)
+    kv_transfer_params[_KV_HINT_EXTRA_ARGS_KEY] = dict(kv_hints)
     extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = kv_transfer_params
     sampling_params.extra_args = extra_args
-
-
-def _apply_kv_hints(sampling_params: SamplingParams, kv_hints: Any) -> None:
-    """Lower each supported action from the Dynamo KV hint envelope."""
-    if (
-        not isinstance(kv_hints, Mapping)
-        or kv_hints.get("protocol_version") != _KV_HINT_PROTOCOL_VERSION
-    ):
-        return
-
-    actions = kv_hints.get("actions")
-    if not isinstance(actions, list):
-        return
-
-    for action in actions:
-        if (
-            not isinstance(action, Mapping)
-            or action.get("action_type") != _KV_SOURCE_LOCATIONS_ACTION_TYPE
-            or action.get("action_version") != _KV_SOURCE_LOCATIONS_ACTION_VERSION
-        ):
-            continue
-        payload = action.get("payload")
-        if isinstance(payload, Mapping):
-            _apply_source_locations_action(sampling_params, payload)
 
 
 def _update_kv_transfer_params(
     sampling_params: SamplingParams,
     kv_transfer_params: Mapping[str, Any],
     *,
-    preserve_router_hint: bool = False,
+    preserve_kv_hint: bool = False,
 ) -> None:
     """Set vLLM KV transfer params, optionally carrying Dynamo's transfer hint.
 
-    ``build_sampling_params`` may have copied ``router_hint`` from the Dynamo
+    ``build_sampling_params`` may have copied ``kv_hint`` from the Dynamo
     request into ``sampling_params.extra_args["kv_transfer_params"]``. The new
     ``kv_transfer_params`` value comes from vLLM's ``KVTransferConfig``
     (``engine_client.vllm_config.kv_transfer_config``), via the connector
@@ -908,16 +880,16 @@ def _update_kv_transfer_params(
         else {}
     )
     updated_params = dict(kv_transfer_params)
-    updated_params.pop(_ROUTER_HINT_EXTRA_ARGS_KEY, None)
+    updated_params.pop(_KV_HINT_EXTRA_ARGS_KEY, None)
 
     existing_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
-    router_hint = (
-        existing_params.get(_ROUTER_HINT_EXTRA_ARGS_KEY)
-        if preserve_router_hint and isinstance(existing_params, Mapping)
+    kv_hint = (
+        existing_params.get(_KV_HINT_EXTRA_ARGS_KEY)
+        if preserve_kv_hint and isinstance(existing_params, Mapping)
         else None
     )
-    if isinstance(router_hint, Mapping):
-        updated_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = router_hint
+    if isinstance(kv_hint, Mapping):
+        updated_params[_KV_HINT_EXTRA_ARGS_KEY] = kv_hint
 
     extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = updated_params
     sampling_params.extra_args = extra_args
@@ -3696,7 +3668,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         _update_kv_transfer_params(
             sampling_params,
             kv_protocol.prefill_request_kv_transfer_params(),
-            preserve_router_hint=True,
+            preserve_kv_hint=True,
         )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
