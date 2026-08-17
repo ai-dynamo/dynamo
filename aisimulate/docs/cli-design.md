@@ -533,7 +533,7 @@ engine:
   hardware: H100-SXM-80GB
   backend: vllm
   backend_version: null
-  context_length: 32768
+  context_length: max
   workers:
     aggregated:
       parallelism:
@@ -568,7 +568,7 @@ engine:
 | `engine.hardware` | Required | `auto` | `-` | Concrete assignment; `recommend` also accepts `auto` with `optimization.hardware`. |
 | `engine.backend` | `vllm` | `{choices: [vllm, sglang]}` | `-` | `vllm`, `sglang`, or `trtllm`; explicit choices may include supported alternatives. |
 | `engine.backend_version` | `null` | `x` | `-` | Fixed when set. |
-| `engine.context_length` | Required | `x` | `-` | Positive. |
+| `engine.context_length` | `"max"` | `x` | `-` | `"max"` derives the effective maximum from the resolved Hugging Face model config; a concrete value must be positive. |
 | `engine.workers` | Required | `x` | `-` | Aggregated role or prefill plus decode roles. |
 | `engine.workers.<role>.parallelism.preset` | `default` in `recommend` | `x` | `-` | Default list, complete mapping list, `false`, or `{}`. |
 | `engine.workers.<role>.parallelism.replicas` | `1` | Feasible positive values within GPU budget | `parallelism` | Positive. |
@@ -608,7 +608,7 @@ engine:
   model: meta-llama/Llama-3.1-8B-Instruct
   hardware: H100-SXM-80GB
   backend: vllm
-  context_length: 32768
+  context_length: max
   kv_transfer:
     bytes_per_token: auto
     bandwidth_gb_per_second: 400
@@ -872,7 +872,7 @@ engine:
   hardware: H100-SXM-80GB
   backend: vllm
   backend_version: null
-  context_length: 32768
+  context_length: max
   workers:
     aggregated:
       parallelism:
@@ -930,7 +930,7 @@ engine:
   hardware: auto
   backend: {choices: [vllm, sglang]}
   backend_version: null
-  context_length: 32768
+  context_length: max
   workers:
     aggregated:
       parallelism: {preset: default}
