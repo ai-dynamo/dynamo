@@ -110,10 +110,21 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
     """Apply a post-resolution SGLang configuration update.
 
     SGLang 0.5.17 makes ``ServerArgs`` unconditionally read-only after
-    resolution. Both supported releases expose ``ServerArgs.override`` as the
-    audited mutation API, so Dynamo must use it instead of assigning fields.
+    resolution. Both supported CUDA releases expose ``ServerArgs.override`` as
+    the audited mutation API, so Dynamo must use it instead of assigning fields.
+    The separately pinned XPU image still uses SGLang 0.5.11, which predates
+    that API; preserve its legacy assignment behavior until its engine pin is
+    upgraded.
     """
-    server_args.override(source, **fields)
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override(source, **fields)
+        return
+
+    # XPU compatibility for SGLang 0.5.11. Remove when the XPU SGLang pin is
+    # upgraded to 0.5.16+.
+    for name, value in fields.items():
+        setattr(server_args, name, value)
 
 
 @lru_cache(maxsize=32)
