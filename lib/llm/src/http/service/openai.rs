@@ -3279,6 +3279,13 @@ async fn responses(
         ),
     );
 
+    // Responses requests share the chat-completions aggregator for the unary
+    // path. Thread this option through so its post-parse fallback also caps a
+    // model-produced batch to the first tool call when parallel calls are
+    // disabled. The streaming Responses converter enforces the same contract.
+    let parsing_options =
+        parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
+
     // NOTE: `move_reasoning_to_content_when_empty` is the aggregator flag and is
     // not set here. A non-streaming Responses request DOES reach the aggregator
     // (forcing stream=true on the converted request only drives internal
