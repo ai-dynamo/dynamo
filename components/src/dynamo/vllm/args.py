@@ -137,6 +137,9 @@ def parse_args(argv: list[str] | None = None) -> Config:
     update_engine_config_with_dynamo(dynamo_config, engine_config)
 
     dynamo_config.engine_args = engine_config
+    from .state_agent import validate_state_agent_worker
+
+    validate_state_agent_worker(dynamo_config)
     return dynamo_config
 
 

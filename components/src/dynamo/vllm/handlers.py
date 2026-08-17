@@ -33,7 +33,7 @@ from typing import (
 import numpy as np
 import torch
 from vllm import PoolingParams
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -92,6 +92,7 @@ from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
+from .dp_topology import get_dp_range_for_worker
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
@@ -1050,32 +1051,6 @@ def apply_data_parallel_runtime_config(
 ) -> None:
     runtime_config.data_parallel_start_rank = dp_range[0]
     runtime_config.data_parallel_size = dp_range[1]
-
-
-def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
-    """
-    Get the global DP rank range that this worker is responsible for based on vLLM config.
-    Note that the 'vllm_config' is normalized so the load balancing flags are set properly.
-    The return value is in the format of (start_dp_rank, managed_dp_size)."""
-    if vllm_config.parallel_config.data_parallel_external_lb:
-        # external load balancing, each worker is responsible for exactly 1 rank
-        return (vllm_config.parallel_config.data_parallel_rank, 1)
-    elif vllm_config.parallel_config.data_parallel_hybrid_lb:
-        # hybrid load balancing, each worker is responsible for a subset of local ranks
-        return (
-            vllm_config.parallel_config.data_parallel_rank,
-            vllm_config.parallel_config.data_parallel_size_local,
-        )
-    else:
-        # internal load balancing, the worker is responsible for all DP ranks
-        logger.warning(
-            "vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment,"
-            " hybrid or external load balancing is recommended."
-        )
-        return (
-            vllm_config.parallel_config.data_parallel_rank,
-            vllm_config.parallel_config.data_parallel_size,
-        )
 
 
 RequestT = TypeVar("RequestT")

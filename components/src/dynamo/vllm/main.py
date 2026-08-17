@@ -60,6 +60,7 @@ from .capacity import (
     per_rank_kv_blocks,
     publish_vllm_token_budget,
 )
+from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
     EmbeddingEngineCleanupResource,
     create_shared_embedding_engine_client,
@@ -67,7 +68,7 @@ from .embedding_worker_processes import (
     start_embedding_parent_watchdog,
 )
 from .engine_generate import publish_engine_generate_capability
-from .handlers import apply_data_parallel_runtime_config, get_dp_range_for_worker
+from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
@@ -77,6 +78,11 @@ from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
+from .state_agent import (
+    StateAgentLifecycle,
+    start_attachment_owner,
+    state_agent_settings,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -185,6 +191,7 @@ async def worker(argv: list[str] | None = None) -> None:
         return
 
     shutdown_event = asyncio.Event()
+    state_agent_lifecycle = StateAgentLifecycle()
     runtime, loop = create_runtime(
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
@@ -193,15 +200,23 @@ async def worker(argv: list[str] | None = None) -> None:
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
-    install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
+    install_signal_handlers(
+        loop,
+        runtime,
+        shutdown_endpoints,
+        shutdown_event,
+        pre_shutdown_callback=state_agent_lifecycle.close,
+    )
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
     factory = WorkerFactory(
         setup_vllm_engine_fn=setup_vllm_engine,
         setup_kv_event_publisher_fn=setup_kv_event_publisher,
+        setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
         register_vllm_model_fn=register_vllm_model,
         setup_fpm_relay_fn=setup_fpm_relay,
         setup_metrics_collection_fn=setup_metrics_collection,
+        state_agent_lifecycle=state_agent_lifecycle,
     )
     await factory.create(
         runtime,
@@ -460,6 +475,19 @@ def setup_kv_event_publisher(
         )
 
     return kv_publishers if kv_publishers else None
+
+
+async def setup_kv_state_attachment_owner(
+    config: Config,
+    generate_endpoint: Endpoint,
+    vllm_config: VllmConfig,
+):
+    return await start_attachment_owner(
+        config,
+        generate_endpoint,
+        vllm_config,
+        _resolve_image_token_id(config, vllm_config),
+    )
 
 
 def setup_fpm_relay(
@@ -783,6 +811,8 @@ async def register_vllm_model(
     runtime_config.enable_local_indexer = config.enable_local_indexer
     runtime_config.kv_event_publishing_enabled = config.use_kv_events
     runtime_config.kv_state_endpoint = config.kv_state_endpoint
+    if state_agent_settings(config) is not None:
+        runtime_config.kv_event_source_mode = "state_agent_v2"
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off
