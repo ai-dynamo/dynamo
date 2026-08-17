@@ -17,6 +17,7 @@ from dynamo.workflow.nixl import NixlTensorFanout, tensor_transfer_ref_from_dict
 from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.workflow.plan import INLINE_VALUE_TYPES
 from dynamo.workflow.runtime import (
+    ReleasableTensorCarrier,
     StageContext,
     StageRunner,
     TensorCarrier,
@@ -380,6 +381,7 @@ class RemoteStageServer:
 
         async def invoke() -> dict[str, Any]:
             started_ns = time.perf_counter_ns()
+            imported_tensors: list[Any] = []
             expected_inputs = set(self._runner.contract.inputs)
             actual_inputs = set(envelope.inputs)
             if actual_inputs != expected_inputs:
@@ -389,77 +391,117 @@ class RemoteStageServer:
                     f"extra={sorted(actual_inputs - expected_inputs)}"
                 )
 
-            runner_inputs = dict(envelope.inputs)
-            for name in envelope.input_carriers:
-                if self._tensor_carrier is None:
-                    raise WorkflowExecutionError(
-                        f"remote stage {self._stage_id!r} has no NIXL tensor carrier"
+            try:
+                runner_inputs = dict(envelope.inputs)
+                for name, spec in self._runner.contract.inputs.items():
+                    value_spec = _require_value_spec(
+                        spec, f"remote stage {self._stage_id!r} input {name!r}"
                     )
-                runner_inputs[name] = await self._tensor_carrier.import_tensor(
-                    envelope.inputs[name]
-                )
-            inputs_ready_ns = time.perf_counter_ns()
+                    if value_spec.type == "tensor":
+                        if self._tensor_carrier is None:
+                            raise WorkflowExecutionError(
+                                f"remote stage {self._stage_id!r} has no NIXL "
+                                "tensor carrier"
+                            )
+                        imported = await self._tensor_carrier.import_tensor(
+                            envelope.inputs[name]
+                        )
+                        imported_tensors.append(imported)
+                        runner_inputs[name] = imported
+                    _validate_value(
+                        value_spec,
+                        runner_inputs[name],
+                        f"remote stage {self._stage_id!r} input {name!r}",
+                    )
+                inputs_ready_ns = time.perf_counter_ns()
 
-            result = await self._runner.run(
-                MappingProxyType(runner_inputs), stage_context
-            )
-            if unknown_transfer_outputs:
-                raise WorkflowExecutionError(
-                    f"remote stage {self._stage_id!r} has transfer requests for "
-                    f"unknown outputs {sorted(unknown_transfer_outputs)}"
+                unknown_transfer_outputs = set(envelope.output_transfers) - set(
+                    self._runner.contract.outputs
                 )
-
-            result = await self._runner.run(MappingProxyType(runner_inputs), context)
-            runner_finished_ns = time.perf_counter_ns()
-            if not isinstance(result, Mapping):
-                raise WorkflowExecutionError(
-                    f"remote stage {self._stage_id!r} returned a non-mapping result"
-                )
-            expected_outputs = set(self._runner.contract.outputs)
-            actual_outputs = set(result)
-            if actual_outputs != expected_outputs:
-                raise WorkflowExecutionError(
-                    f"remote stage {self._stage_id!r} outputs differ from its contract; "
-                    f"missing={sorted(expected_outputs - actual_outputs)}, "
-                    f"extra={sorted(actual_outputs - expected_outputs)}"
-                )
-
-            wire_outputs = dict(result)
-            output_carriers: dict[str, str] = {}
-            for name, value in result.items():
-                if self._tensor_carrier is None or not self._tensor_carrier.can_export(
-                    value
-                ):
-                    continue
-                transfer_ids = envelope.output_transfers.get(name, ())
-                if not transfer_ids:
+                if unknown_transfer_outputs:
                     raise WorkflowExecutionError(
-                        f"remote tensor output {name!r} has no NIXL consumer transfers"
+                        f"remote stage {self._stage_id!r} has transfer requests for "
+                        f"unknown outputs {sorted(unknown_transfer_outputs)}"
                     )
-                references = await self._tensor_carrier.export_tensor_fanout(
-                    value, transfer_ids
+
+                result = await self._runner.run(
+                    MappingProxyType(runner_inputs), context
                 )
-                if set(references) != set(transfer_ids):
+                runner_finished_ns = time.perf_counter_ns()
+                if not isinstance(result, Mapping):
                     raise WorkflowExecutionError(
-                        f"remote tensor output {name!r} NIXL references differ "
-                        "from requested consumer transfers"
+                        f"remote stage {self._stage_id!r} returned a non-mapping result"
                     )
-                for transfer_id, reference in references.items():
-                    transfers[transfer_id] = tensor_transfer_ref_from_dict(
-                        reference, transfer_id=transfer_id
+                expected_outputs = set(self._runner.contract.outputs)
+                actual_outputs = set(result)
+                if actual_outputs != expected_outputs:
+                    raise WorkflowExecutionError(
+                        f"remote stage {self._stage_id!r} outputs differ from its "
+                        f"contract; missing={sorted(expected_outputs - actual_outputs)}, "
+                        f"extra={sorted(actual_outputs - expected_outputs)}"
                     )
-                wire_outputs[name] = NixlTensorFanout(transfers).to_dict()
-            WORKFLOW_PERF_TRACE.emit(
-                logger,
-                "workflow.remote_server",
-                envelope.attempt_id,
-                elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
-                export_ms=(time.perf_counter_ns() - runner_finished_ns) / 1_000_000,
-                import_ms=(inputs_ready_ns - started_ns) / 1_000_000,
-                runner_ms=(runner_finished_ns - inputs_ready_ns) / 1_000_000,
-                stage=self._stage_id,
-            )
-            return wire_outputs
+                outputs = dict(result)
+                for name, spec in self._runner.contract.outputs.items():
+                    _validate_value(
+                        spec,
+                        outputs[name],
+                        f"remote stage {self._stage_id!r} output {name!r}",
+                    )
+                wire_outputs: dict[str, Any] = dict(outputs)
+                for name, spec in self._runner.contract.outputs.items():
+                    value_spec = _require_value_spec(
+                        spec, f"remote stage {self._stage_id!r} output {name!r}"
+                    )
+                    transfer_ids = envelope.output_transfers.get(name, ())
+                    if value_spec.type != "tensor":
+                        if transfer_ids:
+                            raise WorkflowExecutionError(
+                                f"remote stage {self._stage_id!r} received NIXL "
+                                f"transfers for non-tensor output {name!r}"
+                            )
+                        continue
+                    if self._tensor_carrier is None:
+                        raise WorkflowExecutionError(
+                            f"remote stage {self._stage_id!r} has no NIXL tensor "
+                            "carrier"
+                        )
+                    if not transfer_ids:
+                        raise WorkflowExecutionError(
+                            f"remote tensor output {name!r} has no consumer transfers"
+                        )
+                    transfers = {}
+                    references = await self._tensor_carrier.export_tensor_fanout(
+                        outputs[name], transfer_ids
+                    )
+                    if set(references) != set(transfer_ids):
+                        raise WorkflowExecutionError(
+                            f"remote tensor output {name!r} NIXL references differ "
+                            "from requested consumer transfers"
+                        )
+                    for transfer_id, reference in references.items():
+                        transfers[transfer_id] = tensor_transfer_ref_from_dict(
+                            reference, transfer_id=transfer_id
+                        )
+                    wire_outputs[name] = NixlTensorFanout(transfers).to_dict()
+                WORKFLOW_PERF_TRACE.emit(
+                    logger,
+                    "workflow.remote_server",
+                    envelope.attempt_id,
+                    elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+                    export_ms=(time.perf_counter_ns() - runner_finished_ns) / 1_000_000,
+                    import_ms=(inputs_ready_ns - started_ns) / 1_000_000,
+                    runner_ms=(runner_finished_ns - inputs_ready_ns) / 1_000_000,
+                    stage=self._stage_id,
+                    tensor_transfers=sum(
+                        len(transfer_ids)
+                        for transfer_ids in envelope.output_transfers.values()
+                    ),
+                )
+                return wire_outputs
+            finally:
+                if isinstance(self._tensor_carrier, ReleasableTensorCarrier):
+                    for tensor in reversed(imported_tensors):
+                        self._tensor_carrier.release_imported_tensor(tensor)
 
         invocation = asyncio.create_task(invoke(), name=f"workflow-remote:{request_id}")
         transport_task: asyncio.Future[Any] | None = None
