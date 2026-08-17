@@ -583,13 +583,13 @@ engine:
 | `engine.workers.<role>.kv_cache.prefix_caching` | `true` | `x` | `-` | Backend-supported. |
 | `engine.workers.<role>.kv_cache.capacity.type` | `default` | `x` | `-` | `default` or `fixed`. |
 | `engine.workers.<role>.kv_cache.capacity.memory_fraction` | vLLM/TensorRT-LLM `0.9`; SGLang `0.88` | `-` | `-` | `(0, 1]`; `default` capacity only. |
-| `engine.workers.<role>.kv_cache.capacity.blocks` | `null` | `-` | `-` | Positive and required for `fixed` capacity. |
-| `engine.workers.<role>.timing.type` | `default` | `-` | `-` | `default`, `fixed`, or `polynomial`. |
-| `engine.workers.<role>.timing.prefill_ms` | `null` | `-` | `-` | Nonnegative and required for `fixed` timing. |
-| `engine.workers.<role>.timing.decode_ms` | `null` | `-` | `-` | Nonnegative and required for `fixed` timing. |
-| `engine.workers.<role>.startup_seconds` | `0` | `-` | `-` | Nonnegative. |
-| `engine.kv_transfer.bytes_per_token` | `auto` | `-` | `-` | Positive when concrete; disaggregated mode only. |
-| `engine.kv_transfer.bandwidth_gb_per_second` | `null` | `-` | `-` | Positive when set; `null` disables transfer delay. |
+| `engine.workers.<role>.kv_cache.capacity.blocks` | `null` | `x` | `-` | Positive and required for `fixed` capacity. |
+| `engine.workers.<role>.timing.type` | `default` | `x` | `-` | `default`, `fixed`, or `polynomial`. |
+| `engine.workers.<role>.timing.prefill_ms` | `null` | `x` | `-` | Nonnegative and required for `fixed` timing. |
+| `engine.workers.<role>.timing.decode_ms` | `null` | `x` | `-` | Nonnegative and required for `fixed` timing. |
+| `engine.workers.<role>.startup_seconds` | `0` | `x` | `-` | Nonnegative. |
+| `engine.kv_transfer.bytes_per_token` | `auto` | `x` | `-` | Positive when concrete; disaggregated mode only. |
+| `engine.kv_transfer.bandwidth_gb_per_second` | `null` | `x` | `-` | Positive when set; `null` disables transfer delay. |
 | `engine.kv_transfer.timing_mode` | `full_prompt` | `{choices: [full_prompt, destination_missing]}` | `-` | Disaggregated mode only. |
 
 `engine.hardware: auto` is valid only in `recommend` and requires the hardware inventory under
