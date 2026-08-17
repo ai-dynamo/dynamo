@@ -27,6 +27,51 @@ type ProcessDetails struct {
 	Cmdline       string
 }
 
+// ReadProcessFilesystemIDs returns the filesystem UID and GID from a proc status entry.
+func ReadProcessFilesystemIDs(procRoot string, pid int) (int, int, error) {
+	if pid <= 0 {
+		return 0, 0, fmt.Errorf("invalid PID %d", pid)
+	}
+
+	statusPath := filepath.Join(procRoot, strconv.Itoa(pid), "status")
+	statusBytes, err := os.ReadFile(statusPath)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read %s: %w", statusPath, err)
+	}
+	status := string(statusBytes)
+
+	uid, err := parseProcessFilesystemID(status, "Uid:")
+	if err != nil {
+		return 0, 0, err
+	}
+	gid, err := parseProcessFilesystemID(status, "Gid:")
+	if err != nil {
+		return 0, 0, err
+	}
+	return uid, gid, nil
+}
+
+func parseProcessFilesystemID(status, field string) (int, error) {
+	for _, line := range strings.Split(status, "\n") {
+		if !strings.HasPrefix(line, field) {
+			continue
+		}
+		values := strings.Fields(strings.TrimPrefix(line, field))
+		if len(values) != 4 {
+			return 0, fmt.Errorf("invalid %s process status field %q", strings.TrimSuffix(field, ":"), line)
+		}
+		value, err := strconv.Atoi(values[3])
+		if err != nil {
+			return 0, fmt.Errorf("invalid filesystem %s %q: %w", strings.TrimSuffix(field, ":"), values[3], err)
+		}
+		if value < 0 {
+			return 0, fmt.Errorf("invalid filesystem %s %q", strings.TrimSuffix(field, ":"), values[3])
+		}
+		return value, nil
+	}
+	return 0, fmt.Errorf("missing %s in process status", strings.TrimSuffix(field, ":"))
+}
+
 // ReadProcessDetails reads one proc entry from a proc root.
 func ReadProcessDetails(procRoot string, pid int) (ProcessDetails, error) {
 	if pid <= 0 {

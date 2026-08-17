@@ -22,7 +22,7 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy,
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::DistributedRuntime;
@@ -51,12 +51,14 @@ impl HttpFrontend {
     /// Replace the default worker selector with a statically linked native policy.
     ///
     /// The factory is called when each decode or prefill worker set is constructed, not per
-    /// request. Dynamo continues to own discovery, scheduling, validation, and accounting.
+    /// request. Workers must advertise an explicit typed role; legacy untyped cards are rejected
+    /// because decode and aggregated workers cannot be distinguished. Dynamo continues to own
+    /// discovery, scheduling, validation, and accounting.
     pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
     where
         F: for<'a> Fn(
                 &KvRouterConfig,
-                &'static str,
+                WorkerType,
                 RoutingPartitionRef<'a>,
             ) -> WorkerSelectionPolicy
             + Send
@@ -87,6 +89,7 @@ impl HttpFrontend {
                     distributed_runtime,
                     engine_config,
                     self.frontend_route_extensions,
+                    true,
                     factory,
                 )
                 .await
@@ -96,8 +99,12 @@ impl HttpFrontend {
                     distributed_runtime,
                     engine_config,
                     self.frontend_route_extensions,
+                    false,
                     Arc::new(|config, worker_type, _partition| {
-                        DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+                        DefaultWorkerSelector::new(
+                            Some(config.clone()),
+                            worker_type.default_selector_label(),
+                        )
                     }),
                 )
                 .await
@@ -132,6 +139,7 @@ async fn run_with_worker_selector_factory<Sel>(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
+    require_typed_worker_role: bool,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
 ) -> anyhow::Result<()>
 where
@@ -221,7 +229,9 @@ where
                 prefill_load_estimator.clone(),
                 local_model_path,
                 model.runtime_config().tokenizer_backend,
+                model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
+                require_typed_worker_role,
                 worker_selector_factory.clone(),
             )
             .await?;
@@ -307,7 +317,9 @@ async fn run_watcher<Sel>(
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
+    tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
+    require_typed_worker_role: bool,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
 ) -> anyhow::Result<()>
 where
@@ -330,10 +342,12 @@ where
         chat_engine_factory,
         prefill_load_estimator,
         metrics.clone(),
+        require_typed_worker_role,
         worker_selector_factory,
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
+    watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
     watch_obj.set_generate_engine_capabilities(generate_engine_capabilities);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();

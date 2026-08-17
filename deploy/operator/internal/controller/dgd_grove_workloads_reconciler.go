@@ -48,7 +48,7 @@ func newGroveWorkloadsReconciler(
 	recorder events.EventRecorder,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 	scaleClient scale.ScalesGetter,
 ) *groveWorkloadsReconciler {
 	return &groveWorkloadsReconciler{

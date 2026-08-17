@@ -219,7 +219,7 @@ Annotations are additional annotations to add to the DynamoGraphDeployment metad
 </ParamField>
 
 <ParamField path="workersImage" type="string">
-WorkersImage specifies the container image to use for DynamoGraphDeployment worker components. This image is used for both temporary DGDs created during online profiling and the final DGD. If omitted, the image from the base config file (e.g., disagg.yaml) is used. Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1"
+WorkersImage specifies the container image to use for DynamoGraphDeployment worker components. This image is used for both temporary DGDs created during online profiling and the final DGD. If omitted, the image from the base config file (e.g., disagg.yaml) is used. Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0"
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -538,7 +538,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -699,7 +699,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -1970,7 +1970,7 @@ See [ConfigMapKeySelector](#configmapkeyselector).
 </ParamField>
 
 <ParamField path="profilerImage" type="string" required={true}>
-ProfilerImage specifies the container image to use for profiling jobs. This image contains the profiler code and dependencies needed for SLA-based profiling. Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
+ProfilerImage specifies the container image to use for profiling jobs. This image contains the profiler code and dependencies needed for SLA-based profiling. Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
 
@@ -2888,7 +2888,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2991,7 +2991,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3203,7 +3203,7 @@ See [BackendType](#backendtype).
 </ParamField>
 
 <ParamField path="image" type="string">
-Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1". For Dynamo &lt; 1.1.0, use dynamo-frontend.
+Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0". For Dynamo &lt; 1.1.0, use dynamo-frontend.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
