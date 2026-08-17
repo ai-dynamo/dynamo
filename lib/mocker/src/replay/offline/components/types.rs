@@ -169,7 +169,7 @@ impl<Events: EngineEventBatch> EngineEffects<Events> {
     }
 }
 
-/// Accumulated traffic statistics returned by [`TrafficAccumulator::drain`].
+/// Accumulated traffic statistics returned by `TrafficAccumulator::drain`.
 ///
 /// IMPORTANT: When fields here are added or renamed, update the PyO3
 /// binding in ``lib/bindings/python/rust/llm/replay.rs`` (drain_traffic
