@@ -360,7 +360,8 @@ export function ArtifactBrowser() {
   const componentContainers = ARTIFACTS.filter((a) => a.category === "container" && a.group !== "runtime");
   const wheels = ARTIFACTS.filter((a) => a.category === "wheel");
   const helmCharts = ARTIFACTS.filter((a) => a.category === "helm");
-  const crates = ARTIFACTS.filter((a) => a.category === "crate");
+  const publishedCrates = ARTIFACTS.filter((a) => a.category === "crate" && a.group !== "consumed");
+  const consumedCrates = ARTIFACTS.filter((a) => a.category === "crate" && a.group === "consumed");
 
   return (
     <>
@@ -456,8 +457,12 @@ export function ArtifactBrowser() {
           {helmCharts.map((a) => (
             <ArtifactRow key={a.name} artifact={a} />
           ))}
-          <GroupHeader label="Rust crates" cat="crate" />
-          {crates.map((a) => (
+          <GroupHeader label="Rust crates published this release" cat="crate" />
+          {publishedCrates.map((a) => (
+            <ArtifactRow key={a.name} artifact={a} />
+          ))}
+          <GroupHeader label="Frontend crate dependencies (independently versioned)" cat="crate" />
+          {consumedCrates.map((a) => (
             <ArtifactRow key={a.name} artifact={a} />
           ))}
         </div>
