@@ -15,6 +15,7 @@ import (
 
 type CheckpointJobOptions struct {
 	Namespace             string
+	TargetContainer       string
 	CheckpointID          string
 	ArtifactVersion       string
 	SeccompProfile        string
@@ -46,15 +47,13 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
 
-	// Checkpoint contract: exactly one target container per Job. The
-	// annotation is required — callers (the operator, snapshotctl) stamp
-	// nvidia.com/snapshot-target-containers before handing the template
-	// to us so there is no Containers[0]-vs-"main" ambiguity.
-	targets, err := TargetContainersFromAnnotations(podTemplate.Annotations, 1, 1)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint job pod template: %w", err)
+	// Checkpoint contract: exactly one target container per Job. The caller (the operator,
+	// snapshotctl) resolves the single target and passes it in opts so there is no
+	// Containers[0]-vs-"main" ambiguity.
+	targetName := opts.TargetContainer
+	if targetName == "" {
+		return nil, fmt.Errorf("checkpoint job pod template: opts.TargetContainer is required")
 	}
-	targetName := targets[0]
 	var targetContainer *corev1.Container
 	for i := range podTemplate.Spec.Containers {
 		if podTemplate.Spec.Containers[i].Name == targetName {
@@ -63,7 +62,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		}
 	}
 	if targetContainer == nil {
-		return nil, fmt.Errorf("checkpoint job pod template has no container named %q (from %s annotation)", targetName, TargetContainersAnnotation)
+		return nil, fmt.Errorf("checkpoint job pod template has no container named %q (from opts.TargetContainer)", targetName)
 	}
 
 	// Snapshot contract: control volume + ready-file readiness probe. The
@@ -148,13 +147,25 @@ func DisableCheckpointJobSidecarInjection(annotations map[string]string) map[str
 
 // wrapWithCudaCheckpointLaunchJob rewrites the container's entrypoint so the
 // workload is launched under `cuda-checkpoint --launch-job`, required for
-// multi-GPU checkpoints. The original command and args are preserved as-is
-// (including shell-form entrypoints): workload-to-agent signaling now uses
-// file sentinels in the snapshot-control volume, so an intervening shell at
-// PID 1 is no longer an issue.
+// multi-GPU checkpoints. The launch-job file is copied from its transient
+// procfs FD into the per-pod snapshot control volume before the original
+// command starts. The workload inherits that stable path, while the snapshot
+// agent stages the capture-time contents into the versioned artifact.
 func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string, []string) {
-	wrappedArgs := make([]string, 0, len(command)+len(args)+1)
-	wrappedArgs = append(wrappedArgs, "--launch-job")
+	const persistJobFileScript = `set -eu
+job_file="$1"
+shift
+if [ -z "${CUDA_CHECKPOINT_JOB_FILE:-}" ]; then
+    echo "CUDA_CHECKPOINT_JOB_FILE is missing; cuda-checkpoint --launch-job requires NVIDIA driver 610 or newer" >&2
+    exit 1
+fi
+umask 077
+cat "$CUDA_CHECKPOINT_JOB_FILE" > "$job_file"
+export CUDA_CHECKPOINT_JOB_FILE="$job_file"
+exec "$@"`
+
+	wrappedArgs := make([]string, 0, len(command)+len(args)+7)
+	wrappedArgs = append(wrappedArgs, "--launch-job", "/bin/sh", "-c", persistJobFileScript, "dynamo-cuda-checkpoint", CUDAJobFilePath)
 	wrappedArgs = append(wrappedArgs, command...)
 	wrappedArgs = append(wrappedArgs, args...)
 	return []string{"cuda-checkpoint"}, wrappedArgs

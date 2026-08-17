@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -53,7 +53,7 @@ type dgdWorkerRolloutReconciler struct {
 
 func newDGDWorkerRolloutReconciler(
 	kubeClient client.Client,
-	recorder record.EventRecorder,
+	recorder events.EventRecorder,
 ) *dgdWorkerRolloutReconciler {
 	return &dgdWorkerRolloutReconciler{
 		dgdResourceSyncer: newDGDResourceSyncer(kubeClient, recorder),
@@ -110,10 +110,13 @@ func (r *dgdWorkerRolloutReconciler) ReconcileUnsupported(
 		"hasMultinode", dgd.HasAnyMultinodeComponent(),
 	)
 	if r.recorder != nil {
-		r.recorder.Event(
+		r.recorder.Eventf(
 			dgd,
+			nil,
 			corev1.EventTypeWarning,
 			"RollingUpdateNotSupported",
+			"Update",
+			"%s",
 			"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments",
 		)
 	}
@@ -283,7 +286,7 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 		}
 
 		if r.recorder != nil {
-			r.recorder.Eventf(dgd, corev1.EventTypeNormal, "LegacyMigrationStarted",
+			r.recorder.Eventf(dgd, nil, corev1.EventTypeNormal, "LegacyMigrationStarted", "Update",
 				"Detected %d legacy worker DCDs, initiating rolling update migration", len(legacyDCDs))
 		}
 		return nil
@@ -348,7 +351,7 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 		"v1Hash", next.v1,
 		"v2Hash", next.v2)
 	if r.recorder != nil {
-		r.recorder.Event(dgd, corev1.EventTypeNormal, "WorkerHashMigrated", eventMessage)
+		r.recorder.Eventf(dgd, nil, corev1.EventTypeNormal, "WorkerHashMigrated", "Update", "%s", eventMessage)
 	}
 
 	return nil

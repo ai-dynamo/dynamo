@@ -82,7 +82,7 @@ The standalone router does not include the HTTP frontend and does not expose `/v
 
 ## Deployment Modes
 
-The Dynamo router can be deployed in several configurations. The table below shows every combination and when to use it:
+The Dynamo router can be deployed in several configurations. The table below shows common combinations and when to use them:
 
 | Mode | Command | Routing Logic | KV Events | Topology | Use Case |
 |------|---------|---------------|-----------|----------|----------|
@@ -95,6 +95,12 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Frontend + Device-Aware Weighted** | `python -m dynamo.frontend --router-mode device-aware-weighted` | Device-aware budget + least-loaded within selected device group | None | Aggregated or disaggregated fallback | Heterogeneous fleet balancing (CPU/non-CPU); degenerates to least-loaded when only one device class is present |
 | **Frontend + Direct** | `python -m dynamo.frontend --router-mode direct` | Worker ID from request hints | None | Aggregated | External orchestrator (e.g., EPP/GAIE) selects workers |
 | **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | NATS Core / ZMQ | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
+
+> [!IMPORTANT]
+> With `DYN_LORA_ENABLED`, use KV, random, or round-robin routing. Direct,
+> power-of-two, least-loaded, and device-aware-weighted modes are not LoRA-aware
+> and fail startup. Session affinity with LoRA is supported only in KV mode;
+> random and round-robin plus affinity are rejected.
 
 ### Routing Modes (`--router-mode`)
 
@@ -120,7 +126,7 @@ normalized_load = total_inflight(group) / (instance_count(group) x throughput_we
 
 The throughput weight is `1` for CPU workers and `DYN_ENCODER_CUDA_TO_CPU_RATIO` for non-CPU workers. The next request is routed to the group with the lower normalized load, then to the least-loaded worker inside that group.
 
-For multimodal requests, a full embedding-cache hit on one or more workers bypasses the CPU-to-non-CPU ratio. The router selects the least-loaded worker among those that hold every distinct embedding-cache key in the request. Partial hits continue through the normal weighted group selection. See [Embedding Cache](../../../../use-cases/multimodal-serving/embedding-cache.md#cache-aware-routing).
+For multimodal requests, a full embedding-cache hit on one or more workers bypasses the CPU-to-non-CPU ratio. The router selects the least-loaded worker among those that hold every distinct embedding-cache key in the request. Partial hits continue through the normal weighted group selection. See [Embedding Cache](../../../../use-cases/multimodal-serving/embedding-cache.md#configuration).
 
 Use `DYN_ENCODER_CUDA_TO_CPU_RATIO` to approximate the throughput ratio of a non-CPU worker relative to one CPU worker. The default is `8`.
 
@@ -144,6 +150,52 @@ When using KV routing, the router needs to know what each worker has cached. The
 | **Disaggregated** | Separate prefill and decode pools | Frontend routes to a prefill worker first, then to a decode worker; requires workers registered with `WorkerType.Prefill` |
 
 Disaggregated mode is activated automatically when prefill workers register alongside decode workers. See [Disaggregated Serving](disaggregated-serving.md) for details.
+
+## Per-Worker Router Configuration
+
+`--router-mode` on the frontend sets the default for every worker. A worker set can override it for itself by declaring its own routing in its model deployment card, which the frontend then uses in place of its own configuration when routing to that set. This lets one deployment serve worker sets that want different strategies — for example a heterogeneous CPU/GPU encoder pool on `device-aware-weighted` while everything else stays round-robin.
+
+Workers accept the same flags as the frontend, on vLLM, SGLang, TensorRT-LLM, and the mocker:
+
+```bash
+# Frontend default for the deployment
+python -m dynamo.frontend --router-mode round-robin --http-port 8000
+
+# Worker set A -- overrides to KV. Every replica is launched with the same flags.
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --router-mode kv --router-kv-overlap-score-credit 2.0
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --router-mode kv --router-kv-overlap-score-credit 2.0
+
+# Worker set B -- a different model, no router flags, so it inherits round-robin
+python -m dynamo.vllm --model meta-llama/Llama-3.1-8B-Instruct
+
+# Worker set C -- a different model again, on its own strategy
+python -m dynamo.vllm --model BAAI/bge-m3 --router-mode device-aware-weighted
+```
+
+Sets A, B, and C are distinct because a worker set is keyed on model name as well as endpoint and worker type. Each carries its own routing configuration and the three do not interact.
+
+A worker that omits `--router-mode`, like set B, advertises nothing and inherits the frontend's configuration. That is the default, and it is what every deployment written before this option did.
+
+### The override is per worker set, not per worker
+
+Workers that share a namespace, component, endpoint, model type, and worker type form a single worker set, and a worker set has one routing configuration. Two replicas of the same model launched with different router flags are not two independently routed workers — they are one set whose members disagree.
+
+> [!WARNING]
+> Every worker in a set must be launched with identical router flags. The frontend fingerprints each worker's card together with its effective routing configuration, so mismatched flags split the set into two cohorts. A split set is treated as a conflict: **no instances are admitted and the set stops serving**. It does not fall back to one worker's configuration or to the frontend's.
+
+This is not specific to router flags — any card difference splits a set the same way — but router flags are easy to apply to one replica by mistake. Two practical consequences:
+
+- **Changing the routing of a running fleet is a card change.** Roll the whole set rather than mixing old and new replicas, the same as any other change that alters the card.
+- **Applying the flag to only some replicas of a set splits it.** Whether by flag or by an exported `DYN_ROUTER_MODE` that reaches some processes and not others, every member of a set must end up with the same value.
+
+> [!IMPORTANT]
+> An advertised configuration **replaces** the frontend's for that worker set rather than merging with it. If you set `--router-mode kv` on a worker and the frontend was tuned with KV flags such as `--router-temperature`, restate those flags on the worker too, or that set falls back to KV defaults.
+
+Because the flags are shared with the frontend, they read the same environment variables — `--router-mode` reads `DYN_ROUTER_MODE`. Kubernetes scopes environment per service, so a frontend's value does not reach workers, and the launch scripts pass the flag rather than exporting it. The one case to watch is a shell that exports `DYN_ROUTER_MODE` and then starts both the frontend and workers: there the workers advertise it instead of inheriting.
+
+The frontend-only options (`--router-min-initial-workers`, `--enforce-disagg`, `--admission-control`) are not accepted by workers, since a model card does not carry them.
+
+Advertised configuration applies to the worker sets the frontend routes to directly — aggregated and decode. See [Frontend Configuration Reference](../../../../reference/components/frontend-configuration.mdx#router) for the full flag list.
 
 ## More Router Docs
 

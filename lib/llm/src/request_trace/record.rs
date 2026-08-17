@@ -240,7 +240,9 @@ mod tests {
                 session_id: "root".to_string(),
                 parent_session_id: None,
                 session_final: None,
+                compaction: None,
                 kv_hints: None,
+                input_trigger: None,
             }),
             request: None,
             tool: Some(RequestTraceToolEvent {

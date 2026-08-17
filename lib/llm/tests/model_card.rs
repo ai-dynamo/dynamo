@@ -7,11 +7,37 @@ use dynamo_llm::model_card::{ModelDeploymentCard, PromptFormatterArtifact, Token
 use dynamo_llm::tokenizers::{
     BasetenTokenizer, EncodeSegment, HuggingFaceTokenizer, TikTokenTokenizer, traits::Encoder,
 };
-use tempfile::tempdir;
+use std::path::PathBuf;
+use tempfile::{TempDir, tempdir};
 use tokenizers::models::bpe::{BPE, Vocab};
 
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
 const TIKTOKEN_PATH: &str = "tests/data/sample-models/mock-tiktoken";
+
+fn unsupported_alternate_tokenizer() -> (TempDir, PathBuf) {
+    let dir = tempdir().unwrap();
+    let tokenizer_path = dir.path().join("tokenizer.json");
+    std::fs::write(
+        &tokenizer_path,
+        r#"{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "WordLevel",
+                "vocab": {"[UNK]": 0, "hello": 1},
+                "unk_token": "[UNK]"
+            }
+        }"#,
+    )
+    .unwrap();
+    (dir, tokenizer_path)
+}
 
 #[tokio::test]
 async fn test_model_info_from_hf_like_local_repo() {
@@ -156,6 +182,73 @@ fn test_basetenkenizer_model_card_matches_hf_and_uses_prefix_cache() {
 #[test]
 #[serial_test::serial]
 fn test_basetenkenizer_load_failure_falls_back_to_hf() {
+    temp_env::with_vars(
+        [
+            ("DYN_TOKENIZER_CACHE", Some("0")),
+            ("DYN_TOKENIZER_FALLBACK", None),
+        ],
+        || {
+            let (_dir, tokenizer_path) = unsupported_alternate_tokenizer();
+
+            assert!(
+                BasetenTokenizer::from_file(tokenizer_path.to_str().unwrap()).is_err(),
+                "fixture must remain unsupported by the Baseten BPE backend"
+            );
+
+            let mut mdc = ModelDeploymentCard::with_name_only("baseten-fallback");
+            mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+                CheckedFile::from_disk(&tokenizer_path).unwrap(),
+            ));
+            mdc.runtime_config.tokenizer_backend = Some(TokenizerBackend::Basetenkenizer);
+
+            let tokenizer = mdc
+                .tokenizer()
+                .expect("unsupported Baseten tokenizer must fall back to HuggingFace");
+            assert_eq!(
+                tokenizer.encode("hello").unwrap().token_ids(),
+                &[1],
+                "fallback must remain usable"
+            );
+        },
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_alternate_tokenizer_load_failure_is_rejected_when_fallback_is_disabled() {
+    temp_env::with_vars(
+        [
+            ("DYN_TOKENIZER_CACHE", Some("0")),
+            ("DYN_TOKENIZER_FALLBACK", Some("1")),
+        ],
+        || {
+            for backend in [
+                TokenizerBackend::Fastokens,
+                TokenizerBackend::Basetenkenizer,
+            ] {
+                let (_dir, tokenizer_path) = unsupported_alternate_tokenizer();
+                let mut mdc = ModelDeploymentCard::with_name_only("strict-tokenizer");
+                mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+                    CheckedFile::from_disk(&tokenizer_path).unwrap(),
+                ));
+                mdc.runtime_config.tokenizer_backend = Some(backend);
+                mdc.runtime_config.tokenizer_fallback_enabled = Some(false);
+
+                let error = mdc
+                    .tokenizer()
+                    .err()
+                    .expect("unsupported alternate tokenizer must fail without fallback")
+                    .to_string();
+                assert!(error.contains(backend.as_str()));
+                assert!(error.contains("fallback is disabled"));
+            }
+        },
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_hf_model_card_disables_serialized_padding_and_truncation() {
     temp_env::with_vars([("DYN_TOKENIZER_CACHE", Some("0"))], || {
         let dir = tempdir().unwrap();
         let tokenizer_path = dir.path().join("tokenizer.json");
@@ -163,8 +256,20 @@ fn test_basetenkenizer_load_failure_falls_back_to_hf() {
             &tokenizer_path,
             r#"{
                 "version": "1.0",
-                "truncation": null,
-                "padding": null,
+                "truncation": {
+                    "direction": "Right",
+                    "max_length": 2,
+                    "strategy": "LongestFirst",
+                    "stride": 0
+                },
+                "padding": {
+                    "strategy": {"Fixed": 8},
+                    "direction": "Right",
+                    "pad_to_multiple_of": null,
+                    "pad_id": 0,
+                    "pad_type_id": 0,
+                    "pad_token": "[UNK]"
+                },
                 "added_tokens": [],
                 "normalizer": null,
                 "pre_tokenizer": {"type": "Whitespace"},
@@ -172,31 +277,30 @@ fn test_basetenkenizer_load_failure_falls_back_to_hf() {
                 "decoder": null,
                 "model": {
                     "type": "WordLevel",
-                    "vocab": {"[UNK]": 0, "hello": 1},
+                    "vocab": {"[UNK]": 0, "hello": 1, "world": 2, "again": 3},
                     "unk_token": "[UNK]"
                 }
             }"#,
         )
         .unwrap();
 
-        assert!(
-            BasetenTokenizer::from_file(tokenizer_path.to_str().unwrap()).is_err(),
-            "fixture must remain unsupported by the Baseten BPE backend"
+        let raw = HuggingFaceTokenizer::from_file(tokenizer_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            raw.encode("hello world again").unwrap().token_ids(),
+            &[1, 2, 0, 0, 0, 0, 0, 0],
+            "fixture must exercise serialized truncation and padding"
         );
 
-        let mut mdc = ModelDeploymentCard::with_name_only("baseten-fallback");
+        let mut mdc = ModelDeploymentCard::with_name_only("hf-online-normalization");
         mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
             CheckedFile::from_disk(&tokenizer_path).unwrap(),
         ));
-        mdc.runtime_config.tokenizer_backend = Some(TokenizerBackend::Basetenkenizer);
 
-        let tokenizer = mdc
-            .tokenizer()
-            .expect("unsupported Baseten tokenizer must fall back to HuggingFace");
+        let tokenizer = mdc.tokenizer().unwrap();
         assert_eq!(
-            tokenizer.encode("hello").unwrap().token_ids(),
-            &[1],
-            "fallback must remain usable"
+            tokenizer.encode("hello world again").unwrap().token_ids(),
+            &[1, 2, 3],
+            "online tokenization must not apply serialized padding or truncation"
         );
     });
 }

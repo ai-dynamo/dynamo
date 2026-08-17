@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents};
 use super::super::events::WorkerCompletionPayload;
+use super::super::evidence::{KvIngestBoundary, WorkerPool};
 use super::super::state::OfflineWorkerState;
 use crate::common::protocols::DirectRequest;
 use crate::loadgen::ReplayRequestPayload;
@@ -67,6 +68,15 @@ pub(in crate::replay) trait ReplayEngineObservation {
 
     fn stored_hashes(_events: &Self::Batch) -> Vec<u64> {
         Vec::new()
+    }
+
+    fn record_ingestion(
+        _events: &Self::Batch,
+        _pool: WorkerPool,
+        _boundary: KvIngestBoundary,
+        _at_ms: f64,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -159,7 +169,7 @@ impl<Events: EngineEventBatch> EngineEffects<Events> {
     }
 }
 
-/// Accumulated traffic statistics returned by [`TrafficAccumulator::drain`].
+/// Accumulated traffic statistics returned by `TrafficAccumulator::drain`.
 ///
 /// IMPORTANT: When fields here are added or renamed, update the PyO3
 /// binding in ``lib/bindings/python/rust/llm/replay.rs`` (drain_traffic

@@ -19,7 +19,7 @@ import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, Protocol
 from urllib.parse import parse_qsl
 
 import yaml
@@ -39,6 +39,31 @@ from dynamo.planner.plugins.registry.config import PluginRegistrationConfig
 from dynamo.planner.plugins.types import HoldPolicy
 
 logger = logging.getLogger(__name__)
+
+
+class MinimumEndpointConfig(Protocol):
+    """Configuration fields used to resolve component endpoint floors."""
+
+    min_endpoint: int
+    prefill_min_endpoint: Optional[int]
+    decode_min_endpoint: Optional[int]
+
+
+def resolve_min_endpoint(
+    config: MinimumEndpointConfig, component: Literal["prefill", "decode"]
+) -> int:
+    """Return the configured minimum for one planner role.
+
+    ``min_endpoint`` supplies a role's value when its role-specific value is
+    unset.
+    """
+
+    value = (
+        config.prefill_min_endpoint
+        if component == "prefill"
+        else config.decode_min_endpoint
+    )
+    return config.min_endpoint if value is None else value
 
 
 def _prometheus_ssl_verify_default() -> bool:
@@ -405,7 +430,42 @@ class PlannerConfig(BaseModel):
     ``min_total_gpus`` flag for cross-DGD enforcement; the two are
     orthogonal and can both be set.
     """
-    min_endpoint: int = SLAPlannerDefaults.min_endpoint
+    min_endpoint: int = Field(
+        default=SLAPlannerDefaults.min_endpoint,
+        ge=0,
+        description=(
+            "Minimum endpoints for aggregated mode. In disaggregated mode, this "
+            "value applies to both prefill and decode unless a role-specific "
+            "value is set. In prefill-only or decode-only mode, it supplies the "
+            "active role when the corresponding role-specific value is unset. "
+            "Must be nonnegative; 0 permits scale-to-zero."
+        ),
+    )
+    prefill_min_endpoint: Optional[int] = Field(
+        default=SLAPlannerDefaults.prefill_min_endpoint,
+        ge=1,
+        description=(
+            "Minimum prefill endpoints in disagg and prefill modes. When set, "
+            "replaces the prefill value supplied by min_endpoint."
+        ),
+    )
+    decode_min_endpoint: Optional[int] = Field(
+        default=SLAPlannerDefaults.decode_min_endpoint,
+        ge=1,
+        description=(
+            "Minimum decode endpoints in disagg and decode modes. When set, "
+            "replaces the decode value supplied by min_endpoint."
+        ),
+    )
+    control_api_port: int = Field(
+        default=SLAPlannerDefaults.control_api_port,
+        ge=0,
+        le=65535,
+        description=(
+            "Port for the localhost-only runtime minimum-endpoint API. "
+            "Set to 0 to disable the API."
+        ),
+    )
 
     decode_engine_num_gpu: Optional[int] = None
     prefill_engine_num_gpu: Optional[int] = None
@@ -615,6 +675,42 @@ class PlannerConfig(BaseModel):
     # Advisory mode: compute and log decisions without executing scaling
     advisory: bool = SLAPlannerDefaults.advisory
 
+    # --- Power-aware budget (read-only caps; DGD-owned) ---
+    #
+    # Per-GPU caps are NOT configured here. They are authored on each worker
+    # component's ``podTemplate.metadata.annotations``
+    # (``dynamo.nvidia.com/gpu-power-limit``), applied to Pods by the operator,
+    # and enforced by the Power Agent. The planner reads those caps from the DGD
+    # and combines them with ``total_gpu_power_limit`` to project and clamp a
+    # power budget. It never writes per-GPU caps. These inputs are
+    # process-static; changing the total budget requires a Planner restart.
+    enable_power_awareness: bool = Field(
+        default=False,
+        description=(
+            "Enable power-aware budget projection and budget-gated replica "
+            "scaling. Per-GPU caps are read from DGD worker podTemplate "
+            "annotations; this planner combines them with total_gpu_power_limit "
+            "to publish power-budget gauges and clamp scale-up. Requires "
+            "total_gpu_power_limit, environment='kubernetes', and "
+            "mode in ('disagg', 'prefill', 'decode'). Not supported for "
+            "mode='agg'."
+        ),
+    )
+    total_gpu_power_limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Total GPU power budget in watts for this DGD. Required when "
+            "enable_power_awareness=True; changing it requires a Planner "
+            "restart. Recommended formula: "
+            "(rack_capacity_W × headroom_factor) − non_gpu_overhead with "
+            "headroom_factor ≈ 0.85–0.9. Used for the power-budget gauges and "
+            "as the projected ceiling the final budget clamp holds scaling to — "
+            "a bound on projected draw from the requested caps, not a proven "
+            "hardware limit (see the Power Agent for effective enforcement)."
+        ),
+    )
+
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
         default=24.0,
@@ -646,15 +742,16 @@ class PlannerConfig(BaseModel):
         default=8080,
         description=(
             "Port for the live diagnostics dashboard HTTP server. "
-            "Set to 0 to disable. When enabled, visit http://host:port/ "
-            "to view a real-time Plotly report of accumulated snapshots."
+            "Set to 0 to disable. When enabled, visit "
+            "http://<host>:<port>/ to view a real-time Plotly report of "
+            "accumulated snapshots."
         ),
     )
 
     scheduling: SchedulingConfig = Field(
         default_factory=SchedulingConfig,
         description=(
-            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` " "docstring."
+            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` docstring."
         ),
     )
 
@@ -737,6 +834,19 @@ class PlannerConfig(BaseModel):
         if self.ttft_ms <= 0:
             raise ValueError(f"ttft_ms must be > 0, got {self.ttft_ms}")
 
+        if self.mode == "prefill" and self.decode_min_endpoint is not None:
+            raise ValueError("decode_min_endpoint is not supported when mode='prefill'")
+        if self.mode == "decode" and self.prefill_min_endpoint is not None:
+            raise ValueError("prefill_min_endpoint is not supported when mode='decode'")
+        if self.mode == "agg" and (
+            self.prefill_min_endpoint is not None
+            or self.decode_min_endpoint is not None
+        ):
+            raise ValueError(
+                "prefill_min_endpoint and decode_min_endpoint are not supported "
+                "when mode='agg'; use min_endpoint"
+            )
+
         if self.report_interval_hours is not None:
             if (
                 not math.isfinite(self.report_interval_hours)
@@ -752,6 +862,33 @@ class PlannerConfig(BaseModel):
                 f"fpm_sample_bucket_size must be a perfect square, "
                 f"got {self.fpm_sample_bucket_size}"
             )
+
+        # Power-awareness validation. Per-GPU caps come from DGD worker
+        # podTemplate annotations, not this config, so the only required knob
+        # is the total budget — and a Kubernetes connector to read the DGD.
+        if self.enable_power_awareness:
+            if self.total_gpu_power_limit is None:
+                raise ValueError(
+                    "total_gpu_power_limit is required when enable_power_awareness=True. "
+                    "Recommended: (rack_capacity_W × headroom_factor) − non_gpu_overhead "
+                    "with headroom_factor ≈ 0.85–0.9. Setting this incorrectly "
+                    "could silently cap your cluster — there is no safe default."
+                )
+            if self.environment != "kubernetes":
+                raise ValueError(
+                    "enable_power_awareness=True requires environment='kubernetes'. "
+                    "Per-GPU caps are read from DGD worker podTemplate annotations, "
+                    "which only the Kubernetes connector resolves; virtual/replay and "
+                    "global-planner modes have no DGD with authoritative caps."
+                )
+            if self.mode == "agg":
+                raise ValueError(
+                    "enable_power_awareness=True is not supported with mode='agg'. "
+                    "The Kubernetes deployment-validation and GPU-count paths use the "
+                    "typed decode role resolver, which does not follow the generic "
+                    "type:worker fallback used by the power parser. Power awareness "
+                    "is supported for mode='disagg', 'prefill', and 'decode'."
+                )
 
         if self.environment == "global-planner" and not self.global_planner_namespace:
             raise ValueError(
@@ -944,6 +1081,30 @@ class PlannerConfig(BaseModel):
 
     def scaling_enabled(self) -> bool:
         return self.enable_throughput_scaling or self.enable_load_scaling
+
+    @property
+    def effective_prefill_min_endpoint(self) -> int:
+        """Return the effective prefill endpoint minimum."""
+
+        return resolve_min_endpoint(self, "prefill")
+
+    @property
+    def effective_decode_min_endpoint(self) -> int:
+        """Return the effective decode endpoint minimum."""
+
+        return resolve_min_endpoint(self, "decode")
+
+    def active_min_endpoints(self) -> tuple[Optional[int], Optional[int]]:
+        """Return effective ``(prefill, decode)`` floors for the active mode."""
+
+        if self.mode == "prefill":
+            return self.effective_prefill_min_endpoint, None
+        if self.mode in ("decode", "agg"):
+            return None, self.effective_decode_min_endpoint
+        return (
+            self.effective_prefill_min_endpoint,
+            self.effective_decode_min_endpoint,
+        )
 
 
 if __name__ == "__main__":

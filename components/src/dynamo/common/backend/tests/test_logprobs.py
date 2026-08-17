@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the shared logprob helpers.
-
-The legacy per-backend extraction logic moved into this module; these
-tests cover the contract directly so both the unified engines and the
-legacy handlers (which now delegate here) get verified at the same time.
-"""
+"""Tests for the shared logprob helpers and active handler adapters."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Optional
 
 import pytest
 
@@ -74,6 +68,37 @@ def _logprob(lp: float, rank: int = 1, decoded: str | None = None):
 def test_extract_completion_returns_none_when_logprobs_absent():
     output = SimpleNamespace(token_ids=[1, 2], logprobs=None)
     assert extract_from_completion_output(output, 0) == (None, None)
+
+
+class _ExplodingTokenIds:
+    """Stands in for `token_ids` and fails the test if anything reads it.
+
+    Non-empty, so it survives the `or []` fallback and would reach the copy;
+    iterating it, which is what copying does, raises instead.
+    """
+
+    def __len__(self) -> int:
+        return 2
+
+    def __iter__(self):
+        raise AssertionError("token_ids copied though no logprobs were requested")
+
+
+def test_extract_completion_skips_token_ids_when_logprobs_empty():
+    """When no logprobs were requested, return without ever reading `token_ids`.
+
+    TRT-LLM leaves `logprobs` at its `[]` default whenever the client did not ask
+    for logprobs. That is falsy but not None, so the early return has to test
+    truthiness for this case to fire at all.
+
+    Asserting only the return value would not catch a regression, because the
+    older `is None` check returned `(None, None)` too -- it just copied
+    `token_ids` on the way. `token_ids` holds every token the request has emitted
+    so far, so that copy grows as the request runs and is then thrown away.
+    Hence a `token_ids` that raises if anything touches it.
+    """
+    output = SimpleNamespace(token_ids=_ExplodingTokenIds(), logprobs=[])
+    assert extract_from_completion_output(output, 1) == (None, None)
 
 
 def test_extract_completion_returns_none_past_end_of_tokens():
@@ -199,6 +224,11 @@ def test_prompt_logprobs_completion_returns_none_when_absent():
     assert extract_prompt_logprobs_from_completion_output(output) is None
 
 
+def test_prompt_logprobs_completion_returns_none_when_empty():
+    output = SimpleNamespace(prompt_logprobs=[])
+    assert extract_prompt_logprobs_from_completion_output(output) is None
+
+
 def test_prompt_logprobs_completion_preserves_none_bos_position():
     # vLLM emits `None` at index 0 (no logprob for the very first token).
     output = SimpleNamespace(
@@ -255,28 +285,39 @@ def test_prompt_logprobs_sglang_returns_none_when_absent():
     )
 
 
-def test_prompt_logprobs_sglang_prepends_none_for_bos():
-    # SGLang's `input_token_logprobs` starts at prompt position 1; we
-    # add `None` at index 0 to align with the Rust PromptLogprobs
-    # invariant (BOS has no logprob).
+def test_prompt_logprobs_sglang_preserves_engine_bos_none():
+    # Current SGLang versions include the BOS position as a tuple with a null
+    # logprob, and align input_top_logprobs to that same position.
     meta = {
         "input_token_logprobs": [
+            (None, 6, None),
             (-0.5, 7, "a"),
-            (-0.6, 8, "b"),
-        ]
+        ],
+        "input_top_logprobs": [
+            None,
+            [(-0.5, 7, "a"), (-1.5, 70, "A")],
+        ],
     }
     payload = extract_prompt_logprobs_from_sglang_meta(meta)
     assert payload == [
         None,
-        {"7": {"logprob": -0.5, "decoded_token": "a"}},
-        {"8": {"logprob": -0.6, "decoded_token": "b"}},
+        {
+            "7": {"logprob": -0.5, "decoded_token": "a"},
+            "70": {"logprob": -1.5, "decoded_token": "A"},
+        },
     ]
 
 
 def test_prompt_logprobs_sglang_merges_input_top_logprobs():
     meta = {
-        "input_token_logprobs": [(-0.5, 7, "a")],
-        "input_top_logprobs": [[(-0.5, 7, "a"), (-1.5, 70, "A")]],
+        "input_token_logprobs": [
+            (None, 6, None),
+            (-0.5, 7, "a"),
+        ],
+        "input_top_logprobs": [
+            None,
+            [(-0.5, 7, "a"), (-1.5, 70, "A")],
+        ],
     }
     payload = extract_prompt_logprobs_from_sglang_meta(meta)
     assert payload[1] == {
@@ -286,7 +327,12 @@ def test_prompt_logprobs_sglang_merges_input_top_logprobs():
 
 
 def test_prompt_logprobs_sglang_handles_missing_decoded_token():
-    meta = {"input_token_logprobs": [(-0.7, 9, None)]}
+    meta = {
+        "input_token_logprobs": [
+            (None, 6, None),
+            (-0.7, 9, None),
+        ]
+    }
     payload = extract_prompt_logprobs_from_sglang_meta(meta)
     assert payload[1] == {"9": {"logprob": -0.7}}
 
@@ -350,17 +396,25 @@ def test_sglang_gate_reads_env(monkeypatch):
 
 
 def test_sglang_extract_returns_none_when_meta_empty():
-    assert extract_from_sglang_meta({}, 0) == (None, None, 0)
+    assert extract_from_sglang_meta({}) == (None, None)
 
 
-def test_sglang_extract_slices_cumulative_array():
+def test_sglang_extract_supports_incremental_streaming_metadata():
+    # Current SGLang slices output logprobs to the same disjoint token chunk.
     meta = {
-        "output_token_logprobs": [(-0.1, 1, "a"), (-0.2, 2, "b"), (-0.3, 3, "c")],
+        "output_token_logprobs": [(-0.2, 2, "b")],
+        "output_top_logprobs": [[(-0.2, 2, "b"), (-1.2, 20, "B")]],
     }
-    log_probs, top_logprobs, new_total = extract_from_sglang_meta(meta, 1)
-    assert log_probs == [-0.2, -0.3]
-    assert top_logprobs is None
-    assert new_total == 3
+    log_probs, top_logprobs = extract_from_sglang_meta(
+        meta, num_output_tokens_in_chunk=1
+    )
+    assert log_probs == [-0.2]
+    assert top_logprobs == [
+        [
+            {"rank": 1, "token_id": 2, "token": "b", "logprob": -0.2},
+            {"rank": 2, "token_id": 20, "token": "B", "logprob": -1.2},
+        ]
+    ]
 
 
 def test_sglang_extract_with_top():
@@ -368,7 +422,7 @@ def test_sglang_extract_with_top():
         "output_token_logprobs": [(-0.1, 101, "a")],
         "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
     }
-    log_probs, top_logprobs, _ = extract_from_sglang_meta(meta, 0)
+    log_probs, top_logprobs = extract_from_sglang_meta(meta)
     assert log_probs == [-0.1]
     assert top_logprobs == [
         [
@@ -383,9 +437,7 @@ def test_sglang_extract_return_tokens_as_token_ids():
         "output_token_logprobs": [(-0.1, 101, "a")],
         "output_top_logprobs": [[(-0.1, 101, "a")]],
     }
-    _, top_logprobs, _ = extract_from_sglang_meta(
-        meta, 0, return_tokens_as_token_ids=True
-    )
+    _, top_logprobs = extract_from_sglang_meta(meta, return_tokens_as_token_ids=True)
     assert top_logprobs[0][0]["token"] == "token_id:101"
 
 
@@ -397,274 +449,25 @@ def test_sglang_extract_none_top_position_becomes_empty_list():
         "output_token_logprobs": [(-0.1, 101, "a"), (-0.2, 102, "b")],
         "output_top_logprobs": [None, [(-0.2, 102, "b")]],
     }
-    _, top_logprobs, _ = extract_from_sglang_meta(meta, 0)
+    _, top_logprobs = extract_from_sglang_meta(meta)
     assert top_logprobs == [
         [],
         [{"rank": 1, "token_id": 102, "token": "b", "logprob": -0.2}],
     ]
 
 
-def test_sglang_extract_returns_offset_unchanged_when_no_new_entries():
-    meta = {"output_token_logprobs": [(-0.1, 1, "a")]}
-    _, _, new_total = extract_from_sglang_meta(meta, 1)
-    assert new_total == 1
+def test_sglang_extract_clamps_metadata_to_output_chunk():
+    meta = {
+        "output_token_logprobs": [(-0.1, 1, "a"), (-0.2, 2, "b")],
+    }
+    log_probs, _ = extract_from_sglang_meta(meta, num_output_tokens_in_chunk=1)
+    assert log_probs == [-0.1]
 
 
 # ---------------------------------------------------------------------------
-# Legacy ↔ unified behavioural parity corner cases.
-#
-# The legacy handlers and unified engines call the same shared helpers, so
-# the call sites should produce byte-identical output for any given input.
-# The tests below simulate each engine's wire format and confirm parity by
-# driving both call patterns side-by-side.
-# ---------------------------------------------------------------------------
-
-
-def _vllm_legacy_call(output, num_so_far, tokenizer=None):
-    """Mirror of ``BaseWorkerHandler._extract_logprobs`` — vLLM legacy.
-    `fallback_to_first_on_missing=True` matches the pre-shared-helper
-    extractor that always emitted a logprob when vLLM returned a dict."""
-    return extract_from_completion_output(
-        output,
-        num_so_far,
-        tokenizer=tokenizer,
-        fallback_to_first_on_missing=True,
-        include_bytes=True,
-    )
-
-
-def _vllm_unified_call(output, tokenizer=None):
-    """Mirror of ``VllmLLMEngine.generate``'s per-chunk extraction.
-    DELTA outputs always slice from offset 0."""
-    return extract_from_completion_output(
-        output,
-        0,
-        tokenizer=tokenizer,
-        fallback_to_first_on_missing=True,
-        include_bytes=True,
-    )
-
-
-def _trtllm_call(output, num_so_far):
-    """Mirror of both ``HandlerBase._extract_logprobs`` and
-    ``TrtllmLLMEngine.generate``'s per-chunk extraction — TRT-LLM uses
-    cumulative arrays on both call sites with the same offset."""
-    return extract_from_completion_output(
-        output,
-        num_so_far,
-        fallback_to_first_on_missing=True,
-        include_bytes=False,
-    )
-
-
-def test_parity_vllm_delta_vs_cumulative_yields_same_logprobs():
-    """vLLM's legacy path slices a *cumulative* CompletionOutput with a
-    growing offset; the unified path receives DELTA chunks and slices
-    from offset 0. For an equivalent token stream both paths must emit
-    the same flat list of logprobs."""
-    cumulative_tokens = [7, 8, 9]
-    cumulative_logprobs = [
-        {7: _logprob(-0.7, decoded="a")},
-        {8: _logprob(-0.8, decoded="b")},
-        {9: _logprob(-0.9, decoded="c")},
-    ]
-
-    legacy_flat: list[float] = []
-    for i in range(len(cumulative_tokens)):
-        output = SimpleNamespace(
-            token_ids=cumulative_tokens[: i + 1],
-            logprobs=cumulative_logprobs[: i + 1],
-        )
-        lp, _ = _vllm_legacy_call(output, i)
-        if lp:
-            legacy_flat.extend(lp)
-
-    unified_flat: list[float] = []
-    for i in range(len(cumulative_tokens)):
-        output = SimpleNamespace(
-            token_ids=[cumulative_tokens[i]],
-            logprobs=[cumulative_logprobs[i]],
-        )
-        lp, _ = _vllm_unified_call(output)
-        if lp:
-            unified_flat.extend(lp)
-
-    assert legacy_flat == unified_flat == [-0.7, -0.8, -0.9]
-
-
-def test_parity_vllm_delta_vs_cumulative_yields_same_top_logprobs():
-    """Top-logprobs are also identical across the two slicing schemes."""
-    cumulative_tokens = [7, 8]
-    cumulative_logprobs = [
-        {7: _logprob(-0.7, decoded="a"), 70: _logprob(-1.7, decoded="A")},
-        {8: _logprob(-0.8, decoded="b"), 80: _logprob(-1.8, decoded="B")},
-    ]
-
-    legacy_top: list[list[dict]] = []
-    for i in range(len(cumulative_tokens)):
-        output = SimpleNamespace(
-            token_ids=cumulative_tokens[: i + 1],
-            logprobs=cumulative_logprobs[: i + 1],
-        )
-        _, top = _vllm_legacy_call(output, i)
-        if top:
-            legacy_top.extend(top)
-
-    unified_top: list[list[dict]] = []
-    for i in range(len(cumulative_tokens)):
-        output = SimpleNamespace(
-            token_ids=[cumulative_tokens[i]],
-            logprobs=[cumulative_logprobs[i]],
-        )
-        _, top = _vllm_unified_call(output)
-        if top:
-            unified_top.extend(top)
-
-    assert legacy_top == unified_top
-    # Confirm `bytes` field is included on both paths (vLLM-specific).
-    assert legacy_top[0][0]["bytes"] == list("a".encode("utf-8"))
-
-
-def test_parity_trtllm_extraction_is_idempotent_across_call_sites():
-    """TRT-LLM's legacy `_extract_logprobs` and the unified call use the
-    same flags and same offset — confirm a representative payload
-    produces byte-identical output through both call patterns."""
-    output = SimpleNamespace(
-        token_ids=[7, 8, 9],
-        logprobs=[
-            {7: _logprob(-0.7), 70: _logprob(-1.7)},
-            {8: _logprob(-0.8)},
-            # Selected-token missing — fallback_to_first must kick in.
-            {99: _logprob(-1.9)},
-        ],
-    )
-
-    legacy_log, legacy_top = _trtllm_call(output, num_so_far=0)
-    unified_log, unified_top = _trtllm_call(output, num_so_far=0)
-
-    assert legacy_log == unified_log == [-0.7, -0.8, -1.9]
-    assert legacy_top == unified_top
-    # Confirm bytes NOT included on TRT-LLM (legacy & unified).
-    assert "bytes" not in legacy_top[0][0]
-
-
-def test_parity_sglang_per_choice_offset_tracking_multi_choice():
-    """The unified SGLang generate() tracks `num_logprobs_per_choice` —
-    a dict keyed by output_idx. Without per-choice tracking, interleaved
-    n>1 chunks would mis-slice each other's cumulative arrays. Simulate
-    interleaved chunks for choice 0 and choice 1 and confirm each
-    choice's logprobs are extracted correctly."""
-    # SGLang emits ONE cumulative array per choice. The unified engine
-    # receives chunks tagged with `index` and tracks an offset per index.
-    # Sim: choice 0 emits 3 tokens, choice 1 emits 2, interleaved.
-    choice_0_arrays = [
-        {  # after step 1
-            "output_token_logprobs": [(-0.1, 100, "a")],
-        },
-        {  # after step 2 (cumulative)
-            "output_token_logprobs": [(-0.1, 100, "a"), (-0.2, 101, "b")],
-        },
-        {  # after step 3 (cumulative)
-            "output_token_logprobs": [
-                (-0.1, 100, "a"),
-                (-0.2, 101, "b"),
-                (-0.3, 102, "c"),
-            ],
-        },
-    ]
-    choice_1_arrays = [
-        {"output_token_logprobs": [(-0.5, 200, "x")]},
-        {
-            "output_token_logprobs": [(-0.5, 200, "x"), (-0.6, 201, "y")],
-        },
-    ]
-
-    # Interleaved arrival order: c0[0], c1[0], c0[1], c1[1], c0[2].
-    arrival = [
-        (0, choice_0_arrays[0]),
-        (1, choice_1_arrays[0]),
-        (0, choice_0_arrays[1]),
-        (1, choice_1_arrays[1]),
-        (0, choice_0_arrays[2]),
-    ]
-
-    num_logprobs_per_choice: dict[int, int] = {}
-    extracted_per_choice: dict[int, list[float]] = {}
-    for idx, meta in arrival:
-        lp, _, next_total = extract_from_sglang_meta(
-            meta, num_logprobs_per_choice.get(idx, 0)
-        )
-        num_logprobs_per_choice[idx] = next_total
-        if lp:
-            extracted_per_choice.setdefault(idx, []).extend(lp)
-
-    assert extracted_per_choice[0] == [-0.1, -0.2, -0.3]
-    assert extracted_per_choice[1] == [-0.5, -0.6]
-
-
-def test_parity_sglang_single_offset_misslices_under_n_gt_1():
-    """Negative control for the bug we fixed: a *scalar* offset (the
-    pre-fix unified behaviour) would mis-slice when chunks for two
-    different choices are interleaved on the same offset cursor. This
-    test exists so the regression is obvious if the per-choice dict
-    ever gets simplified back into a scalar."""
-    choice_0 = {"output_token_logprobs": [(-0.1, 100, "a")]}
-    choice_1 = {"output_token_logprobs": [(-0.5, 200, "x")]}
-
-    # Single scalar offset across both choices (buggy mode).
-    num_logprobs_so_far = 0
-    extracted_logprobs: list[float] = []
-    for meta in (choice_0, choice_1):
-        lp, _, num_logprobs_so_far = extract_from_sglang_meta(meta, num_logprobs_so_far)
-        if lp:
-            extracted_logprobs.extend(lp)
-
-    # The second extraction returns nothing because the scalar offset
-    # (=1 after the first chunk) skips choice 1's first entry. That's the
-    # bug — we'd lose choice 1's logprobs entirely.
-    assert extracted_logprobs == [-0.1]
-
-
-def test_parity_parse_logprob_options_consistent_across_engines():
-    """Every engine path goes through `parse_logprob_options` for the
-    options→ints normalization. Confirm the function is the single source
-    of truth — a battery of edge-case inputs returns the same parsed
-    output regardless of which engine consumes it next."""
-    cases: list[tuple[dict, tuple[Optional[int], Optional[int]]]] = [
-        ({}, (None, None)),
-        ({"logprobs": 0}, (0, None)),
-        ({"logprobs": 5}, (5, None)),
-        ({"prompt_logprobs": 3}, (None, 3)),
-        ({"logprobs": 2, "prompt_logprobs": 4}, (2, 4)),
-        ({"logprobs": ""}, (None, None)),
-        ({"logprobs": "7"}, (7, None)),  # str → int coercion
-        ({"logprobs": -1}, (None, None)),
-        ({"logprobs": "garbage"}, (None, None)),
-    ]
-    for opts, expected in cases:
-        assert parse_logprob_options(opts) == expected, opts
-
-
-def test_parity_sglang_kwargs_rejects_top_logprobs_consistently():
-    """Both legacy decode handler and unified engine call into
-    `build_sglang_logprob_kwargs` with the env-derived gate. With the
-    gate off, any `logprobs >= 1` (or `prompt_logprobs >= 1`) request
-    must raise — regardless of which call site invoked it."""
-    for opts in (
-        {"logprobs": 1},
-        {"logprobs": 5},
-        {"prompt_logprobs": 2},
-        {"logprobs": 0, "prompt_logprobs": 3},
-    ):
-        with pytest.raises(ValueError, match="does not currently support"):
-            build_sglang_logprob_kwargs(opts, allow_top_logprobs=False)
-
-
-# ---------------------------------------------------------------------------
-# Direct wrapper-vs-shared parity. These tests import the legacy static
-# methods on each engine's handler class and assert byte-identical output
-# vs a direct shared call with the same flags. They catch wrapper rot —
-# e.g. someone editing the static method to drop a flag.
+# Active handler adapters. These tests import the static methods on each
+# backend's handler class and compare them with the shared helper. They catch
+# adapter drift, such as dropping a backend-specific flag.
 #
 # `pytest.importorskip` skips when the engine package isn't installed
 # (developer machines without vllm/sglang/trtllm). CI envs with the
@@ -673,7 +476,7 @@ def test_parity_sglang_kwargs_rejects_top_logprobs_consistently():
 
 
 @pytest.mark.vllm
-def test_parity_vllm_legacy_wrapper_matches_shared():
+def test_vllm_handler_matches_shared():
     # `exc_type=ImportError` also skips on missing native deps (libcuda)
     # on CPU-only lanes where the wheel is installed but no GPU runtime.
     pytest.importorskip("vllm", reason="vLLM not installed", exc_type=ImportError)
@@ -696,7 +499,7 @@ def test_parity_vllm_legacy_wrapper_matches_shared():
 
 
 @pytest.mark.trtllm
-def test_parity_trtllm_legacy_wrapper_matches_shared():
+def test_trtllm_handler_matches_shared():
     pytest.importorskip(
         "tensorrt_llm", reason="TRT-LLM not installed", exc_type=ImportError
     )
@@ -720,7 +523,7 @@ def test_parity_trtllm_legacy_wrapper_matches_shared():
 
 
 @pytest.mark.sglang
-def test_parity_sglang_legacy_extract_wrapper_matches_shared():
+def test_sglang_extract_handler_matches_shared():
     pytest.importorskip("sglang", reason="SGLang not installed", exc_type=ImportError)
     from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
@@ -732,13 +535,13 @@ def test_parity_sglang_legacy_extract_wrapper_matches_shared():
         ],
     }
 
-    wrapper = DecodeWorkerHandler._extract_logprobs(meta, 0)
-    direct = extract_from_sglang_meta(meta, 0)
+    wrapper = DecodeWorkerHandler._extract_logprobs(meta)
+    direct = extract_from_sglang_meta(meta)
     assert wrapper == direct
 
 
 @pytest.mark.sglang
-def test_parity_sglang_legacy_kwargs_wrapper_matches_shared(monkeypatch):
+def test_sglang_kwargs_handler_matches_shared(monkeypatch):
     pytest.importorskip("sglang", reason="SGLang not installed", exc_type=ImportError)
     from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
@@ -751,202 +554,3 @@ def test_parity_sglang_legacy_kwargs_wrapper_matches_shared(monkeypatch):
         request["output_options"], allow_top_logprobs=False
     )
     assert wrapper_kwargs == direct_kwargs
-
-
-# ---------------------------------------------------------------------------
-# Whole-stream parity. Drive a simulated multi-chunk generation through both
-# paths and confirm not just the per-chunk logprobs, but the byte-identical
-# top-logprob dict shape (rank/token_id/token/logprob/bytes) lines up.
-# ---------------------------------------------------------------------------
-
-
-def test_parity_vllm_full_stream_byte_identical_top_logprobs():
-    """Whole-stream parity: a 4-token generation with non-trivial top-k
-    alternatives must emit byte-identical top_logprobs through both
-    legacy cumulative+offset and unified DELTA+0 paths."""
-    cumulative_tokens = [10, 20, 30, 40]
-    # Each position has 3 alternatives — selected first, then two off-pol.
-    cumulative_logprobs = [
-        {
-            10: _logprob(-0.1, rank=1, decoded="ten"),
-            11: _logprob(-1.1, rank=2, decoded="11"),
-            12: _logprob(-2.1, rank=3, decoded="12"),
-        },
-        {
-            20: _logprob(-0.2, rank=1, decoded="twenty"),
-            21: _logprob(-1.2, rank=2, decoded="21"),
-        },
-        {
-            30: _logprob(-0.3, rank=1, decoded="thirty"),
-            31: _logprob(-1.3, rank=2, decoded="31"),
-            32: _logprob(-2.3, rank=3, decoded="32"),
-            33: _logprob(-3.3, rank=4, decoded="33"),
-        },
-        {
-            40: _logprob(-0.4, rank=1, decoded="forty"),
-        },
-    ]
-
-    def _run_legacy() -> list[list[dict]]:
-        # Legacy: receives the cumulative array each step, slices by offset.
-        flat: list[list[dict]] = []
-        for i in range(len(cumulative_tokens)):
-            output = SimpleNamespace(
-                token_ids=cumulative_tokens[: i + 1],
-                logprobs=cumulative_logprobs[: i + 1],
-            )
-            _, top = _vllm_legacy_call(output, i)
-            if top:
-                flat.extend(top)
-        return flat
-
-    def _run_unified() -> list[list[dict]]:
-        # Unified: receives the DELTA chunk each step, offset always 0.
-        flat: list[list[dict]] = []
-        for i in range(len(cumulative_tokens)):
-            output = SimpleNamespace(
-                token_ids=[cumulative_tokens[i]],
-                logprobs=[cumulative_logprobs[i]],
-            )
-            _, top = _vllm_unified_call(output)
-            if top:
-                flat.extend(top)
-        return flat
-
-    legacy = _run_legacy()
-    unified = _run_unified()
-
-    # Byte-identical comparison on the full structure: rank, token_id,
-    # token, logprob, bytes are all included.
-    assert legacy == unified
-    assert len(legacy) == 4
-    # Spot-check a representative entry.
-    assert legacy[2] == [
-        {
-            "rank": 1,
-            "token_id": 30,
-            "token": "thirty",
-            "logprob": -0.3,
-            "bytes": list("thirty".encode("utf-8")),
-        },
-        {
-            "rank": 2,
-            "token_id": 31,
-            "token": "31",
-            "logprob": -1.3,
-            "bytes": list("31".encode("utf-8")),
-        },
-        {
-            "rank": 3,
-            "token_id": 32,
-            "token": "32",
-            "logprob": -2.3,
-            "bytes": list("32".encode("utf-8")),
-        },
-        {
-            "rank": 4,
-            "token_id": 33,
-            "token": "33",
-            "logprob": -3.3,
-            "bytes": list("33".encode("utf-8")),
-        },
-    ]
-
-
-def test_parity_vllm_with_none_position_mid_stream():
-    """If the engine emits None for a mid-stream position (no logprobs
-    sampled at that slot), both paths must skip the position consistently
-    without misaligning subsequent entries."""
-    cumulative_tokens = [10, 20, 30]
-    cumulative_logprobs = [
-        {10: _logprob(-0.1, decoded="a")},
-        None,  # engine emitted no logprobs for position 1
-        {30: _logprob(-0.3, decoded="c")},
-    ]
-
-    legacy: list[float] = []
-    for i in range(len(cumulative_tokens)):
-        output = SimpleNamespace(
-            token_ids=cumulative_tokens[: i + 1],
-            logprobs=cumulative_logprobs[: i + 1],
-        )
-        lp, _ = _vllm_legacy_call(output, i)
-        if lp:
-            legacy.extend(lp)
-
-    unified: list[float] = []
-    for i in range(len(cumulative_tokens)):
-        output = SimpleNamespace(
-            token_ids=[cumulative_tokens[i]],
-            logprobs=[cumulative_logprobs[i]],
-        )
-        lp, _ = _vllm_unified_call(output)
-        if lp:
-            unified.extend(lp)
-
-    # Both skip the None position (one fewer entry than tokens emitted).
-    assert legacy == unified == [-0.1, -0.3]
-
-
-def test_parity_trtllm_selected_token_missing_fallback_consistent():
-    """TRT-LLM fallback: when the engine doesn't include the selected
-    token in the logprob dict, both legacy and unified fall back to the
-    first dict entry. Confirm the fallback is consistent across a
-    multi-position stream where SOME positions hit the fallback."""
-    output = SimpleNamespace(
-        token_ids=[100, 200, 300],
-        logprobs=[
-            # Position 0: selected present, normal path.
-            {100: _logprob(-0.5), 101: _logprob(-1.5)},
-            # Position 1: selected missing, fallback to first.
-            {201: _logprob(-2.5), 202: _logprob(-3.5)},
-            # Position 2: selected present again.
-            {300: _logprob(-0.7), 301: _logprob(-1.7)},
-        ],
-    )
-
-    log_probs, top_logprobs = _trtllm_call(output, num_so_far=0)
-    # Position 1 falls back to first dict entry = 201 (-2.5).
-    assert log_probs == [-0.5, -2.5, -0.7]
-    assert top_logprobs is not None
-    # Top remains the full dict at each position — fallback doesn't
-    # change the top list itself.
-    assert [len(p) for p in top_logprobs] == [2, 2, 2]
-
-
-def test_parity_sglang_cumulative_two_chunks_yields_full_stream():
-    """SGLang receives cumulative arrays. After two chunks (3 tokens
-    total), the running extracted-logprobs list matches the engine's
-    final state — proving the offset advances correctly."""
-    chunk_1_meta = {
-        "output_token_logprobs": [(-0.1, 100, "a")],
-        "output_top_logprobs": [[(-0.1, 100, "a"), (-0.5, 105, "x")]],
-    }
-    chunk_2_meta = {
-        "output_token_logprobs": [
-            (-0.1, 100, "a"),
-            (-0.2, 200, "b"),
-            (-0.3, 300, "c"),
-        ],
-        "output_top_logprobs": [
-            [(-0.1, 100, "a"), (-0.5, 105, "x")],
-            [(-0.2, 200, "b"), (-0.6, 205, "y")],
-            [(-0.3, 300, "c")],
-        ],
-    }
-
-    extracted_lp: list[float] = []
-    extracted_top: list[list[dict]] = []
-    offset = 0
-    for meta in (chunk_1_meta, chunk_2_meta):
-        lp, top, offset = extract_from_sglang_meta(meta, offset)
-        if lp:
-            extracted_lp.extend(lp)
-        if top:
-            extracted_top.extend(top)
-
-    assert extracted_lp == [-0.1, -0.2, -0.3]
-    assert [pos[0]["token_id"] for pos in extracted_top] == [100, 200, 300]
-    # First chunk: 1 entry; second chunk: 2 new entries. Total 3.
-    assert len(extracted_top) == 3
-    assert offset == 3

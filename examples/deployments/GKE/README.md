@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Dynamo on Google GKE
 
 Supported manifests for the GKE deployment guide.
@@ -8,8 +13,8 @@ Supported manifests for the GKE deployment guide.
 
 | Path | Description |
 |------|-------------|
-| `vllm/` | vLLM DGD manifests (v1alpha1 and `v1beta1/`) |
-| `sglang/` | SGLang DGD manifests (v1alpha1 and `v1beta1/`) |
+| `vllm/` | vLLM `v1beta1` DGD manifests |
+| `sglang/` | SGLang `v1beta1` DGD manifests |
 
 ## Working Directory
 

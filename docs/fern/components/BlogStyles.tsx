@@ -672,25 +672,12 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] > svg {
   color: #0b1400;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner {
-  display: flex;
-  flex-direction: column;
-  gap: 0.28rem;
-  font-size: 1rem;
-  font-weight: 750;
-  letter-spacing: -0.015em;
-}
+/* The stacked title-and-kicker treatment, and the "2026 · ENGINEERING STORIES"
+   label under it, belonged to the tile. The entry is a plain sidebar link now,
+   and the label had also gone stale — the section it sits on is "Dynamo blogs",
+   which is not year-scoped.
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner::after,
-body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner::after {
-  content: "2026  ·  ENGINEERING STORIES";
-  color: var(--dynamo-blog-muted);
-  font-size: 0.58rem;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  line-height: 1.2;
-}
+   The type is levelled further down, where the entry's own font rule lives. */
 
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1,
 body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 {
@@ -891,15 +878,20 @@ article:has(.dynamo-blog-article) img.dynamo-blog-image-reveal[data-revealed="tr
   }
 }
 
-/* The landing page is a normal nav entry; the archive year supplies hierarchy. */
+/* The /digest entry is a normal nav link, and now a peer of the "External
+   publications" page entry directly above it in the Blog tab. The inset margin
+   and min-height left over from its days as the bespoke "Latest" tile put the
+   two at different indents and different heights, so both go: it takes the
+   ordinary top-level sidebar box, like its neighbour. Padding and radius are
+   already settled by main.css, which declares them !important.
+
+   No backticks in this block: it sits inside the BLOG_CSS template literal, so
+   one would close the string and hand the rest of the file to the JS parser. */
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"],
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] {
-  min-height: 2.8rem;
   align-items: center;
-  margin: 0.2rem 0.35rem 0.65rem;
-  padding: 0.62rem 0.75rem;
+  margin: 0.18rem 0;
   border: 0;
-  border-radius: 10px;
   background: transparent;
   box-shadow: none;
   backdrop-filter: none;
@@ -918,8 +910,16 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] > svg {
   display: none;
 }
 
+/* "Dynamo blogs" is a section and the other two are pages, and Fern weights
+   section headers more heavily. All three sit side by side at the top of this
+   tab as siblings, so they take the same type rather than reading as two
+   different ranks. */
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner {
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/external-publications"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/external-publications"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/research-publications"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/research-publications"] .fern-sidebar-link-title-inner {
   display: block;
   font-size: 0.8rem;
   font-weight: 720;

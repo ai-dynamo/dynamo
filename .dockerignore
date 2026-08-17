@@ -79,6 +79,7 @@ htmlcov/
 
 # Docs
 docs/_build/
+aisimulate/docs/
 
 # AI
 .cursor/

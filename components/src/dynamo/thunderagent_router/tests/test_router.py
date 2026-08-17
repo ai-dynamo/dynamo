@@ -20,12 +20,18 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 @dataclass
 class FakeCapacity:
-    """Stand-in for WorkerCapacityProvider that returns a fixed snapshot."""
+    """Stand-in for WorkerCapacityProvider with configurable worker state."""
 
     workers: dict[int, int] = field(default_factory=dict)
+    live_workers: Optional[set[int]] = None
 
     def snapshot(self) -> dict[int, int]:
         return dict(self.workers)
+
+    def live_worker_ids(self) -> set[int]:
+        if self.live_workers is not None:
+            return set(self.live_workers)
+        return set(self.workers)
 
 
 def make_router(
@@ -61,6 +67,58 @@ async def test_after_request_records_real_tokens():
 
 
 @pytest.mark.asyncio
+async def test_status_snapshot_reports_programs_and_worker_utilization():
+    workers = {
+        1: 1000,
+        2: 500,
+    }
+    router, _ = make_router(capacity_workers=workers)
+
+    await router.before_request("p1", estimated_prompt_tokens=100)
+    await router.after_request("p1", prompt_tokens=100, completion_tokens=25)
+    await router.before_request("p2", estimated_prompt_tokens=50)
+
+    snapshot = await router.status_snapshot()
+
+    assert snapshot["programs_total"] == 2
+    assert snapshot["paused_total"] == 0
+    assert snapshot["lifecycle_counts"]["active"] == 2
+    assert snapshot["status_counts"]["acting"] == 1
+    assert snapshot["status_counts"]["reasoning"] == 1
+    assert snapshot["workers"]["1"]["capacity"] == 1000
+    assert snapshot["workers"]["1"]["used"] == 225
+    assert snapshot["workers"]["1"]["active_programs"] == 1
+    assert {
+        (program["program_id"], program["assigned_worker_id"])
+        for program in snapshot["programs"]
+    } == {("p1", 1), ("p2", 2)}
+
+
+@pytest.mark.asyncio
+async def test_metrics_snapshot_reports_lifecycle_counters_and_gauges():
+    router, _ = make_router(capacity_workers={1: 1000})
+
+    await router.before_request("p1", estimated_prompt_tokens=100)
+    await router.after_request("p1", prompt_tokens=100, completion_tokens=20)
+    assert await router.end_program("p1") is True
+
+    async def fail_status_snapshot() -> dict:
+        raise AssertionError("metrics_snapshot must not build detailed status rows")
+
+    router.status_snapshot = fail_status_snapshot  # type: ignore[method-assign]
+
+    metrics = await router.metrics_snapshot()
+
+    assert metrics["counters"]["programs_created_total"] == 1
+    assert metrics["counters"]["programs_ended_total"] == 1
+    assert metrics["counters"]["requests_admitted_total"] == 1
+    assert metrics["counters"]["worker_assignments_total"] == 1
+    assert metrics["gauges"]["programs_total"] == 0
+    assert metrics["gauges"]["paused_total"] == 0
+    assert metrics["gauges"]["workers_total"] == 1
+
+
+@pytest.mark.asyncio
 async def test_before_request_records_exact_prompt_estimate_before_admission():
     router, _ = make_router()
     await router.before_request("p1", estimated_prompt_tokens=1234)
@@ -76,6 +134,50 @@ async def test_assigned_worker_hint_reflects_sticky_assignment():
     await router.assign_worker("p1", 3)
     decision = await router.before_request("p1", estimated_prompt_tokens=100)
     assert decision.assigned_worker_hint == 3
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_assignment_moves_to_replacement():
+    router, capacity = make_router(capacity_workers={1: 1000})
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.workers = {}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.workers = {2: 1000}
+    capacity.live_workers = {1, 2}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.live_workers = {2}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 2
+    assert router._stat_worker_assignments == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_replacement_bypasses_new_program_fairness_gate():
+    router, capacity = make_router(capacity_workers={1: 300})
+    decision = await router.before_request("active", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    waiter = asyncio.create_task(
+        router.before_request("waiting", estimated_prompt_tokens=100)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+    assert router._table.programs["waiting"].lifecycle == ProgramLifecycle.PAUSED
+
+    capacity.workers = {2: 1000}
+    capacity.live_workers = {2}
+    decision = await router.before_request("active", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 2
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
 
 
 @pytest.mark.asyncio
@@ -103,6 +205,8 @@ async def test_pause_acting_then_before_request_blocks_until_resume():
     assert decision.was_paused is True
     assert decision.priority_jump == cfg.resume_priority_boost
     assert decision.assigned_worker_hint == 1
+    metrics = await router.metrics_snapshot()
+    assert metrics["counters"]["worker_assignments_total"] == 2
 
 
 @pytest.mark.asyncio

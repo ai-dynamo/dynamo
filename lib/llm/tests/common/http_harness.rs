@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_llm::http::service::service_v2::HttpService;
+use dynamo_llm::http::service::{Metrics, service_v2::HttpService};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::codec::create_message_stream;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
@@ -36,6 +36,8 @@ pub struct HarnessService {
     pub base_url: String,
     pub client: reqwest::Client,
     pub engine: Arc<ScriptedChatEngine>,
+    #[allow(dead_code)]
+    pub metrics: Arc<Metrics>,
     cancel: CancellationToken,
     join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
@@ -68,6 +70,7 @@ impl HarnessService {
             .expect("failed to build harness HTTP service");
 
         let card = ModelDeploymentCard::with_name_only(MODEL);
+        let metrics = service.state_clone().metrics_clone();
         service
             .model_manager()
             .add_chat_completions_model(MODEL, card.mdcsum(), engine.clone())
@@ -82,6 +85,7 @@ impl HarnessService {
             base_url,
             client,
             engine,
+            metrics,
             cancel,
             join: Some(join),
         }
@@ -297,7 +301,7 @@ fn canonicalize_in_place(
 }
 
 fn is_service_generated_object_id(id: &str) -> bool {
-    ["msg_", "resp_", "fc_", "req_"]
+    ["msg_", "resp_", "fc_", "req_", "toolu_"]
         .iter()
         .any(|prefix| id.starts_with(prefix))
 }

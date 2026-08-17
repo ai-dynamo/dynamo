@@ -103,6 +103,7 @@ class PipelineOutcome:
     propose_outcome: Optional[MergeOutcome] = None
     reconcile_outcome: Optional[MergeOutcome] = None
     constrain_outcome: Optional[MergeOutcome] = None
+    proposed_components: frozenset[ComponentKey] = field(default_factory=frozenset)
     audit_events: list[str] = field(default_factory=list)
 
 
@@ -241,6 +242,24 @@ def _proposal_to_baseline(
         key = ComponentKey(sub_component_type=t.sub_component_type)
         out[key] = t.replicas
     return out
+
+
+def _proposed_component_mask(
+    plugin_results: list[PluginResult],
+) -> frozenset[ComponentKey]:
+    """Return components explicitly targeted by PROPOSE-stage overrides.
+
+    Merge baselines deliberately fill omitted components with current replica
+    counts. Preserve the original target set before that happens so downstream
+    projection never has to infer provenance from target values.
+    """
+    return frozenset(
+        ComponentKey(sub_component_type=target.sub_component_type)
+        for plugin_result in plugin_results
+        if isinstance(plugin_result.result, OverrideResult)
+        for target in plugin_result.result.targets
+        if target.replicas is not None
+    )
 
 
 def _stage_request(
@@ -783,6 +802,7 @@ async def run_pipeline(
             clock=clock,
             metrics=metrics,
         )
+        proposed_components = _proposed_component_mask(propose_plugin_results)
         if propose.short_circuited:
             return PipelineOutcome(
                 execute_action="skip_short_circuit",
@@ -790,6 +810,7 @@ async def run_pipeline(
                 short_circuit_reason=propose.short_circuit_reason,
                 predict_outcome=ca,
                 propose_outcome=propose,
+                proposed_components=proposed_components,
                 audit_events=audit,
             )
         if propose.proposal is not None:
@@ -822,6 +843,7 @@ async def run_pipeline(
                 predict_outcome=ca,
                 propose_outcome=propose,
                 reconcile_outcome=reconcile,
+                proposed_components=proposed_components,
                 audit_events=audit,
             )
         if reconcile.proposal is not None:
@@ -852,6 +874,7 @@ async def run_pipeline(
                 propose_outcome=propose,
                 reconcile_outcome=reconcile,
                 constrain_outcome=constrain,
+                proposed_components=proposed_components,
                 audit_events=audit,
             )
 
@@ -868,6 +891,7 @@ async def run_pipeline(
                 propose_outcome=propose,
                 reconcile_outcome=reconcile,
                 constrain_outcome=constrain,
+                proposed_components=proposed_components,
                 audit_events=audit,
             )
 
@@ -878,6 +902,7 @@ async def run_pipeline(
             propose_outcome=propose,
             reconcile_outcome=reconcile,
             constrain_outcome=constrain,
+            proposed_components=proposed_components,
             audit_events=audit,
         )
 

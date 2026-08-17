@@ -158,6 +158,92 @@ def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
     assert adapter._engine._orchestrator.get_regression("agg") is not None
 
 
+def test_summary_only_planner_details_preserve_tick_count():
+    class _Recorder:
+        def finalize(self):
+            raise AssertionError("summary-only replay must not finalize diagnostics")
+
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._capture_details = False
+    adapter._recorder = _Recorder()
+    adapter._config = PlannerConfig(mode="agg")
+    adapter._benchmark_granularity = 8
+    adapter._bootstrap_metadata = {"status": "not_required"}
+    adapter._ticks = [{"large": "tick payload"}]
+    adapter._scaling_events = []
+    adapter._total_ticks = 4
+
+    details = adapter.finalize([{"large": "lifecycle payload"}])
+
+    assert details.total_ticks == 4
+    assert details.ticks == []
+    assert details.lifecycle_operations == []
+    assert details.metadata["details_captured"] is False
+
+
+def test_planner_metadata_identifies_custom_plugins_without_secrets():
+    config = PlannerConfig(
+        mode="agg",
+        plugin_registration={
+            "in_process_plugins": [
+                {
+                    "module": "custom.plugins",
+                    "class": "Predictor",
+                    "plugin_id": "custom_predict",
+                    "plugin_type": "predict",
+                    "priority": 5,
+                    "kwargs": {"window": 4},
+                }
+            ]
+        },
+        scheduling={
+            "external_plugins": [
+                {
+                    "plugin_id": "external_propose",
+                    "plugin_type": "propose",
+                    "priority": 10,
+                    "endpoint": "grpc://planner-plugin:9000",
+                    "auth_token": "secret",
+                    "version": "v2",
+                }
+            ]
+        },
+    )
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._config = config
+    adapter._benchmark_granularity = 8
+    adapter._bootstrap_metadata = {"status": "not_required"}
+    adapter._capture_details = True
+
+    metadata = adapter._planner_metadata()
+    identities = metadata["configured_plugin_identities"]
+
+    assert [identity["plugin_id"] for identity in identities] == [
+        "custom_predict",
+        "external_propose",
+    ]
+    serialized = str(identities)
+    assert "secret" not in serialized
+    assert "grpc://planner-plugin:9000" not in serialized
+
+    changed_port_config = config.model_copy(
+        update={"control_api_port": config.control_api_port + 1}
+    )
+    adapter._config = changed_port_config
+    assert (
+        adapter._planner_metadata()["planner_config_digest"]
+        == metadata["planner_config_digest"]
+    )
+
+    changed_config = config.model_copy(deep=True)
+    changed_config.plugin_registration.in_process_plugins[0].kwargs["window"] = 8
+    adapter._config = changed_config
+    assert (
+        adapter._planner_metadata()["planner_config_digest"]
+        != metadata["planner_config_digest"]
+    )
+
+
 def test_build_tick_input_maps_replay_accept_length():
     # The Rust simulation drains the per-tick traffic window into
     # ``result["traffic"]``; a need_traffic_metrics tick maps it onto

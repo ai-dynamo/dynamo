@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -98,7 +98,7 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 
 	return &DynamoGraphDeploymentReconciler{
 		Client:        builder.Build(),
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &commonController.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
@@ -250,6 +250,63 @@ func TestShouldTriggerRollingUpdate_IgnoresReplicaChanges(t *testing.T) {
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
 	require.NoError(t, err)
 	assert.False(t, trigger)
+}
+
+func TestShouldTriggerRollingUpdate_UsesResolvedRuntimeVersion(t *testing.T) {
+	t.Log("define rollout decisions from current and desired runtime versions")
+	tests := []struct {
+		name            string
+		image           string
+		currentOverride string
+		desiredOverride string
+		wantTrigger     bool
+	}{
+		{
+			name:            "triggers when the resolved override changes",
+			image:           "registry.example/dynamo:custom",
+			currentOverride: "1.5.0",
+			desiredOverride: "1.5.1",
+			wantTrigger:     true,
+		},
+		{
+			name:            "does not trigger for an equivalent image-derived override",
+			image:           "registry.example/dynamo:1.5.0",
+			desiredOverride: "1.5.0",
+			wantTrigger:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("create a worker DGD at the current runtime version")
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: consts.ComponentTypeWorker},
+			})
+			dgd.Spec.Components[0].RuntimeVersionOverride = tt.currentOverride
+			dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  consts.MainContainerName,
+						Image: tt.image,
+					}},
+				},
+			}
+
+			t.Log("record the current v2 worker hash")
+			dgd.Annotations = map[string]string{
+				consts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+			}
+
+			t.Log("apply the desired runtime override")
+			dgd.Spec.Components[0].RuntimeVersionOverride = tt.desiredOverride
+
+			t.Log("evaluate whether the desired runtime requires rollout")
+			r := createTestReconcilerWithStatus(dgd)
+			trigger, err := r.shouldTriggerRollingUpdate(dgd)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantTrigger, trigger)
+		})
+	}
 }
 
 func TestCanonicalWorkerHashLifecycle_FirstDeploySpecChangeAndCompletion(t *testing.T) {

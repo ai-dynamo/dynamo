@@ -294,6 +294,7 @@ mod tests {
                 token_id: None,
                 completed: true,
                 rejected: false,
+                cached_tokens: None,
                 handoff_delay_ms: None,
             }],
             lifecycle_events: Vec::new(),

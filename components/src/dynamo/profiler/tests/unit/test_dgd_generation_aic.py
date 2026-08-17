@@ -15,6 +15,7 @@ try:
     from dynamo.profiler.utils.dgd_generation import (
         _build_planner_config,
         _inject_mocker_aic_args,
+        _load_latest_database_version,
         build_aic_interpolation_spec,
         build_aic_perf_model_spec,
         enable_vllm_benchmark_mode,
@@ -34,6 +35,39 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
+    def raise_missing_root(_):
+        raise ModuleNotFoundError(name="aiconfigurator_core")
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.dgd_generation.importlib.import_module",
+        raise_missing_root,
+    )
+
+    assert _load_latest_database_version() is None
+
+
+@pytest.mark.parametrize(
+    "missing_module",
+    ["aiconfigurator_core.sdk.operations.attention", "unrelated_dependency"],
+)
+def test_aic_import_propagates_internal_or_unrelated_missing_module(
+    monkeypatch, missing_module
+):
+    def raise_missing_dependency(_):
+        raise ModuleNotFoundError(name=missing_module)
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.dgd_generation.importlib.import_module",
+        raise_missing_dependency,
+    )
+
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        _load_latest_database_version()
+
+    assert exc_info.value.name == missing_module
 
 
 def _dgdr(
@@ -276,18 +310,21 @@ class TestInjectMockerAicArgs:
         assert out[out.index("--aic-attention-dp-size") + 1] == "8"
         # trtllm is not a mocker engine_type; leave --engine-type alone.
         assert "--engine-type" not in out
+        assert out[out.index("--aic-backend-version") + 1] == "1.3.0rc10"
 
     def test_matches_engine_type_for_vllm(self):
         spec = self._spec("vllm")
         out = _inject_mocker_aic_args([], spec, spec.prefill_pick)
         assert out[out.index("--engine-type") + 1] == "vllm"
         assert out[out.index("--aic-backend") + 1] == "vllm"
+        assert out[out.index("--aic-backend-version") + 1] == "0.14.0"
 
     def test_matches_engine_type_for_sglang(self):
         spec = self._spec("sglang")
         out = _inject_mocker_aic_args([], spec, spec.decode_pick)
         assert out[out.index("--engine-type") + 1] == "sglang"
         assert out[out.index("--aic-backend") + 1] == "sglang"
+        assert out[out.index("--aic-backend-version") + 1] == "0.5.6.post2"
 
 
 class TestBuildPlannerConfigEmbedsAicSpec:
@@ -331,7 +368,17 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.prefill_engine_num_gpu == 8
         assert cfg.decode_engine_num_gpu == 8
 
-    def test_aic_perf_model_threads_into_planner_config(self):
+    def test_aic_perf_model_threads_into_planner_config(self, monkeypatch):
+        resolved_versions = []
+
+        def resolve_backend_version(*, system, backend):
+            resolved_versions.append((system, backend))
+            return "0.24.0"
+
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            resolve_backend_version,
+        )
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -360,8 +407,57 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.aic_perf_model.hf_id == dgdr.model
         assert cfg.aic_perf_model.system == "h200_sxm"
         assert cfg.aic_perf_model.backend == "vllm"
+        assert cfg.aic_perf_model.backend_version == "0.24.0"
         assert cfg.aic_perf_model.prefill_pick == prefill_pick
         assert cfg.aic_perf_model.decode_pick == decode_pick
+        assert resolved_versions == [("h200_sxm", "vllm")]
+
+    def test_aic_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            lambda **_: None,
+        )
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+        )
+        dgdr = _dgdr(planner=planner)
+
+        spec = build_aic_perf_model_spec(
+            dgdr,
+            best_prefill_pick=PickedParallelConfig(tp=1),
+            best_decode_pick=PickedParallelConfig(tp=2),
+            resolved_backend="vllm",
+            system="unknown_system",
+        )
+
+        assert spec is None
+
+    def test_aic_perf_model_falls_back_when_sdk_is_unavailable(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            None,
+        )
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+        )
+        dgdr = _dgdr(planner=planner)
+
+        spec = build_aic_perf_model_spec(
+            dgdr,
+            best_prefill_pick=PickedParallelConfig(tp=1),
+            best_decode_pick=PickedParallelConfig(tp=2),
+            resolved_backend="vllm",
+            system="h200_sxm",
+        )
+
+        assert spec is None
+        assert "aiconfigurator-core is unavailable" in caplog.text
 
     @pytest.mark.parametrize(
         ("mode", "prefill_pick", "decode_pick"),

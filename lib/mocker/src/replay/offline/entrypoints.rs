@@ -146,6 +146,7 @@ pub fn run_offline_handoff_conformance(
     let request = DirectRequest {
         tokens: (0..8).collect(),
         max_output_tokens: 2,
+        output_token_ids: Some(vec![7, 8]),
         uuid: Some(uuid::Uuid::from_u128(1)),
         arrival_timestamp_ms: Some(0.0),
         ..Default::default()
@@ -400,6 +401,7 @@ pub(crate) fn simulate_trace_workload_without_session_metadata(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_agentic_trace_workload(
     args: MockEngineArgs,
     router_config: Option<ReplayKvRouterConfig>,
@@ -407,10 +409,11 @@ pub(crate) fn simulate_agentic_trace_workload(
     trace: AgenticTrace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     if use_single_runtime(num_workers, args.dp_size, router_mode) {
-        simulate_agentic_trace_workload_single(args, trace, sla)
+        simulate_agentic_trace_workload_single(args, trace, record_per_request, sla)
     } else {
         simulate_agentic_trace_workload_multi(
             args,
@@ -419,6 +422,7 @@ pub(crate) fn simulate_agentic_trace_workload(
             trace,
             num_workers,
             router_mode,
+            record_per_request,
             sla,
         )
     }
@@ -1031,13 +1035,16 @@ pub(crate) fn simulate_trace_workload_single(
 pub(crate) fn simulate_agentic_trace_workload_single(
     args: MockEngineArgs,
     trace: AgenticTrace,
+    record_per_request: bool,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
     let driver = WorkloadDriver::new_agentic_trace_without_replay_hashes(trace, engine_block_size)?;
-    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace).run()?;
+    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace)
+        .with_per_request_records(record_per_request)
+        .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -1306,6 +1313,7 @@ fn simulate_trace_workload_multi_with_scaling_policy(
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_agentic_trace_workload_multi(
     args: MockEngineArgs,
     router_config: Option<ReplayKvRouterConfig>,
@@ -1313,6 +1321,7 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
     trace: AgenticTrace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
@@ -1325,6 +1334,7 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
             num_workers,
             AggReplayMode::Trace,
         )?
+        .with_per_request_records(record_per_request)
         .run()?,
         ReplayRouterMode::KvRouter => AggRuntime::new_workload(
             &args,
@@ -1335,6 +1345,7 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
             AggReplayMode::Trace,
             router_mode,
         )?
+        .with_per_request_records(record_per_request)
         .run()?,
     };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
@@ -1725,6 +1736,8 @@ mod tests {
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
     #[cfg(feature = "kvbm-offload")]
     use crate::replay::OfflineDisaggReplayConfig;
+    #[cfg(feature = "kvbm-offload")]
+    use crate::replay::{ReplayCaptureOptions, ReplayDeterminism, with_runtime_evidence};
     use crate::replay::{ReplayRouterMode, SlaThresholds};
     use std::sync::Arc;
     use uuid::Uuid;
@@ -1866,7 +1879,6 @@ mod tests {
 
     #[cfg(feature = "kvbm-offload")]
     fn assert_g2_restore(report: &crate::replay::TraceSimulationReport) {
-        assert_eq!(report.request_counts.completed_requests, 3);
         let restored = report
             .per_request
             .iter()
@@ -1895,8 +1907,62 @@ mod tests {
                 SlaThresholds::default(),
             )
             .unwrap();
+            assert_eq!(report.request_counts.completed_requests, 3);
             assert_g2_restore(&report);
         }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    #[test]
+    fn aggregated_canonical_evidence_covers_real_kvbm_lifecycle() {
+        let mut requests = offload_lifecycle_requests();
+        requests.extend((0_u128..20).map(|ordinal| DirectRequest {
+            tokens: vec![ordinal as u32; 8],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(100 + ordinal)),
+            arrival_timestamp_ms: Some(300.0 + ordinal as f64 * 20.0),
+            ..Default::default()
+        }));
+        let (report, evidence) = with_runtime_evidence(
+            ReplayCaptureOptions {
+                capture_per_request: true,
+                capture_canonical_evidence: true,
+                determinism: ReplayDeterminism::CanonicalV1,
+                ..Default::default()
+            },
+            || {
+                simulate_trace(
+                    offload_args(WorkerType::Aggregated),
+                    None,
+                    None,
+                    requests,
+                    1,
+                    1.0,
+                    ReplayRouterMode::KvRouter,
+                    true,
+                    None,
+                    SlaThresholds::default(),
+                )
+            },
+        );
+        let report = report.unwrap();
+        assert_eq!(report.request_counts.completed_requests, 23);
+        assert_g2_restore(&report);
+        let kv_ingest = evidence.kv_ingest.unwrap();
+        assert_eq!(kv_ingest.batches, 227);
+        assert_eq!(kv_ingest.events, 102);
+        assert_eq!(kv_ingest.blocks, 142);
+        assert_eq!(kv_ingest.kind_counts["stored"], 57);
+        assert_eq!(kv_ingest.kind_counts["removed"], 45);
+        assert_eq!(kv_ingest.tier_counts["device"], 40);
+        assert_eq!(kv_ingest.tier_counts["host_pinned"], 62);
+        assert_eq!(kv_ingest.boundaries["offload_tick"].events, 63);
+        assert_eq!(kv_ingest.boundaries["pass_start"].events, 0);
+        assert_eq!(kv_ingest.boundaries["pass_end"].events, 39);
+        assert_eq!(
+            kv_ingest.boundaries["offload_tick"].last_at_ms,
+            report.throughput.duration_ms
+        );
     }
 
     #[cfg(feature = "kvbm-offload")]
@@ -1920,6 +1986,7 @@ mod tests {
                 SlaThresholds::default(),
             )
             .unwrap();
+            assert_eq!(report.request_counts.completed_requests, 3);
             assert_g2_restore(&report);
         }
     }

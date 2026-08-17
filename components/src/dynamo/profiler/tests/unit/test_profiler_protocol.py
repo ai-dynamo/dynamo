@@ -21,6 +21,9 @@ try:
     from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
         PickedParallelConfig,
     )
+    from dynamo.profiler.utils.config_modifiers.protocol import (  # noqa: F401
+        BaseConfigModifier,
+    )
     from dynamo.profiler.utils.defaults import (
         DYNAMO_RUN_DEFAULT_PORT,
         EngineType,
@@ -432,6 +435,30 @@ def test_vllm_mamba_align_raises_max_num_batched_tokens() -> None:
     assert result[result.index("--max-num-batched-tokens") + 1] == "8320"
 
 
+def test_vllm_mamba_align_normalizes_duplicate_token_caps() -> None:
+    modifier = CONFIG_MODIFIERS["vllm"]
+    args = [
+        "--mamba-cache-mode",
+        "align",
+        "--max-num-batched-tokens",
+        "20000",
+        "--max-num-batched-tokens=1024",
+    ]
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size",
+        return_value=8320,
+    ):
+        result = modifier._apply_mamba_cache_align_token_floor(args, "nemotron")
+
+    assert result == [
+        "--mamba-cache-mode",
+        "align",
+        "--max-num-batched-tokens",
+        "8320",
+    ]
+
+
 def test_vllm_mamba_align_skips_without_explicit_align_mode() -> None:
     """Do not probe model metadata for ordinary prefix-caching decode workers."""
     modifier = CONFIG_MODIFIERS["vllm"]
@@ -450,8 +477,48 @@ def test_vllm_mamba_align_skips_without_explicit_align_mode() -> None:
     assert result == args
 
 
-def test_vllm_model_runtime_constraints_update_decode_config() -> None:
-    """Candidate-level vLLM postprocessing fixes generated decode worker args."""
+@pytest.mark.parametrize(
+    "args, context_length, expected",
+    [
+        (["--max-model-len", "6500"], 2048, ["--max-model-len", "2048"]),
+        (["--max-model-len=6500"], 4096, ["--max-model-len", "4096"]),
+        (["--max-model-len", "6k"], 4096, ["--max-model-len", "4096"]),
+        (["--max-model-len=6K"], 4096, ["--max-model-len", "4096"]),
+        (["--max-model-len", "6.5k"], 4096, ["--max-model-len", "4096"]),
+        (["--max-model-len", "2048"], 4096, ["--max-model-len", "2048"]),
+        (
+            ["--max-model-len", "2000", "--max-model-len=6500"],
+            4096,
+            ["--max-model-len", "4096"],
+        ),
+        (
+            ["--max-model-len", "6500", "--max-model-len=2000"],
+            4096,
+            ["--max-model-len", "2000"],
+        ),
+        (
+            ["--max-num-batched-tokens", "6012"],
+            2048,
+            ["--max-num-batched-tokens", "6012"],
+        ),
+    ],
+)
+def test_vllm_model_context_window_ceiling(
+    args: list[str], context_length: int, expected: list[str]
+) -> None:
+    modifier = CONFIG_MODIFIERS["vllm"]
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_model_context_length",
+        return_value=context_length,
+    ):
+        result = modifier._apply_model_context_window_ceiling(args, "test/model")
+
+    assert result == expected
+
+
+def test_vllm_model_runtime_constraints_update_worker_configs() -> None:
+    """Candidate-level vLLM postprocessing fixes generated worker args."""
     modifier = CONFIG_MODIFIERS["vllm"]
     config = {
         "apiVersion": "nvidia.com/v1beta1",
@@ -461,9 +528,22 @@ def test_vllm_model_runtime_constraints_update_decode_config() -> None:
             "components": [
                 _make_component("Frontend", "frontend"),
                 _make_component(
+                    "VllmPrefillWorker",
+                    "prefill",
+                    args=[
+                        "--max-model-len=6500",
+                        "--mamba-cache-mode",
+                        "align",
+                        "--max-num-batched-tokens",
+                        "1024",
+                    ],
+                ),
+                _make_component(
                     "VllmDecodeWorker",
                     "decode",
                     args=[
+                        "--max-model-len",
+                        "6500",
                         "--mamba-cache-mode",
                         "align",
                         "--max-num-batched-tokens",
@@ -474,13 +554,24 @@ def test_vllm_model_runtime_constraints_update_decode_config() -> None:
         },
     }
 
-    with patch(
-        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size",
-        return_value=8320,
+    with (
+        patch(
+            "dynamo.profiler.utils.config_modifiers.vllm.get_model_context_length",
+            return_value=2048,
+        ),
+        patch(
+            "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size",
+            return_value=8320,
+        ),
     ):
         result = modifier.apply_model_runtime_constraints(config, "nemotron")
 
-    args = _main_container(_components_by_name(result)["VllmDecodeWorker"])["args"]
+    components = _components_by_name(result)
+    prefill_args = _main_container(components["VllmPrefillWorker"])["args"]
+    args = _main_container(components["VllmDecodeWorker"])["args"]
+    assert prefill_args[prefill_args.index("--max-model-len") + 1] == "2048"
+    assert prefill_args[prefill_args.index("--max-num-batched-tokens") + 1] == "8320"
+    assert args[args.index("--max-model-len") + 1] == "2048"
     assert args[args.index("--max-num-batched-tokens") + 1] == "8320"
 
 
