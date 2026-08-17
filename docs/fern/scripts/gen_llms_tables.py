@@ -44,8 +44,9 @@ It also emits three machine-readable outputs from the same parse:
 
 Usage (from any cwd; paths resolve relative to this file):
 
-    python3 gen_llms_tables.py            # write/refresh all outputs
-    python3 gen_llms_tables.py --check    # exit 1 if any output is stale, no writes
+    python3 gen_llms_tables.py               # write/refresh all outputs
+    python3 gen_llms_tables.py --check       # check marker-spliced pages, no writes
+    python3 gen_llms_tables.py --assets-only # write/refresh only JSON and Atom
 
 Re-run at every release bump, after editing releases.data.ts.
 
@@ -1293,10 +1294,16 @@ def apply_block(page_text: str, block: Block, rendered: str) -> str:
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument(
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
-        help="exit 1 if regeneration would change any page; write nothing",
+        help="exit 1 if regeneration would change a marker-spliced page; write nothing",
+    )
+    mode.add_argument(
+        "--assets-only",
+        action="store_true",
+        help="write only assets/releases.json and assets/releases-atom.xml",
     )
     args = ap.parse_args(argv)
 
@@ -1306,21 +1313,23 @@ def main(argv: list[str]) -> int:
         print(f"error: failed to parse {DATA_TS}: {exc}", file=sys.stderr)
         return 2
 
-    # Render everything up front so a failure on any output emits nothing.
+    # Render every selected output up front so a rendering failure emits nothing.
     try:
         rendered: dict[Path, str] = {}
-        for page_name, blocks in PAGES.items():
-            page_path = REFERENCE_DIR / page_name
-            if not page_path.is_file():
-                print(f"error: page not found: {page_path}", file=sys.stderr)
-                return 2
-            text = page_path.read_text(encoding="utf-8")
-            for block in blocks:
-                body = build_block(block, block.renderer(data))
-                text = apply_block(text, block, body)
-            rendered[page_path] = text
-        for asset_path, builder in ASSET_OUTPUTS.items():
-            rendered[asset_path] = builder(data)
+        if not args.assets_only:
+            for page_name, blocks in PAGES.items():
+                page_path = REFERENCE_DIR / page_name
+                if not page_path.is_file():
+                    print(f"error: page not found: {page_path}", file=sys.stderr)
+                    return 2
+                text = page_path.read_text(encoding="utf-8")
+                for block in blocks:
+                    body = build_block(block, block.renderer(data))
+                    text = apply_block(text, block, body)
+                rendered[page_path] = text
+        if not args.check:
+            for asset_path, builder in ASSET_OUTPUTS.items():
+                rendered[asset_path] = builder(data)
     except (TSParseError, KeyError) as exc:
         print(f"error: rendering failed: {exc!r}", file=sys.stderr)
         return 2

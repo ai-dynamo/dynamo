@@ -488,6 +488,8 @@ areas:
 - label: performance
   github_team: '@ai-dynamo/dynamo-performance-codeowners'
   path_globs:
+  - aisimulate/crates/core/src/engine/cache/
+  - aisimulate/crates/core/src/engine/kv_manager/
   - benchmarks/README.md
   - benchmarks/__init__.py
   - benchmarks/burstgpt_loadgen/
@@ -519,10 +521,7 @@ areas:
   - lib/bench/tests/
   - lib/data-gen/
   - lib/mocker/
-  - lib/mocker/src/cache/
   - lib/mocker/src/common/
-  - lib/mocker/src/kv_manager/
-  - lib/mocker/src/kvbm_offload/
   - lib/mocker/src/loadgen/
   - lib/mocker/src/replay/
   - lib/mocker/src/scheduler/
@@ -1036,11 +1035,7 @@ shared:
   owners:
   - frontend
   - diffusion
-- glob: lib/mocker/src/kv_manager/
-  owners:
-  - performance
-  - kv-memory
-- glob: lib/mocker/src/kvbm_offload/
+- glob: aisimulate/crates/core/src/engine/kv_manager/
   owners:
   - performance
   - kv-memory
