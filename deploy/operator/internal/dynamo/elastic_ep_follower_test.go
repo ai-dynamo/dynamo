@@ -145,6 +145,19 @@ func TestSynthesizeElasticEPFollowerDCD_DerivesADistinctIdentity(t *testing.T) {
 		t.Errorf("follower must carry the marker annotation; got %v", follower.Annotations)
 	}
 
+	t.Log("it carries the load-bearing clique affinity pinning it into the LEADER's NVLink partition")
+	if follower.Spec.PodTemplate == nil || follower.Spec.PodTemplate.Spec.Affinity == nil ||
+		follower.Spec.PodTemplate.Spec.Affinity.PodAffinity == nil {
+		t.Fatal("follower must carry a pod affinity")
+	}
+	clique := follower.Spec.PodTemplate.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if len(clique) != 1 || clique[0].TopologyKey != commonconsts.NodeLabelGPUClique {
+		t.Fatalf("expected 1 required clique affinity on %q, got %+v", commonconsts.NodeLabelGPUClique, clique)
+	}
+	if got := clique[0].LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoComponent]; got != "decode" {
+		t.Errorf("clique affinity must select the LEADER (decode), got %q", got)
+	}
+
 	t.Log("the leader itself is untouched by the derivation")
 	if leader.Spec.Replicas != nil {
 		t.Errorf("leader Replicas must not be mutated by follower synthesis; got %v", leader.Spec.Replicas)
@@ -203,7 +216,7 @@ func TestInjectElasticEPRayLaunchFlags_Follower(t *testing.T) {
 	}
 }
 
-func TestInjectElasticEPFollowerAntiAffinity(t *testing.T) {
+func TestInjectElasticEPFollowerAffinity(t *testing.T) {
 	tests := []struct {
 		name             string
 		podSpec          *corev1.PodSpec
@@ -219,30 +232,46 @@ func TestInjectElasticEPFollowerAntiAffinity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("injecting the one-pod-per-node anti-affinity")
-			injectElasticEPFollowerAntiAffinity(tt.podSpec, "decode", "ns-mydgd")
+			t.Log("injecting the follower placement terms (leader component = decode)")
+			injectElasticEPFollowerAffinity(tt.podSpec, "decode", "ns-mydgd")
+			if tt.podSpec.Affinity == nil {
+				t.Fatal("expected affinity to be set")
+			}
 
-			t.Log("exactly one required term, keyed on hostname, so each data-parallel rank gets the cross-node NVLink the EP collective needs")
-			if tt.podSpec.Affinity == nil || tt.podSpec.Affinity.PodAntiAffinity == nil {
+			t.Log("LOAD-BEARING: a required pod affinity on nvidia.com/gpu.clique selecting the leader, pinning the follower into the leader's NVLink partition")
+			if tt.podSpec.Affinity.PodAffinity == nil {
+				t.Fatal("expected pod affinity (clique) to be set")
+			}
+			aff := tt.podSpec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			if len(aff) != 1 {
+				t.Fatalf("expected 1 required clique affinity term, got %d", len(aff))
+			}
+			if aff[0].TopologyKey != commonconsts.NodeLabelGPUClique {
+				t.Errorf("clique topologyKey = %q, want %q", aff[0].TopologyKey, commonconsts.NodeLabelGPUClique)
+			}
+			if s := aff[0].LabelSelector.MatchLabels; s[commonconsts.KubeLabelDynamoComponent] != "decode" ||
+				s[commonconsts.KubeLabelDynamoNamespace] != "ns-mydgd" {
+				t.Errorf("clique selector = %v, want leader component=decode namespace=ns-mydgd", s)
+			}
+
+			t.Log("one-pod-per-node: a required pod anti-affinity on hostname selecting the leader")
+			if tt.podSpec.Affinity.PodAntiAffinity == nil {
 				t.Fatal("expected pod anti-affinity to be set")
 			}
-			terms := tt.podSpec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
-			if len(terms) != 1 {
-				t.Fatalf("expected 1 required anti-affinity term, got %d", len(terms))
+			anti := tt.podSpec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			if len(anti) != 1 {
+				t.Fatalf("expected 1 required anti-affinity term, got %d", len(anti))
 			}
-			if terms[0].TopologyKey != "kubernetes.io/hostname" {
-				t.Errorf("topologyKey = %q, want kubernetes.io/hostname", terms[0].TopologyKey)
+			if anti[0].TopologyKey != "kubernetes.io/hostname" {
+				t.Errorf("anti-affinity topologyKey = %q, want kubernetes.io/hostname", anti[0].TopologyKey)
 			}
-
-			t.Log("the term selects this component's pods by their identity labels")
-			sel := terms[0].LabelSelector.MatchLabels
-			if sel[commonconsts.KubeLabelDynamoComponent] != "decode" ||
-				sel[commonconsts.KubeLabelDynamoNamespace] != "ns-mydgd" {
-				t.Errorf("selector = %v, want component=decode namespace=ns-mydgd", sel)
+			if s := anti[0].LabelSelector.MatchLabels; s[commonconsts.KubeLabelDynamoComponent] != "decode" ||
+				s[commonconsts.KubeLabelDynamoNamespace] != "ns-mydgd" {
+				t.Errorf("anti-affinity selector = %v, want leader component=decode namespace=ns-mydgd", s)
 			}
 
 			if tt.wantNodeAffinity {
-				t.Log("the user's own affinity rules survive the injection")
+				t.Log("user-supplied affinity is merged, not overwritten")
 				if tt.podSpec.Affinity.NodeAffinity == nil {
 					t.Error("user-supplied NodeAffinity was dropped")
 				}

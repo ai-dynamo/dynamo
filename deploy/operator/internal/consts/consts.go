@@ -58,6 +58,12 @@ const (
 	// leader's serve command. Operator-set when it expands a leader; never user-set.
 	KubeAnnotationElasticEPFollower = "nvidia.com/elastic-ep-follower"
 
+	// NodeLabelGPUClique is the NVLink-partition label the DRA driver stamps on GB200
+	// nodes. Nodes sharing a value share a multi-node NVLink fabric; nodes in different
+	// partitions have no NVLink route between them. Used as the topology key that pins an
+	// elastic-EP follower into the leader's partition.
+	NodeLabelGPUClique = "nvidia.com/gpu.clique"
+
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"

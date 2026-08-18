@@ -363,6 +363,17 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 		follower.Annotations = map[string]string{}
 	}
 	follower.Annotations[commonconsts.KubeAnnotationElasticEPFollower] = commonconsts.KubeLabelValueTrue
+
+	// Placement: pin the follower into the leader's NVLink partition and off the leader's
+	// node, merging with any user affinity inherited from the leader's deep copy. The terms
+	// select the LEADER component, since the follower positions itself relative to the leader.
+	if follower.Spec.PodTemplate != nil {
+		injectElasticEPFollowerAffinity(
+			&follower.Spec.PodTemplate.Spec,
+			leaderComponentName,
+			leaderDCD.Labels[commonconsts.KubeLabelDynamoNamespace],
+		)
+	}
 	return follower
 }
 
@@ -2355,27 +2366,60 @@ type cliqueParams struct {
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
 }
 
-// injectElasticEPFollowerAntiAffinity adds a required one-pod-per-node anti-affinity so
-// each elastic-EP follower (and the leader it selects) lands on its own node -- packing
-// several data-parallel ranks onto a node would starve them of the cross-node NVLink the
-// EP collective needs. The term selects this component's pods by their identity labels.
-func injectElasticEPFollowerAntiAffinity(podSpec *corev1.PodSpec, componentName, dynamoNamespace string) {
+// injectElasticEPFollowerAffinity injects the two required placement terms an elastic-EP
+// follower needs, appending to (never overwriting) any user-supplied affinity:
+//
+//   - a pod affinity on topology key nvidia.com/gpu.clique selecting the leader, which pins
+//     the follower into the leader's NVLink partition. This is the load-bearing term: a
+//     follower in a different partition still joins the ComputeDomain and reports healthy,
+//     but has no NVLink route to the leader, so the cross-node EP collective fails only when
+//     it runs -- an apparently successful scale that serves wrong or failing inference.
+//   - a pod anti-affinity on kubernetes.io/hostname selecting the leader, keeping the
+//     follower off the leader's node so each node-sized rank keeps its node's NVLink.
+//
+// Both select the leader component, the follower's reference point. The clique affinity
+// cannot be dropped; the hostname anti-affinity is redundant under node-sized pods and may
+// be relaxed if it ever fights the scheduler.
+func injectElasticEPFollowerAffinity(podSpec *corev1.PodSpec, leaderComponentName, dynamoNamespace string) {
 	if podSpec.Affinity == nil {
 		podSpec.Affinity = &corev1.Affinity{}
 	}
+	// Both terms position the follower relative to the leader, so both select the leader
+	// component. Separate selector objects avoid aliasing one mutable struct across terms.
+	leaderSelector := func() *metav1.LabelSelector {
+		return &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				commonconsts.KubeLabelDynamoComponent: leaderComponentName,
+				commonconsts.KubeLabelDynamoNamespace: dynamoNamespace,
+			},
+		}
+	}
+
+	// Load-bearing: pin the follower into the leader's NVLink partition. The leader's
+	// nvidia.com/gpu.clique value is unknown at render time (it depends on where the
+	// leader lands), so this is an inter-pod affinity against the leader on that topology
+	// key rather than a node affinity on a literal value -- the effect is identical:
+	// "schedule me on a node whose gpu.clique equals a leader pod's node's gpu.clique".
+	if podSpec.Affinity.PodAffinity == nil {
+		podSpec.Affinity.PodAffinity = &corev1.PodAffinity{}
+	}
+	podSpec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
+		podSpec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+		corev1.PodAffinityTerm{
+			TopologyKey:   commonconsts.NodeLabelGPUClique,
+			LabelSelector: leaderSelector(),
+		},
+	)
+
+	// One node-sized rank per node: keep the follower off the leader's node.
 	if podSpec.Affinity.PodAntiAffinity == nil {
 		podSpec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{}
 	}
 	podSpec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
 		podSpec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
 		corev1.PodAffinityTerm{
-			TopologyKey: "kubernetes.io/hostname",
-			LabelSelector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					commonconsts.KubeLabelDynamoComponent: componentName,
-					commonconsts.KubeLabelDynamoNamespace: dynamoNamespace,
-				},
-			},
+			TopologyKey:   "kubernetes.io/hostname",
+			LabelSelector: leaderSelector(),
 		},
 	)
 }
