@@ -201,8 +201,8 @@ def _make_jinja_env(script_dir):
     )
 
 
-def _inject_python_index_secrets(dockerfile: str) -> str:
-    """Mount optional PyPI credentials in every Python package install layer."""
+def _inject_python_index_mounts(dockerfile: str) -> str:
+    """Mount optional PyPI configuration in every Python package install layer."""
     instructions = re.split(r"(?=^[A-Z]+\b)", dockerfile, flags=re.MULTILINE)
     for index, instruction in enumerate(instructions):
         if not instruction.startswith("RUN ") or not _PYTHON_PACKAGE_DOWNLOAD_RE.search(
@@ -306,7 +306,7 @@ def render(args, context, script_dir):
     rendered = template.render(context=context, **_render_context(args, context))
     # Replace all instances of 3+ newlines with 2 newlines
     cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
-    cleaned = _inject_python_index_secrets(cleaned)
+    cleaned = _inject_python_index_mounts(cleaned)
 
     if args.output_short_filename:
         filename = "rendered.Dockerfile"
