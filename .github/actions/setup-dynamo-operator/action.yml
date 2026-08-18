@@ -195,6 +195,18 @@ runs:
           helm uninstall "${VCLUSTER_NAME}" -n "${NAMESPACE}" 2>/dev/null || true
           kubectl wait "statefulset/${VCLUSTER_NAME}" -n "${NAMESPACE}" \
             --for=delete --timeout=120s 2>/dev/null || true
+          # Cascading deletion drops the StatefulSet before its pod, and the
+          # replacement reuses the same name and labels. Wait the old pod out so
+          # the readiness check cannot select one that is still terminating.
+          DEADLINE=$(( SECONDS + 120 ))
+          while kubectl get pod -l "app=vcluster,release=${VCLUSTER_NAME}" \
+                  -n "${NAMESPACE}" -o name 2>/dev/null | grep -q .; do
+            if [ "${SECONDS}" -ge "${DEADLINE}" ]; then
+              echo "::error::vCluster pod for ${VCLUSTER_NAME} still terminating 120s after delete"
+              exit 1
+            fi
+            sleep 5
+          done
         else
           echo "No existing vCluster named ${VCLUSTER_NAME} found."
         fi
