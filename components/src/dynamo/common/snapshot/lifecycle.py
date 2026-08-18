@@ -90,10 +90,11 @@ class SnapshotConfig:
             await asyncio.sleep(SENTINEL_POLL_INTERVAL_SEC)
 
     def _cleanup_ready_and_sentinels(self) -> None:
+        # Keep restore-complete for the kubelet startup probe; the snapshot agent
+        # removes it before restoring the next container incarnation.
         for name in (
             READY_FOR_SNAPSHOT_FILE,
             SNAPSHOT_COMPLETE_FILE,
-            RESTORE_COMPLETE_FILE,
         ):
             path = os.path.join(self.control_dir, name)
             try:
