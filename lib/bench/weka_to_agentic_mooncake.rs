@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use dynamo_data_gen::{MooncakeJsonlWriter, WekaImporter};
-use dynamo_mocker::loadgen::AgenticTrace;
+use dynamo_mocker::loadgen::{AgenticTrace, load_weka_trace};
 
 #[derive(Debug, Parser)]
 #[command(name = "weka_to_agentic_mooncake")]
@@ -39,7 +39,31 @@ fn main() -> Result<()> {
     writer.write_agentic_header(importer.header())?;
     let summary = importer.for_each_row(|row| writer.write_agentic_row(&row))?;
     let stats = writer.finish()?;
-    AgenticTrace::from_agentic_mooncake(temporary_path.as_ref())?;
+    let materialized = AgenticTrace::from_agentic_mooncake(temporary_path.as_ref())?;
+    let direct = load_weka_trace(&args.input)?;
+    if direct.identity() != materialized.identity() {
+        let mismatch = direct
+            .nodes()
+            .iter()
+            .zip(materialized.nodes())
+            .find(|(left, right)| left != right)
+            .map(|(left, right)| {
+                format!(
+                    "{} (direct not_before_ms={}, dependencies={:?}; materialized not_before_ms={}, dependencies={:?})",
+                    left.request_id(),
+                    left.not_before_ms(),
+                    left.dependencies(),
+                    right.not_before_ms(),
+                    right.dependencies()
+                )
+            })
+            .unwrap_or_else(|| "node cardinality or graph metadata".to_string());
+        bail!(
+            "direct Weka and materialized v2 graph identities differ: direct={:?}, materialized={:?}; first mismatch: {mismatch}",
+            direct.identity(),
+            materialized.identity()
+        );
+    }
     temporary_path
         .persist(&args.output)
         .with_context(|| format!("failed to publish {}", args.output.display()))?;
