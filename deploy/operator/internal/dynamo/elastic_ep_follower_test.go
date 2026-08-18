@@ -28,6 +28,13 @@ import (
 
 // vllmComponent builds a single-pod vLLM component whose main container carries the
 // given extra args, so each test can describe the launch it wants at a high level.
+// The leader every case in this file builds around. The follower derives its own
+// identity and both placement terms from these, so they are shared by all tests.
+const (
+	leaderComponent       = "decode"
+	leaderDynamoNamespace = "ns-mydgd"
+)
+
 func vllmComponent(extraArgs ...string) *v1beta1.DynamoComponentDeploymentSharedSpec {
 	return &v1beta1.DynamoComponentDeploymentSharedSpec{
 		PodTemplate: &corev1.PodTemplateSpec{
@@ -62,7 +69,7 @@ func TestExpandRolesForComponent_NeverEmitsFollower(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("expanding the component's Grove roles")
-			roles := expandRolesForComponent("decode", nil, 1, tt.component)
+			roles := expandRolesForComponent(leaderComponent, nil, 1, tt.component)
 
 			t.Log("no role may be RoleFollower: a minAvailable:0 clique gang-blocks the leader")
 			for _, r := range roles {
@@ -85,8 +92,8 @@ func leaderDCD(component *v1beta1.DynamoComponentDeploymentSharedSpec) *v1beta1.
 		},
 	}
 	dcd.Name = "mydgd-decode"
-	dcd.Spec.ComponentName = "decode"
-	dcd.Labels = map[string]string{commonconsts.KubeLabelDynamoComponent: "decode"}
+	dcd.Spec.ComponentName = leaderComponent
+	dcd.Labels = map[string]string{commonconsts.KubeLabelDynamoComponent: leaderComponent}
 	return dcd
 }
 
@@ -104,7 +111,7 @@ func TestSynthesizeElasticEPFollowerDCD_OnlyForElasticEP(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("deriving the follower from the leader DCD")
-			follower := synthesizeElasticEPFollowerDCD(leaderDCD(tt.component), "decode")
+			follower := synthesizeElasticEPFollowerDCD(leaderDCD(tt.component), leaderComponent)
 
 			t.Log("only an elastic-EP Ray launch has a Ray cluster for a follower to join")
 			if gotSynthesis := follower != nil; gotSynthesis != tt.wantSynthesis {
@@ -119,7 +126,7 @@ func TestSynthesizeElasticEPFollowerDCD_DerivesADistinctIdentity(t *testing.T) {
 	wantSuffixed := "decode-" + commonconsts.GroveRoleSuffixFollower
 
 	t.Log("deriving the follower from a single-pod elastic-EP leader")
-	follower := synthesizeElasticEPFollowerDCD(leader, "decode")
+	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent)
 	if follower == nil {
 		t.Fatal("expected a follower DCD for an elastic-EP leader")
 	}
@@ -154,7 +161,7 @@ func TestSynthesizeElasticEPFollowerDCD_DerivesADistinctIdentity(t *testing.T) {
 	if len(clique) != 1 || clique[0].TopologyKey != commonconsts.NodeLabelGPUClique {
 		t.Fatalf("expected 1 required clique affinity on %q, got %+v", commonconsts.NodeLabelGPUClique, clique)
 	}
-	if got := clique[0].LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoComponent]; got != "decode" {
+	if got := clique[0].LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoComponent]; got != leaderComponent {
 		t.Errorf("clique affinity must select the LEADER (decode), got %q", got)
 	}
 
@@ -233,7 +240,7 @@ func TestInjectElasticEPFollowerAffinity(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("injecting the follower placement terms (leader component = decode)")
-			injectElasticEPFollowerAffinity(tt.podSpec, "decode", "ns-mydgd")
+			injectElasticEPFollowerAffinity(tt.podSpec, leaderComponent, leaderDynamoNamespace)
 			if tt.podSpec.Affinity == nil {
 				t.Fatal("expected affinity to be set")
 			}
@@ -249,8 +256,8 @@ func TestInjectElasticEPFollowerAffinity(t *testing.T) {
 			if aff[0].TopologyKey != commonconsts.NodeLabelGPUClique {
 				t.Errorf("clique topologyKey = %q, want %q", aff[0].TopologyKey, commonconsts.NodeLabelGPUClique)
 			}
-			if s := aff[0].LabelSelector.MatchLabels; s[commonconsts.KubeLabelDynamoComponent] != "decode" ||
-				s[commonconsts.KubeLabelDynamoNamespace] != "ns-mydgd" {
+			if s := aff[0].LabelSelector.MatchLabels; s[commonconsts.KubeLabelDynamoComponent] != leaderComponent ||
+				s[commonconsts.KubeLabelDynamoNamespace] != leaderDynamoNamespace {
 				t.Errorf("clique selector = %v, want leader component=decode namespace=ns-mydgd", s)
 			}
 
@@ -265,8 +272,8 @@ func TestInjectElasticEPFollowerAffinity(t *testing.T) {
 			if anti[0].TopologyKey != "kubernetes.io/hostname" {
 				t.Errorf("anti-affinity topologyKey = %q, want kubernetes.io/hostname", anti[0].TopologyKey)
 			}
-			if s := anti[0].LabelSelector.MatchLabels; s[commonconsts.KubeLabelDynamoComponent] != "decode" ||
-				s[commonconsts.KubeLabelDynamoNamespace] != "ns-mydgd" {
+			if s := anti[0].LabelSelector.MatchLabels; s[commonconsts.KubeLabelDynamoComponent] != leaderComponent ||
+				s[commonconsts.KubeLabelDynamoNamespace] != leaderDynamoNamespace {
 				t.Errorf("anti-affinity selector = %v, want leader component=decode namespace=ns-mydgd", s)
 			}
 
