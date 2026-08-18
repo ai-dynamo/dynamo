@@ -13,13 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Author and remotely bind the declarative workflow."""
+"""Author and bind the declarative workflow."""
+
+from typing import Any
 
 from dynamo.workflow import (
     DeploymentSpec,
     ExecutionPlan,
     ValueSpec,
     Workflow,
+    WorkflowOrchestrator,
     compile_workflow,
 )
 from examples.custom_backend.workflow_hello_world.dynamo.stages import (
@@ -54,4 +57,11 @@ def compile_remote_workflow() -> ExecutionPlan:
     return compile_workflow(
         define_workflow(),
         DeploymentSpec.remote(**ENDPOINTS),
+    )
+
+
+async def provide_workflow(runtime: Any) -> WorkflowOrchestrator:
+    return await WorkflowOrchestrator.bind(
+        compile_remote_workflow(),
+        runtime=runtime,
     )
