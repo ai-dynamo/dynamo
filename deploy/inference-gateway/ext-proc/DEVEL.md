@@ -159,10 +159,23 @@ the `KvWorkerMonitor` from `lib/llm` (`dynamo-llm`).
    router `Client`s. The KV/prefill schedulers already exclude overloaded workers
    and cannot route to them.
 3. On each request, before tokenizing or routing, the EPP checks whether any
-   eligible worker is free. If all discovered workers are overloaded, it returns
-   an explicit **HTTP 429** (with an optional `Retry-After` header) via an Envoy
-   `ext_proc` immediate response — so the gateway rejects the request without
-   forwarding it to any worker, and the client / failover can back off and retry.
+   eligible worker is free and, if not, returns an explicit **HTTP 429** (with an
+   optional `Retry-After` header) via an Envoy `ext_proc` immediate response — so
+   the gateway rejects the request without forwarding it to any worker, and the
+   client / failover can back off and retry. The check is **scoped to the
+   request's candidate set**: when the gateway supplies an InferencePool subset
+   hint, the request is shed only if *every candidate* worker is overloaded, not
+   based on workers outside the subset.
+
+Pools are handled as follows:
+
+- **Decode**: sheds when all eligible decode workers are overloaded.
+- **Prefill (disaggregated)**: prefill saturation is realized two ways — the
+  prefill scheduler excludes overloaded prefill workers, and the shed gate
+  observes the prefill pool's load (via the monitor's attached prefill `Client`).
+  When the whole prefill pool is overloaded the request is **shed with 429**
+  rather than silently degrading to aggregated. (Non-saturation prefill failures
+  still fall back to aggregated routing; only pool saturation sheds.)
 
 Because the monitor lives in-process, the EPP reads Dynamo's own KV-router load
 signals directly (no metrics scraping and no CGO bridge).
@@ -185,7 +198,7 @@ export DYN_SHED_RETRY_AFTER_SECS=1
 The threshold semantics, tuning guidance, dual-threshold (decode vs prefill)
 model, and Prometheus metrics are documented for the frontend and apply
 identically here, since the same `KvWorkerMonitor` computes overload:
-[Request Rejection (frontend)](../../../docs/fault-tolerance/request-rejection.md).
+[Request Rejection (frontend)](../../../docs/fern/pages/kubernetes/fault-tolerance/request-rejection.md).
 
 The main differences on the EPP path are:
 

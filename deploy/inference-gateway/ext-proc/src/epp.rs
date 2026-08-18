@@ -42,21 +42,26 @@ const DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: &str = "DYN_ACTIVE_PREFILL_TOKEN
 /// Env var: optional `Retry-After` (seconds) sent on a 429 shed response.
 const DYN_SHED_RETRY_AFTER_SECS: &str = "DYN_SHED_RETRY_AFTER_SECS";
 
-/// Parse an optional value from an environment variable. Returns `None` when
-/// the variable is unset, empty, or fails to parse (a parse failure is logged).
-fn parse_env_opt<T: std::str::FromStr>(key: &str) -> Option<T> {
-    let raw = std::env::var(key).ok()?;
+/// Parse an optional value from an environment variable, failing when the
+/// variable is **set but unparseable**. Returns `Ok(None)` when the variable is
+/// unset or empty, `Ok(Some(v))` when set and valid, and `Err` when set to a
+/// value that does not parse as `T`.
+///
+/// Load-shedding config uses this (rather than silently defaulting to `None`) so
+/// a typo like `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD=0.85x` fails initialization
+/// instead of silently disabling shedding while startup appears to succeed.
+fn parse_env_opt<T: std::str::FromStr>(key: &str) -> Result<Option<T>> {
+    let Ok(raw) = std::env::var(key) else {
+        return Ok(None);
+    };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return None;
+        return Ok(None);
     }
-    match trimmed.parse() {
-        Ok(v) => Some(v),
-        Err(_) => {
-            tracing::warn!(env = key, value = %trimmed, "Ignoring unparseable env value");
-            None
-        }
-    }
+    trimmed
+        .parse()
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("invalid value for {key}: {trimmed:?}"))
 }
 
 /// Build the load-shedding threshold config from the environment.
@@ -64,15 +69,16 @@ fn parse_env_opt<T: std::str::FromStr>(key: &str) -> Option<T> {
 /// Mirrors the frontend's `--active-*-threshold` flags but sourced from env
 /// vars (the EPP has no CLI). All thresholds are opt-in; if none are set the
 /// returned config is `is_configured() == false` and shedding stays disabled,
-/// so an unconfigured EPP behaves exactly as before.
-fn load_threshold_config_from_env() -> LoadThresholdConfig {
-    LoadThresholdConfig {
-        active_decode_blocks_threshold: parse_env_opt(DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD),
-        active_prefill_tokens_threshold: parse_env_opt(DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD),
+/// so an unconfigured EPP behaves exactly as before. A set-but-invalid value
+/// fails initialization rather than silently disabling that check.
+fn load_threshold_config_from_env() -> Result<LoadThresholdConfig> {
+    Ok(LoadThresholdConfig {
+        active_decode_blocks_threshold: parse_env_opt(DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD)?,
+        active_prefill_tokens_threshold: parse_env_opt(DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD)?,
         active_prefill_tokens_threshold_frac: parse_env_opt(
             DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC,
-        ),
-    }
+        )?,
+    })
 }
 
 fn validate_kube_discovery_mode() -> Result<()> {
@@ -227,7 +233,7 @@ impl Router {
         // IMPORTANT: the monitor must use the decode KvRouter's `Client` so that
         // `set_overloaded_instances` updates are visible to the same routing
         // instances the scheduler consults (each `Client` has independent state).
-        let load_threshold_config = load_threshold_config_from_env();
+        let load_threshold_config = load_threshold_config_from_env()?;
         if let Err(e) = load_threshold_config.validate() {
             anyhow::bail!("invalid load-shedding threshold configuration: {e}");
         }
@@ -263,9 +269,12 @@ impl Router {
             actual_namespace.to_string(),
             enable_eagle,
             // Hand the monitor to the prefill router so it attaches the prefill
-            // `Client` on activation — this publishes the overloaded set to the
-            // prefill pool too, so `--active-prefill-tokens-threshold` sheds on
-            // the prefill path in disaggregated serving.
+            // `Client` on activation. This does two things for prefill overload:
+            // (1) the scheduler excludes overloaded prefill workers, and (2) the
+            // attached `Client`'s counts become visible to the shed gate (via
+            // `KvWorkerMonitor::prefill_routing_instance_counts`), so a fully
+            // saturated prefill pool sheds with HTTP 429 rather than silently
+            // degrading to aggregated.
             Some(worker_monitor.clone()),
         );
 
@@ -298,7 +307,7 @@ impl Router {
             pod_store_ready,
             served_model: model_name,
             worker_monitor,
-            shed_retry_after_secs: parse_env_opt(DYN_SHED_RETRY_AFTER_SECS),
+            shed_retry_after_secs: parse_env_opt(DYN_SHED_RETRY_AFTER_SECS)?,
         })
     }
 
@@ -311,26 +320,83 @@ impl Router {
     }
 
     /// Load-shedding gate. Returns `Some(PickError::AllWorkersOverloaded)` when
-    /// thresholds are configured and every discovered decode worker is
-    /// currently overloaded (i.e. the router has no free instance to route
-    /// to). Reuses the overloaded set the shared `KvWorkerMonitor` publishes to
-    /// the decode `Client`. Returns `None` (admit) when shedding is disabled or
-    /// at least one worker is free.
-    fn shed_if_saturated(&self) -> Option<PickError> {
+    /// thresholds are configured and no eligible worker can serve the request,
+    /// so the request is shed (HTTP 429) before tokenizing/routing/booking.
+    ///
+    /// Honors `allowed_worker_ids` (the Envoy subset hint intersected with the
+    /// pod reflector). A subset-scoped request sheds only when *every candidate*
+    /// is overloaded — never based on non-candidate workers. See the EPP
+    /// guardrail in `.cursor/rules/rust-critical-path.mdc`: EPP admission/shed
+    /// decisions must never ignore `allowed_worker_ids`.
+    ///
+    /// Pools:
+    /// - Decode: sheds when all eligible decode workers are overloaded.
+    /// - Prefill (disaggregated): product intent is "prefill saturated ⇒ shed"
+    ///   rather than silently degrading to aggregated, so a fully overloaded
+    ///   prefill pool also sheds. (Non-saturation prefill failures still fall
+    ///   back to aggregated downstream — only pool saturation sheds here.)
+    fn shed_if_saturated(&self, allowed_worker_ids: Option<&HashSet<u64>>) -> Option<PickError> {
         if !self.worker_monitor.is_configured() {
             return None;
         }
-        let counts = self.decode_router.client().routing_instance_counts();
-        if counts.discovered > 0 && counts.free == 0 {
+
+        // Subset-scoped request: shed only if every candidate worker is
+        // overloaded. The decode client's overloaded set is the full published
+        // set (decode + prefill), so this is pool-agnostic and never sheds based
+        // on workers outside the requested subset.
+        if let Some(ids) = allowed_worker_ids {
+            if ids.is_empty() {
+                return None;
+            }
+            let overloaded = self
+                .decode_router
+                .client()
+                .overloaded_instance_ids()
+                .unwrap_or_default();
+            if ids.iter().all(|id| overloaded.contains(id)) {
+                tracing::info!(
+                    candidates = ids.len(),
+                    "All candidate workers overloaded; shedding subset-scoped request (HTTP 429)"
+                );
+                return Some(PickError::AllWorkersOverloaded {
+                    retry_after_secs: self.shed_retry_after_secs,
+                });
+            }
+            return None;
+        }
+
+        // No subset hint: shed when a whole pool is saturated.
+        let decode = self.decode_router.client().routing_instance_counts();
+        if decode.discovered > 0 && decode.free == 0 {
             tracing::info!(
-                discovered = counts.discovered,
-                overloaded = counts.overloaded,
-                "All eligible workers overloaded; shedding request with HTTP 429"
+                discovered = decode.discovered,
+                overloaded = decode.overloaded,
+                "All decode workers overloaded; shedding request (HTTP 429)"
             );
             return Some(PickError::AllWorkersOverloaded {
                 retry_after_secs: self.shed_retry_after_secs,
             });
         }
+
+        // Prefill pool (disaggregated). Shed when the whole prefill pool is
+        // saturated rather than silently degrading to aggregated. Prefill load is
+        // observed via the shared monitor's prefill `Client` (attached on
+        // prefill-router activation); `None` means prefill is not active (agg).
+        if self.prefill_router.is_activated()
+            && let Some(prefill) = self.worker_monitor.prefill_routing_instance_counts()
+            && prefill.discovered > 0
+            && prefill.free == 0
+        {
+            tracing::info!(
+                discovered = prefill.discovered,
+                overloaded = prefill.overloaded,
+                "All prefill workers overloaded; shedding request (HTTP 429)"
+            );
+            return Some(PickError::AllWorkersOverloaded {
+                retry_after_secs: self.shed_retry_after_secs,
+            });
+        }
+
         None
     }
 
@@ -1056,8 +1122,9 @@ impl EndpointPicker for Router {
         // Load-shedding gate: if every eligible worker is overloaded, reject
         // explicitly (HTTP 429) before tokenizing/routing/booking so the request
         // never enters the router or triggers prefill compute. No-op unless
-        // thresholds are configured.
-        if let Some(shed) = self.shed_if_saturated() {
+        // thresholds are configured. Scoped to the request's candidate set so a
+        // subset hint is honored (never sheds based on non-candidate workers).
+        if let Some(shed) = self.shed_if_saturated(allowed_worker_ids.as_ref()) {
             return Err(shed);
         }
 

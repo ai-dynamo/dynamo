@@ -19,7 +19,7 @@ use crate::http::service::metrics::{
 use crate::kv_router::KV_METRICS_SUBJECT;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
-use dynamo_runtime::component::Client;
+use dynamo_runtime::component::{Client, RoutingInstanceCounts};
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{EventSubscriber, TypedEventSubscriber};
@@ -602,6 +602,20 @@ impl KvWorkerMonitor {
     /// detection should check this before enabling the gate.
     pub fn is_configured(&self) -> bool {
         self.thresholds.read().unwrap().is_configured()
+    }
+
+    /// Routing instance counts for the prefill pool, when a prefill `Client`
+    /// has been attached via [`attach_prefill_client`](Self::attach_prefill_client)
+    /// (i.e. disaggregated serving is active). Returns `None` before the prefill
+    /// router activates. Lets callers (e.g. the EPP shed gate) observe prefill
+    /// saturation — `free == 0` with `discovered > 0` means every prefill worker
+    /// is currently overloaded — without reaching into the prefill router.
+    pub fn prefill_routing_instance_counts(&self) -> Option<RoutingInstanceCounts> {
+        self.prefill_client
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|client| client.routing_instance_counts())
     }
 
     /// Attach the prefill router's `Client` for disaggregated mode.
