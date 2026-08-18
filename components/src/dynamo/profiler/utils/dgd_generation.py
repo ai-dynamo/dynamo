@@ -44,7 +44,7 @@ from dynamo.profiler.utils.config import (
     get_main_container,
     get_main_container_dict,
     set_argument_value,
-    set_unique_argument_value,
+    set_unique_env_value,
 )
 from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.dgd_template import load_dgd_template
@@ -215,10 +215,14 @@ def apply_runtime_version_override(dgdr, config_dict: dict) -> None:
 def enable_kv_router(config_dict: dict) -> None:
     """Configure the generated frontend to use KV-cache-aware routing.
 
-    DGD container args replace the operator's frontend defaults, so a generated
-    frontend must include the complete Python module invocation before adding
-    ``--router-mode kv``. Frontends with an unexpected generated shape are left
-    unchanged so this final assembly step does not discard profiling results.
+    Sets ``DYN_ROUTER_MODE=kv`` on the frontend's main container rather than
+    editing its command/args. ``--router-mode`` reads ``DYN_ROUTER_MODE`` as its
+    env fallback, so this avoids reasoning about whether the module entrypoint
+    lives in ``command`` or ``args`` (e.g. the ``command``-form produced by the
+    PVC/model-path flow), and any explicit user ``--router-mode`` override still
+    wins because flags take precedence over env vars. Frontends with an
+    unexpected generated shape are left unchanged so this final assembly step
+    does not discard profiling results.
     """
     components = config_dict.get("spec", {}).get("components", [])
     if not isinstance(components, list):
@@ -236,11 +240,9 @@ def enable_kv_router(config_dict: dict) -> None:
                 component.get("name"),
             )
             continue
-        args = container.get("args")
-        args = list(args) if isinstance(args, list) else []
-        if args[:2] != ["-m", "dynamo.frontend"]:
-            args = ["-m", "dynamo.frontend", *args]
-        container["args"] = set_unique_argument_value(list(args), "--router-mode", "kv")
+        container["env"] = set_unique_env_value(
+            container.get("env"), "DYN_ROUTER_MODE", "kv"
+        )
 
     if not found_frontend:
         logger.warning(
