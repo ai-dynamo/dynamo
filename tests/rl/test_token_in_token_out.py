@@ -256,7 +256,10 @@ def _request_vllm_completion(
     )
 
 
-def _assert_vllm_input_parity(*, frontend_port: int) -> None:
+@pytest.mark.vllm
+@pytest.mark.timeout(600)
+def test_vllm_token_in_token_out(start_vllm_tito_services: int) -> None:
+    frontend_port = start_vllm_tito_services
     text_response = _request_vllm_completion(
         frontend_port=frontend_port,
         prompt=TEST_PROMPT,
@@ -376,7 +379,12 @@ def _request_sglang_generate(*, frontend_port: int) -> list[dict[str, Any]]:
     return events
 
 
-def _assert_sglang_output_alignment(events: list[dict[str, Any]]) -> None:
+@pytest.mark.sglang
+@pytest.mark.profiled_vram_gib(3.7)
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.timeout(600)
+def test_sglang_token_in_token_out(start_sglang_tito_services: int) -> None:
+    events = _request_sglang_generate(frontend_port=start_sglang_tito_services)
     final = events[-1]
     output_ids = final.get("output_ids")
     assert (
@@ -398,20 +406,3 @@ def _assert_sglang_output_alignment(events: list[dict[str, Any]]) -> None:
         logprob, logprob_token_id = logprob_entry[:2]
         assert isinstance(logprob, (int, float)) and math.isfinite(logprob), final
         assert logprob_token_id == token_id, final
-
-
-@pytest.mark.vllm
-@pytest.mark.profiled_vram_gib(6.9)
-@pytest.mark.requested_vllm_kv_cache_bytes(331_801_000)
-@pytest.mark.timeout(600)
-def test_vllm_token_in_token_out(start_vllm_tito_services: int) -> None:
-    _assert_vllm_input_parity(frontend_port=start_vllm_tito_services)
-
-
-@pytest.mark.sglang
-@pytest.mark.profiled_vram_gib(3.7)
-@pytest.mark.requested_sglang_kv_tokens(2048)
-@pytest.mark.timeout(600)
-def test_sglang_token_in_token_out(start_sglang_tito_services: int) -> None:
-    events = _request_sglang_generate(frontend_port=start_sglang_tito_services)
-    _assert_sglang_output_alignment(events)
