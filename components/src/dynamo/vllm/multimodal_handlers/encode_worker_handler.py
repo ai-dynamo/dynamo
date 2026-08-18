@@ -46,6 +46,7 @@ CACHE_SIZE_MAXIMUM = 8
 # scale worse than local. Need to investigate why.
 # [gluo NOTE] default off to benchmark standalone encoder
 ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
+SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
 
 
 def _load_image_processor(engine_args: AsyncEngineArgs):
@@ -69,6 +70,54 @@ class EmbeddingItem:
     key: str | None
     image_grid_thw: list
     embeddings: torch.Tensor
+
+
+def _prepare_embedding_transfers(
+    embedding_items: list[EmbeddingItem],
+    *,
+    coalesce: bool,
+    combined_embedding: torch.Tensor | None = None,
+) -> tuple[list[torch.Tensor], list[int | None]]:
+    """Return the tensors to transfer for one encode response.
+
+    Qwen-VL stores each image as ``[1, visual_tokens, hidden]``. When the
+    request is not split across encode workers, concatenate the token axis so
+    the response needs one transfer instead of one transfer per image.
+    """
+    tensors = [item.embeddings for item in embedding_items]
+    if not coalesce or len(tensors) <= 1:
+        return tensors, list(range(len(tensors)))
+
+    first = tensors[0]
+    if any(
+        tensor.ndim != 3 or tensor.shape[0] != 1 or tensor.shape[2] != first.shape[2]
+        for tensor in tensors
+    ):
+        raise ValueError(
+            "Coalesced embedding transfer requires matching "
+            "[1, visual_tokens, hidden] tensors"
+        )
+
+    expected_shape = (1, sum(tensor.shape[1] for tensor in tensors), first.shape[2])
+    if combined_embedding is not None:
+        if tuple(combined_embedding.shape) != expected_shape:
+            raise ValueError(
+                "Combined Qwen-VL embedding does not match its per-image views: "
+                f"expected={expected_shape}, actual={tuple(combined_embedding.shape)}"
+            )
+        transfer_tensor = combined_embedding
+    else:
+        transfer_tensor = torch.cat(tensors, dim=1)
+
+    return [transfer_tensor], [0, *([None] * (len(tensors) - 1))]
+
+
+def _should_coalesce_embedding_transfers(model: str, item_count: int) -> bool:
+    return (
+        not SPLIT_ENCODE
+        and item_count > 1
+        and resolve_model_family(model) is ModelFamily.QWEN_VL
+    )
 
 
 class EncodeWorkerHandler:
@@ -224,6 +273,7 @@ class EncodeWorkerHandler:
 
         try:
             time_start = time.perf_counter()
+            encoded_embeddings: torch.Tensor | None = None
 
             with _nvtx.annotate("mm:enc:cache_check", color="cyan"):
                 # Before batch process images, check cache first
@@ -293,6 +343,7 @@ class EncodeWorkerHandler:
                         vision_encoder=self.vision_encoder,
                         projector=self.projector,
                     )
+                    encoded_embeddings = embeddings
                     # Sync XPU to ensure kernels complete before NIXL transfer.
                     if embeddings.device.type == "xpu":
                         torch.xpu.synchronize()
@@ -344,23 +395,44 @@ class EncodeWorkerHandler:
             before_transfer_time = time.perf_counter()
 
             with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
-                # Prepare transfer
+                complete_items = [
+                    embedding_item
+                    for embedding_item in embedding_lists
+                    if embedding_item is not None
+                ]
+                if len(complete_items) != len(request.multimodal_inputs):
+                    raise RuntimeError(
+                        "Encode worker did not produce one embedding for every "
+                        f"multimodal input: expected={len(request.multimodal_inputs)}, "
+                        f"actual={len(complete_items)}"
+                    )
+
+                coalesce = _should_coalesce_embedding_transfers(
+                    self.model, len(complete_items)
+                )
+                combined_embedding = (
+                    encoded_embeddings
+                    if coalesce and len(need_encode_indexes) == len(complete_items)
+                    else None
+                )
+                transfer_tensors, transfer_indices = _prepare_embedding_transfers(
+                    complete_items,
+                    coalesce=coalesce,
+                    combined_embedding=combined_embedding,
+                )
                 send_tasks = [
                     asyncio.create_task(
                         self.embedding_sender.send_embeddings(
-                            embedding_item.embeddings, stage_embeddings=True
+                            transfer_tensor, stage_embeddings=True
                         )
                     )
-                    for embedding_item in embedding_lists
-                    if embedding_item is not None
+                    for transfer_tensor in transfer_tensors
                 ]
                 transfer_requests = await asyncio.gather(*send_tasks)
 
                 after_transfer_time = time.perf_counter()
 
-                for idx, item in enumerate(zip(embedding_lists, transfer_requests)):
-                    embedding_item, transfer_request = item
-                    assert embedding_item is not None
+                for idx, embedding_item in enumerate(complete_items):
                     logger.debug(
                         f"{embedding_item.embeddings.shape} prepared for transfer."
                     )
@@ -373,11 +445,19 @@ class EncodeWorkerHandler:
                     group.multimodal_input.image_decoded = None
                     group.image_grid_thw = embedding_item.image_grid_thw
                     group.embeddings_shape = tuple(embedding_item.embeddings.shape)  # type: ignore[assignment]
-                    group.serialized_request = transfer_request[0]
+                    transfer_idx = transfer_indices[idx]
+                    group.serialized_request = (
+                        None
+                        if transfer_idx is None
+                        else transfer_requests[transfer_idx][0]
+                    )
 
-                    # Keep a reference of the embedding and only drop reference when the transfer is done
+                for transfer_request, transfer_tensor in zip(
+                    transfer_requests, transfer_tensors, strict=True
+                ):
+                    # Keep the transfer buffer alive until the transfer completes.
                     self.send_complete_queue.put_nowait(
-                        (transfer_request[1], embedding_item.embeddings)
+                        (transfer_request[1], transfer_tensor)
                     )
 
             payload = request.model_dump_json()
