@@ -222,15 +222,38 @@ class TorchMempoolMemoryClient:
         try:
             self._state = "RESUMING"
             wake_t0 = monotonic()
+
+            t = monotonic()
             self._kv_cache.connect(RequestedLockType.RW)
+            kv_connect = monotonic() - t
+
+            t = monotonic()
             self._kv_cache.reallocate_all_handles()
+            kv_reallocate = monotonic() - t
+
+            t = monotonic()
             self._kv_cache.remap_all_vas()
+            kv_remap = monotonic() - t
+
+            t = monotonic()
             self._weights.connect(RequestedLockType.RO)
+            weights_connect = monotonic() - t
+
+            t = monotonic()
             self._weights.remap_all_vas()
+            weights_remap = monotonic() - t
+
             self._state = "RUNNING"
             logger.info(
-                "GMS V1 wake complete device=%d total_elapsed=%.3fs",
+                "GMS V1 wake complete device=%d "
+                "kv_connect=%.3fs kv_reallocate=%.3fs kv_remap=%.3fs "
+                "weights_connect=%.3fs weights_remap=%.3fs total_elapsed=%.3fs",
                 self._device,
+                kv_connect,
+                kv_reallocate,
+                kv_remap,
+                weights_connect,
+                weights_remap,
                 monotonic() - wake_t0,
             )
         except Exception:  # noqa: BLE001

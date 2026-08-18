@@ -19,6 +19,7 @@ from __future__ import annotations
 import gc
 import logging
 from contextlib import contextmanager
+from time import monotonic
 from typing import Optional
 
 import torch
@@ -181,20 +182,37 @@ class GMSMemorySaverImpl:
         torch.cuda.empty_cache()
 
     def resume(self, tag: Optional[str] = None) -> None:
+        resume_t0 = monotonic()
         for target_tag in _pause_resume_tags(tag):
             if not self.allocators[target_tag].is_unmapped:
                 continue
 
             logger.info("[GMS] Remapping %s", target_tag)
             timeout_ms = self.ro_connect_timeout_ms if target_tag == "weights" else None
+            t = monotonic()
             self.allocators[target_tag].connect(
                 _TAG_LOCK_TYPES[target_tag], timeout_ms=timeout_ms
             )
+            connect_s = monotonic() - t
+            realloc_s = 0.0
             if target_tag == "kv_cache":
                 # KV cache resumes into a new RW layout epoch, so the handles
                 # must be re-created before the VA range is mapped again.
+                t = monotonic()
                 self.allocators[target_tag].reallocate_all_handles(tag=target_tag)
+                realloc_s = monotonic() - t
+            t = monotonic()
             self.allocators[target_tag].remap_all_vas()
+            remap_s = monotonic() - t
+            logger.info(
+                "[GMS] wake tag=%s connect=%.3fs realloc=%.3fs remap=%.3fs total=%.3fs",
+                target_tag,
+                connect_s,
+                realloc_s,
+                remap_s,
+                connect_s + realloc_s + remap_s,
+            )
+        logger.info("[GMS] wake complete total_elapsed=%.3fs", monotonic() - resume_t0)
 
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
         """Publish write-mode weights after all managed GMS regions exit."""
