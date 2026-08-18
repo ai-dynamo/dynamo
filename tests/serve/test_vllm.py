@@ -901,7 +901,9 @@ def lora_chat_payload(
     941_712_000
 )  # 2x safety over min=470_855_680
 @pytest.mark.timeout(300)  # LoRA setup adds overhead; L4 machines are slower
-@pytest.mark.post_merge
+# TEMPORARY (#13492): route this post-merge test to the H100 PR validation lane.
+@pytest.mark.h100
+@pytest.mark.pre_merge
 def test_lora_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -958,6 +960,8 @@ def test_lora_aggregated(
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.timeout(600)
+# TEMPORARY (#13492): route this existing pre-merge test to the H100 PR lane.
+@pytest.mark.h100
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_lora_aggregated_router(
