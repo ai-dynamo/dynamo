@@ -94,6 +94,7 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 	// controller-owned metadata still has to be protected during that window,
 	// while anything required for cleanup to finish must still be allowed.
 	t.Run("terminating rejects replacing the workload provider", func(t *testing.T) {
+		t.Log("given a terminating DGD whose workload provider is already materialized")
 		oldDGD := newBetaDGDForValidation()
 		oldDGD.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}
 		newDGD := oldDGD.DeepCopy()
@@ -101,13 +102,17 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD.DeletionTimestamp = &now
 		newDGD.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderComponent
 
+		t.Log("when the update replaces that provider")
 		_, err := handler.ValidateUpdate(ctx, oldDGD, newDGD)
+
+		t.Log("then the annotation is reported immutable")
 		assertBetaValidationErrors(t, err, []string{
 			`metadata.annotations[nvidia.com/workload-provider]: Invalid value: "component": field is immutable`,
 		})
 	})
 
 	t.Run("terminating rejects removing the workload provider", func(t *testing.T) {
+		t.Log("given a terminating DGD whose workload provider is already materialized")
 		oldDGD := newBetaDGDForValidation()
 		oldDGD.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}
 		newDGD := oldDGD.DeepCopy()
@@ -115,7 +120,10 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD.DeletionTimestamp = &now
 		delete(newDGD.Annotations, consts.KubeAnnotationWorkloadProvider)
 
+		t.Log("when the update removes that provider")
 		_, err := handler.ValidateUpdate(ctx, oldDGD, newDGD)
+
+		t.Log("then the annotation is reported immutable")
 		assertBetaValidationErrors(t, err, []string{
 			// Removal reports a null bad value, since there is no new value to name.
 			"metadata.annotations[nvidia.com/workload-provider]: Invalid value: null: field is immutable",
@@ -123,6 +131,7 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 	})
 
 	t.Run("terminating rejects an unsupported workload provider", func(t *testing.T) {
+		t.Log("given the operator identity materializing a provider on a terminating DGD")
 		operatorCtx := dgdAdmissionContextWithUserInfo(
 			admissionv1.Update,
 			nvidiacomv1beta1.DynamoGraphDeploymentGVK,
@@ -134,13 +143,17 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD.DeletionTimestamp = &now
 		newDGD.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: "bogus"}
 
+		t.Log("when the value names no program the controller implements")
 		_, err := handler.ValidateUpdate(operatorCtx, oldDGD, newDGD)
+
+		t.Log("then the value is reported unsupported")
 		assertBetaValidationErrors(t, err, []string{
 			`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "bogus": supported values: "component", "grove"`,
 		})
 	})
 
 	t.Run("terminating accepts a finalizer-only update", func(t *testing.T) {
+		t.Log("given a terminating DGD holding a finalizer")
 		oldDGD := newBetaDGDForValidation()
 		oldDGD.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}
 		oldDGD.Finalizers = []string{"nvidia.com/dynamo-graph-deployment-finalizer"}
@@ -149,6 +162,34 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD.DeletionTimestamp = &now
 		newDGD.Finalizers = nil
 
+		t.Log("when the update only drops that finalizer")
+		t.Log("then cleanup is allowed to proceed")
+		if _, err := handler.ValidateUpdate(ctx, oldDGD, newDGD); err != nil {
+			t.Fatalf("ValidateUpdate() on finalizer removal error = %v, want nil", err)
+		}
+	})
+
+	// A legacy object whose existing settings no longer satisfy today's rules has
+	// to stay deletable. The GPU memory service traversal on the update path
+	// judges the new component on its own, so running it here would reject the
+	// controller's finalizer-removal update and strand the object forever.
+	t.Run("terminating accepts finalizer removal despite an invalid gpu memory service", func(t *testing.T) {
+		t.Log("given a terminating DGD whose existing GPU memory service block fails today's rules")
+		oldDGD := newBetaDGDForValidation()
+		worker := &oldDGD.Spec.Components[1]
+		worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+			GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+				ExtraClientContainers: []string{"no-such-container"},
+			},
+		}
+		oldDGD.Finalizers = []string{"nvidia.com/dynamo-graph-deployment-finalizer"}
+		newDGD := oldDGD.DeepCopy()
+		now := metav1.Now()
+		newDGD.DeletionTimestamp = &now
+		newDGD.Finalizers = nil
+
+		t.Log("when the update only drops the finalizer")
+		t.Log("then no new-state rule is allowed to strand the object")
 		if _, err := handler.ValidateUpdate(ctx, oldDGD, newDGD); err != nil {
 			t.Fatalf("ValidateUpdate() on finalizer removal error = %v, want nil", err)
 		}
