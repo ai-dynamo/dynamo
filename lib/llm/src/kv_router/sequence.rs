@@ -913,8 +913,6 @@ mod tests {
             .expect("attempt channel should remain open");
         assert_eq!(first, 0);
 
-        // The transport is now pending. Submit more than capacity: the queue holds `capacity`
-        // and the rest are shed, and no further publish starts while the first is in flight.
         for worker_id in 1..=capacity as u64 {
             assert!(sender.enqueue(active_load(worker_id, false)));
         }
