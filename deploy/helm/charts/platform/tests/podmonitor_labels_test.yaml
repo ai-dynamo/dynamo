@@ -11,20 +11,34 @@ tests:
       dynamo-operator.dynamo.metrics.podMonitors.labels.release: kube-prometheus-stack
     asserts:
       - hasDocuments:
-          count: 4
+          count: 5
       - equal:
           path: metadata.labels.release
           value: kube-prometheus-stack
-        documentIndex: 0
+        documentSelector:
+          path: metadata.name
+          value: dynamo-frontend
       - equal:
           path: metadata.labels.release
           value: kube-prometheus-stack
-        documentIndex: 1
+        documentSelector:
+          path: metadata.name
+          value: dynamo-worker
       - equal:
           path: metadata.labels.release
           value: kube-prometheus-stack
-        documentIndex: 2
+        documentSelector:
+          path: metadata.name
+          value: dynamo-planner
       - equal:
           path: metadata.labels.release
           value: kube-prometheus-stack
-        documentIndex: 3
+        documentSelector:
+          path: metadata.name
+          value: dynamo-epp
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack
+        documentSelector:
+          path: metadata.name
+          value: dynamo-router
