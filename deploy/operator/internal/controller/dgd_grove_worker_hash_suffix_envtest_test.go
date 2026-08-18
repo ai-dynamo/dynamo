@@ -66,12 +66,15 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	triggerGroveWorkerHashSuffixReconcile(t, ctx, env, dgd)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, dgd, "")
 
-	t.Log("Wait for the baseline worker hash commit before updating the legacy DGD")
-	initialWorkerHash := waitForGroveWorkerHash(t, ctx, env, dgd)
-
-	t.Log("Read the legacy DGD for the frontend-only update")
+	t.Log("Read the baseline DGD and wait for its worker hash commit")
 	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
+	require.NoError(t, env.Client().Get(ctx, key, current))
+	initialWorkerHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
+	require.NoError(t, err)
+	waitForGroveWorkerHash(t, ctx, env, current, initialWorkerHash)
+
+	t.Log("Read the legacy DGD for the frontend-only update")
 	require.NoError(t, env.Client().Get(ctx, key, current))
 
 	t.Log("Apply a frontend-only update")
@@ -90,11 +93,13 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	prefill := current.GetComponentByName("prefill")
 	prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
 	require.NoError(t, env.Client().Update(ctx, current))
-	t.Log("Wait for the updated Grove workers to carry the canonical suffix")
+	t.Log("Read the updated DGD and wait for its PCS suffix and hash commit")
+	require.NoError(t, env.Client().Get(ctx, key, current))
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
 	require.NoError(t, err)
 	require.NotEqual(t, initialWorkerHash, wantHash)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, current, wantHash)
+	waitForGroveWorkerHash(t, ctx, env, current, wantHash)
 }
 
 func triggerGroveWorkerHashSuffixReconcile(
@@ -213,26 +218,23 @@ func waitForGroveWorkerHash(
 	ctx context.Context,
 	env *operatorenv.TestEnv,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) string {
+	want string,
+) {
 	t.Helper()
-	var workerHash string
 	dynamotesting.Eventually(t, func() (bool, string) {
 		current := &nvidiacomv1beta1.DynamoGraphDeployment{}
 		key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
 		if err := env.Client().Get(ctx, key, current); err != nil {
 			return false, fmt.Sprintf("get DynamoGraphDeployment: %v", err)
 		}
-		workerHash = current.GetAnnotations()[consts.AnnotationCurrentWorkerHashV2]
-		if workerHash == "" {
+		if got := current.GetAnnotations()[consts.AnnotationCurrentWorkerHashV2]; got != want {
 			return false, fmt.Sprintf(
-				"DynamoGraphDeployment has no current worker hash (state=%s, conditions=%v)",
-				current.Status.State,
-				current.Status.Conditions,
+				"DynamoGraphDeployment current worker hash = %q, want %q (state=%s, conditions=%v)",
+				got, want, current.Status.State, current.Status.Conditions,
 			)
 		}
-		return true, "DynamoGraphDeployment recorded the current worker hash"
-	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove did not commit the initial worker hash")
-	return workerHash
+		return true, "DynamoGraphDeployment recorded the expected worker hash"
+	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove did not commit the expected worker hash")
 }
 
 func waitForGroveWorkerHashSuffixes(
@@ -271,6 +273,9 @@ func checkGroveWorkerHashSuffixes(
 			continue
 		}
 		seenWorkers[component] = true
+		if got := clique.Labels[consts.KubeLabelDynamoWorkerHash]; got != want {
+			return false, fmt.Sprintf("%s clique %q worker hash label=%q, want %q", component, clique.Name, got, want)
+		}
 		main := findMainContainer(clique.Spec.PodSpec.Containers)
 		if main == nil {
 			return false, fmt.Sprintf("%s clique %q has no main container", component, clique.Name)
