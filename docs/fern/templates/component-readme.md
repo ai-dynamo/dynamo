@@ -38,8 +38,13 @@ title: Component README
 # metadata:
 #   name: <component>-deployment
 # spec:
-#   services:
-#     ...
+#   components:
+#   - name: <component-name>
+#     type: <component-type>
+#     podTemplate:
+#       spec:
+#         containers:
+#         - name: main
 ```
 
 {/* EXAMPLE: Filled-in Quick Start for Router would look like:
@@ -58,14 +63,19 @@ python -m dynamo.frontend --router-mode kv --http-port 8000
 ### Kubernetes
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: router-example
 spec:
-  graphs:
-    - name: frontend
-      replicas: 1
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
 ``` */}
 
 ## Configuration

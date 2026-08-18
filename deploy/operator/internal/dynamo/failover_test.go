@@ -173,7 +173,7 @@ func TestAugmentEngineForGMS(t *testing.T) {
 
 	assert.Equal(t, corev1.RestartPolicyNever, podSpec.RestartPolicy,
 		"inter-pod failover engines must be RestartPolicyNever so the "+
-			"FailoverCascadeReconciler is the sole recovery path")
+			"failover cascade controller is the sole recovery path")
 }
 
 // TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever pins the

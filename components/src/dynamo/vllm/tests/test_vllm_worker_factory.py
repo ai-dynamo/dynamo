@@ -16,6 +16,7 @@ from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
+    _DecodeWorkerLifecycle,
     _wait_and_load_benchmark,
 )
 
@@ -23,9 +24,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.core,
-    # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
-    # runners with "Failed to infer device type" even for mock tests.
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.xpu_1,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
@@ -41,10 +40,280 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        # Pin to the real Config default: an auto-created Mock attribute is
+        # truthy, which enables the GMS shadow-mode path and imports the
+        # optional gpu_memory_service package (absent in some test images).
+        "gms_shadow_mode": False,
         "realtime": False,
+        "classify_worker": False,
     }
     defaults.update(overrides)
     return Mock(**defaults)
+
+
+def _make_factory(**overrides) -> WorkerFactory:
+    defaults = {
+        "setup_vllm_engine_fn": Mock(),
+        "setup_kv_event_publisher_fn": Mock(return_value=None),
+        "register_vllm_model_fn": AsyncMock(),
+        "setup_fpm_relay_fn": Mock(return_value=None),
+        "setup_metrics_collection_fn": Mock(),
+    }
+    defaults.update(overrides)
+    return WorkerFactory(**defaults)
+
+
+def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
+    calls = []
+    shutdown_event = asyncio.Event()
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: calls.append("handler")
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    resources = _DecodeWorkerLifecycle(
+        engine_client=engine_client,
+        vllm_config=SimpleNamespace(shutdown_timeout=7.0),
+        handler=handler,
+        shutdown_event=shutdown_event,
+    )
+
+    resources.cleanup()
+
+    assert calls == ["handler", "engine"]
+    assert shutdown_event.is_set()
+    engine_client.shutdown.assert_called_once_with(timeout=7.0)
+
+
+def test_decode_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
+    handler = Mock()
+    handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
+    engine_client = Mock()
+    resources = _DecodeWorkerLifecycle(
+        engine_client=engine_client,
+        vllm_config=SimpleNamespace(shutdown_timeout=5.0),
+        handler=handler,
+    )
+
+    with pytest.raises(RuntimeError, match="handler cleanup failed"):
+        resources.cleanup()
+
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+def test_decode_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
+    handler_error = RuntimeError("handler cleanup failed")
+    engine_error = RuntimeError("engine shutdown failed")
+    handler = Mock()
+    handler.cleanup.side_effect = handler_error
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = engine_error
+    lifecycle = _DecodeWorkerLifecycle(
+        engine_client=engine_client,
+        vllm_config=SimpleNamespace(shutdown_timeout=5.0),
+        handler=handler,
+    )
+
+    with pytest.raises(RuntimeError, match="engine shutdown failed") as exc_info:
+        lifecycle.cleanup()
+
+    assert exc_info.value is engine_error
+    assert exc_info.value.__context__ is handler_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog):
+    factory = _make_factory()
+    engine_client = Mock()
+    handler = Mock()
+    handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
+    startup_error = ValueError("decode worker startup failed")
+
+    async def fail_after_resource_creation(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.handler = handler
+        raise startup_error
+
+    factory._run_decode_worker = fail_after_resource_creation  # type: ignore[method-assign]
+    caplog.set_level(logging.ERROR)
+    config = SimpleNamespace(custom_encoder_class="encoder.Backend")
+
+    with pytest.raises(ValueError, match="decode worker startup failed") as exc_info:
+        await factory._create_decode_worker(Mock(), config, asyncio.Event(), [])
+
+    assert exc_info.value is startup_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    assert "Failed to clean up decode worker after an earlier failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_decode_worker_without_custom_encoder_uses_lifecycle():
+    factory = _make_factory()
+    engine_client = Mock()
+    startup_error = ValueError("decode worker startup failed")
+
+    async def fail_after_engine_creation(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        raise startup_error
+
+    factory._run_decode_worker = fail_after_engine_creation  # type: ignore[method-assign]
+    config = SimpleNamespace(custom_encoder_class=None)
+
+    with pytest.raises(ValueError, match="decode worker startup failed") as exc_info:
+        await factory._create_decode_worker(Mock(), config, asyncio.Event(), [])
+
+    assert exc_info.value is startup_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
+    calls = []
+    state_agent_lifecycle = SimpleNamespace(
+        close=AsyncMock(side_effect=lambda: calls.append("state-agent"))
+    )
+    factory = _make_factory(state_agent_lifecycle=state_agent_lifecycle)
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: calls.append("handler")
+
+    async def fail_after_setup(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.handler = handler
+        raise RuntimeError("startup failed")
+
+    factory._run_decode_worker = fail_after_setup  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="startup failed"):
+        await factory._create_decode_worker(
+            Mock(), SimpleNamespace(custom_encoder_class=None), asyncio.Event(), []
+        )
+
+    assert calls == ["state-agent", "handler", "engine"]
+
+
+@pytest.mark.asyncio
+async def test_prefill_startup_failure_withdraws_state_agent_owner():
+    lifecycle = SimpleNamespace(close=AsyncMock())
+    factory = _make_factory(state_agent_lifecycle=lifecycle)
+    factory._run_prefill_worker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("prefill startup failed")
+    )
+
+    with pytest.raises(RuntimeError, match="prefill startup failed"):
+        await factory._create_prefill_worker(Mock(), Mock(), asyncio.Event(), [])
+
+    lifecycle.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_state_agent_setup_failure_never_falls_back_to_legacy(monkeypatch):
+    from dynamo.vllm import worker_factory
+
+    monkeypatch.setattr(
+        worker_factory, "state_agent_settings", lambda _config: object()
+    )
+    setup_legacy = Mock(return_value=["legacy"])
+    setup_owner = AsyncMock(side_effect=RuntimeError("host is unavailable"))
+    factory = _make_factory(
+        setup_kv_event_publisher_fn=setup_legacy,
+        setup_kv_state_attachment_owner_fn=setup_owner,
+    )
+
+    result = await factory._setup_kv_routing(
+        Mock(),
+        Mock(),
+        Mock(),
+        consolidator_enabled=False,
+        consolidator_port=0,
+    )
+
+    assert result is None
+    setup_owner.assert_awaited_once()
+    setup_legacy.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["configure", "handler"])
+async def test_custom_encoder_shutdown_engine_on_startup_failure(
+    monkeypatch, failure_stage, tmp_path
+):
+    engine_client = Mock()
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(num_gpu_blocks=1),
+        model_config=SimpleNamespace(max_model_len=1024),
+        shutdown_timeout=5.0,
+    )
+    engine_setup: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        str(tmp_path / "prometheus"),
+        Mock(),
+    )
+    factory = _make_factory(setup_vllm_engine_fn=Mock(return_value=engine_setup))
+    factory._maybe_create_failover_metrics = Mock(return_value=None)  # type: ignore[method-assign]
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    stat_logger = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory",
+        Mock(return_value=stat_logger),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.per_rank_kv_blocks",
+        lambda _num_blocks, _dp_size: 1,
+    )
+
+    async def configure_block_size(*_args, **_kwargs):
+        if failure_stage == "configure":
+            raise ValueError("decode startup rejected")
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size",
+        configure_block_size,
+    )
+    handler_constructor = Mock(
+        side_effect=(
+            ValueError("decode startup rejected")
+            if failure_stage == "handler"
+            else None
+        )
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.DecodeWorkerHandler",
+        handler_constructor,
+    )
+
+    endpoint = Mock(connection_id=Mock(return_value="worker-id"))
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+    config = SimpleNamespace(
+        namespace="dynamo",
+        component="backend",
+        endpoint="generate",
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+        enable_multimodal=True,
+        custom_encoder_class="encoder.Backend",
+        use_vllm_tokenizer=False,
+        frontend_decoding=False,
+    )
+
+    with pytest.raises(ValueError, match="decode startup rejected"):
+        await factory._create_decode_worker(runtime, config, asyncio.Event(), [])
+
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    if failure_stage == "configure":
+        handler_constructor.assert_not_called()
 
 
 def _single_rank_benchmark_payload(
@@ -470,6 +739,7 @@ class TestCreate:
         factory._create_decode_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_embedding_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_realtime_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_classify_worker = AsyncMock()  # type: ignore[assignment]
         return factory
 
     # Tests for non-legacy worker config, 'route_to_encode' is worker internal config
@@ -562,6 +832,17 @@ class TestCreate:
         factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
 
+    async def test_classify_worker_takes_priority(self, factory: WorkerFactory) -> None:
+        config = _make_config(classify_worker=True)
+        shutdown_event = asyncio.Event()
+
+        await factory.create(Mock(), config, shutdown_event, [])
+
+        factory._create_classify_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
+
     async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
         config = _make_config(enable_multimodal=True)
         runtime = Mock()
@@ -590,6 +871,81 @@ class TestCreate:
             shutdown_endpoints,
             snapshot_engine=snapshot_engine,
         )
+
+
+@pytest.mark.asyncio
+async def test_classify_worker_registers_classify_and_pooling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = Mock()
+    endpoint.connection_id.return_value = "worker-1"
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    engine_client = Mock()
+    vllm_config = Mock(model_config=Mock())
+    engine_tuple: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        "/tmp/prom",
+        None,
+    )
+    register_model = AsyncMock()
+    handler = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.ClassifyWorkerHandler",
+        Mock(return_value=handler),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory",
+        Mock(return_value=Mock()),
+    )
+
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_kv_event_publisher_fn=Mock(),
+        register_vllm_model_fn=register_model,
+        setup_fpm_relay_fn=Mock(),
+        setup_metrics_collection_fn=Mock(),
+    )
+    config = _make_config(
+        classify_worker=True,
+        namespace="dynamo",
+        component="worker",
+        endpoint="generate",
+        served_model_name="model",
+        model="model",
+    )
+    shutdown_endpoints: list = []
+
+    await factory._create_classify_worker(
+        runtime,
+        config,
+        asyncio.Event(),
+        shutdown_endpoints,
+    )
+
+    register_model.assert_awaited_once()
+    register_args = register_model.await_args.args
+    registered_model_type = register_args[1]
+    assert register_args[0] == ModelInput.Text
+    assert registered_model_type.supports_classify()
+    assert registered_model_type.supports_pooling()
+    assert not registered_model_type.supports_embedding()
+    assert register_args[2:] == (
+        endpoint,
+        config,
+        engine_client,
+        vllm_config,
+    )
+    assert register_model.await_args.kwargs == {
+        "worker_type": WorkerType.Aggregated,
+        "needs": [],
+    }
+    assert shutdown_endpoints == [endpoint]
+    handler.cleanup.assert_called_once()
 
 
 @pytest.mark.asyncio

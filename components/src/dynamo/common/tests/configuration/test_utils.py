@@ -11,6 +11,7 @@ from dynamo.common.configuration.utils import (
     add_negatable_bool_argument,
     env_or_default,
     nullable_float,
+    parse_bool,
 )
 
 pytestmark = [
@@ -18,6 +19,28 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("true", True),
+        ("1", True),
+        ("on", True),
+        ("yes", True),
+        ("false", False),
+        ("0", False),
+        ("off", False),
+        ("no", False),
+    ],
+)
+def test_parse_bool(value, expected):
+    assert parse_bool(value) is expected
+
+
+def test_parse_bool_rejects_invalid_value():
+    with pytest.raises(argparse.ArgumentTypeError, match="expected one of"):
+        parse_bool("flase")
 
 
 class TestEnvOrDefault:
@@ -250,6 +273,20 @@ class TestAddNegatableBool:
 
         args = parser.parse_args([])
         assert args.enable_feature is False
+
+    def test_strict_env_parser_rejects_invalid_value(self, monkeypatch):
+        monkeypatch.setenv("TEST_ENABLE", "flase")
+        parser = argparse.ArgumentParser()
+
+        with pytest.raises(argparse.ArgumentTypeError, match="expected one of"):
+            add_negatable_bool_argument(
+                parser,
+                flag_name="--enable-feature",
+                env_var="TEST_ENABLE",
+                default=True,
+                help="Enable feature",
+                env_value_type=parse_bool,
+            )
 
     def test_converts_hyphens_to_underscores(self):
         """Test that flag name with hyphens converts to underscores in dest."""

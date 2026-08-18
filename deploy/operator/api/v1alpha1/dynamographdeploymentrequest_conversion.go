@@ -58,8 +58,9 @@ import (
 )
 
 const (
-	annDGDRSpec   = "nvidia.com/dgdr-spec"
-	annDGDRStatus = "nvidia.com/dgdr-status"
+	annDGDRSpec               = "nvidia.com/dgdr-spec"
+	annDGDRStatus             = "nvidia.com/dgdr-status"
+	dgdrProfilerContainerName = "profiler"
 )
 
 // Retired per-field annotations are no longer decoded, but must still be
@@ -228,7 +229,12 @@ func marshalDGDRHubSpec(src *v1beta1.DynamoGraphDeploymentRequestSpec) ([]byte, 
 }
 
 func restoreDGDRHubSpec(raw string) (v1beta1.DynamoGraphDeploymentRequestSpec, bool) {
-	return restorePreservedSpec[v1beta1.DynamoGraphDeploymentRequestSpec](raw, nil)
+	spec, ok := restorePreservedSpec[v1beta1.DynamoGraphDeploymentRequestSpec](raw, nil)
+	if !ok {
+		return spec, false
+	}
+	migrateLegacyUnnamedProfilerInOverrides(spec.Overrides)
+	return spec, true
 }
 
 func marshalDGDRSpokeSpec(src *DynamoGraphDeploymentRequestSpec) ([]byte, error) {
@@ -486,10 +492,17 @@ func projectProfilingConfigToProfilingJob(src *ProfilingConfigSpec, dst *v1beta1
 	podSpec := &dst.Overrides.ProfilingJob.Template.Spec
 
 	if src.Resources != nil {
-		if len(podSpec.Containers) == 0 {
-			podSpec.Containers = []corev1.Container{{}}
+		idx := dgdrProfilerContainerIndex(podSpec.Containers)
+		if idx < 0 {
+			// Alpha profilingConfig.resources always projects onto the canonical
+			// named profiler entry. containers is a map list keyed by name, so
+			// provenance must not be encoded as name:"".
+			podSpec.Containers = append(podSpec.Containers, corev1.Container{
+				Name: dgdrProfilerContainerName,
+			})
+			idx = len(podSpec.Containers) - 1
 		}
-		podSpec.Containers[0].Resources = *src.Resources
+		podSpec.Containers[idx].Resources = *src.Resources
 	}
 	if len(src.Tolerations) > 0 {
 		podSpec.Tolerations = src.Tolerations
@@ -758,10 +771,20 @@ func dgdrHubOnlyProfilingJob(src *batchv1.JobSpec) *batchv1.JobSpec {
 		return nil
 	}
 	save := src.DeepCopy()
-	if len(save.Template.Spec.Containers) > 0 {
-		save.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
-		if len(save.Template.Spec.Containers) == 1 && apiequality.Semantic.DeepEqual(save.Template.Spec.Containers[0], corev1.Container{}) {
-			save.Template.Spec.Containers = slices.Delete(save.Template.Spec.Containers, 0, 1)
+	migrateLegacyUnnamedProfilerContainers(save.Template.Spec.Containers)
+	if idx := dgdrProfilerContainerIndex(save.Template.Spec.Containers); idx >= 0 {
+		hadProjectedResources := !apiequality.Semantic.DeepEqual(
+			save.Template.Spec.Containers[idx].Resources,
+			corev1.ResourceRequirements{},
+		)
+		save.Template.Spec.Containers[idx].Resources = corev1.ResourceRequirements{}
+		// Omit only when alpha alone reconstructs the same ordered list: a sole
+		// profiler whose only projected field was resources. An explicit
+		// name-only profiler (no resources) must remain in the annotation.
+		if hadProjectedResources &&
+			dgdrIsNameOnlyProfiler(save.Template.Spec.Containers[idx]) &&
+			len(save.Template.Spec.Containers) == 1 {
+			save.Template.Spec.Containers = slices.Delete(save.Template.Spec.Containers, idx, idx+1)
 		}
 	}
 	save.Template.Spec.Tolerations = nil
@@ -776,16 +799,21 @@ func mergeDGDRHubOnlyProfilingJob(dst *batchv1.JobSpec, restored *batchv1.JobSpe
 	if dst == nil || restored == nil {
 		return
 	}
-	resources, hasResources := dgdrFirstContainerResources(dst)
+	resources, hasResources := dgdrProfilerContainerResources(dst)
 	tolerations := slices.Clone(dst.Template.Spec.Tolerations)
 	nodeSelector := maps.Clone(dst.Template.Spec.NodeSelector)
 
 	*dst = *restored.DeepCopy()
+	migrateLegacyUnnamedProfilerContainers(dst.Template.Spec.Containers)
 	if hasResources {
-		if len(dst.Template.Spec.Containers) == 0 {
-			dst.Template.Spec.Containers = []corev1.Container{{}}
+		idx := dgdrProfilerContainerIndex(dst.Template.Spec.Containers)
+		if idx < 0 {
+			dst.Template.Spec.Containers = append(dst.Template.Spec.Containers, corev1.Container{
+				Name: dgdrProfilerContainerName,
+			})
+			idx = len(dst.Template.Spec.Containers) - 1
 		}
-		dst.Template.Spec.Containers[0].Resources = resources
+		dst.Template.Spec.Containers[idx].Resources = resources
 	}
 	if len(tolerations) > 0 {
 		dst.Template.Spec.Tolerations = tolerations
@@ -795,12 +823,59 @@ func mergeDGDRHubOnlyProfilingJob(dst *batchv1.JobSpec, restored *batchv1.JobSpe
 	}
 }
 
-func dgdrFirstContainerResources(job *batchv1.JobSpec) (corev1.ResourceRequirements, bool) {
-	if job == nil || len(job.Template.Spec.Containers) == 0 {
+func dgdrProfilerContainerResources(job *batchv1.JobSpec) (corev1.ResourceRequirements, bool) {
+	if job == nil {
 		return corev1.ResourceRequirements{}, false
 	}
-	res := job.Template.Spec.Containers[0].Resources
+	idx := dgdrProfilerContainerIndex(job.Template.Spec.Containers)
+	if idx < 0 {
+		return corev1.ResourceRequirements{}, false
+	}
+	res := job.Template.Spec.Containers[idx].Resources
 	return res, !apiequality.Semantic.DeepEqual(res, corev1.ResourceRequirements{})
+}
+
+// dgdrProfilerContainerIndex returns the index of the canonical profiler
+// container (name == "profiler"). Matching is strict by map-list key.
+func dgdrProfilerContainerIndex(containers []corev1.Container) int {
+	for i := range containers {
+		if containers[i].Name == dgdrProfilerContainerName {
+			return i
+		}
+	}
+	return -1
+}
+
+func dgdrIsNameOnlyProfiler(c corev1.Container) bool {
+	return apiequality.Semantic.DeepEqual(c, corev1.Container{Name: dgdrProfilerContainerName})
+}
+
+// migrateLegacyUnnamedProfilerInOverrides renames a legacy name:"" profiler
+// placeholder in restored hub annotations before map-list merging.
+func migrateLegacyUnnamedProfilerInOverrides(overrides *v1beta1.OverridesSpec) {
+	if overrides == nil || overrides.ProfilingJob == nil {
+		return
+	}
+	migrateLegacyUnnamedProfilerContainers(overrides.ProfilingJob.Template.Spec.Containers)
+}
+
+// migrateLegacyUnnamedProfilerContainers implements the narrow decode-time
+// migration for old nvidia.com/dgdr-spec payloads that used an unnamed
+// synthetic profiler entry:
+//  1. If no name:profiler exists and a name:"" entry exists, rename that entry
+//     to profiler in place (preserve position and fields).
+//  2. If name:profiler already exists, leave any additional name:"" entry as a
+//     distinct map-list element.
+func migrateLegacyUnnamedProfilerContainers(containers []corev1.Container) {
+	if dgdrProfilerContainerIndex(containers) >= 0 {
+		return
+	}
+	for i := range containers {
+		if containers[i].Name == "" {
+			containers[i].Name = dgdrProfilerContainerName
+			return
+		}
+	}
 }
 
 // projectSLAAndWorkloadToProfilingConfigBlob writes SLA and Workload structured fields back into the JSON blob.
@@ -906,8 +981,13 @@ func projectProfilingJobToProfilingConfig(src *v1beta1.DynamoGraphDeploymentRequ
 		return
 	}
 	podSpec := &src.Overrides.ProfilingJob.Template.Spec
-	if len(podSpec.Containers) > 0 {
-		res := podSpec.Containers[0].Resources
+
+	// Migrate leftover unnamed profiler entries on a copy so live hub storage
+	// is not mutated. Lookup after that is strict by name.
+	containers := slices.Clone(podSpec.Containers)
+	migrateLegacyUnnamedProfilerContainers(containers)
+	if idx := dgdrProfilerContainerIndex(containers); idx >= 0 {
+		res := containers[idx].Resources
 		if !apiequality.Semantic.DeepEqual(res, corev1.ResourceRequirements{}) {
 			dst.ProfilingConfig.Resources = &res
 		}

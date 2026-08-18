@@ -59,6 +59,7 @@ jobs:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ inputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
@@ -82,7 +83,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ inputs.framework }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ inputs.image_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.image_tag }}
           platform_arch: amd64
           extra_pytest_args: -m framework_only
           # Mount the shared model cache only when both endpoint vars are set

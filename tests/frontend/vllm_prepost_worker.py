@@ -14,7 +14,13 @@ from typing import Any
 import uvloop
 from transformers import AutoTokenizer
 
-from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
 from dynamo.runtime import DistributedRuntime
 from tests.frontend.test_prepost import OUTPUTS_INTERVAL_20
 from tests.frontend.test_vllm_prepost_integration import CAPTURE_PATH_ENV
@@ -69,12 +75,17 @@ async def main():
 
     runtime = DistributedRuntime(asyncio.get_running_loop(), "etcd", "tcp")
     endpoint = runtime.endpoint("test.vllm-prepost.generate")
+    runtime_config = ModelRuntimeConfig()
+    runtime_config.set_structural_tag_mode("on")
+    runtime_config.set_structural_tag_scope("always")
+    runtime_config.set_structural_tag_schema("strict")
     await register_model(
         ModelInput.Tokens,
         ModelType.Chat,
         endpoint,
         QWEN,
         model_name=QWEN,
+        runtime_config=runtime_config,
         worker_type=WorkerType.Aggregated,
     )
 

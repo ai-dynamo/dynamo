@@ -57,6 +57,12 @@ global:
     # create PodCliqueSets for multinode deployments.
     enabled: false
 
+  snapshot:
+    # -- Whether this chart should install the bundled Snapshot subchart
+    # (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs.
+    # NOTE: For production environments, it is recommended to install Snapshot separately.
+    install: false
+
 # Subcharts configuration
 
 # Dynamo operator configuration
@@ -229,7 +235,7 @@ dynamo-operator:
     # -- CA bundle (base64 encoded) for webhook validation. Only used when certificateSecret.external=true. For automatic certificate generation or cert-manager integration, leave this empty as it will be injected automatically.
     caBundle: ""
 
-    # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees.
+    # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. Keep 'Fail' in every environment so requests cannot bypass Dynamo validation and defaulting. 'Ignore' is an emergency-only, short-lived bypass: pause Dynamo resource writes, restore 'Fail' immediately after recovery, and audit every resource changed during the bypass window.
     failurePolicy: Fail
 
     # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods.

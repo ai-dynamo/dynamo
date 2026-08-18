@@ -101,8 +101,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
 	// no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
 	// parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
-	// example "1.4.0". It does not change the image or rendered Pod, and changing only this field does
-	// not trigger a rollout.
+	// example "1.4.0". It does not change the image. Setting or changing an override that resolves to
+	// version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
@@ -133,8 +133,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// minAvailable maps to Grove PodClique minAvailable for single-node and
-	// Grove PodCliqueScalingGroup minAvailable for multi-node components.
+	// minAvailable maps to Grove PodCliqueScalingGroup minAvailable for
+	// components rendered as a scaling group (multi-node, inter-pod GMS, or
+	// `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove
+	// PodClique minAvailable for all other single-node components.
 	// This field determines 1) the minimum number of replicas guaranteed to be
 	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
 	// termination.
@@ -167,11 +169,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ModelRef *ModelReference `json:"modelRef,omitempty"`
 
-	// scalingAdapter opts this component into using the
-	// DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
-	// `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
-	// so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-	// the Scale subresource. Omit the field to opt out.
+	// scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.
+	// Setting it (even as an empty object, `scalingAdapter: {}`) creates a DGDSA that owns the
+	// `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the
+	// Scale subresource; omit the field to opt out.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
@@ -245,6 +246,7 @@ type DynamoComponentDeploymentStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dcd
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
@@ -252,9 +254,8 @@ type DynamoComponentDeploymentStatus struct {
 
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 //
-// v1beta1 is a served version: the API server accepts reads and writes
-// against it, and transparently converts to/from v1alpha1 (still the
-// storage version until a later MR flips it). Conversion goes through the
+// v1beta1 is the storage version. The API server transparently converts
+// to and from the served v1alpha1 version through
 // operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 type DynamoComponentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -273,10 +274,6 @@ type DynamoComponentDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoComponentDeployment `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
 // IsReady returns true if the component has processed its latest spec and is `Available`.
@@ -325,6 +322,19 @@ func (s *DynamoComponentDeploymentSharedSpec) IsInterPodGMSEnabled() bool {
 	return s.Experimental != nil &&
 		s.Experimental.GPUMemoryService != nil &&
 		s.Experimental.GPUMemoryService.Mode == GMSModeInterPod
+}
+
+// IsGroveScalingGroupForced reports whether the ScalingGroup layout is explicitly requested.
+func (s *DynamoComponentDeploymentSharedSpec) IsGroveScalingGroupForced() bool {
+	return s.Experimental != nil &&
+		s.Experimental.Grove != nil &&
+		s.Experimental.Grove.ForceScalingGroup
+}
+
+// UsesPCSG reports whether Grove renders this component as a
+// PodCliqueScalingGroup rather than a standalone PodClique.
+func (s *DynamoComponentDeploymentSharedSpec) UsesPCSG() bool {
+	return s.GetNumberOfNodes() > 1 || s.IsInterPodGMSEnabled() || s.IsGroveScalingGroupForced()
 }
 
 // IsInterPodFailoverEnabled reports whether inter-pod GMS failover is configured.

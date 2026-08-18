@@ -94,9 +94,15 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="migration_type" type="string">
-  `[Shared]` On `dynamo_frontend_model_migration_total` — the category of request migration triggered by worker unavailability.
+  `[Shared]` On request migration counters and the duration histogram — the category of request migration triggered by worker unavailability.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>new_request</Badge> <Badge intent="note" minimal>ongoing_request</Badge></span>
+</ParamField>
+
+<ParamField path="outcome" type="string">
+  `[Shared]` On `dynamo_frontend_model_migration_duration_seconds` — whether the migration recovered on another worker, ended without recovery, or was cancelled.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>success</Badge> <Badge intent="note" minimal>failure</Badge> <Badge intent="note" minimal>cancelled</Badge></span>
 </ParamField>
 
 <ParamField path="request_type" type="string">
@@ -184,7 +190,7 @@ Values you will see in the `dynamo_endpoint` label on backend workers.
 | Value | Meaning |
 |-------|---------|
 | `generate` | Main inference RPC; one increment per request received. On a prefill worker this counts prefill-stage `generate` calls; on a decode worker this counts decode-stage `generate` calls. |
-| `clear_kv_blocks` | Legacy vLLM distributed admin RPC to flush the worker KV cache. Unified vLLM exposes `/engine/control/clear_kv_blocks` on the system server instead; that route does not emit this component endpoint label. |
+| `clear_kv_blocks` | vLLM distributed admin RPC to flush the worker KV cache. |
 | `worker_kv_indexer_query_dp{N}` | KV-router queries to the worker's local KV indexer about its cached prefix blocks. One endpoint per data-parallel rank (`_dp0`, `_dp1`, …). Appears on the worker that owns the prefix caches the router consults — in disaggregated serving that is the prefill worker. |
 
 ### Component error types

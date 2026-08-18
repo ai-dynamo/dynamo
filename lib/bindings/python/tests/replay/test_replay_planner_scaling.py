@@ -8,9 +8,14 @@ import pytest
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_trace_replay
 
+from .replay_utils import _require_aisimulate_distribution
+
+_require_aisimulate_distribution(allow_module_level=True)
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
+    pytest.mark.planner,
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.timeout(120),
@@ -88,6 +93,34 @@ def _planner_config(mode, report_output_dir, scale_component=None):
     return config
 
 
+def _assert_lifecycle_operations_are_consistent(operations):
+    assert [operation["operation_ordinal"] for operation in operations] == list(
+        range(len(operations))
+    )
+    for operation in operations:
+        state = operation["state_after_batch"]
+        assert state["active"] == sorted(state["active"])
+        assert state["starting"] == sorted(state["starting"])
+        assert state["draining"] == sorted(state["draining"])
+        assert not (set(state["active"]) & set(state["starting"]))
+        assert not (set(state["active"]) & set(state["draining"]))
+        assert not (set(state["starting"]) & set(state["draining"]))
+        releases = operation["topology_released_request_uuids"]
+        assert len(releases) == len(set(releases))
+        for transition in operation["transitions"]:
+            assert (
+                transition["origin_operation_ordinal"] <= operation["operation_ordinal"]
+            )
+        if operation["cause"] == "planner_scale":
+            assert operation["planner_tick_ordinal"] is not None
+        else:
+            assert operation["planner_tick_ordinal"] is None
+            assert operation["origin_operation_ordinal"] is not None
+            assert (
+                operation["origin_operation_ordinal"] < operation["operation_ordinal"]
+            )
+
+
 def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
     trace_path = _write_burst_idle_trace(
         tmp_path,
@@ -106,20 +139,67 @@ def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
         planner_config=_planner_config("agg", tmp_path),
     )
 
+    assert report.per_request is None
+    assert report.coverage["capture_per_request"] is False
+    assert report.planner.total_ticks == len(report.planner.ticks)
+    assert report.planner.total_ticks > 0
     events = [
         (event.component, event.from_count, event.to_count)
-        for event in report.scaling_events
+        for event in report.planner.scaling_events
     ]
-    assert report.trace_report["completed_requests"] == 33
+    assert report.summary["completed_requests"] == 33
     assert events == [
         ("agg", 1, 2),
         ("agg", 2, 3),
         ("agg", 3, 2),
         ("agg", 2, 1),
     ]
-    assert report.trace_report["decode_worker_seconds"] > (
-        report.trace_report["duration_ms"] / 1000.0
+    lifecycle = report.planner.lifecycle_operations
+    assert lifecycle
+    _assert_lifecycle_operations_are_consistent(lifecycle)
+    transitions = {
+        transition["transition"]
+        for operation in lifecycle
+        for transition in operation["transitions"]
+    }
+    assert transitions == {
+        "worker_ready",
+        "worker_draining",
+        "worker_removed",
+    }
+    assert report.summary["decode_worker_seconds"] > (
+        report.summary["duration_ms"] / 1000.0
     )
+
+
+def test_summary_only_planner_replay_keeps_metrics_decisions_and_tick_count(tmp_path):
+    trace_path = _write_burst_idle_trace(
+        tmp_path,
+        input_tokens=128,
+        output_tokens=512,
+    )
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=MockEngineArgs(
+            block_size=64,
+            num_gpu_blocks=16,
+            max_num_seqs=32,
+            speedup_ratio=50.0,
+        ),
+        num_workers=1,
+        planner_config=_planner_config("agg", tmp_path),
+        capture_per_request=False,
+        capture_planner_details=False,
+    )
+
+    assert report.summary["completed_requests"] == 33
+    assert report.per_request is None
+    assert report.coverage["capture_per_request"] is False
+    assert report.coverage["capture_planner_details"] is False
+    assert report.planner.total_ticks > 0
+    assert report.planner.scaling_events
+    assert report.planner.ticks == []
+    assert report.planner.lifecycle_operations == []
 
 
 @pytest.mark.parametrize(
@@ -169,16 +249,43 @@ def test_actual_disaggregated_planner_scales_each_pool_up_then_down(
 
     events = [
         (event.from_count, event.to_count)
-        for event in report.scaling_events
+        for event in report.planner.scaling_events
         if event.component == component
     ]
-    assert report.trace_report["completed_requests"] == (
-        3 if component == "prefill" else 33
-    )
+    assert report.summary["completed_requests"] == (3 if component == "prefill" else 33)
     assert events[0] == (1, 2)
     assert events[-1] == (2, 1)
     assert max(to_count for _, to_count in events) > 1
-    worker_seconds_key = f"{component}_worker_seconds"
-    assert report.trace_report[worker_seconds_key] > (
-        report.trace_report["duration_ms"] / 1000.0
+    lifecycle = [
+        operation
+        for operation in report.planner.lifecycle_operations
+        if operation["pool"] == component
+    ]
+    _assert_lifecycle_operations_are_consistent(lifecycle)
+    starting = next(
+        operation
+        for operation in lifecycle
+        if any(
+            transition["transition"] == "worker_starting"
+            for transition in operation["transitions"]
+        )
     )
+    ready = next(
+        operation
+        for operation in lifecycle
+        if operation["cause"] == "worker_ready_event"
+    )
+    assert ready["origin_operation_ordinal"] == starting["operation_ordinal"]
+    assert ready["at_ms"] > starting["at_ms"]
+    assert any(
+        transition["transition"] == "worker_removed"
+        for operation in lifecycle
+        for transition in operation["transitions"]
+    )
+    assert any(
+        transition["transition"] == "worker_draining"
+        for operation in lifecycle
+        for transition in operation["transitions"]
+    )
+    worker_seconds_key = f"{component}_worker_seconds"
+    assert report.summary[worker_seconds_key] > (report.summary["duration_ms"] / 1000.0)

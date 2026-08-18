@@ -48,21 +48,34 @@ def _make_dgdr(
 
 def _base_dgd_config(image: str) -> dict:
     return {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
         "metadata": {"name": "test-dgd"},
         "spec": {
-            "services": {
-                "Frontend": {
+            "components": [
+                {
+                    "name": "Frontend",
+                    "type": "frontend",
                     "replicas": 1,
-                    "extraPodSpec": {
-                        "mainContainer": {
-                            "image": image,
-                            "args": ["serve"],
+                    "podTemplate": {
+                        "spec": {
+                            "containers": [
+                                {"name": "main", "image": image, "args": ["serve"]}
+                            ]
                         }
                     },
                 }
-            }
+            ]
         },
     }
+
+
+def _component_map(config: dict) -> dict[str, dict]:
+    return {component["name"]: component for component in config["spec"]["components"]}
+
+
+def _main_container(component: dict) -> dict:
+    return component["podTemplate"]["spec"]["containers"][0]
 
 
 @pytest.mark.parametrize(
@@ -121,10 +134,10 @@ def test_add_planner_to_config_uses_dynamo_planner_image():
 
     add_planner_to_config(dgdr, config)
 
-    planner_image = config["spec"]["services"]["Planner"]["extraPodSpec"][
-        "mainContainer"
-    ]["image"]
+    planner = _component_map(config)["Planner"]
+    planner_image = _main_container(planner)["image"]
     assert planner_image == "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
+    assert "scalingAdapter" not in planner
 
 
 def test_assemble_final_config_applies_runtime_version_override():
@@ -134,7 +147,7 @@ def test_assemble_final_config_applies_runtime_version_override():
 
     result = assemble_final_config(dgdr, ProfilerOperationalConfig(), config)
 
-    assert result["spec"]["services"]["Frontend"]["runtimeVersionOverride"] == "1.2.3"
+    assert _component_map(result)["Frontend"]["runtimeVersionOverride"] == "1.2.3"
 
 
 def test_runtime_version_override_applies_to_injected_planner():
@@ -146,12 +159,12 @@ def test_runtime_version_override_applies_to_injected_planner():
     apply_runtime_version_override(dgdr, config)
 
     assert {
-        name: service["runtimeVersionOverride"]
-        for name, service in config["spec"]["services"].items()
+        component["name"]: component["runtimeVersionOverride"]
+        for component in config["spec"]["components"]
     } == {"Frontend": "1.2.3", "Planner": "1.2.3"}
 
 
-def test_update_image_does_not_overwrite_planner_service_image():
+def test_update_image_does_not_overwrite_planner_component_image():
     profiler_image = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3"
     worker_image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3"
     dgdr = _make_dgdr(profiler_image)
@@ -161,13 +174,26 @@ def test_update_image_does_not_overwrite_planner_service_image():
 
     updated = update_image(config, worker_image)
 
+    components = _component_map(updated)
+    assert _main_container(components["Frontend"])["image"] == worker_image
     assert (
-        updated["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"][
-            "image"
-        ]
-        == worker_image
-    )
-    assert (
-        updated["spec"]["services"]["Planner"]["extraPodSpec"]["mainContainer"]["image"]
+        _main_container(components["Planner"])["image"]
         == "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
     )
+
+
+def test_update_image_skips_component_without_main_container():
+    config = _base_dgd_config("example/frontend:old")
+    config["spec"]["components"].append(
+        {
+            "name": "PartialWorker",
+            "type": "worker",
+            "podTemplate": {"spec": {"containers": []}},
+        }
+    )
+
+    updated = update_image(config, "example/worker:new")
+
+    components = _component_map(updated)
+    assert _main_container(components["Frontend"])["image"] == "example/worker:new"
+    assert components["PartialWorker"]["podTemplate"]["spec"]["containers"] == []
