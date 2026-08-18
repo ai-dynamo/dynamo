@@ -354,6 +354,7 @@ def test_router_decisions_sglang_multiple_workers(
 
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(3.7)
