@@ -367,7 +367,8 @@ where
         let (affinity_target, pinned_worker) =
             resolve_affinity_binding(binding, self.session_affinity_mode, |id| {
                 router.chooser.unique_dp_rank_for_worker(id)
-            })?;
+            })
+            .unwrap_or_default();
 
         let outcome = router
             .chooser
@@ -428,6 +429,17 @@ mod tests {
             resolve_affinity_binding(Some(target), SessionAffinityMode::Soft, |_| None),
             Some((Some(worker), None))
         );
+    }
+
+    #[test]
+    fn unresolved_affinity_can_fall_back_to_an_unpinned_probe() {
+        let resolved = resolve_affinity_binding(
+            Some(RouteTarget::new(7, None)),
+            SessionAffinityMode::Hard,
+            |_| None,
+        )
+        .unwrap_or_default();
+        assert_eq!(resolved, (None, None));
     }
 
     #[test]

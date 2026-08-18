@@ -454,6 +454,24 @@ async fn failed_migration_preserves_the_existing_affinity_target() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn rankless_binding_invalidates_when_the_selected_worker_fails() {
+    let coordinator = coordinator();
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(target(7, None)).unwrap());
+
+    coordinator
+        .acquire(&session_id(), None)
+        .await
+        .unwrap()
+        .invalidate_selected(target(7, Some(2)));
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
 async fn session_affinity_stream_drop_refreshes_idle_ttl() {
     let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) =

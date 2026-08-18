@@ -96,7 +96,8 @@ impl AffinityAcquire {
         if let Self::Bound {
             target, mut lease, ..
         } = self
-            && target == selected_target
+            && target.worker_id == selected_target.worker_id
+            && (target.dp_rank.is_none() || target.dp_rank == selected_target.dp_rank)
         {
             lease.invalidate(target);
         }
