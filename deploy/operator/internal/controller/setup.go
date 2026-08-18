@@ -7,11 +7,13 @@ package controller
 
 import (
 	"fmt"
+	"os"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/powerbudget"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/scale"
@@ -85,8 +87,13 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 }
 
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
+	qualification, err := productionQualificationProvider()
+	if err != nil {
+		return err
+	}
 	if err := (&DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
+		PowerInventoryReader:  mgr.GetAPIReader(),
 		Recorder:              mgr.GetEventRecorder("dynamographdeployment"),
 		Config:                opts.Config,
 		RuntimeConfig:         opts.RuntimeConfig,
@@ -95,10 +102,21 @@ func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetu
 		ScaleClient:           opts.ScaleClient,
 		SSHKeyManager:         opts.SSHKeyManager,
 		RBACManager:           opts.RBACManager,
+		PowerQualification:    qualification,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeployment controller: %w", err)
 	}
 	return nil
+}
+
+func productionQualificationProvider() (powerbudget.QualificationIndex, error) {
+	qualification, err := powerbudget.ParseQualificationCatalogJSON(
+		os.Getenv(powerbudget.QualificationCatalogEnv),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load production power qualification catalog from %s: %w", powerbudget.QualificationCatalogEnv, err)
+	}
+	return qualification, nil
 }
 
 func SetupDynamoGraphDeploymentScalingAdapter(mgr ctrl.Manager, opts SetupOptions) error {

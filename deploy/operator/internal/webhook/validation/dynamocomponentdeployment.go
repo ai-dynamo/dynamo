@@ -20,9 +20,13 @@ package validation
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -79,6 +83,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	ctx context.Context,
 	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	canModifyReplicas bool,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
@@ -110,7 +115,11 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 		)...)
 	}
 
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentUpdate(newDCD, oldDCD)...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentUpdate(
+		newDCD,
+		oldDCD,
+		canModifyReplicas,
+	)...)
 	return validation.warnings, invalidDynamoComponentDeploymentError(newDCD, allErrs)
 }
 
@@ -145,12 +154,54 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentUpdate(
 	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	canModifyReplicas bool,
 ) field.ErrorList {
-	return v.validateDynamoComponentDeploymentSpecUpdate(
+	allErrs := v.validateObjectMetaUpdate(
+		&newDCD.ObjectMeta,
+		&oldDCD.ObjectMeta,
+		field.NewPath("metadata"),
+	)
+	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSpecUpdate(
 		&newDCD.Spec,
 		&oldDCD.Spec,
 		field.NewPath("spec"),
-	)
+		canModifyReplicas,
+	)...)
+	return allErrs
+}
+
+// validateObjectMetaUpdate validates a DCD objectMeta update. newMeta,
+// oldMeta, and fldPath must not be nil.
+func (v *dynamoComponentDeploymentValidation) validateObjectMetaUpdate(
+	newMeta *metav1.ObjectMeta,
+	oldMeta *metav1.ObjectMeta,
+	fldPath *field.Path,
+) field.ErrorList {
+	oldOwner := dgdControllerOwnerReference(oldMeta.OwnerReferences)
+	if oldOwner == nil {
+		return nil
+	}
+	for index := range newMeta.OwnerReferences {
+		if apiequality.Semantic.DeepEqual(&newMeta.OwnerReferences[index], oldOwner) {
+			return nil
+		}
+	}
+	return field.ErrorList{field.Forbidden(
+		fldPath.Child("ownerReferences"),
+		"DynamoGraphDeployment controller owner reference is immutable",
+	)}
+}
+
+func dgdControllerOwnerReference(ownerReferences []metav1.OwnerReference) *metav1.OwnerReference {
+	for index := range ownerReferences {
+		owner := &ownerReferences[index]
+		if ptr.Deref(owner.Controller, false) &&
+			owner.Kind == nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind &&
+			strings.HasPrefix(owner.APIVersion, nvidiacomv1beta1.GroupVersion.Group+"/") {
+			return owner
+		}
+	}
+	return nil
 }
 
 // validateDynamoComponentDeploymentSpecUpdate validates a spec update.
@@ -159,12 +210,9 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	fldPath *field.Path,
+	canModifyReplicas bool,
 ) field.ErrorList {
-	// Standalone DCD updates preserve direct replica modification.
-	const (
-		canModifyReplicas                = true
-		validateGPUMemoryServiceNewState = false // ValidateUpdate already runs the stateless new-state traversal.
-	)
+	const validateGPUMemoryServiceNewState = false // ValidateUpdate already runs the stateless new-state traversal.
 
 	allErrs := field.ErrorList{}
 	if newSpec.BackendFramework != oldSpec.BackendFramework {
@@ -176,11 +224,19 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		))
 	}
 
+	sharedCanModifyReplicas := canModifyReplicas
+	if !canModifyReplicas && ptr.Deref(newSpec.Replicas, int32(1)) != ptr.Deref(oldSpec.Replicas, int32(1)) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("replicas"),
+			"transactional DGD-owned worker replicas are operator-owned; update the related DynamoGraphDeploymentScalingAdapter request instead",
+		))
+		sharedCanModifyReplicas = true
+	}
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdate(
 		&newSpec.DynamoComponentDeploymentSharedSpec,
 		&oldSpec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
-		canModifyReplicas,
+		sharedCanModifyReplicas,
 		nvidiacomv1beta1.DynamoComponentDeploymentGVK.GroupKind(),
 		validateGPUMemoryServiceNewState,
 	)...)

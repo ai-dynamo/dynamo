@@ -44,6 +44,24 @@ const (
 
 const sglangBackendFramework = "sglang"
 
+func TestAlphaCheckpointConvertsToHubError(t *testing.T) {
+	dgd := alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+		dgd.Annotations = map[string]string{
+			nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation: nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence,
+			nvidiacomv1beta1.DynamoGraphGPUPowerBudgetAnnotation:   "2400",
+			nvidiacomv1beta1.DynamoGraphPowerMinEndpointAnnotation: "1",
+		}
+		dgd.Spec.Services[dgdAdmissionWorkerName].Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true}
+	})
+	runAdmissionTest(t, admissionTestCase{
+		object: dgd,
+		gates:  features.Gates{Checkpoint: true, Grove: true},
+		wantWebhookErrors: []string{
+			"spec.components[0].experimental.checkpoint: Forbidden: checkpoint-enabled workers and checkpoint restores are incompatible with transactional power control",
+		},
+	})
+}
+
 func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
@@ -2156,6 +2174,68 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			username: admissionOperatorPrincipal,
 		},
+		{
+			name: "static planner can change scaling-adapter-owned replicas",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(2))
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+			username: "system:serviceaccount:default:planner-serviceaccount",
+		},
+		{
+			name: "transactional planner cannot change committed DGD replicas",
+			oldDeployment: transactionalBetaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(2))
+			}),
+			deployment: transactionalBetaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+			username:        "system:serviceaccount:default:planner-serviceaccount",
+			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: transactional worker replicas are operator-owned; update the related DynamoGraphDeploymentScalingAdapter request instead"},
+		},
+		{
+			name: "transactional planner cannot bypass request ingress when scalingAdapter is nil",
+			oldDeployment: transactionalBetaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = nil
+				worker.Replicas = k8sptr.To(int32(2))
+			}),
+			deployment: transactionalBetaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = nil
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+			username:        "system:serviceaccount:default:planner-serviceaccount",
+			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: transactional worker replicas are operator-owned; update the related DynamoGraphDeploymentScalingAdapter request instead"},
+		},
+		{
+			name: "transactional operator can mirror a worker whose scalingAdapter is nil",
+			oldDeployment: transactionalBetaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = nil
+				worker.Replicas = k8sptr.To(int32(2))
+			}),
+			deployment: transactionalBetaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = nil
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+			username: admissionOperatorPrincipal,
+		},
+		{
+			name: "transactional operator remains the committed DGD writer",
+			oldDeployment: transactionalBetaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(2))
+			}),
+			deployment: transactionalBetaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+			username: admissionOperatorPrincipal,
+		},
 
 		// Backend and restart updates.
 		{
@@ -2537,6 +2617,18 @@ func betaDGDWithWorker(
 			}
 		}
 	})
+}
+
+func transactionalBetaDGDWithWorker(
+	mutate func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := betaDGDWithWorker(mutate)
+	dgd.Annotations = map[string]string{
+		nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation: nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence,
+		nvidiacomv1beta1.DynamoGraphGPUPowerBudgetAnnotation:   "2400",
+		nvidiacomv1beta1.DynamoGraphPowerMinEndpointAnnotation: "1",
+	}
+	return dgd
 }
 
 func betaDGDWithStatus(

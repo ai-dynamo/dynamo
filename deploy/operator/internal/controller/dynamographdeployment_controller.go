@@ -21,12 +21,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
@@ -49,6 +51,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/powerbudget"
 )
 
 const (
@@ -72,6 +75,10 @@ type rbacManager interface {
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
+	// PowerInventoryReader is the uncached API reader used only to prove that
+	// the safety-critical Pod/DCD/DGDSA informer view has caught up before an
+	// Idle fence can be published or a replica request can be admitted.
+	PowerInventoryReader  client.Reader
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
@@ -80,12 +87,25 @@ type DynamoGraphDeploymentReconciler struct {
 	ScaleClient           scale.ScalesGetter
 	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
+	// PowerQualification is an immutable process-start qualification snapshot
+	// for the P2.2 inventory seam. P2.8 owns the live operator-qualified pool
+	// source and its reconciliation watch; transactional control stays disabled
+	// until that source is wired.
+	PowerQualification     powerbudget.QualificationIndex
+	PowerReportFreshness   time.Duration
+	PowerRecoveryStability time.Duration
+	PowerNow               func() time.Time
+	powerGateEvents        powerGateEventTracker
+	powerClampEvents       powerCapClampEventTracker
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographpowerbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographpowerbudgets/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographpowerbudgets/finalizers,verbs=update
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
@@ -124,6 +144,8 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	// Finalize deleting resources before validating their now-immutable live configuration.
 	if !dynamoDeployment.GetDeletionTimestamp().IsZero() {
+		r.powerGateEvents.forgetScope(string(dynamoDeployment.UID))
+		r.powerClampEvents.forgetScope(string(dynamoDeployment.UID))
 		_, err = commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
 		if err != nil {
 			logger.Error(err, "failed to handle the finalizer")
@@ -181,6 +203,44 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// Converge transactional power authority before dispatching the selected workload program.
+	waitForPowerBudget, powerBudgetErr := reconcileDGDPowerBudget(ctx, r.Client, dynamoDeployment)
+	if powerBudgetErr != nil {
+		logger.Error(powerBudgetErr, "failed to reconcile the DynamoGraphPowerBudget enrollment")
+		programResult := newWorkloadProgramResult(dynamoDeployment)
+		programResult.Fail(dynamoDeployment.Generation, reasonFailedToReconcileResources, powerBudgetErr)
+		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+			logger.Error(statusErr, "unable to update status after power-budget enrollment failure")
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, powerBudgetErr
+	}
+	if waitForPowerBudget {
+		return ctrl.Result{}, nil
+	}
+	inventoryUpdated, powerRequeueAfter, inventoryErr := r.reconcileDGDPowerBudgetInventory(ctx, dynamoDeployment)
+	if inventoryErr != nil {
+		logger.Error(inventoryErr, "failed to reconcile the transactional power inventory")
+		return ctrl.Result{}, inventoryErr
+	}
+	if inventoryUpdated {
+		return ctrl.Result{RequeueAfter: powerRequeueAfter}, nil
+	}
+	waitForSeed, seedErr := r.reconcileTransactionalPowerBootstrap(ctx, dynamoDeployment)
+	if seedErr != nil {
+		logger.Error(seedErr, "failed to reconcile the transactional create-time replica vector")
+		programResult := newWorkloadProgramResult(dynamoDeployment)
+		programResult.Fail(dynamoDeployment.Generation, reasonFailedToReconcileResources, seedErr)
+		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+			logger.Error(statusErr, "unable to update status after create-time vector failure")
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, seedErr
+	}
+	if waitForSeed {
+		return ctrl.Result{RequeueAfter: powerRequeueAfter}, nil
+	}
+
 	// Dispatch exclusively through the persisted provider.
 	program, err := r.selectWorkloadProgram(provider)
 	if err != nil {
@@ -190,6 +250,9 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		DGD: dynamoDeployment,
 	})
 	result = programResult.Result
+	if powerRequeueAfter > 0 && (result.RequeueAfter == 0 || powerRequeueAfter < result.RequeueAfter) {
+		result.RequeueAfter = powerRequeueAfter
+	}
 	if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
 		logger.Error(statusErr, "unable to persist workload program status")
 		return result, statusErr
@@ -243,7 +306,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			generationOrDeletionChangedPredicate(),
+			predicate.Or(generationOrDeletionChangedPredicate(), dgdPowerInventoryStatusPredicate()),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Watches(
@@ -261,18 +324,19 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),
 			builder.WithPredicates(dgdWorkerPodEventPredicate()),
 		).
-		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
-			// ignore creation cause we don't want to be called again after we create the deployment
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(dgdDCDInventoryEventPredicate())).
+		Owns(&nvidiacomv1beta1.DynamoGraphPowerBudget{}, builder.WithPredicates(predicate.Funcs{
+			CreateFunc:  func(ce event.CreateEvent) bool { return true },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		Owns(&nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(predicate.Funcs{
-			// ignore creation cause we don't want to be called again after we create the adapter
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
-			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-			UpdateFunc:  func(de event.UpdateEvent) bool { return false }, // Adapter updates are handled by adapter controller
+			CreateFunc: func(ce event.CreateEvent) bool { return true },
+			DeleteFunc: func(de event.DeleteEvent) bool { return true },
+			UpdateFunc: func(ue event.UpdateEvent) bool {
+				return ue.ObjectOld.GetGeneration() != ue.ObjectNew.GetGeneration()
+			},
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.Funcs{
@@ -355,8 +419,8 @@ func dgdComponentPodIndexValue(dgdName, componentName string) string {
 
 // dgdWorkerPodEventPredicate admits only events that can change whether a
 // Recreate rollout is blocked by an old pod. Creation and deletion change pod
-// membership; updates matter only when membership or terminality changes. A
-// deletion timestamp alone leaves the pod non-terminal and does not enqueue.
+// membership; updates matter when membership, power evidence, assignment,
+// deletion state, or terminality changes.
 func dgdWorkerPodEventPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
@@ -381,11 +445,49 @@ func dgdWorkerPodEventPredicate() predicate.Predicate {
 				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] {
 				return true
 			}
+			if oldPod.Annotations[powerbudget.AgentReportAnnotation] != newPod.Annotations[powerbudget.AgentReportAnnotation] {
+				return true
+			}
+			if oldPod.Spec.NodeName != newPod.Spec.NodeName ||
+				oldPod.DeletionTimestamp.IsZero() != newPod.DeletionTimestamp.IsZero() {
+				return true
+			}
+			if powerGateTerminationOccurrence(oldPod) != powerGateTerminationOccurrence(newPod) {
+				return true
+			}
 			return isTerminalPhase(oldPod.Status.Phase) != isTerminalPhase(newPod.Status.Phase)
 		},
 		GenericFunc: func(event.GenericEvent) bool {
 			return false
 		},
+	}
+}
+
+func dgdPowerInventoryStatusPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return false },
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(update event.UpdateEvent) bool {
+			oldDGD, oldOK := update.ObjectOld.(*nvidiacomv1beta1.DynamoGraphDeployment)
+			newDGD, newOK := update.ObjectNew.(*nvidiacomv1beta1.DynamoGraphDeployment)
+			if !oldOK || !newOK ||
+				newDGD.Annotations[nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation] !=
+					nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence {
+				return false
+			}
+			return !equality.Semantic.DeepEqual(oldDGD.Status.RollingUpdate, newDGD.Status.RollingUpdate) ||
+				!equality.Semantic.DeepEqual(oldDGD.Status.Components, newDGD.Status.Components)
+		},
+	}
+}
+
+func dgdDCDInventoryEventPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return true },
+		DeleteFunc:  func(event.DeleteEvent) bool { return true },
+		UpdateFunc:  func(event.UpdateEvent) bool { return true },
+		GenericFunc: func(event.GenericEvent) bool { return true },
 	}
 }
 

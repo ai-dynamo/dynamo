@@ -171,11 +171,14 @@ func shouldSkipAdmission(obj runtime.Object, excludedNamespaces ExcludedNamespac
 // the Downward API env vars were not set.
 //
 // Authorization is checked in two ways:
-//  1. Exact match against operatorPrincipal.
-//  2. Name-only match for the planner SA, which the operator creates in every DGD
-//     namespace with a well-known constant name. Because the namespace is only known
-//     at runtime, it cannot be enumerated statically.
-func CanModifyDGDReplicas(operatorPrincipal string, userInfo authenticationv1.UserInfo) bool {
+//  1. Exact match against operatorPrincipal in every mode.
+//  2. Name-only match for the planner SA only in static mode, where the operator
+//     creates it in every DGD namespace with a well-known constant name.
+func CanModifyDGDReplicas(
+	operatorPrincipal string,
+	userInfo authenticationv1.UserInfo,
+	transactional bool,
+) bool {
 	username := userInfo.Username
 
 	if !strings.HasPrefix(username, "system:serviceaccount:") {
@@ -190,7 +193,7 @@ func CanModifyDGDReplicas(operatorPrincipal string, userInfo authenticationv1.Us
 	}
 
 	parts := strings.Split(username, ":")
-	if len(parts) == 4 && parts[3] == consts.PlannerServiceAccountName {
+	if !transactional && len(parts) == 4 && parts[3] == consts.PlannerServiceAccountName {
 		webhookCommonLog.V(1).Info("allowing DGD replicas modification",
 			"username", username,
 			"matchType", "plannerSA")

@@ -8,14 +8,18 @@ package webhook
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	appsv1 "k8s.io/api/apps/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	"sigs.k8s.io/yaml"
 )
 
 type testExcludedNamespaces map[string]bool
@@ -167,10 +171,116 @@ func TestCanModifyDGDReplicas(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			userInfo := authenticationv1.UserInfo{Username: tt.username}
-			got := CanModifyDGDReplicas(tt.principal, userInfo)
+			got := CanModifyDGDReplicas(tt.principal, userInfo, false)
 			if got != tt.expectAllowed {
 				t.Errorf("CanModifyDGDReplicas() = %v, want %v", got, tt.expectAllowed)
 			}
 		})
+	}
+}
+
+func TestCanModifyDGDReplicasTransactional(t *testing.T) {
+	operatorPrincipal := "system:serviceaccount:dynamo-system:dynamo-operator-controller-manager"
+	tests := []struct {
+		name          string
+		username      string
+		transactional bool
+		want          bool
+	}{
+		{
+			name:          "exact operator remains the committed writer",
+			username:      operatorPrincipal,
+			transactional: true,
+			want:          true,
+		},
+		{
+			name:          "planner loses direct DGD fallback in transactional mode",
+			username:      "system:serviceaccount:user-ns:planner-serviceaccount",
+			transactional: true,
+			want:          false,
+		},
+		{
+			name:          "planner retains direct DGD fallback in static mode",
+			username:      "system:serviceaccount:user-ns:planner-serviceaccount",
+			transactional: false,
+			want:          true,
+		},
+		{
+			name:          "ordinary users remain denied",
+			username:      "developer@example.com",
+			transactional: true,
+			want:          false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Evaluate the request identity against the DGD power-control mode")
+			got := CanModifyDGDReplicas(
+				operatorPrincipal,
+				authenticationv1.UserInfo{Username: test.username},
+				test.transactional,
+			)
+			if got != test.want {
+				t.Fatalf("CanModifyDGDReplicas() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestStaticDGDSAUnchanged(t *testing.T) {
+	t.Log("Keep the Phase 1 Planner ServiceAccount direct-DGD fallback for a static DGD")
+	allowed := CanModifyDGDReplicas(
+		"system:serviceaccount:dynamo-system:dynamo-operator-controller-manager",
+		authenticationv1.UserInfo{Username: "system:serviceaccount:user-ns:planner-serviceaccount"},
+		false,
+	)
+	if !allowed {
+		t.Fatal("static Planner ServiceAccount direct-DGD fallback was rejected")
+	}
+
+	t.Log("Keep ordinary static users denied")
+	allowed = CanModifyDGDReplicas(
+		"system:serviceaccount:dynamo-system:dynamo-operator-controller-manager",
+		authenticationv1.UserInfo{Username: "developer@example.com"},
+		false,
+	)
+	if allowed {
+		t.Fatal("ordinary static user was allowed to change adapter-owned replicas")
+	}
+}
+
+func TestKustomizeManagerPublishesOperatorPrincipalInputs(t *testing.T) {
+	manifestPath := filepath.Join("..", "..", "config", "manager", "manager.yaml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read canonical manager manifest: %v", err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := yaml.Unmarshal(data, deployment); err != nil {
+		t.Fatalf("decode canonical manager manifest: %v", err)
+	}
+	if len(deployment.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("manager containers = %d, want 1", len(deployment.Spec.Template.Spec.Containers))
+	}
+
+	want := map[string]string{
+		"POD_SERVICE_ACCOUNT": "spec.serviceAccountName",
+		"POD_NAMESPACE":       "metadata.namespace",
+	}
+	for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
+		fieldPath := ""
+		if env.ValueFrom != nil && env.ValueFrom.FieldRef != nil {
+			fieldPath = env.ValueFrom.FieldRef.FieldPath
+		}
+		if expected, found := want[env.Name]; found {
+			if fieldPath != expected {
+				t.Fatalf("%s fieldPath = %q, want %q", env.Name, fieldPath, expected)
+			}
+			delete(want, env.Name)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("canonical manager manifest is missing identity envs: %v", want)
 	}
 }

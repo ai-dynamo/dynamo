@@ -19,6 +19,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +42,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
@@ -55,6 +58,7 @@ type DynamoGraphDeploymentScalingAdapterReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographpowerbudgets,verbs=get;list;watch
 
 // Reconcile implements the reconciliation loop for DynamoGraphDeploymentScalingAdapter
 func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -97,7 +101,10 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 			"availableComponents", getComponentNames(dgd.Spec.Components))
 		return ctrl.Result{}, nil
 	}
-	if component.ScalingAdapter == nil {
+	transactional := dgd.Annotations[nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation] ==
+		nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence &&
+		dynamo.IsWorkerComponent(string(component.ComponentType))
+	if component.ScalingAdapter == nil && !transactional {
 		logger.V(1).Info("Component no longer uses a scaling adapter; skipping replica propagation",
 			"component", componentName,
 			"dgd", dgd.Name)
@@ -110,8 +117,8 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 		currentReplicas = *component.Replicas
 	}
 
-	// 4. Update DGD if replicas changed (DGDSA is the source of truth)
-	if currentReplicas != adapter.Spec.Replicas {
+	// 4. Static adapters remain the DGD source of truth; transactional adapters are request-only.
+	if !transactional && currentReplicas != adapter.Spec.Replicas {
 		// Update the component's replicas in DGD.
 		component.Replicas = &adapter.Spec.Replicas
 
@@ -134,10 +141,66 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 		// Record scaling event
 		now := metav1.Now()
 		adapter.Status.LastScaleTime = &now
+		currentReplicas = adapter.Spec.Replicas
 	}
 
-	// 5. Update adapter status
-	adapter.Status.Replicas = adapter.Spec.Replicas
+	// 5. The Scale subresource status reports observed capacity. Static mode
+	// retains its historical mirrored-target behavior; transactional mode keeps
+	// requested, durably committed, and actually observed replicas distinct.
+	actualReplicas := currentReplicas
+	if transactional {
+		actualReplicas = dgd.Status.Components[componentName].Replicas
+		dgpb := &nvidiacomv1beta1.DynamoGraphPowerBudget{}
+		if err := r.Get(ctx, dgdKey, dgpb); err != nil {
+			return ctrl.Result{}, err
+		}
+		committedReplicas, found := dgpb.Status.CommittedReplicaTargets[componentName]
+		if !found {
+			return ctrl.Result{}, fmt.Errorf(
+				"power budget %s/%s has no committed target for component %q",
+				dgpb.Namespace,
+				dgpb.Name,
+				componentName,
+			)
+		}
+		if adapter.Spec.Replicas != committedReplicas &&
+			(adapter.Status.PendingReason == "" ||
+				adapter.Status.RequestedReplicas != adapter.Spec.Replicas ||
+				adapter.Status.CommittedReplicas != committedReplicas) {
+			// The DGD reconciler owns the complete-vector decision and publishes
+			// its exact bounded reason. A reason for an older request must not be
+			// rebound to this new tuple before that decision completes.
+			if adapter.Status.PendingReason == "" {
+				return ctrl.Result{}, nil
+			}
+			adapter.Status.ActualReplicas = actualReplicas
+			adapter.Status.Replicas = actualReplicas
+			adapter.Status.Selector = r.buildPodSelector(dgd.Name, componentName)
+			if err := r.Status().Update(ctx, adapter); err != nil {
+				logger.Error(err, "Failed to update adapter actual status")
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+		preserveInitializingZeroReason :=
+			dgpb.Status.Phase == nvidiacomv1beta1.DynamoGraphPowerBudgetPhaseInitializing &&
+				adapter.Spec.Replicas == 0 && committedReplicas == 0 &&
+				adapter.Status.RequestedReplicas == 0 && adapter.Status.CommittedReplicas == 0 &&
+				(adapter.Status.PendingReason == nvidiacomv1beta1.DynamoGraphPowerBudgetPendingReasonUnenforcedBaseline ||
+					adapter.Status.PendingReason == nvidiacomv1beta1.DynamoGraphPowerBudgetPendingReasonBelowMinimum)
+		adapter.Status.RequestedReplicas = adapter.Spec.Replicas
+		adapter.Status.CommittedReplicas = committedReplicas
+		adapter.Status.ActualReplicas = actualReplicas
+		if adapter.Spec.Replicas == committedReplicas && !preserveInitializingZeroReason {
+			adapter.Status.PendingReason = ""
+		}
+	} else {
+		adapter.Status.RequestedReplicas = actualReplicas
+		adapter.Status.CommittedReplicas = actualReplicas
+		adapter.Status.ActualReplicas = actualReplicas
+		adapter.Status.PendingReason = ""
+	}
+	adapter.Status.Replicas = actualReplicas
 	adapter.Status.Selector = r.buildPodSelector(dgd.Name, componentName)
 
 	if err := r.Status().Update(ctx, adapter); err != nil {
@@ -166,7 +229,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 			predicate.GenerationChangedPredicate{},
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeploymentScalingAdapter).
-		// Watch DGDs to sync status when DGD component replicas change.
+		// Watch DGDs to sync both target and observed component replicas.
 		Watches(
 			&nvidiacomv1beta1.DynamoGraphDeployment{},
 			handler.EnqueueRequestsFromMapFunc(r.findAdaptersForDGD),
@@ -174,20 +237,38 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 				CreateFunc: func(ce event.CreateEvent) bool { return false },
 				DeleteFunc: func(de event.DeleteEvent) bool { return true },
 				UpdateFunc: func(ue event.UpdateEvent) bool {
-					// Only trigger on spec changes (not status)
 					oldDGD, okOld := ue.ObjectOld.(*nvidiacomv1beta1.DynamoGraphDeployment)
 					newDGD, okNew := ue.ObjectNew.(*nvidiacomv1beta1.DynamoGraphDeployment)
 					if !okOld || !okNew {
 						return false
 					}
-					// Trigger if components changed.
-					return !componentsEqual(oldDGD.Spec.Components, newDGD.Spec.Components)
+					return !componentsEqual(oldDGD.Spec.Components, newDGD.Spec.Components) ||
+						!reflect.DeepEqual(oldDGD.Status.Components, newDGD.Status.Components)
 				},
 				GenericFunc: func(ge event.GenericEvent) bool { return false },
 			}),
 		).
+		Watches(
+			&nvidiacomv1beta1.DynamoGraphPowerBudget{},
+			handler.EnqueueRequestsFromMapFunc(r.findAdaptersForPowerBudget),
+		).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
 		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentScalingAdapter))
+}
+
+// findAdaptersForPowerBudget maps a DGPB status change to adapters owned by the
+// same namespaced DGD.
+func (r *DynamoGraphDeploymentScalingAdapterReconciler) findAdaptersForPowerBudget(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	dgpb, ok := obj.(*nvidiacomv1beta1.DynamoGraphPowerBudget)
+	if !ok {
+		return nil
+	}
+	return r.findAdaptersForDGD(ctx, &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: dgpb.Name, Namespace: dgpb.Namespace},
+	})
 }
 
 // findAdaptersForDGD maps DGD changes to adapter reconcile requests.

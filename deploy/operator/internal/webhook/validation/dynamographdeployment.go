@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	semver "github.com/Masterminds/semver/v3"
@@ -148,7 +149,36 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		grovePathwayRequirement: grovePathwayRequirement,
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
+	allErrs = append(allErrs, validateTransactionalCheckpointCompatibility(dgd)...)
 
+	return allErrs
+}
+
+// validateTransactionalCheckpointCompatibility is the single hub predicate
+// excluding checkpoint creation and restore from transactional power control.
+func validateTransactionalCheckpointCompatibility(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) field.ErrorList {
+	if dgd.Annotations[nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation] !=
+		nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence {
+		return nil
+	}
+
+	allErrs := field.ErrorList{}
+	componentsPath := field.NewPath("spec", "components")
+	for i := range dgd.Spec.Components {
+		checkpoint := dgd.Spec.Components[i].Experimental
+		if checkpoint == nil || checkpoint.Checkpoint == nil {
+			continue
+		}
+		config := checkpoint.Checkpoint
+		if config.Enabled || k8sptr.Deref(config.CheckpointRef, "") != "" {
+			allErrs = append(allErrs, field.Forbidden(
+				componentsPath.Index(i).Child("experimental", "checkpoint"),
+				"checkpoint-enabled workers and checkpoint restores are incompatible with transactional power control",
+			))
+		}
+	}
 	return allErrs
 }
 
@@ -213,7 +243,61 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 			`must be "container" when intra-pod failover is configured`,
 		))
 	}
+	allErrs = append(allErrs, validateDGDTransactionalPowerAnnotations(objectMeta.Annotations, annotationsPath)...)
 
+	return allErrs
+}
+
+func validateDGDTransactionalPowerAnnotations(annotations map[string]string, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	keys := []string{
+		nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation,
+		nvidiacomv1beta1.DynamoGraphGPUPowerBudgetAnnotation,
+		nvidiacomv1beta1.DynamoGraphPowerMinEndpointAnnotation,
+	}
+	configured := false
+	for _, key := range keys {
+		if _, exists := annotations[key]; exists {
+			configured = true
+			break
+		}
+	}
+	if !configured {
+		return allErrs
+	}
+	for _, key := range keys {
+		if _, exists := annotations[key]; !exists {
+			allErrs = append(allErrs, field.Required(fldPath.Key(key), "required when transactional power control is configured"))
+		}
+	}
+	if mode, exists := annotations[nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation]; exists &&
+		mode != nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence {
+		allErrs = append(allErrs, field.NotSupported(
+			fldPath.Key(nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation),
+			mode,
+			[]string{nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence},
+		))
+	}
+	for _, item := range []struct {
+		key     string
+		bitSize int
+	}{
+		{key: nvidiacomv1beta1.DynamoGraphGPUPowerBudgetAnnotation, bitSize: 64},
+		{key: nvidiacomv1beta1.DynamoGraphPowerMinEndpointAnnotation, bitSize: 32},
+	} {
+		value, exists := annotations[item.key]
+		if !exists {
+			continue
+		}
+		parsed, err := strconv.ParseInt(value, 10, item.bitSize)
+		if value == "" || strings.Trim(value, "0123456789") != "" || err != nil || parsed < 1 {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Key(item.key),
+				value,
+				"must be a positive base-10 integer",
+			))
+		}
+	}
 	return allErrs
 }
 
@@ -514,11 +598,32 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentUpdate(
 		&oldDGD.ObjectMeta,
 		field.NewPath("metadata"),
 	)...)
+	transactional := oldDGD.Annotations[nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation] ==
+		nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence ||
+		newDGD.Annotations[nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation] ==
+			nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpecUpdate(
 		&newDGD.Spec,
 		&oldDGD.Spec,
 		field.NewPath("spec"),
+		transactional,
 	)...)
+	annotationsPath := field.NewPath("metadata", "annotations")
+	for _, key := range []string{
+		nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation,
+		nvidiacomv1beta1.DynamoGraphGPUPowerBudgetAnnotation,
+		nvidiacomv1beta1.DynamoGraphPowerMinEndpointAnnotation,
+	} {
+		oldValue, oldExists := oldDGD.Annotations[key]
+		newValue, newExists := newDGD.Annotations[key]
+		if oldExists != newExists || oldValue != newValue {
+			allErrs = append(allErrs, field.Invalid(
+				annotationsPath.Key(key),
+				newValue,
+				apivalidation.FieldImmutableErrorMsg,
+			))
+		}
+	}
 
 	if oldDGD.Status.RollingUpdate != nil {
 		phase := oldDGD.Status.RollingUpdate.Phase
@@ -579,6 +684,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
 	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
 	fldPath *field.Path,
+	transactional bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	newComponents := componentsByName(newSpec.Components)
@@ -601,7 +707,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("components"), detail))
 	}
 
-	canModifyReplicas := v.userInfo != nil && internalwebhook.CanModifyDGDReplicas(v.operatorPrincipal, *v.userInfo)
 	const validateGPUMemoryServiceNewState = true // DGD updates do not run the stateless new-state traversal.
 	componentsPath := fldPath.Child("components")
 	for i := range newSpec.Components {
@@ -610,11 +715,31 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		if !exists {
 			continue
 		}
+		transactionalWorker := transactional &&
+			(dynamo.IsWorkerComponent(string(newComponent.ComponentType)) ||
+				dynamo.IsWorkerComponent(string(oldComponent.ComponentType)))
+		canModifyReplicas := v.userInfo != nil && internalwebhook.CanModifyDGDReplicas(
+			v.operatorPrincipal,
+			*v.userInfo,
+			transactionalWorker,
+		)
+		sharedCanModifyReplicas := canModifyReplicas
+		if transactionalWorker && !canModifyReplicas &&
+			k8sptr.Deref(newComponent.Replicas, int32(1)) != k8sptr.Deref(oldComponent.Replicas, int32(1)) {
+			allErrs = append(allErrs, field.Forbidden(
+				componentsPath.Index(i).Child("replicas"),
+				"transactional worker replicas are operator-owned; update the related DynamoGraphDeploymentScalingAdapter request instead",
+			))
+			// The DGD-level transactional rule is authoritative and must also cover
+			// workers whose user-visible scalingAdapter field is nil. Avoid emitting
+			// the older shared scaling-adapter error for the same field.
+			sharedCanModifyReplicas = true
+		}
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent,
 			oldComponent,
 			componentsPath.Index(i),
-			canModifyReplicas,
+			sharedCanModifyReplicas,
 			nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind(),
 			validateGPUMemoryServiceNewState,
 		)...)
