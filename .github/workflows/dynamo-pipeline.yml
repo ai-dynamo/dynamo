@@ -73,6 +73,8 @@ on:
         required: false
       HF_TOKEN:
         required: false
+
+
 jobs:
   image:
     uses: ./.github/workflows/shared-build-image.yml

@@ -141,6 +141,7 @@ ci: &ci
 core:
   - *ci
   - 'container/render.py'
+  - 'container/test_render.py'
   - 'container/Dockerfile.template'
   - 'container/context.yaml'
   - 'container/templates/args.Dockerfile'
