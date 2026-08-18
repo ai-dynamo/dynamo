@@ -285,6 +285,10 @@ where
 struct MigrationCause {
     reason: ErrorType,
     from_worker_id: Option<u64>,
+    /// The attempt that *failed*, not the retry it may schedule. `next_attempt`
+    /// has already been incremented past this by the time a failure surfaces,
+    /// so recording that instead would name an attempt with no route span.
+    attempt: u32,
 }
 
 impl<Resp> RetryManager<Resp>
@@ -371,12 +375,13 @@ where
                     && is_migratable_for_request(&self.request, err)
                 {
                     if self.retries_left == 0 {
+                        let route_trace = self.active_route_trace.clone();
                         self.record_migration_exhausted(MigrationCause {
                             reason: err.error_type(),
-                            from_worker_id: self
-                                .active_route_trace
+                            from_worker_id: route_trace
                                 .as_deref()
                                 .and_then(RouteTraceContext::selected_worker_id),
+                            attempt: self.failed_attempt(route_trace.as_deref()),
                         });
                     } else {
                         self.queue_migration(err.error_type(), self.active_route_trace.clone());
@@ -499,6 +504,7 @@ where
                         let cause = MigrationCause {
                             reason,
                             from_worker_id: route_trace.selected_worker_id(),
+                            attempt: route_trace.attempt(),
                         };
                         self.record_migration_exhausted(cause);
                         self.record_migration_outcome(
@@ -529,6 +535,15 @@ where
         Err(Error::msg("Migration limit exhausted"))
     }
 
+    /// The attempt a failure belongs to. Prefers the attempt's own trace
+    /// context; falls back to the last dispatched attempt when there is none.
+    fn failed_attempt(&self, route_trace: Option<&RouteTraceContext>) -> u32 {
+        route_trace.map_or_else(
+            || self.next_attempt.saturating_sub(1),
+            RouteTraceContext::attempt,
+        )
+    }
+
     fn queue_migration(&mut self, reason: ErrorType, route_trace: Option<Arc<RouteTraceContext>>) {
         let from_worker_id = route_trace
             .as_deref()
@@ -536,6 +551,7 @@ where
         self.pending_migration = Some(MigrationCause {
             reason,
             from_worker_id,
+            attempt: self.failed_attempt(route_trace.as_deref()),
         });
         tracing::info!(
             target: "request_span",
@@ -554,7 +570,7 @@ where
         tracing::warn!(
             target: "request_span",
             {
-                { "request.attempt" } = self.next_attempt,
+                { "request.attempt" } = cause.attempt,
                 { "migration.is_retry" } = true,
                 { "migration.reason" } = error_type_name(cause.reason),
                 { "migration.from_worker_id" } = cause.from_worker_id,
@@ -2441,5 +2457,160 @@ mod tests {
         );
 
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 2);
+    }
+
+    /// The `migration retries exhausted` event must name the attempt that
+    /// *failed*, not the retry that will never happen.
+    ///
+    /// `next_attempt` is incremented at dispatch, so after attempt 0 is
+    /// dispatched it already reads 1. Recording that would emit
+    /// `request.attempt=1` for a run whose only route span is attempt 0,
+    /// so consumers joining lifecycle events to `router.route_request` spans by
+    /// `request.attempt` could never correlate the exhaustion event.
+    ///
+    /// This asserts on the emitted field rather than on struct state, because
+    /// struct state is exactly what does *not* catch the off-by-one.
+    #[tokio::test]
+    async fn test_migration_exhausted_reports_the_attempt_that_failed() {
+        use std::sync::Mutex;
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt};
+
+        #[derive(Default)]
+        struct Captured {
+            exhausted_attempt: Option<u64>,
+            scheduled_attempts: Vec<u64>,
+        }
+
+        struct AttemptVisitor {
+            message: Option<String>,
+            attempt: Option<u64>,
+        }
+
+        impl Visit for AttemptVisitor {
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                if field.name() == "request.attempt" {
+                    self.attempt = Some(value);
+                }
+            }
+            fn record_i64(&mut self, field: &Field, value: i64) {
+                if field.name() == "request.attempt" {
+                    self.attempt = Some(value as u64);
+                }
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = Some(format!("{value:?}"));
+                }
+            }
+        }
+
+        struct CaptureLayer(Arc<Mutex<Captured>>);
+
+        impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: LayerContext<'_, S>) {
+                let mut visitor = AttemptVisitor {
+                    message: None,
+                    attempt: None,
+                };
+                event.record(&mut visitor);
+                let (Some(message), Some(attempt)) = (visitor.message, visitor.attempt) else {
+                    return;
+                };
+                let mut captured = self.0.lock().unwrap();
+                if message.contains("migration retries exhausted") {
+                    captured.exhausted_attempt = Some(attempt);
+                } else if message.contains("migration retry scheduled") {
+                    captured.scheduled_attempts.push(attempt);
+                }
+            }
+        }
+
+        /// Fails mid-stream on every attempt, so retries run out.
+        struct AlwaysDisconnectEngine {
+            context_id: String,
+        }
+
+        #[async_trait]
+        impl
+            AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                anyhow::Error,
+            > for AlwaysDisconnectEngine
+        {
+            async fn generate(
+                &self,
+                _request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let responses = async_stream::stream! {
+                    yield create_mock_output(101);
+                    yield Annotated::from_err(
+                        DynamoError::builder()
+                            .error_type(ErrorType::Disconnected)
+                            .message("worker disconnected")
+                            .build(),
+                    );
+                };
+                Ok(ResponseStream::new(
+                    Box::pin(responses),
+                    Arc::new(Controller::new(self.context_id.clone())),
+                ))
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Captured::default()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let root = Arc::new(Controller::new(context_id.clone()));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            Arc::new(AlwaysDisconnectEngine {
+                context_id: context_id.clone(),
+            });
+
+        // One retry: attempt 0 dispatches, fails, schedules attempt 1; attempt 1
+        // dispatches, fails, and exhausts.
+        let retries = 1;
+        let manager = tracing::subscriber::with_default(subscriber, || {
+            futures::executor::block_on(async {
+                let mut manager = RetryManager::build(
+                    root,
+                    BTreeMap::new(),
+                    create_mock_request(50),
+                    next_generate,
+                    retries,
+                    None,
+                    Arc::new(TEST_MODEL.to_string()),
+                    Arc::new(Metrics::new()),
+                    None,
+                )
+                .await
+                .expect("initial stream should be created");
+                while let Some(response) = manager.next().await {
+                    if response.err().is_some() {
+                        break;
+                    }
+                }
+                manager
+            })
+        });
+
+        let captured = captured.lock().unwrap();
+        let last_dispatched = manager.next_attempt - 1;
+        assert_eq!(
+            captured.exhausted_attempt,
+            Some(u64::from(last_dispatched)),
+            "exhaustion must name the attempt that failed ({last_dispatched}), \
+             not the retry that never ran; scheduled={:?}",
+            captured.scheduled_attempts
+        );
+        // The forward-looking event keeps naming the retry it schedules, and that
+        // attempt really is dispatched.
+        assert_eq!(
+            captured.scheduled_attempts,
+            vec![u64::from(last_dispatched)],
+            "retry scheduled must name the upcoming attempt"
+        );
     }
 }
