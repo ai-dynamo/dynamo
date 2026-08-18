@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -183,5 +185,89 @@ func TestSetupDynamoCheckpointWithSnapshotAPIAvailability(t *testing.T) {
 				t.Fatalf("stop manager: %v", err)
 			}
 		})
+	}
+}
+
+func TestDisabledCheckpointReconcileWithoutSnapshotAPI(t *testing.T) {
+	t.Log("Start an API server without the PodSnapshot CRD")
+	testEnv := operatorenv.New(operatorenv.Options{
+		CRDDirectoryPaths: []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		Config: &configv1alpha1.OperatorConfiguration{
+			Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: false},
+		},
+		SetupWebhooks: func(ctrl.Manager, operatorenv.WebhookSetupOptions) error {
+			return nil
+		},
+	}).RunT(t)
+
+	t.Log("Create an existing checkpoint in the Creating phase")
+	checkpoint := &nvidiacomv1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: "creating-checkpoint", Namespace: testEnv.Namespace()},
+		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
+			Identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
+				Model: "test-model", BackendFramework: "vllm",
+			},
+			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test"}}},
+				},
+			},
+		},
+	}
+	if err := testEnv.Client().Create(context.Background(), checkpoint); err != nil {
+		t.Fatalf("create checkpoint: %v", err)
+	}
+	checkpoint.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseCreating
+	checkpoint.Status.JobName = "checkpoint-job"
+	if err := testEnv.Client().Status().Update(context.Background(), checkpoint); err != nil {
+		t.Fatalf("set checkpoint status: %v", err)
+	}
+
+	t.Log("Reconcile with the Checkpoint gate disabled")
+	recorder := events.NewFakeRecorder(1)
+	reconciler := &CheckpointReconciler{
+		Client:        testEnv.Client(),
+		Config:        testEnv.OperatorConfig(),
+		RuntimeConfig: testEnv.RuntimeConfig(),
+		Recorder:      recorder,
+	}
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(checkpoint),
+	})
+	if err != nil {
+		t.Fatalf("disabled reconcile accessed the unavailable PodSnapshot API: %v", err)
+	}
+
+	t.Log("Observe the disabled status and warning event")
+	stored := &nvidiacomv1alpha1.DynamoCheckpoint{}
+	if err := testEnv.Client().Get(context.Background(), client.ObjectKeyFromObject(checkpoint), stored); err != nil {
+		t.Fatalf("get reconciled checkpoint: %v", err)
+	}
+	if stored.Status.Phase != nvidiacomv1alpha1.DynamoCheckpointPhaseCreating {
+		t.Fatalf("checkpoint phase = %q, want %q", stored.Status.Phase, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating)
+	}
+	if stored.Status.Message != checkpointDisabledMessage {
+		t.Fatalf("checkpoint message = %q, want %q", stored.Status.Message, checkpointDisabledMessage)
+	}
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "CheckpointDisabled") {
+			t.Fatalf("event = %q, want CheckpointDisabled warning", event)
+		}
+	default:
+		t.Fatal("CheckpointDisabled warning event was not emitted")
+	}
+
+	t.Log("Reconcile the disabled checkpoint again without emitting a duplicate event")
+	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(checkpoint),
+	})
+	if err != nil {
+		t.Fatalf("repeat disabled reconcile: %v", err)
+	}
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("repeat reconcile emitted duplicate event %q", event)
+	default:
 	}
 }
