@@ -68,6 +68,10 @@ from dynamo.planner.config.planner_config import resolve_min_endpoint
 if TYPE_CHECKING:
     import grpc.aio
 
+from dynamo.planner.connectors.base import (
+    DynamoGraphPowerBudgetSnapshot,
+    is_transactional_power_aware_connector,
+)
 from dynamo.planner.core.budget import (
     apply_power_budget,
     proportional_clamp_pair,
@@ -140,6 +144,8 @@ class OrchestratorEngineAdapter:
         self._config = config
         self._capabilities = capabilities
         self._observe_plugin = observe_plugin
+        self._power_budget_snapshot: Optional[DynamoGraphPowerBudgetSnapshot] = None
+        self._adopt_transactional_power_policy()
         # Clock is shared with all sub-components (CircuitBreaker,
         # PluginRegistryServer, PluginScheduler, LocalPlannerOrchestrator).
         # Default ``WallClock`` is correct for production / K8s smoke
@@ -279,6 +285,29 @@ class OrchestratorEngineAdapter:
     @property
     def plugins_bootstrapped(self) -> bool:
         return self._plugins_bootstrapped
+
+    def _adopt_transactional_power_policy(self) -> None:
+        """Adopt immutable DGPB policy from the connector's cached observation.
+
+        The environment owns API-read cycle boundaries and the connector owns
+        refresh-cycle caching. The engine only observes that cache, so it cannot
+        add a second DGPB read to a planning tick or write a commit/release vote.
+        """
+
+        environment = getattr(self._observe_plugin, "environment", None)
+        controller = getattr(environment, "controller", None)
+        if not is_transactional_power_aware_connector(controller):
+            return
+        snapshot = controller.get_power_budget_snapshot()
+        if snapshot is None:
+            return
+        self._power_budget_snapshot = snapshot
+        # PlannerConfig parsing remains an early startup requirement for
+        # compatibility, but transactional policy is operator-owned after DGPB
+        # discovery. Mutating the shared model makes every built-in plugin and
+        # the final clamp consume the same immutable values.
+        self._config.total_gpu_power_limit = snapshot.budget_watts
+        self._config.min_endpoint = snapshot.min_endpoint
 
     def _register_builtin_plugins(self) -> None:
         """Register the in-process builtins that implement local planning."""
@@ -526,6 +555,10 @@ class OrchestratorEngineAdapter:
         scheduled_tick: ScheduledTick,
         tick_input: TickInput,
     ) -> PlannerEffects:
+        # Adopt the single DGPB observation made during this environment
+        # refresh before plugin or final-budget logic reads PlannerConfig.
+        self._adopt_transactional_power_policy()
+
         # NOTE: we intentionally do NOT gate plugins via ``plugin.enabled``
         # on top of ``ScheduledTick.run_*_scaling`` flags. Each plugin's
         # own config-toggle check (``if not self._config.enable_load_scaling:
@@ -1019,13 +1052,17 @@ class OrchestratorEngineAdapter:
         if self._config.enable_power_awareness:
             # Suppress only a proven stable no-op. During a rollout ``expected``
             # is unknown, so an explicit target equal to transient ready may be
-            # intentional cancellation of the in-flight desired count.
-            expected_p = worker_counts.expected_num_prefill
-            expected_d = worker_counts.expected_num_decode
-            if num_p is not None and expected_p is not None and num_p == expected_p:
-                num_p = None
-            if num_d is not None and expected_d is not None and num_d == expected_d:
-                num_d = None
+            # intentional cancellation of the in-flight desired count. A
+            # settled transactional snapshot has the same ambiguity: DGPB
+            # exposes committed counts, not a possibly pending DGDSA request,
+            # so every explicit target must reach DGDSA and overwrite it.
+            if getattr(self, "_power_budget_snapshot", None) is None:
+                expected_p = worker_counts.expected_num_prefill
+                expected_d = worker_counts.expected_num_decode
+                if num_p is not None and expected_p is not None and num_p == expected_p:
+                    num_p = None
+                if num_d is not None and expected_d is not None and num_d == expected_d:
+                    num_d = None
             if num_p is None and num_d is None:
                 return None
         else:

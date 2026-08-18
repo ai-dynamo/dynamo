@@ -25,6 +25,10 @@ from __future__ import annotations
 import pytest
 
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.connectors.base import (
+    DynamoGraphPowerBudgetComponentSnapshot,
+    DynamoGraphPowerBudgetSnapshot,
+)
 from dynamo.planner.core.types import (
     EngineCapabilities,
     FpmObservations,
@@ -145,6 +149,134 @@ def _disagg_config_sla_no_budget() -> PlannerConfig:
         max_gpu_budget=-1,
         min_gpu_budget=-1,
     )
+
+
+class _SnapshotController:
+    def __init__(self, snapshot: DynamoGraphPowerBudgetSnapshot) -> None:
+        self.snapshot = snapshot
+        self.reads = 0
+        self.consumes = 0
+
+    def get_power_budget_snapshot(self) -> DynamoGraphPowerBudgetSnapshot:
+        self.reads += 1
+        return self.snapshot
+
+    def consume_power_budget_snapshot(self) -> None:
+        self.consumes += 1
+
+
+class _SnapshotObserver:
+    def __init__(self, controller: _SnapshotController) -> None:
+        self.environment = type("Environment", (), {"controller": controller})()
+
+
+def _transactional_snapshot(*, rollout: bool) -> DynamoGraphPowerBudgetSnapshot:
+    return DynamoGraphPowerBudgetSnapshot(
+        budget_watts=1600,
+        min_endpoint=2,
+        phase="Applying" if rollout else "Idle",
+        inventory_epoch=9,
+        rollout_in_progress=rollout,
+        components=(
+            DynamoGraphPowerBudgetComponentSnapshot(
+                name="prefill",
+                ready_replicas=2,
+                committed_replicas=2,
+                updated_replicas=2,
+                terminating_replicas=0,
+            ),
+            DynamoGraphPowerBudgetComponentSnapshot(
+                name="decode",
+                ready_replicas=2,
+                committed_replicas=2,
+                updated_replicas=2,
+                terminating_replicas=0,
+            ),
+        ),
+        conditions=(),
+    )
+
+
+def test_transactional_rollout_restart_adopts_snapshot_without_voting():
+    """Restart reads DGPB policy and retains the global hold without voting."""
+
+    config = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        enable_power_awareness=True,
+        total_gpu_power_limit=9999,
+        min_endpoint=1,
+    )
+    capabilities = _disagg_caps()
+    assert capabilities.prefill is not None
+    assert capabilities.decode is not None
+    capabilities.prefill.power_watts_per_replica = 400
+    capabilities.decode.power_watts_per_replica = 400
+    controller = _SnapshotController(_transactional_snapshot(rollout=True))
+    observer = _SnapshotObserver(controller)
+
+    first = OrchestratorEngineAdapter(
+        config, capabilities, observe_plugin=observer  # type: ignore[arg-type]
+    )
+    restarted = OrchestratorEngineAdapter(
+        config, capabilities, observe_plugin=observer  # type: ignore[arg-type]
+    )
+
+    assert config.total_gpu_power_limit == 1600
+    assert config.min_endpoint == 2
+    assert controller.reads == 2
+    assert controller.consumes == 0
+
+    rolling_counts = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=None,
+        expected_num_decode=None,
+        prefill_scaling_in_progress=True,
+        decode_scaling_in_progress=True,
+    )
+    assert first._apply_power_final_budget(3, 3, rolling_counts) == (None, None)
+    assert restarted._apply_power_final_budget(3, 3, rolling_counts) == (None, None)
+
+    restarted._adopt_transactional_power_policy()
+    assert controller.consumes == 0
+
+
+def test_transactional_projection_emits_committed_target_to_cancel_pending_request():
+    """DGPB commitment cannot prove that the DGDSA request is already equal."""
+
+    config = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        enable_power_awareness=True,
+        total_gpu_power_limit=9999,
+        min_endpoint=1,
+    )
+    controller = _SnapshotController(_transactional_snapshot(rollout=False))
+    adapter = OrchestratorEngineAdapter(
+        config,
+        _disagg_caps(),
+        observe_plugin=_SnapshotObserver(controller),  # type: ignore[arg-type]
+    )
+    counts = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=2,
+        expected_num_decode=2,
+    )
+    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=2)])
+
+    decision = adapter._project_scale_to(outcome, counts)
+
+    assert decision is not None
+    assert decision.num_prefill is None
+    assert decision.num_decode == 2
 
 
 def _make_fpm(worker_id: str = "w1", dp_rank: int = 0):

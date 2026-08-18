@@ -10,7 +10,11 @@ from typing import Optional
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.connectors.base import PlannerConnector, is_power_aware_connector
+from dynamo.planner.connectors.base import (
+    PlannerConnector,
+    is_power_aware_connector,
+    is_transactional_power_aware_connector,
+)
 from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.core.types import FpmObservations, TrafficObservation
 from dynamo.planner.environment.interface import (
@@ -129,6 +133,17 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         await self._refresh_deployment_state()
 
     async def refresh(self) -> DeploymentState:
+        # A Planner refresh is the DGPB observation-cycle boundary. Invalidate
+        # the connector cache before any count read so the first tick and a
+        # retry after any pre-engine failure cannot reuse the prior snapshot.
+        # Multiple count reads within this refresh (for example after a runtime
+        # namespace change) still share the one newly observed snapshot.
+        if (
+            self.config.enable_power_awareness
+            and is_transactional_power_aware_connector(self.controller)
+        ):
+            self.controller.consume_power_budget_snapshot()
+
         namespace_changed = False
         if self.runtime_namespace_source is not None:
             namespace_changed = (
@@ -196,11 +211,12 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         return self.controller.get_graph_deployment()
 
     async def _wait_for_startup_dgd_snapshot(self) -> Optional[dict]:
-        """Wait for readiness; when power is on, return a settled DGD snapshot.
+        """Discover transactional policy before choosing the startup wait.
 
-        The settled wait (observedGeneration + pod annotation convergence) is
-        only required to permanently cache DGD-owned power caps. Power-disabled
-        planners keep the standard ``wait_for_deployment_ready`` path.
+        Transactional cap/topology inputs are immutable and worker readiness is
+        represented by DGPB aggregate status, so a restart during an admitted
+        rollout must not block on the Phase-1 DGD/Pod settlement loop. Static
+        power mode retains that legacy convergence boundary.
         """
         if self.config.enable_power_awareness:
             if not is_power_aware_connector(self.controller):
@@ -214,6 +230,14 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                         "this connector does not."
                     ]
                 )
+            if is_transactional_power_aware_connector(self.controller):
+                if self.controller.get_power_budget_snapshot() is None:
+                    # This call only discovers/caches DGPB. Worker names are
+                    # resolved from the DGD later; passing backend defaults
+                    # here would reject valid renamed component rows.
+                    await self.controller.get_power_aware_worker_counts()
+                if self.controller.get_power_budget_snapshot() is not None:
+                    return self.controller.get_graph_deployment()
             prefill_name, decode_name = self._power_component_names()
             return await self.controller.wait_for_settled_graph_deployment(
                 include_planner=False,
@@ -376,7 +400,26 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             self._adopt_power_config(state.prefill, prefill_cfg)
         if self.require_decode and decode_cfg is not None:
             self._adopt_power_config(state.decode, decode_cfg)
+        self._adopt_cached_transactional_power_policy()
         self._validate_minimum_power_footprint(prefill_cfg, decode_cfg)
+
+    def _adopt_cached_transactional_power_policy(self) -> None:
+        """Adopt operator-owned policy before startup feasibility validation.
+
+        Worker-count discovery populates the connector's DGPB cache before
+        startup cap validation. Reading that cache performs no API I/O and does
+        not consume the observation cycle; the engine remains responsible for
+        consuming it on its first tick. Static power-aware connectors retain
+        the PlannerConfig policy unchanged.
+        """
+
+        if not is_transactional_power_aware_connector(self.controller):
+            return
+        snapshot = self.controller.get_power_budget_snapshot()
+        if snapshot is None:
+            return
+        self.config.total_gpu_power_limit = snapshot.budget_watts
+        self.config.min_endpoint = snapshot.min_endpoint
 
     def _resolve_power_configs(
         self,

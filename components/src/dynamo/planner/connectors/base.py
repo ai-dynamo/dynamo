@@ -11,7 +11,15 @@ capability discovery, and replica-state introspection for one deployment mode.
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING, Optional, Protocol, TypeGuard, runtime_checkable
+from dataclasses import dataclass
+from typing import (
+    TYPE_CHECKING,
+    Mapping,
+    Optional,
+    Protocol,
+    TypeGuard,
+    runtime_checkable,
+)
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.monitoring.worker_info import WorkerInfo
@@ -150,6 +158,65 @@ class PowerAwareConnector(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class DynamoGraphPowerBudgetComponentSnapshot:
+    """One bounded component row from a DGPB status snapshot."""
+
+    name: str
+    ready_replicas: int
+    committed_replicas: int
+    updated_replicas: int
+    terminating_replicas: int
+
+    @property
+    def settled(self) -> bool:
+        """Whether committed, updated, and serving inventory has converged."""
+
+        return (
+            self.committed_replicas == self.updated_replicas == self.ready_replicas
+            and self.terminating_replicas == 0
+        )
+
+
+@dataclass(frozen=True)
+class DynamoGraphPowerBudgetSnapshot:
+    """Read-only operator-owned policy and aggregate inventory for one tick."""
+
+    budget_watts: int
+    min_endpoint: int
+    phase: str
+    inventory_epoch: int
+    rollout_in_progress: bool
+    components: tuple[DynamoGraphPowerBudgetComponentSnapshot, ...]
+    conditions: tuple[Mapping[str, object], ...]
+
+    def ready_replicas(self, component_name: str) -> int:
+        """Return the ready count for ``component_name`` from this snapshot."""
+
+        for component in self.components:
+            if component.name == component_name:
+                return component.ready_replicas
+        raise KeyError(component_name)
+
+
+@runtime_checkable
+class TransactionalPowerAwareConnector(Protocol):
+    """Optional cached DGPB observation capability for transactional power mode.
+
+    ``get_power_budget_snapshot`` never performs API I/O. The Kubernetes
+    connector refreshes the cache while collecting worker counts, and the
+    orchestrator consumes it once the current planning tick has observed it.
+    """
+
+    def get_power_budget_snapshot(
+        self,
+    ) -> Optional[DynamoGraphPowerBudgetSnapshot]:
+        ...
+
+    def consume_power_budget_snapshot(self) -> None:
+        ...
+
+
 _POWER_AWARE_REQUIRED: tuple[str, ...] = (
     "get_graph_deployment",
     "get_component_power_configs",
@@ -173,9 +240,24 @@ def is_power_aware_connector(obj: object) -> TypeGuard[PowerAwareConnector]:
     )
 
 
+def is_transactional_power_aware_connector(
+    obj: object,
+) -> TypeGuard[TransactionalPowerAwareConnector]:
+    """Return True when ``obj`` exposes the cached DGPB observation boundary."""
+
+    return all(
+        callable(inspect.getattr_static(obj, name, None))
+        for name in ("get_power_budget_snapshot", "consume_power_budget_snapshot")
+    )
+
+
 __all__ = [
+    "DynamoGraphPowerBudgetComponentSnapshot",
+    "DynamoGraphPowerBudgetSnapshot",
     "PlannerConnector",
     "PowerAwareConnector",
+    "TransactionalPowerAwareConnector",
     "WorkerInfoProvider",
     "is_power_aware_connector",
+    "is_transactional_power_aware_connector",
 ]

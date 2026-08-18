@@ -39,6 +39,7 @@ DYNAMO_API_VERSION = "v1beta1"
 DYNAMO_WORKER_METADATA_API_VERSION = "v1alpha1"
 DGD_PLURAL = "dynamographdeployments"
 DGDSA_PLURAL = "dynamographdeploymentscalingadapters"
+DGPB_PLURAL = "dynamographpowerbudgets"
 # During a rollout old Pods are still active and carry the previous cap, so
 # progressing phases must block pod-annotation settlement.
 # Failed is terminal (the operator sets endTime) and must NOT be treated as a
@@ -116,12 +117,35 @@ class KubernetesAPI:
                 )
             raise
 
+    def get_graph_power_budget(self, graph_deployment_name: str) -> Optional[dict]:
+        """Read the operator-owned DGPB for a graph, or ``None`` on 404."""
+
+        try:
+            return self.custom_api.get_namespaced_custom_object(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGPB_PLURAL,
+                name=graph_deployment_name,
+            )
+        except client.ApiException as exc:
+            if exc.status == 404:
+                return None
+            raise
+
     def update_service_replicas(
-        self, graph_deployment_name: str, service_name: str, replicas: int
+        self,
+        graph_deployment_name: str,
+        service_name: str,
+        replicas: int,
+        *,
+        transactional: bool = False,
     ) -> None:
         """
         Update replicas for a component using Scale subresource when DGDSA exists.
-        Falls back to a direct DGD patch when the component does not have a DGDSA.
+        Falls back to a direct DGD patch when the component does not have a
+        DGDSA, except in transactional mode where DGDSA is the only request
+        ingress and a 404 is returned to the caller.
 
         Args:
             graph_deployment_name: Name of the DynamoGraphDeployment
@@ -144,7 +168,7 @@ class KubernetesAPI:
             logger.info(f"Scaled DGDSA {adapter_name} to {replicas} replicas")
 
         except client.ApiException as e:
-            if e.status == 404:
+            if e.status == 404 and not transactional:
                 # DGDSA doesn't exist - fall back to a direct DGD patch.
                 logger.info(
                     f"DGDSA {adapter_name} not found, falling back to DGD update"
@@ -247,7 +271,10 @@ class KubernetesAPI:
         )
 
     def update_graph_replicas(
-        self, graph_deployment_name: str, component_name: str, replicas: int
+        self,
+        graph_deployment_name: str,
+        component_name: str,
+        replicas: int,
     ) -> None:
         """
         Update replicas for a component. Now uses DGDSA when available.

@@ -20,7 +20,11 @@ import os
 from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
-from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.base import (
+    DynamoGraphPowerBudgetComponentSnapshot,
+    DynamoGraphPowerBudgetSnapshot,
+    PlannerConnector,
+)
 from dynamo.planner.connectors.clients.kubernetes_api import (
     DYNAMO_WORKER_METADATA_API_VERSION,
     NVIDIA_API_GROUP,
@@ -61,6 +65,8 @@ CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
 CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
 WORKER_COMPONENT_TYPES = {"worker", "prefill", "decode"}
 WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment", "LeaderWorkerSet"}
+POWER_CONTROL_MODE_ANNOTATION = "dynamo.nvidia.com/power-control-mode"
+TRANSACTIONAL_REPLICA_FENCE = "transactional-replica-fence"
 
 
 class KubernetesConnector(PlannerConnector):
@@ -94,10 +100,45 @@ class KubernetesConnector(PlannerConnector):
         # For backwards compatibility
         self.graph_deployment_name = self.parent_dgd_name
         self.raise_not_ready = raise_not_ready
+        self._power_budget_snapshot: Optional[DynamoGraphPowerBudgetSnapshot] = None
+        self._power_budget_snapshot_observed = False
+        self._transactional_power_control = False
+        self._transactional_policy_logged = False
 
     async def async_init(self):
         """No-op asynchronous lifecycle hook."""
         return
+
+    def _deployment_uses_transactional_power(self, deployment: dict) -> bool:
+        annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
+        transactional = self._transactional_power_control or (
+            annotations.get(POWER_CONTROL_MODE_ANNOTATION)
+            == TRANSACTIONAL_REPLICA_FENCE
+        )
+        if transactional:
+            self._transactional_power_control = True
+        return transactional
+
+    def _request_component_replicas(
+        self,
+        service_name: str,
+        replicas: int,
+        *,
+        transactional: bool,
+    ) -> None:
+        if transactional:
+            self.kube_api.update_service_replicas(
+                self.graph_deployment_name,
+                service_name,
+                replicas,
+                transactional=True,
+            )
+        else:
+            self.kube_api.update_graph_replicas(
+                self.graph_deployment_name,
+                service_name,
+                replicas,
+            )
 
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
         """Return the Dynamo namespace used by the current worker generation.
@@ -176,10 +217,10 @@ class KubernetesConnector(PlannerConnector):
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         service = get_component_from_type_or_name(deployment, sub_component_type)
-        self.kube_api.update_graph_replicas(
-            self.graph_deployment_name,
+        self._request_component_replicas(
             service.name,
             service.number_replicas() + 1,
+            transactional=self._deployment_uses_transactional_power(deployment),
         )
         if blocking:
             await self.kube_api.wait_for_graph_deployment_ready(
@@ -195,10 +236,10 @@ class KubernetesConnector(PlannerConnector):
 
         service = get_component_from_type_or_name(deployment, sub_component_type)
         if service.number_replicas() > 0:
-            self.kube_api.update_graph_replicas(
-                self.graph_deployment_name,
+            self._request_component_replicas(
                 service.name,
                 service.number_replicas() - 1,
+                transactional=self._deployment_uses_transactional_power(deployment),
             )
             if blocking:
                 await self.kube_api.wait_for_graph_deployment_ready(
@@ -355,6 +396,181 @@ class KubernetesConnector(PlannerConnector):
         rather than duck-typing via ``getattr``.
         """
         return self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
+    def get_power_budget_snapshot(
+        self,
+    ) -> Optional[DynamoGraphPowerBudgetSnapshot]:
+        """Return the current tick's cached DGPB observation without API I/O."""
+
+        return self._power_budget_snapshot
+
+    def consume_power_budget_snapshot(self) -> None:
+        """Allow the next Planner refresh cycle to observe a new DGPB snapshot."""
+
+        self._power_budget_snapshot_observed = False
+
+    @staticmethod
+    def _snapshot_int(value: object, field: str, *, minimum: int = 0) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise DeploymentValidationError(
+                [f"DGPB {field} must be an integer >= {minimum}"]
+            )
+        return value
+
+    @classmethod
+    def _parse_power_budget_snapshot(
+        cls, resource: dict
+    ) -> DynamoGraphPowerBudgetSnapshot:
+        """Validate the narrow DGPB policy/inventory surface Planner consumes."""
+
+        spec = resource.get("spec")
+        status = resource.get("status")
+        if not isinstance(spec, dict) or not isinstance(status, dict):
+            raise DeploymentValidationError(
+                ["DGPB must contain spec and status objects"]
+            )
+
+        policy = spec.get("policy")
+        if not isinstance(policy, dict):
+            raise DeploymentValidationError(["DGPB spec.policy must be an object"])
+        budget_watts = cls._snapshot_int(
+            spec.get("budgetWatts"), "spec.budgetWatts", minimum=1
+        )
+        min_endpoint = cls._snapshot_int(
+            policy.get("minEndpoint"), "spec.policy.minEndpoint", minimum=1
+        )
+        inventory_epoch = cls._snapshot_int(
+            status.get("inventoryEpoch", 0), "status.inventoryEpoch"
+        )
+        phase = status.get("phase", "")
+        if not isinstance(phase, str):
+            raise DeploymentValidationError(["DGPB status.phase must be a string"])
+        rollout_in_progress = status.get("rolloutInProgress", False)
+        if not isinstance(rollout_in_progress, bool):
+            raise DeploymentValidationError(
+                ["DGPB status.rolloutInProgress must be a boolean"]
+            )
+
+        committed = status.get("committedReplicaTargets", {})
+        if not isinstance(committed, dict):
+            raise DeploymentValidationError(
+                ["DGPB status.committedReplicaTargets must be an object"]
+            )
+        committed_targets = {
+            name: cls._snapshot_int(
+                replicas, f"status.committedReplicaTargets[{name!r}]"
+            )
+            for name, replicas in committed.items()
+            if isinstance(name, str) and name
+        }
+        if len(committed_targets) != len(committed):
+            raise DeploymentValidationError(
+                ["DGPB committed replica target names must be non-empty strings"]
+            )
+
+        raw_components = status.get("components", [])
+        if not isinstance(raw_components, list):
+            raise DeploymentValidationError(["DGPB status.components must be a list"])
+        components: list[DynamoGraphPowerBudgetComponentSnapshot] = []
+        seen_names: set[str] = set()
+        for index, row in enumerate(raw_components):
+            if not isinstance(row, dict):
+                raise DeploymentValidationError(
+                    [f"DGPB status.components[{index}] must be an object"]
+                )
+            name = row.get("name")
+            if not isinstance(name, str) or not name or name in seen_names:
+                raise DeploymentValidationError(
+                    ["DGPB component names must be unique non-empty strings"]
+                )
+            seen_names.add(name)
+            replica_status = row.get("replicaStatus")
+            if not isinstance(replica_status, dict):
+                raise DeploymentValidationError(
+                    [f"DGPB component {name!r} replicaStatus must be an object"]
+                )
+            available = replica_status.get("availableReplicas")
+            serving = (
+                available
+                if available is not None
+                else replica_status.get("readyReplicas", 0)
+            )
+            components.append(
+                DynamoGraphPowerBudgetComponentSnapshot(
+                    name=name,
+                    ready_replicas=cls._snapshot_int(
+                        serving, f"component {name!r} serving replicas"
+                    ),
+                    committed_replicas=committed_targets.get(name, 0),
+                    updated_replicas=cls._snapshot_int(
+                        replica_status.get("updatedReplicas", 0),
+                        f"component {name!r} updatedReplicas",
+                    ),
+                    terminating_replicas=cls._snapshot_int(
+                        row.get("terminatingReplicas", 0),
+                        f"component {name!r} terminatingReplicas",
+                    ),
+                )
+            )
+
+        raw_conditions = status.get("conditions", [])
+        if not isinstance(raw_conditions, list) or not all(
+            isinstance(condition, dict) for condition in raw_conditions
+        ):
+            raise DeploymentValidationError(
+                ["DGPB status.conditions must be a list of objects"]
+            )
+        return DynamoGraphPowerBudgetSnapshot(
+            budget_watts=budget_watts,
+            min_endpoint=min_endpoint,
+            phase=phase,
+            inventory_epoch=inventory_epoch,
+            rollout_in_progress=rollout_in_progress,
+            components=tuple(components),
+            conditions=tuple(dict(condition) for condition in raw_conditions),
+        )
+
+    def _observe_power_budget_snapshot(
+        self,
+    ) -> Optional[DynamoGraphPowerBudgetSnapshot]:
+        if self._power_budget_snapshot_observed:
+            return self._power_budget_snapshot
+
+        resource = self.kube_api.get_graph_power_budget(self.graph_deployment_name)
+        if resource is None:
+            if self._transactional_power_control:
+                raise DeploymentValidationError(
+                    [
+                        "Transactional power control was already observed, but its "
+                        f"DGPB {self.graph_deployment_name!r} is now missing"
+                    ]
+                )
+            self._power_budget_snapshot = None
+            self._power_budget_snapshot_observed = True
+            return None
+
+        snapshot = self._parse_power_budget_snapshot(resource)
+        self._transactional_power_control = True
+        self._power_budget_snapshot = snapshot
+        self._power_budget_snapshot_observed = True
+        if not self._transactional_policy_logged:
+            logger.info(
+                "Transactional power control detected for %s: PlannerConfig."
+                "total_gpu_power_limit and PlannerConfig.min_endpoint are inactive; "
+                "using DGPB policy budgetWatts=%s minEndpoint=%s",
+                self.graph_deployment_name,
+                snapshot.budget_watts,
+                snapshot.min_endpoint,
+            )
+            self._transactional_policy_logged = True
+        logger.debug(
+            "Observed DGPB %s inventoryEpoch=%s phase=%s conditions=%s",
+            self.graph_deployment_name,
+            snapshot.inventory_epoch,
+            snapshot.phase,
+            [condition.get("type") for condition in snapshot.conditions],
+        )
+        return snapshot
 
     def get_gpu_counts(
         self,
@@ -758,7 +974,27 @@ class KubernetesConnector(PlannerConnector):
         prefill_component_name: Optional[str],
         decode_component_name: Optional[str],
     ) -> tuple[int, int, bool]:
+        power_budget = self._observe_power_budget_snapshot()
+        if power_budget is not None:
+            return self._transactional_worker_counts_from_snapshot(
+                power_budget,
+                prefill_component_name=prefill_component_name,
+                decode_component_name=decode_component_name,
+            )
+
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
+        if (
+            annotations.get(POWER_CONTROL_MODE_ANNOTATION)
+            == TRANSACTIONAL_REPLICA_FENCE
+        ):
+            self._transactional_power_control = True
+            raise DeploymentValidationError(
+                [
+                    f"Transactional DGD {self.graph_deployment_name!r} has no DGPB; "
+                    "refusing to fall back to DGD and Pod inventory"
+                ]
+            )
         dgd_name = deployment.get("metadata", {}).get("name", "")
         pods = self.kube_api.list_pods_for_graph(dgd_name) if dgd_name else []
         pods_by_component = self.kube_api.partition_pods_by_component(pods)
@@ -769,6 +1005,45 @@ class KubernetesConnector(PlannerConnector):
             pods_by_component=pods_by_component,
             power_aware=True,
         )
+
+    def _transactional_worker_counts_from_snapshot(
+        self,
+        snapshot: DynamoGraphPowerBudgetSnapshot,
+        *,
+        prefill_component_name: Optional[str],
+        decode_component_name: Optional[str],
+    ) -> tuple[int, int, bool]:
+        """Resolve serving counts and the global hold from one DGPB snapshot."""
+
+        rows = {component.name: component for component in snapshot.components}
+        missing = [
+            name
+            for name in (prefill_component_name, decode_component_name)
+            if name is not None and name not in rows
+        ]
+        if missing:
+            raise DeploymentValidationError(
+                [
+                    "DGPB status is missing required component row(s): "
+                    + ", ".join(sorted(missing))
+                ]
+            )
+
+        prefill = (
+            rows[prefill_component_name].ready_replicas if prefill_component_name else 0
+        )
+        decode = (
+            rows[decode_component_name].ready_replicas if decode_component_name else 0
+        )
+        relevant = [
+            rows[name]
+            for name in (prefill_component_name, decode_component_name)
+            if name is not None
+        ]
+        all_stable = not snapshot.rollout_in_progress and all(
+            component.settled for component in relevant
+        )
+        return prefill, decode, all_stable
 
     def _worker_counts_from_snapshot(
         self,
@@ -856,8 +1131,14 @@ class KubernetesConnector(PlannerConnector):
             raise EmptyTargetReplicasError()
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        transactional = self._deployment_uses_transactional_power(deployment)
 
-        if not self.kube_api.is_deployment_ready(deployment):
+        # The DGD is the committed mirror in transactional mode and is often
+        # intentionally unready while an admitted rollout is applying. Safe
+        # reductions and cancellation requests must still reach DGDSA during
+        # that window. Preserve the legacy Ready guard only for direct-DGD
+        # (static) scaling.
+        if not transactional and not self.kube_api.is_deployment_ready(deployment):
             if self.raise_not_ready:
                 logger.warning(
                     "Deployment %s is not ready, rejecting this scaling",
@@ -880,14 +1161,18 @@ class KubernetesConnector(PlannerConnector):
                 component_name=target_replica.component_name,
             )
             current_replicas = service.number_replicas()
-            if current_replicas != target_replica.desired_replicas:
+            # In transactional mode DGD spec is the committed mirror, not the
+            # current request. Always write an explicit DGDSA request so a
+            # proposal equal to the commitment can cancel a different pending
+            # request. Static mode retains its existing no-op suppression.
+            if transactional or current_replicas != target_replica.desired_replicas:
                 logger.info(
                     f"Updating {target_replica.sub_component_type.value} component {service.name} to desired replica count {target_replica.desired_replicas}"
                 )
-                self.kube_api.update_graph_replicas(
-                    self.graph_deployment_name,
+                self._request_component_replicas(
                     service.name,
                     target_replica.desired_replicas,
+                    transactional=transactional,
                 )
             else:
                 logger.info(

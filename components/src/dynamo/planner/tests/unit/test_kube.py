@@ -110,6 +110,28 @@ def test_get_graph_deployment_from_name(k8s_api, mock_custom_api):
     )
 
 
+def test_get_graph_power_budget_is_read_only_get(k8s_api, mock_custom_api):
+    resource = {"metadata": {"name": "test-deployment"}, "spec": {}}
+    mock_custom_api.get_namespaced_custom_object.return_value = resource
+
+    assert k8s_api.get_graph_power_budget("test-deployment") == resource
+    mock_custom_api.get_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographpowerbudgets",
+        name="test-deployment",
+    )
+
+
+def test_get_graph_power_budget_404_means_static(k8s_api, mock_custom_api):
+    mock_custom_api.get_namespaced_custom_object.side_effect = client.ApiException(
+        status=404
+    )
+
+    assert k8s_api.get_graph_power_budget("test-deployment") is None
+
+
 def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
     """Test that update_service_replicas uses DGDSA Scale API when available"""
     mock_custom_api.patch_namespaced_custom_object_scale.return_value = None
@@ -185,6 +207,24 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
         _return_http_data_only=True,
         collection_formats={},
     )
+
+
+def test_update_service_replicas_transactional_404_never_falls_back(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
+
+    with pytest.raises(client.ApiException) as exc_info:
+        k8s_api.update_service_replicas(
+            "test-deployment", "test-component", 1, transactional=True
+        )
+
+    assert exc_info.value.status == 404
+    mock_custom_api.get_namespaced_custom_object.assert_not_called()
+    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
+    mock_custom_api.api_client.call_api.assert_not_called()
 
 
 def test_update_service_replicas_propagates_other_errors(k8s_api, mock_custom_api):
