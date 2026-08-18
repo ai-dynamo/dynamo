@@ -29,6 +29,14 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
+/// Runtime-data key indicating that a backend expects tool structural tags to
+/// exclude reasoning and manages grammar activation around reasoning itself.
+///
+/// Absence means `false` for compatibility with workers that expect the
+/// frontend's structural tag to model an already-opened reasoning block.
+pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_excludes_reasoning";
+
 /// Describes which request-token overflows the frontend may reject early.
 ///
 /// The combined limit already accounts for engine-reserved tokens. A false

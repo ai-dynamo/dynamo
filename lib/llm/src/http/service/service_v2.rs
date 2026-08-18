@@ -514,7 +514,7 @@ impl State {
     }
 
     /// Master switch for the `nvext` extension protocol (see
-    /// [`environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT`]).
+    /// `environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT`).
     #[inline]
     pub fn nvext_enabled(&self) -> bool {
         self.nvext_enabled
