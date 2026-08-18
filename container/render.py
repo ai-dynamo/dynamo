@@ -27,10 +27,7 @@ _PYPI_RUN_PREFIX = (
     "    "
 )
 
-_PYPI_ENV = (
-    "export NETRC=/run/secrets/pypi-netrc PIP_RETRIES=10 UV_HTTP_RETRIES=10 && \\\n"
-    "    "
-)
+_PYPI_ENV = "export NETRC=/run/secrets/pypi-netrc && \\\n    "
 
 
 def parse_platform(platform_str: str) -> str:
@@ -213,9 +210,6 @@ def _inject_python_index_secrets(dockerfile: str) -> str:
         ):
             continue
 
-        instruction = re.sub(
-            r"\bUV_HTTP_RETRIES=\d+\b", "UV_HTTP_RETRIES=10", instruction
-        )
         instructions[index] = re.sub(
             r"^RUN (?P<mounts>(?:--mount=[^\n]*\\\n[ \t]+)*)",
             lambda match: _PYPI_RUN_PREFIX + match.group("mounts") + _PYPI_ENV,
