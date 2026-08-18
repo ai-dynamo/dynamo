@@ -19,7 +19,6 @@ package defaulting
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -27,7 +26,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -43,31 +41,6 @@ func admissionCtx(op admissionv1.Operation, kind schema.GroupVersionKind) contex
 				Version: kind.Version,
 				Kind:    kind.Kind,
 			},
-		},
-	})
-	return features.WithGate(ctx, features.Defaults())
-}
-
-func admissionCtxWithOld(
-	t *testing.T,
-	op admissionv1.Operation,
-	kind schema.GroupVersionKind,
-	old runtime.Object,
-) context.Context {
-	t.Helper()
-	raw, err := json.Marshal(old)
-	if err != nil {
-		t.Fatalf("marshal old admission object: %v", err)
-	}
-	ctx := admission.NewContextWithRequest(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{
-			Operation: op,
-			Kind: metav1.GroupVersionKind{
-				Group:   kind.Group,
-				Version: kind.Version,
-				Kind:    kind.Kind,
-			},
-			OldObject: runtime.RawExtension{Raw: raw},
 		},
 	})
 	return features.WithGate(ctx, features.Defaults())
@@ -258,7 +231,6 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build a DGD with the requested replica defaults")
 			defaulter := NewDGDDefaulter("0.9.0")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
@@ -267,12 +239,10 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 				},
 			}
 
-			t.Log("Run defaulting for the requested admission operation")
 			if err := defaulter.Default(admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd); err != nil {
 				t.Fatalf("Default() unexpected error: %v", err)
 			}
 
-			t.Log("Verify the replica defaults for each component")
 			for name, want := range tt.wantReplicas {
 				component := dgd.GetComponentByName(name)
 				if component == nil {
@@ -488,9 +458,6 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 				},
 			}
 			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
-			if tt.op == admissionv1.Update {
-				ctx = admissionCtxWithOld(t, tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK, dgd.DeepCopy())
-			}
 			ctx = features.WithGate(ctx, features.Gates{Grove: tt.groveEnabled})
 
 			t.Log("Apply level-based component defaults")
@@ -529,31 +496,5 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestDGDDefaulterPreservesLegacyGroveWorkerHashSuffixAnnotation(t *testing.T) {
-	const legacyAnnotation = "nvidia.com/grove-worker-hash-suffix-enabled"
-
-	t.Log("Build a DGD carrying the retired client annotation")
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-			Annotations: map[string]string{
-				legacyAnnotation: "client-value",
-			},
-		},
-	}
-
-	t.Log("Default the DGD without owning or rewriting the retired annotation")
-	ctx := admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
-	if err := NewDGDDefaulter("0.9.0").Default(ctx, dgd); err != nil {
-		t.Fatalf("Default() error = %v", err)
-	}
-
-	t.Log("Verify the client annotation remains unchanged")
-	if got := dgd.Annotations[legacyAnnotation]; got != "client-value" {
-		t.Fatalf("legacy annotation = %q, want %q", got, "client-value")
 	}
 }

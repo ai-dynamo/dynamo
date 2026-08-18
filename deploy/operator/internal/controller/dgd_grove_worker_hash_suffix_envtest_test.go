@@ -65,7 +65,11 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 
 	t.Log("Start reconciliation and verify the legacy workers remain unsuffixed")
 	startGroveWorkerHashSuffixTestController(t, env)
+	triggerGroveWorkerHashSuffixReconcile(t, ctx, env, dgd)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, dgd, "")
+
+	t.Log("Wait for the baseline worker hash commit before updating the legacy DGD")
+	initialWorkerHash := waitForGroveWorkerHash(t, ctx, env, dgd)
 
 	t.Log("Read the legacy DGD for the frontend-only update")
 	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
@@ -88,22 +92,28 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	prefill := current.GetComponentByName("prefill")
 	prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
 	require.NoError(t, env.Client().Update(ctx, current))
-	dynamotesting.Eventually(t, func() (bool, string) {
-		pcs := &grovev1alpha1.PodCliqueSet{}
-		pcsKey := types.NamespacedName{Name: dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components), Namespace: dgd.Namespace}
-		if err := env.Client().Get(ctx, pcsKey, pcs); err != nil {
-			return false, fmt.Sprintf("get PodCliqueSet: %v", err)
-		}
-		if pcs.Annotations[consts.AnnotationGroveLegacyWorkerNamespace] != consts.KubeLabelValueTrue {
-			return false, "PodCliqueSet has not recorded the legacy worker namespace migration"
-		}
-		return true, "PodCliqueSet recorded the legacy worker namespace migration"
-	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove worker migration marker was not recorded")
-
 	t.Log("Wait for the updated Grove workers to carry the canonical suffix")
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
 	require.NoError(t, err)
+	require.NotEqual(t, initialWorkerHash, wantHash)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, current, wantHash)
+}
+
+func triggerGroveWorkerHashSuffixReconcile(
+	t *testing.T,
+	ctx context.Context,
+	env *operatorenv.TestEnv,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) {
+	t.Helper()
+	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
+	require.NoError(t, env.Client().Get(ctx, key, current))
+	if current.Annotations == nil {
+		current.Annotations = make(map[string]string)
+	}
+	current.Annotations["operatorenv.dynamo.nvidia.com/reconcile"] = "true"
+	require.NoError(t, env.Client().Update(ctx, current))
 }
 
 func newGroveWorkerHashSuffixTestEnv(t *testing.T) *operatorenv.TestEnv {
@@ -131,7 +141,26 @@ func createLegacyGroveWorkerHashSuffixTestDGD(
 	config.Impersonate.Groups = []string{"system:masters"}
 	legacyClient, err := client.New(config, client.Options{Scheme: env.Client().Scheme()})
 	require.NoError(t, err)
+	if dgd.Annotations == nil {
+		dgd.Annotations = make(map[string]string)
+	}
+	dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderGrove
 	require.NoError(t, legacyClient.Create(ctx, dgd))
+
+	legacyPCS := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+			Namespace: dgd.Namespace,
+		},
+		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+				{Labels: map[string]string{consts.KubeLabelDynamoComponent: "prefill"}},
+				{Labels: map[string]string{consts.KubeLabelDynamoComponent: "decode"}},
+				{Labels: map[string]string{consts.KubeLabelDynamoComponent: "frontend"}},
+			},
+		}},
+	}
+	require.NoError(t, legacyClient.Create(ctx, legacyPCS))
 }
 
 func startGroveWorkerHashSuffixTestController(t *testing.T, env *operatorenv.TestEnv) {
@@ -179,6 +208,33 @@ func groveWorkerHashSuffixTestComponent(
 			}}},
 		},
 	}
+}
+
+func waitForGroveWorkerHash(
+	t *testing.T,
+	ctx context.Context,
+	env *operatorenv.TestEnv,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) string {
+	t.Helper()
+	var workerHash string
+	dynamotesting.Eventually(t, func() (bool, string) {
+		current := &nvidiacomv1beta1.DynamoGraphDeployment{}
+		key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
+		if err := env.Client().Get(ctx, key, current); err != nil {
+			return false, fmt.Sprintf("get DynamoGraphDeployment: %v", err)
+		}
+		workerHash = current.GetAnnotations()[consts.AnnotationCurrentWorkerHashV2]
+		if workerHash == "" {
+			return false, fmt.Sprintf(
+				"DynamoGraphDeployment has no current worker hash (state=%s, conditions=%v)",
+				current.Status.State,
+				current.Status.Conditions,
+			)
+		}
+		return true, "DynamoGraphDeployment recorded the current worker hash"
+	}, groveSuffixTestTimeout, groveSuffixTestInterval, "Grove did not commit the initial worker hash")
+	return workerHash
 }
 
 func waitForGroveWorkerHashSuffixes(

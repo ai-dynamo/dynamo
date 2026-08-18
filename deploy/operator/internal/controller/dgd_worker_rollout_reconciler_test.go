@@ -130,15 +130,12 @@ func TestGroveWorkerHashSuffixMigration(t *testing.T) {
 		name                    string
 		existing                bool
 		existingHash            string
-		existingMarker          bool
 		workerGenerationChanged bool
 		wantSuffix              bool
-		wantMarker              bool
 	}{
 		{name: "new PCS renders a suffix", workerGenerationChanged: true, wantSuffix: true},
 		{name: "legacy PCS with no generation change remains unsuffixed", existing: true},
-		{name: "legacy PCS records migration before a worker generation change", existing: true, workerGenerationChanged: true, wantSuffix: true, wantMarker: true},
-		{name: "marked PCS continues rendering the suffix", existing: true, existingMarker: true, wantSuffix: true},
+		{name: "legacy PCS renders a suffix after a worker generation change", existing: true, workerGenerationChanged: true, wantSuffix: true},
 		{name: "suffixed PCS continues rendering the suffix", existing: true, existingHash: "active", wantSuffix: true},
 	}
 
@@ -156,23 +153,17 @@ func TestGroveWorkerHashSuffixMigration(t *testing.T) {
 				if tt.existingHash != "" {
 					existing.Spec.Template.Cliques[0].Labels[consts.KubeLabelDynamoWorkerHash] = tt.existingHash
 				}
-				if tt.existingMarker {
-					existing.Annotations = map[string]string{consts.AnnotationGroveLegacyWorkerNamespace: consts.KubeLabelValueTrue}
-				}
 			}
 
-			t.Log("Verify suffix rendering and marker creation from the worker generation")
+			t.Log("Verify suffix rendering from the worker generation")
 			if got := shouldRenderGroveWorkerHashSuffix(dgd, existing, tt.workerGenerationChanged); got != tt.wantSuffix {
 				t.Fatalf("shouldRenderGroveWorkerHashSuffix() = %t, want %t", got, tt.wantSuffix)
-			}
-			if got := shouldMarkGroveLegacyWorkerNamespace(dgd, existing, tt.workerGenerationChanged); got != tt.wantMarker {
-				t.Fatalf("shouldMarkGroveLegacyWorkerNamespace() = %t, want %t", got, tt.wantMarker)
 			}
 		})
 	}
 }
 
-func TestReconcileUnsupportedDoesNotReportWorkerGenerationChangeForScaling(t *testing.T) {
+func TestPlanUnsupportedWorkerHashTransitionIgnoresScaling(t *testing.T) {
 	t.Log("Build an active worker generation and apply a replica-only change")
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(int32(1))},
@@ -183,12 +174,39 @@ func TestReconcileUnsupportedDoesNotReportWorkerGenerationChangeForScaling(t *te
 	dgd.GetComponentByName("worker").Replicas = ptr.To(int32(2))
 	reconciler := createTestReconcilerWithStatus(dgd)
 
-	t.Log("Reconcile the unsupported pathway")
-	workerGenerationChanged, err := reconciler.ReconcileUnsupported(context.Background(), dgd, true)
+	t.Log("Plan the unsupported pathway transition")
+	transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
 	require.NoError(t, err)
 
 	t.Log("Verify scaling does not arm a worker generation migration")
-	assert.False(t, workerGenerationChanged)
+	assert.False(t, transition.workerGenerationChanged)
+	assert.False(t, transition.needsCommit())
+}
+
+func TestUnsupportedWorkerHashTransitionDefersCommitUntilAfterWorkloadSync(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "old"}},
+		},
+	})
+	currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: currentHash}
+	worker := dgd.GetComponentByName("worker")
+	require.NotNil(t, worker)
+	require.NotNil(t, worker.PodTemplate)
+	require.NotEmpty(t, worker.PodTemplate.Spec.Containers)
+	worker.PodTemplate.Spec.Containers[0].Env[0].Value = "new"
+	reconciler := createTestReconcilerWithStatus(dgd)
+
+	transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
+	require.NoError(t, err)
+	require.True(t, transition.workerGenerationChanged)
+	assert.Equal(t, currentHash, currentWorkerHashV2(dgd), "planning must not commit the DGD hash")
+
+	require.NoError(t, reconciler.commitUnsupportedWorkerHashTransition(context.Background(), dgd, transition, true))
+	assert.Equal(t, transition.next.v2, currentWorkerHashV2(dgd))
 }
 
 func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {

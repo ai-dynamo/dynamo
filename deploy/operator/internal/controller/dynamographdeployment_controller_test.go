@@ -1047,6 +1047,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				nil,
 				nil,
 				false,
+				nil,
 			)
 			if tt.wantErrSubstring != "" {
 				g.Expect(err).To(gomega.HaveOccurred())
@@ -1139,6 +1140,7 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 		nil,
 		nil,
 		false,
+		nil,
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -1223,8 +1225,9 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 		nil,
 	)
 
-	generatedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
+	generatedPCS := renderedPCS.desired
 	renderDGD, err := groveRenderDeployment(dgd, generatedPCS, podCliqueSetUsesGroveWorkerHashSuffix(dgd, generatedPCS))
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
@@ -1497,8 +1500,9 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	desired, err := renderer.Render(ctx, dgd, nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
+	desired := renderedPCS.desired
 	renderDGD, err := groveRenderDeployment(dgd, desired, podCliqueSetUsesGroveWorkerHashSuffix(dgd, desired))
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	prefill := renderDGD.GetComponentByName("prefill")

@@ -57,7 +57,8 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 // On every operation: defaults nil Replicas to 1 for all components.
 // On CREATE: sets the controller-owned workload provider from routing intent before provider-specific defaults.
 // Existing unannotated DGDs remain unselected for controller-side workload adoption.
-// For Grove-selected DGDs: defaults nil MinAvailable to 1.
+// On the Grove pathway: defaults nil MinAvailable to 1. Scaling to replicas=0
+// does not rewrite MinAvailable; it remains the component's configured minimum viable unit.
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
@@ -81,8 +82,20 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	// Resolve the authoritative or creation-time provider before applying component defaults.
 	provider, providerSelected := defaultWorkloadProvider(ctx, dgd, req.Operation)
 
-	groveProvider := providerSelected && provider == consts.WorkloadProviderGrove
-	defaultComponentFields(dgd, groveProvider)
+	// Default nil replicas on every operation so newly added components remain safe to expand.
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+
+		// Default omitted replica counts before the controller expands component roles.
+		if component.Replicas == nil {
+			component.Replicas = ptr.To(int32(1))
+		}
+
+		// Default Grove's minimum available replicas only for Grove-selected DGDs.
+		if providerSelected && provider == consts.WorkloadProviderGrove && component.MinAvailable == nil {
+			component.MinAvailable = ptr.To(int32(1))
+		}
+	}
 
 	// Stamp creation provenance independently from level-based provider defaulting.
 	if req.Operation == admissionv1.Create {
@@ -97,22 +110,6 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	}
 
 	return nil
-}
-
-func defaultComponentFields(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	groveProvider bool,
-) {
-	// Default nil replica counts before the controller expands component roles.
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
-		if component.Replicas == nil {
-			component.Replicas = ptr.To(int32(1))
-		}
-		if groveProvider && component.MinAvailable == nil {
-			component.MinAvailable = ptr.To(int32(1))
-		}
-	}
 }
 
 func defaultWorkloadProvider(

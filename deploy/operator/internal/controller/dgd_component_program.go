@@ -151,8 +151,7 @@ func (p *componentProgram) reconcileWorkerRollout(
 	if supportsManagedRollingUpdate(dgd) {
 		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
-	_, err := p.rollout.ReconcileUnsupported(ctx, dgd, false)
-	return err
+	return p.rollout.ReconcileUnsupported(ctx, dgd, false)
 }
 
 // supportsManagedRollingUpdate checks whether the component pathway can use

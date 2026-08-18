@@ -1340,26 +1340,24 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 	)
 
 	tests := []struct {
-		name                  string
-		activeNamespace       bool
-		pcsAccepted           bool
-		childRevision         string
-		updateEnded           bool
-		childReady            bool
-		legacyPCS             bool
-		legacyMigrationMarker bool
-		wantReady             bool
-		wantNamespace         string
-		wantMigrationComplete bool
+		name            string
+		activeNamespace bool
+		pcsAccepted     bool
+		childRevision   string
+		updateEnded     bool
+		childReady      bool
+		legacyPCS       bool
+		wantReady       bool
+		wantNamespace   string
 	}{
-		{name: "unaccepted PCS leaves a new worker namespace empty", childRevision: previousRevision},
+		{name: "unaccepted suffixed PCS leaves a new worker namespace empty", childRevision: previousRevision},
+		{name: "unaccepted legacy PCS publishes the base namespace", legacyPCS: true, childRevision: previousRevision},
 		{name: "unaccepted PCS preserves the active worker namespace", activeNamespace: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted PCS with a previous child revision preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: previousRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted PCS with an unfinished child update preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "stale accepted PCS revision publishes its rendered hash instead of the desired DGD hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
 		{name: "accepted completed PCS revision remains published after worker health loss", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, wantNamespace: acceptedHash},
 		{name: "accepted legacy PCS publishes the base namespace", pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true},
-		{name: "completed marked migration publishes the suffix before marker cleanup", pcsAccepted: true, legacyMigrationMarker: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash, wantMigrationComplete: true},
 	}
 
 	for _, tt := range tests {
@@ -1390,20 +1388,15 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 				}
 			}
 
-			annotations := map[string]string(nil)
-			if tt.legacyMigrationMarker {
-				annotations = map[string]string{commonconsts.AnnotationGroveLegacyWorkerNamespace: commonconsts.KubeLabelValueTrue}
-			}
 			labels := map[string]string{commonconsts.KubeLabelDynamoComponent: componentName}
 			if !tt.legacyPCS {
 				labels[commonconsts.KubeLabelDynamoWorkerHash] = acceptedHash
 			}
 			podCliqueSet := &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:        PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-					Namespace:   dgd.Namespace,
-					Generation:  1,
-					Annotations: annotations,
+					Name:       PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+					Namespace:  dgd.Namespace,
+					Generation: 1,
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: labels}},
@@ -1442,7 +1435,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 				t.Fatalf("EvaluateGroveReadiness() error = %v", err)
 			}
 
-			t.Log("Verify the published namespace and migration completion state")
+			t.Log("Verify the published namespace")
 			wantNamespace := tt.wantNamespace
 			if wantNamespace != "" && wantNamespace != "active" {
 				wantNamespace = ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), wantNamespace)
@@ -1457,9 +1450,6 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			}
 			if got := readiness.ComponentStatuses[componentName].RuntimeNamespace; got != wantNamespace {
 				t.Fatalf("runtime namespace = %q, want %q", got, wantNamespace)
-			}
-			if readiness.LegacyWorkerNamespaceMigrationComplete != tt.wantMigrationComplete {
-				t.Fatalf("LegacyWorkerNamespaceMigrationComplete = %t, want %t", readiness.LegacyWorkerNamespaceMigrationComplete, tt.wantMigrationComplete)
 			}
 		})
 	}

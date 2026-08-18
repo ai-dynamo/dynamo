@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -29,7 +30,9 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -107,8 +110,87 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 		nil,
 		nil,
 		false,
+		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)
 	assert.Equal(t, 1, podCliqueReads)
+}
+
+func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetRejectsStaleObservation(t *testing.T) {
+	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+	})
+	existing := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Name: "old"}},
+		}},
+	}
+	updateCalls := 0
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(
+				_ context.Context,
+				_ client.WithWatch,
+				object client.Object,
+				_ ...client.UpdateOption,
+			) error {
+				updateCalls++
+				assert.Equal(t, existing.ResourceVersion, object.GetResourceVersion())
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: "grove.io", Resource: "podcliquesets"},
+					object.GetName(),
+					errors.New("stale PodCliqueSet"),
+				)
+			},
+		}).
+		Build()
+	observed := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(existing), observed))
+	desired := observed.DeepCopy()
+	desired.Spec.Template.Cliques[0].Name = "new"
+	reconciler := &groveWorkloadsReconciler{syncer: newDGDResourceSyncer(kubeClient, nil)}
+
+	_, err := reconciler.reconcilePodCliqueSet(context.Background(), dgd, &grovePodCliqueSetRender{
+		existing: observed,
+		desired:  desired,
+	})
+
+	require.Error(t, err)
+	assert.True(t, apierrors.IsConflict(err))
+	assert.Equal(t, 1, updateCalls)
+}
+
+func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetReturnsCreateConflict(t *testing.T) {
+	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid"},
+	})
+	desired := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(
+				_ context.Context,
+				_ client.WithWatch,
+				object client.Object,
+				_ ...client.CreateOption,
+			) error {
+				return apierrors.NewAlreadyExists(
+					schema.GroupResource{Group: "grove.io", Resource: "podcliquesets"},
+					object.GetName(),
+				)
+			},
+		}).
+		Build()
+	reconciler := &groveWorkloadsReconciler{syncer: newDGDResourceSyncer(kubeClient, nil)}
+
+	_, err := reconciler.reconcilePodCliqueSet(context.Background(), dgd, &grovePodCliqueSetRender{desired: desired})
+
+	require.Error(t, err)
+	assert.True(t, apierrors.IsAlreadyExists(err))
 }

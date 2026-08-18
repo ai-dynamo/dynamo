@@ -107,9 +107,9 @@ func (p *groveProgram) Reconcile(
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
-	workerGenerationChanged, err := p.rollout.ReconcileUnsupported(ctx, req.DGD, true)
+	workerHashTransition, err := p.rollout.planUnsupportedWorkerHashTransition(req.DGD)
 	if err != nil {
-		return programResult, err
+		return programResult, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
 	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
 	if checkpoints.Statuses != nil {
@@ -129,12 +129,20 @@ func (p *groveProgram) Reconcile(
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
+	// Keep the DGD worker hash behind the PCS. The callback runs immediately
+	// after a successful PCS sync, before any later workload operations.
 	result, err := p.workloads.Reconcile(
 		ctx,
 		req.DGD,
 		restart.State,
 		checkpoints.Infos,
-		workerGenerationChanged,
+		workerHashTransition.workerGenerationChanged,
+		func() error {
+			if err := p.rollout.commitUnsupportedWorkerHashTransition(ctx, req.DGD, workerHashTransition, true); err != nil {
+				return failWorkloadProgram(reasonRollingUpdateFailed, err)
+			}
+			return nil
+		},
 	)
 	if err != nil {
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)

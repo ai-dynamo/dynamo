@@ -805,8 +805,9 @@ spec:
 						&controller_common.RuntimeConfig{},
 						nil,
 					)
-					pcs, err := renderer.Render(ctx, dgd, nil, nil, false)
+					renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 					require.NoError(t, err)
+					pcs := renderedPCS.desired
 					renderDGD, err := groveRenderDeployment(dgd, pcs, podCliqueSetUsesGroveWorkerHashSuffix(dgd, pcs))
 					require.NoError(t, err)
 
@@ -931,8 +932,9 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	desired, err := renderer.Render(ctx, dgd, nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 	require.NoError(t, err)
+	desired := renderedPCS.desired
 	renderDGD, err := groveRenderDeployment(dgd, desired, podCliqueSetUsesGroveWorkerHashSuffix(dgd, desired))
 	require.NoError(t, err)
 
