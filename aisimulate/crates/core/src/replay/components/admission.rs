@@ -71,9 +71,10 @@ impl<Metadata> ReplayReadyArrival<Metadata> {
     }
 }
 
+#[allow(clippy::large_enum_variant)] // Boxing the workload adds measurable replay hot-path cost.
 enum AdmissionSource {
     Requests(VecDeque<DirectRequest>),
-    Workload(Box<WorkloadDriver>),
+    Workload(WorkloadDriver),
 }
 
 pub(crate) struct AdmissionQueue<Metadata = NoReplayMetadata> {
@@ -91,7 +92,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
         }
     }
 
-    pub(crate) fn new_workload(driver: Box<WorkloadDriver>, mode: ReplayMode) -> Self {
+    pub(crate) fn new_workload(driver: WorkloadDriver, mode: ReplayMode) -> Self {
         Self {
             source: AdmissionSource::Workload(driver),
             mode,

@@ -77,9 +77,7 @@ fn workload(arrivals_ms: &[f64]) -> WorkloadDriver {
 fn replayer(spec: ReplaySpec, arrivals_ms: &[f64]) -> Replayer<RoundRobinComposition> {
     Replayer::new(spec, ReplayEngineFactory::new())
         .unwrap()
-        .with_runtime_input(ReplayRuntimeInput::Workload(Box::new(workload(
-            arrivals_ms,
-        ))))
+        .with_runtime_input(ReplayRuntimeInput::Workload(workload(arrivals_ms)))
         .with_capture_options(ReplayCaptureOptions {
             determinism: ReplayDeterminism::CanonicalV1,
             ..ReplayCaptureOptions::default()

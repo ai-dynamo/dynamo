@@ -202,7 +202,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
         Some(RouterEventVisibility::PassEnd) => ReplayArtifactKvEventVisibility::PassEnd,
     };
     let (_, artifacts) = Replayer::new(spec, factory)?
-        .with_runtime_input(ReplayRuntimeInput::Workload(Box::new(driver)))
+        .with_runtime_input(ReplayRuntimeInput::Workload(driver))
         .run_with_artifacts(visibility)?;
 
     Ok(ReplayWorkerArtifacts {

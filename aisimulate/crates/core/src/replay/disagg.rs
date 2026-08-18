@@ -959,7 +959,7 @@ impl DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMeta
     ) -> Result<Self> {
         Self::new_composed(
             config,
-            AdmissionQueue::new_workload(Box::new(driver), mode),
+            AdmissionQueue::new_workload(driver, mode),
             false,
             |_, prefill_topology, _, decode_topology| {
                 Ok((

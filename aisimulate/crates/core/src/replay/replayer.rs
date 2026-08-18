@@ -203,9 +203,10 @@ impl ReplayScalingPolicy for ScalingPolicyBoundary {
 /// legacy entrypoints use this seam to preserve multi-turn, concurrency, and
 /// agentic scheduling without recompiling Replay sources in the Dynamo crate.
 #[doc(hidden)]
+#[allow(clippy::large_enum_variant)] // Preserve the inline workload through runtime construction.
 pub enum ReplayRuntimeInput {
     Requests(VecDeque<DirectRequest>),
-    Workload(Box<WorkloadDriver>),
+    Workload(WorkloadDriver),
 }
 
 /// Built-in engine-only composition: Round-robin placement and fixed capacity.
