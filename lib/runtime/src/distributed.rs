@@ -461,7 +461,7 @@ impl DistributedRuntime {
     /// The value is resolved once at construction time by `DiscoveryBackend::resolve_event_transport_kind`:
     /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the default is ZMQ.
     ///
-    /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
+    /// Use this instead of `EventTransportKind::from_env_or_default` wherever you have
     /// access to a `DistributedRuntime`.
     pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
         self.event_transport_kind

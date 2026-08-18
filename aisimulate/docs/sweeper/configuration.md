@@ -104,4 +104,5 @@ AI Simulate variable takes precedence.
 ## Removed KVBM Fields
 
 Sweeper rejects the old KVBM block-count, transfer-bandwidth, offload-batch-size, and cache-hit
-fields. Native G2 replaces KVBM, so these fields have no adapter migration.
+fields. The AI Simulate engine and replay path do not support them, and they have no adapter
+migration.

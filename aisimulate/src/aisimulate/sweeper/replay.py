@@ -65,6 +65,14 @@ class ReplayReport:
     metadata: dict[str, JSONValue] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ReplayOutputRequirements:
+    """Optional detail requested from a Runner without changing replay semantics."""
+
+    include_raw_report: bool = False
+    capture_per_request: bool = False
+
+
 @dataclass(frozen=True, order=True)
 class HookCapability:
     """One runtime-hook ABI supported by a runner composition."""
@@ -90,6 +98,7 @@ class RunnerCapabilities:
     replay_spec_api_version: int = REPLAY_SPEC_API_VERSION
     supported_backend_topologies: tuple[tuple[str, str], ...] = ()
     supported_hooks: tuple[HookCapability, ...] = ()
+    supports_disaggregated_attention_dp: bool = False
 
     def supports_backend_topology(self, backend: str, topology: str) -> bool:
         """Return whether a backend/topology pair is supported.
@@ -106,6 +115,15 @@ class RunnerCapabilities:
 
     def supports_hook(self, hook: RuntimeHookSpec) -> bool:
         return any(capability.supports(hook) for capability in self.supported_hooks)
+
+    def supports_attention_dp(self, topology: str, *dp_sizes: int) -> bool:
+        """Return whether the topology supports all requested attention-DP sizes."""
+
+        return (
+            topology != "disagg"
+            or self.supports_disaggregated_attention_dp
+            or all(dp_size == 1 for dp_size in dp_sizes)
+        )
 
     def require_replay_spec_version(
         self, api_version: int = REPLAY_SPEC_API_VERSION
@@ -148,7 +166,12 @@ class RunnerCapabilities:
 class Runner(Protocol):
     """One worker-local replay executor."""
 
-    def run(self, spec: ReplaySpec) -> ReplayReport:
+    def run(
+        self,
+        spec: ReplaySpec,
+        *,
+        output_requirements: ReplayOutputRequirements | None = None,
+    ) -> ReplayReport:
         ...
 
     def close(self) -> None:
