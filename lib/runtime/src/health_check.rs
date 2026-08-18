@@ -230,7 +230,10 @@ impl HealthCheckManager {
 
         // Spawn task to send health check and wait for response
         tokio::spawn(async move {
-            let result = tokio::time::timeout(timeout, async {
+            // One deadline for the whole canary: the request and the drain that follows it
+            // share it, so a single slow response cannot buy the drain a second full budget.
+            let deadline = tokio::time::Instant::now() + timeout;
+            let result = tokio::time::timeout_at(deadline, async {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
@@ -257,17 +260,16 @@ impl HealthCheckManager {
 
                         // We need to consume the rest of the stream to avoid warnings on the
                         // frontend. This stays on its own task so a slow tail cannot delay
-                        // the health-status write below, and it is bounded by the same
-                        // request timeout so a stream that never closes cannot park it
-                        // forever.
+                        // the health-status write below, and it runs against the canary's
+                        // deadline so a stream that never closes cannot park it forever.
                         let drain_subject = endpoint_subject_owned.clone();
                         tokio::spawn(async move {
-                            match drain_response_stream(response_stream, timeout, drain_cancel)
+                            match drain_response_stream(response_stream, deadline, drain_cancel)
                                 .await
                             {
                                 DrainOutcome::Completed => {}
                                 DrainOutcome::TimedOut => warn!(
-                                    "Health check response stream from {} did not close within {:?}; abandoning the remainder",
+                                    "Health check response stream from {} did not close within the {:?} health check budget; abandoning the remainder",
                                     drain_subject, timeout
                                 ),
                                 DrainOutcome::Cancelled => debug!(
@@ -316,20 +318,31 @@ impl HealthCheckManager {
     }
 }
 
+/// How long the drain keeps reading after signalling `stop_generating()`, so an engine that
+/// only observes the stop on its next poll can flush and close instead of writing into a
+/// receiver that has already gone away.
+const STOP_GRACE: Duration = Duration::from_millis(100);
+
 /// Consume whatever is left of a canary response stream, under an explicit lifetime bound.
 ///
 /// The remainder has to be read rather than dropped outright, or the frontend logs warnings
 /// about an abandoned response stream. But a backend that emits one item and then never
-/// closes its stream must not be able to park this task forever: `budget` caps the wait and
-/// `cancel` releases it on runtime shutdown. When either fires, the engine is told to stop
-/// producing before the stream is dropped, so the producer is not left writing into a
-/// receiver nobody reads.
+/// closes its stream must not be able to park this task forever: `deadline` caps the wait and
+/// `cancel` releases it on runtime shutdown. `deadline` is the canary's own deadline, shared
+/// with the request that produced the stream, so the two cannot bound the same health check
+/// twice.
+///
+/// When the wait ends without the stream closing, the engine is told to stop producing and
+/// the stream is then polled for a further [`STOP_GRACE`] before being dropped. Signalling
+/// and dropping in the same breath would leave the producer facing a vanished receiver — the
+/// case the stop signal exists to avoid — because nothing would have polled the stream
+/// between the two.
 ///
 /// The outcome of the drain never affects the recorded health status. The endpoint answered;
 /// whether its tail was well-behaved is a separate question.
 async fn drain_response_stream<S>(
     mut stream: S,
-    budget: Duration,
+    deadline: tokio::time::Instant,
     cancel: CancellationToken,
 ) -> DrainOutcome
 where
@@ -339,12 +352,15 @@ where
 
     let outcome = tokio::select! {
         _ = (&mut stream).for_each(|_| async {}) => DrainOutcome::Completed,
-        _ = tokio::time::sleep(budget) => DrainOutcome::TimedOut,
+        _ = tokio::time::sleep_until(deadline) => DrainOutcome::TimedOut,
         _ = cancel.cancelled() => DrainOutcome::Cancelled,
     };
 
     if outcome != DrainOutcome::Completed {
         context.stop_generating();
+        // Bounded, and deliberately not selected against `cancel`: on shutdown this is the
+        // window that lets the producer notice the stop, and it is short enough to spend.
+        let _ = tokio::time::timeout(STOP_GRACE, (&mut stream).for_each(|_| async {})).await;
     }
 
     outcome
@@ -505,12 +521,12 @@ mod bounded_drain_tests {
             Duration::from_secs(5),
             drain_response_stream(
                 response_stream,
-                Duration::from_millis(100),
+                tokio::time::Instant::now() + Duration::from_millis(100),
                 CancellationToken::new(),
             ),
         )
         .await
-        .expect("drain must return once its budget elapses");
+        .expect("drain must return once its deadline passes");
 
         assert_eq!(outcome, DrainOutcome::TimedOut);
         assert_eq!(
@@ -541,10 +557,14 @@ mod bounded_drain_tests {
 
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
-            drain_response_stream(response_stream, Duration::from_secs(3600), cancel),
+            drain_response_stream(
+                response_stream,
+                tokio::time::Instant::now() + Duration::from_secs(3600),
+                cancel,
+            ),
         )
         .await
-        .expect("a cancelled drain must return without waiting out its budget");
+        .expect("a cancelled drain must return without waiting out its deadline");
 
         assert_eq!(outcome, DrainOutcome::Cancelled);
         assert_eq!(live.load(Ordering::SeqCst), 0);
@@ -561,7 +581,7 @@ mod bounded_drain_tests {
             let response_stream = one_item_then_pending(&live);
             handles.push(tokio::spawn(drain_response_stream(
                 response_stream,
-                Duration::from_millis(100),
+                tokio::time::Instant::now() + Duration::from_millis(100),
                 CancellationToken::new(),
             )));
         }
@@ -600,7 +620,7 @@ mod bounded_drain_tests {
         let started = std::time::Instant::now();
         let outcome = drain_response_stream(
             response_stream,
-            Duration::from_secs(3600),
+            tokio::time::Instant::now() + Duration::from_secs(3600),
             CancellationToken::new(),
         )
         .await;
@@ -613,13 +633,106 @@ mod bounded_drain_tests {
         );
         assert!(
             started.elapsed() < Duration::from_secs(5),
-            "a terminating stream must return on its own, not on the budget"
+            "a terminating stream must return on its own, not on the deadline"
         );
         assert_eq!(live.load(Ordering::SeqCst), 0);
         assert!(
             !context.is_stopped(),
             "a stream that ended on its own needs no stop signal"
         );
+    }
+
+    /// The drain shares the canary's deadline rather than starting a fresh budget, so a
+    /// request that already spent the whole budget leaves the drain nothing to spend. Without
+    /// this, a slow first response and a non-closing tail together hold a canary for close to
+    /// twice `request_timeout`.
+    #[tokio::test]
+    async fn drain_does_not_extend_a_deadline_the_request_already_spent() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let response_stream = one_item_then_pending(&live);
+
+        // What `send_health_check_request` would pass after the request consumed the budget.
+        let spent = tokio::time::Instant::now();
+
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_response_stream(response_stream, spent, CancellationToken::new()),
+        )
+        .await
+        .expect("an already-spent deadline must not buy the drain a second budget");
+
+        assert_eq!(outcome, DrainOutcome::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the drain must give up at once, not wait out a fresh budget of its own"
+        );
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    /// A producer that only notices `stop_generating()` on its next poll must still get that
+    /// poll. Signalling and dropping in the same breath would strand it against a receiver
+    /// that is already gone — the condition the stop signal exists to prevent.
+    #[tokio::test]
+    async fn drain_keeps_reading_after_the_stop_signal() {
+        let flushed = Arc::new(AtomicUsize::new(0));
+
+        let context = Context::new(()).context();
+        let inner = FlushOnStopStream {
+            context: context.clone(),
+            flushed: flushed.clone(),
+            done: false,
+        };
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(inner), context.clone());
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_response_stream(
+                response_stream,
+                tokio::time::Instant::now() + Duration::from_millis(50),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("the grace window must be bounded");
+
+        assert_eq!(outcome, DrainOutcome::TimedOut);
+        assert!(context.is_stopped());
+        assert_eq!(
+            flushed.load(Ordering::SeqCst),
+            1,
+            "the stream must be polled again after the stop signal, not dropped unread"
+        );
+    }
+
+    /// Yields nothing until the engine is told to stop, then flushes one final item and
+    /// closes. Before the stop it parks without registering a waker, which is what an engine
+    /// waiting on its own producer looks like from here.
+    struct FlushOnStopStream {
+        context: Arc<dyn AsyncEngineContext>,
+        flushed: Arc<AtomicUsize>,
+        done: bool,
+    }
+
+    impl Stream for FlushOnStopStream {
+        type Item = TestResponse;
+
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<Option<TestResponse>> {
+            let me = self.get_mut();
+            if !me.context.is_stopped() {
+                return Poll::Pending;
+            }
+            if !me.done {
+                me.done = true;
+                me.flushed.fetch_add(1, Ordering::SeqCst);
+                return Poll::Ready(Some(healthy_item()));
+            }
+            Poll::Ready(None)
+        }
     }
 }
 
