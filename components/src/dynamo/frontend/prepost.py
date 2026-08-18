@@ -664,7 +664,7 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
-        reasoning_ended: bool | None = None,
+        response_reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
     ) -> None:
@@ -673,7 +673,7 @@ class StreamingPostProcessor:
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
         self.stream_response = stream_response
-        self.reasoning_is_done = bool(reasoning_ended)
+        self.reasoning_is_done = bool(response_reasoning_ended)
         self._uses_dynamo_json_tool_call_fallback = uses_dynamo_json_tool_call_fallback
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
@@ -692,11 +692,11 @@ class StreamingPostProcessor:
             )
             if reasoning_parser_class
             and not thinking_disabled
-            and reasoning_ended is not True
+            and response_reasoning_ended is not True
             else None
         )
         if self.reasoning_parser is not None:
-            if reasoning_ended is None:
+            if response_reasoning_ended is None:
                 self.reasoning_is_done = self.reasoning_parser.is_reasoning_end(
                     prompt_token_ids
                 )
