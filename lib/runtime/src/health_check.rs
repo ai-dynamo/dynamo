@@ -3,15 +3,16 @@
 
 use crate::DistributedRuntime;
 use crate::config::HealthStatus;
-use crate::engine::AsyncEngine;
+use crate::engine::{AsyncEngine, AsyncEngineContextProvider};
 use crate::pipeline::SingleIn;
 use crate::protocols::maybe_error::MaybeError;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Configuration for health check behavior
@@ -223,6 +224,9 @@ impl HealthCheckManager {
         let endpoint_subject_owned = endpoint_subject.to_string();
         let payload = payload.clone();
         let timeout = self.config.request_timeout;
+        // Child of the runtime's endpoint shutdown token, so an in-flight drain is released
+        // when the runtime goes down and deregisters from the token tree when it ends.
+        let drain_cancel = self.drt.child_token();
 
         // Spawn task to send health check and wait for response
         tokio::spawn(async move {
@@ -251,9 +255,26 @@ impl HealthCheckManager {
                             false
                         };
 
+                        // We need to consume the rest of the stream to avoid warnings on the
+                        // frontend. This stays on its own task so a slow tail cannot delay
+                        // the health-status write below, and it is bounded by the same
+                        // request timeout so a stream that never closes cannot park it
+                        // forever.
+                        let drain_subject = endpoint_subject_owned.clone();
                         tokio::spawn(async move {
-                            // We need to consume the rest of the stream to avoid warnings on the frontend.
-                            response_stream.for_each(|_| async {}).await;
+                            match drain_response_stream(response_stream, timeout, drain_cancel)
+                                .await
+                            {
+                                DrainOutcome::Completed => {}
+                                DrainOutcome::TimedOut => warn!(
+                                    "Health check response stream from {} did not close within {:?}; abandoning the remainder",
+                                    drain_subject, timeout
+                                ),
+                                DrainOutcome::Cancelled => debug!(
+                                    "Runtime shutdown released the health check response drain for {}",
+                                    drain_subject
+                                ),
+                            }
                         });
 
                         // Update health status based on response
@@ -293,6 +314,51 @@ impl HealthCheckManager {
 
         Ok(())
     }
+}
+
+/// Consume whatever is left of a canary response stream, under an explicit lifetime bound.
+///
+/// The remainder has to be read rather than dropped outright, or the frontend logs warnings
+/// about an abandoned response stream. But a backend that emits one item and then never
+/// closes its stream must not be able to park this task forever: `budget` caps the wait and
+/// `cancel` releases it on runtime shutdown. When either fires, the engine is told to stop
+/// producing before the stream is dropped, so the producer is not left writing into a
+/// receiver nobody reads.
+///
+/// The outcome of the drain never affects the recorded health status. The endpoint answered;
+/// whether its tail was well-behaved is a separate question.
+async fn drain_response_stream<S>(
+    mut stream: S,
+    budget: Duration,
+    cancel: CancellationToken,
+) -> DrainOutcome
+where
+    S: Stream + AsyncEngineContextProvider + Unpin,
+{
+    let context = stream.context();
+
+    let outcome = tokio::select! {
+        _ = (&mut stream).for_each(|_| async {}) => DrainOutcome::Completed,
+        _ = tokio::time::sleep(budget) => DrainOutcome::TimedOut,
+        _ = cancel.cancelled() => DrainOutcome::Cancelled,
+    };
+
+    if outcome != DrainOutcome::Completed {
+        context.stop_generating();
+    }
+
+    outcome
+}
+
+/// How a call to [`drain_response_stream`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainOutcome {
+    /// The stream ended on its own and was read to completion.
+    Completed,
+    /// The budget elapsed first; the remainder was abandoned.
+    TimedOut,
+    /// The cancellation token fired first; the remainder was abandoned.
+    Cancelled,
 }
 
 /// Start health check manager for the distributed runtime
@@ -348,6 +414,213 @@ pub async fn get_health_check_status(
         "endpoints_checked": endpoint_subjects.len(),
         "endpoint_statuses": endpoint_statuses,
     }))
+}
+
+// ============================================================
+// Bounded-drain tests. These run at default features on purpose: the two modules below
+// need a live NATS server via `create_test_drt_async` and are gated behind
+// `feature = "integration"`, so a regression test placed in either would not run under
+// `cargo test -p dynamo-runtime --lib`.
+// ============================================================
+#[cfg(test)]
+mod bounded_drain_tests {
+    use super::*;
+    use crate::engine::AsyncEngineContext;
+    use crate::pipeline::{Context, ManyOut, ResponseStream};
+    use crate::protocols::annotated::Annotated;
+    use futures::stream::{self, Stream, StreamExt};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context as TaskContext, Poll};
+
+    type TestResponse = Annotated<serde_json::Value>;
+
+    /// Decrements a shared counter when dropped, so a test can observe the moment the
+    /// drain actually releases a response stream instead of inferring it from timing.
+    struct DropProbe(Arc<AtomicUsize>);
+
+    impl DropProbe {
+        fn new(live: &Arc<AtomicUsize>) -> Self {
+            live.fetch_add(1, Ordering::SeqCst);
+            Self(live.clone())
+        }
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Carries a [`DropProbe`] for the lifetime of the wrapped stream.
+    struct ProbedStream<S> {
+        inner: S,
+        _probe: DropProbe,
+    }
+
+    impl<S: Stream + Unpin> Stream for ProbedStream<S> {
+        type Item = S::Item;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<S::Item>> {
+            Pin::new(&mut self.get_mut().inner).poll_next(cx)
+        }
+    }
+
+    /// Wraps `inner` into the same `ManyOut` shape the canary receives from a local engine,
+    /// with a drop probe attached to the stream itself.
+    fn probed_response_stream<S>(inner: S, live: &Arc<AtomicUsize>) -> ManyOut<TestResponse>
+    where
+        S: Stream<Item = TestResponse> + Unpin + Send + 'static,
+    {
+        let probed = ProbedStream {
+            inner,
+            _probe: DropProbe::new(live),
+        };
+        ResponseStream::new(Box::pin(probed), Context::new(()).context())
+    }
+
+    fn healthy_item() -> TestResponse {
+        Annotated::from_data(serde_json::json!({"token": "ok"}))
+    }
+
+    /// One healthy item, then a tail that never yields and never closes — the backend
+    /// shape described in the issue.
+    fn one_item_then_pending(live: &Arc<AtomicUsize>) -> ManyOut<TestResponse> {
+        probed_response_stream(
+            stream::iter([healthy_item()]).chain(stream::pending()),
+            live,
+        )
+    }
+
+    /// A non-terminating response stream must be released once the budget elapses, not
+    /// held for the life of the process.
+    #[tokio::test]
+    async fn bounded_drain_releases_a_stream_that_never_closes() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let response_stream = one_item_then_pending(&live);
+        let context: Arc<dyn AsyncEngineContext> = response_stream.context();
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_response_stream(
+                response_stream,
+                Duration::from_millis(100),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("drain must return once its budget elapses");
+
+        assert_eq!(outcome, DrainOutcome::TimedOut);
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "the response stream must be dropped when the drain gives up"
+        );
+        assert!(
+            context.is_stopped(),
+            "the engine must be told to stop producing before the stream is dropped"
+        );
+    }
+
+    /// Runtime shutdown must release an in-flight drain rather than leaving it parked for
+    /// the remainder of its budget.
+    #[tokio::test]
+    async fn cancelled_drain_releases_the_stream_before_the_budget_elapses() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let response_stream = one_item_then_pending(&live);
+        let context: Arc<dyn AsyncEngineContext> = response_stream.context();
+
+        let cancel = CancellationToken::new();
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_response_stream(response_stream, Duration::from_secs(3600), cancel),
+        )
+        .await
+        .expect("a cancelled drain must return without waiting out its budget");
+
+        assert_eq!(outcome, DrainOutcome::Cancelled);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert!(context.is_stopped());
+    }
+
+    /// Several canary intervals in a row must not accumulate live response streams.
+    #[tokio::test]
+    async fn repeated_drains_do_not_accumulate_live_streams() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        for _ in 0..5 {
+            let response_stream = one_item_then_pending(&live);
+            handles.push(tokio::spawn(drain_response_stream(
+                response_stream,
+                Duration::from_millis(100),
+                CancellationToken::new(),
+            )));
+        }
+        assert_eq!(live.load(Ordering::SeqCst), 5, "five canary intervals ran");
+
+        for handle in handles {
+            let outcome = tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("every drain must end within its budget")
+                .expect("drain task must not panic");
+            assert_eq!(outcome, DrainOutcome::TimedOut);
+        }
+
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "live response streams must return to zero rather than grow per interval"
+        );
+    }
+
+    /// Negative control: a well-behaved stream must still be drained to completion, which
+    /// is why the drain exists at all (dropping it early produces frontend warnings).
+    #[tokio::test]
+    async fn terminating_stream_is_drained_completely_and_promptly() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let counter = consumed.clone();
+
+        let inner = stream::iter(0..4).map(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            healthy_item()
+        });
+        let response_stream = probed_response_stream(Box::pin(inner), &live);
+        let context: Arc<dyn AsyncEngineContext> = response_stream.context();
+
+        let started = std::time::Instant::now();
+        let outcome = drain_response_stream(
+            response_stream,
+            Duration::from_secs(3600),
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(outcome, DrainOutcome::Completed);
+        assert_eq!(
+            consumed.load(Ordering::SeqCst),
+            4,
+            "every item must still be consumed; the bound must not truncate a healthy stream"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a terminating stream must return on its own, not on the budget"
+        );
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert!(
+            !context.is_stopped(),
+            "a stream that ended on its own needs no stop signal"
+        );
+    }
 }
 
 // ============================================================
