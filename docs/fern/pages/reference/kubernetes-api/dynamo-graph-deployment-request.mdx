@@ -618,6 +618,32 @@ containers, and container environment variables merge by `name`; atomic lists
 such as graph-level `spec.env` and container `args` replace their generated
 values.
 
+### Generated component names
+
+An entry in `spec.overrides.dgd.spec.components` must use the exact, case-sensitive
+component name from the generated DGD. These are DGD component names, not Kubernetes
+Service resource names. The current profiler templates generate these components:
+
+| Backend | Aggregated | Disaggregated |
+|---|---|---|
+| vLLM | `Frontend`, `VllmDecodeWorker` | `Frontend`, `VllmDecodeWorker`, `VllmPrefillWorker` |
+| SGLang | `Frontend`, `decode` | `Frontend`, `decode`, `prefill` |
+| TensorRT-LLM | `Frontend`, `TRTLLMWorker` | `Frontend`, `decode`, `prefill` |
+
+Setting `spec.features.mocker.enabled: true` replaces the inference workers with `decode` and
+`prefill` mocker components. Setting `spec.features.planner` adds a `Planner` component.
+
+For a specific DGDR, read the authoritative names from the selected configuration:
+
+```bash
+kubectl get dgdr <name> -n <namespace> \
+  -o jsonpath='{range .status.profilingResults.selectedConfig.spec.components[*]}{.name}{"\n"}{end}'
+```
+
+Set `spec.autoApply: false` when you want to inspect these names before the operator creates the
+DGD. Names can differ in older Dynamo releases, so use `selectedConfig` when updating an existing
+deployment.
+
 For example, set an environment variable on one generated component:
 
 ```yaml
@@ -634,7 +660,7 @@ spec:
       kind: DynamoGraphDeployment
       spec:
         components:
-        - name: SGLangDecodeWorker  # replace with the generated component name
+        - name: decode
           podTemplate:
             spec:
               containers:
@@ -644,7 +670,6 @@ spec:
                   value: /usr/local/cuda/bin/ptxas
 ```
 
-Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` to find component names.
 Overrides can modify only components present in the generated DGD; unknown names are ignored with a
 warning, and an override cannot add deployment topology. Labels and annotations merge,
 `metadata.name` selects the final DGD name, and other identity metadata is ignored. `status`, null
