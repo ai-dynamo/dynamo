@@ -54,6 +54,13 @@ inputs:
     description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-01 or aws-dev-02; use an empty value to disable.'
     required: false
     default: 'auto'
+  reset_existing:
+    description: >-
+      Delete an existing vCluster of the same name before creating it. Only safe from a
+      bootstrap path that is the sole writer of this vCluster name; recovery paths that
+      can run concurrently for one name must leave this false.
+    required: false
+    default: 'false'
   checkpoint_enabled:
     description: 'Enable operator checkpoint/restore injection'
     required: false
@@ -167,6 +174,7 @@ runs:
         echo "::endgroup::"
 
     - name: Delete existing vCluster for this run
+      if: inputs.reset_existing == 'true'
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
@@ -174,7 +182,9 @@ runs:
       run: |
         echo "Checking for existing vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
         # github.run_id is stable across re-runs, so this catches leftovers from
-        # a failed or canceled attempt of the same workflow run.
+        # a failed or canceled attempt of the same workflow run. Gated on
+        # reset_existing: a concurrent caller's cluster is indistinguishable from
+        # a leftover here, so only a sole-writer bootstrap may delete.
         if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
           echo "Deleting existing vCluster: ${VCLUSTER_NAME}"
           vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1 || \
@@ -263,13 +273,22 @@ runs:
         # vCluster distro tags use upstream versions, so strip provider suffixes.
         # Guest/host skew can break Pod status sync (loft-sh/vcluster#3578).
         echo "Using host Kubernetes ${HOST_K8S_GIT_VERSION}; pinning vCluster guest to ${VCLUSTER_K8S_VERSION}"
-        vcluster create "${VCLUSTER_NAME}" \
-          --namespace "${NAMESPACE}" \
-          --connect=false \
-          --upgrade \
-          --set controlPlane.distro.k8s.enabled=true \
-          --set controlPlane.distro.k8s.version="${VCLUSTER_K8S_VERSION}" \
-          "${VCLUSTER_HELM_ARGS[@]}"
+        CREATE_LOG="$(mktemp)"
+        if ! vcluster create "${VCLUSTER_NAME}" \
+             --namespace "${NAMESPACE}" \
+             --connect=false \
+             --upgrade \
+             --set controlPlane.distro.k8s.enabled=true \
+             --set controlPlane.distro.k8s.version="${VCLUSTER_K8S_VERSION}" \
+             "${VCLUSTER_HELM_ARGS[@]}" 2>&1 | tee "${CREATE_LOG}"; then
+          # `vcluster create` is `helm upgrade --install`, which reads release history
+          # before writing it, so concurrent callers both choose install and the loser
+          # lands here. Do not run create again: the release is committed now, so a
+          # second pass would upgrade a vCluster another job is already using. Any
+          # other failure is real -- surface it instead of retrying past it.
+          grep -q 'release: already exists' "${CREATE_LOG}" || exit 1
+          echo "vCluster ${VCLUSTER_NAME} was created concurrently; waiting on that cluster"
+        fi
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready
