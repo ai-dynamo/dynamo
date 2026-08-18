@@ -11,13 +11,7 @@ from typing import Mapping, Optional, Union
 
 from dynamo.workflow.builder import Workflow
 from dynamo.workflow.ir import WorkflowIR
-from dynamo.workflow.plan import (
-    IN_PROCESS_CARRIER,
-    Binding,
-    EdgePlan,
-    ExecutionPlan,
-    InlineBinding,
-)
+from dynamo.workflow.plan import Binding, ExecutionPlan, InlineBinding
 from dynamo.workflow.types import StreamSpec, WorkflowValidationError, validate_name
 
 
@@ -92,14 +86,4 @@ def compile_workflow(
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
         )
 
-    edges = tuple(
-        EdgePlan(
-            source=source,
-            target_stage=stage.id,
-            target_port=port,
-            carrier=IN_PROCESS_CARRIER,
-        )
-        for stage in workflow_ir.stages
-        for port, source in stage.inputs.items()
-    )
-    return ExecutionPlan(workflow_ir, deployment.bindings, edges)
+    return ExecutionPlan(workflow_ir, deployment.bindings)
