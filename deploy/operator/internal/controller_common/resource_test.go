@@ -18,15 +18,26 @@
 package controller_common
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/bsm/gomega"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 func TestGetSpecChangeResult(t *testing.T) {
@@ -914,4 +925,274 @@ func TestGetSpecChangeResult_ConfigMap(t *testing.T) {
 			g.Expect(result.NeedsUpdate).To(gomega.Equal(tt.needsUpdate))
 		})
 	}
+}
+
+// The tests below cover the controller-ownership guard in SyncResource. They drive the helper
+// against a controller-runtime fake client so that every assertion about what was written can be
+// made by re-reading the stored object rather than by inspecting the in-memory copy SyncResource
+// returned.
+
+const (
+	ownershipTestNamespace   = "default"
+	ownershipTestServiceName = "shared-service"
+	ownershipTestParentName  = "test-dgd"
+	ownershipTestParentUID   = types.UID("parent-dgd-uid")
+	ownershipTestForeignUID  = types.UID("foreign-dgd-uid")
+)
+
+type ownershipTestReconciler struct {
+	client.Client
+	recorder events.EventRecorder
+}
+
+func (r *ownershipTestReconciler) GetRecorder() events.EventRecorder {
+	return r.recorder
+}
+
+func newOwnershipTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(s))
+	require.NoError(t, appsv1.AddToScheme(s))
+	require.NoError(t, v1beta1.AddToScheme(s))
+	return s
+}
+
+func newOwnershipTestParent() *v1beta1.DynamoGraphDeployment {
+	return &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ownershipTestParentName,
+			Namespace: ownershipTestNamespace,
+			UID:       ownershipTestParentUID,
+		},
+	}
+}
+
+// foreignControllerRef deliberately carries the parent's kind and name and differs only in UID,
+// which is the collision upstream referSameObject cannot detect.
+func foreignControllerRef() metav1.OwnerReference {
+	return metav1.OwnerReference{
+		APIVersion:         v1beta1.GroupVersion.String(),
+		Kind:               "DynamoGraphDeployment",
+		Name:               ownershipTestParentName,
+		UID:                ownershipTestForeignUID,
+		Controller:         ptr.To(true),
+		BlockOwnerDeletion: ptr.To(true),
+	}
+}
+
+func parentControllerRef() metav1.OwnerReference {
+	ref := foreignControllerRef()
+	ref.UID = ownershipTestParentUID
+	return ref
+}
+
+func ownershipTestService(port int32) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ownershipTestServiceName,
+			Namespace: ownershipTestNamespace,
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: corev1.ClusterIPNone,
+			Selector:  map[string]string{"app": "dynamo"},
+			Ports: []corev1.ServicePort{
+				{Name: "http", Port: port, Protocol: corev1.ProtocolTCP},
+			},
+		},
+	}
+}
+
+// seedService returns a copy of svc annotated as if the operator had last applied exactly this
+// content, so that GetSpecChangeResult reports no update needed when svc is also the desired object.
+func seedService(t *testing.T, svc *corev1.Service) *corev1.Service {
+	t.Helper()
+	existing := svc.DeepCopy()
+	hash, err := GetSpecHash(svc)
+	require.NoError(t, err)
+	existing.Annotations = map[string]string{
+		NvidiaAnnotationHashKey:       hash,
+		NvidiaAnnotationGenerationKey: "1",
+	}
+	existing.Generation = 1
+	return existing
+}
+
+func newOwnershipTestReconciler(t *testing.T, s *runtime.Scheme, objects ...client.Object) (*ownershipTestReconciler, client.Client) {
+	t.Helper()
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build()
+	return &ownershipTestReconciler{Client: c, recorder: events.NewFakeRecorder(100)}, c
+}
+
+func storedService(t *testing.T, c client.Client) *corev1.Service {
+	t.Helper()
+	stored := &corev1.Service{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{
+		Name:      ownershipTestServiceName,
+		Namespace: ownershipTestNamespace,
+	}, stored))
+	return stored
+}
+
+func serviceGenerator(svc *corev1.Service, toDelete bool) ResourceGenerator[*corev1.Service] {
+	return func(_ context.Context) (*corev1.Service, bool, error) {
+		return svc, toDelete, nil
+	}
+}
+
+func requireOwnershipConflict(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	var alreadyOwned *controllerutil.AlreadyOwnedError
+	require.True(t, errors.As(err, &alreadyOwned), "expected an *controllerutil.AlreadyOwnedError, got %v", err)
+	assert.Equal(t, ownershipTestForeignUID, alreadyOwned.Owner.UID)
+}
+
+func TestSyncResource_ForeignControllerBlocksUpdate(t *testing.T) {
+	ctx := context.Background()
+	s := newOwnershipTestScheme(t)
+
+	existing := seedService(t, ownershipTestService(9090))
+	existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
+	r, c := newOwnershipTestReconciler(t, s, existing)
+
+	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(ownershipTestService(8080), false))
+
+	requireOwnershipConflict(t, err)
+	assert.False(t, modified)
+
+	stored := storedService(t, c)
+	assert.Equal(t, int32(9090), stored.Spec.Ports[0].Port, "spec of a foreign-owned object must not be overwritten")
+	assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences)
+	assert.Equal(t, existing.Annotations, stored.Annotations, "bookkeeping annotations must not be written either")
+}
+
+func TestSyncResource_ForeignControllerBlocksDelete(t *testing.T) {
+	ctx := context.Background()
+	s := newOwnershipTestScheme(t)
+
+	existing := seedService(t, ownershipTestService(9090))
+	existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
+	r, c := newOwnershipTestReconciler(t, s, existing)
+
+	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(ownershipTestService(9090), true))
+
+	requireOwnershipConflict(t, err)
+	assert.False(t, modified)
+
+	stored := storedService(t, c)
+	assert.Equal(t, int32(9090), stored.Spec.Ports[0].Port)
+	assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences)
+}
+
+func TestSyncResource_ForeignControllerBlocksMatchingContentSuccess(t *testing.T) {
+	ctx := context.Background()
+	s := newOwnershipTestScheme(t)
+
+	desired := ownershipTestService(8080)
+	existing := seedService(t, desired)
+	existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
+	r, c := newOwnershipTestReconciler(t, s, existing)
+
+	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(desired, false))
+
+	requireOwnershipConflict(t, err)
+	assert.False(t, modified)
+
+	stored := storedService(t, c)
+	assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences,
+		"a matching-content sync must not rewrite the owner references of a foreign-owned object")
+}
+
+func TestSyncResource_AdoptsOwnerlessObjectWithMatchingContent(t *testing.T) {
+	ctx := context.Background()
+	s := newOwnershipTestScheme(t)
+
+	desired := ownershipTestService(8080)
+	existing := seedService(t, desired)
+	r, c := newOwnershipTestReconciler(t, s, existing)
+
+	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(desired, false))
+
+	require.NoError(t, err)
+	assert.True(t, modified)
+
+	stored := storedService(t, c)
+	require.Len(t, stored.OwnerReferences, 1)
+	assert.Equal(t, parentControllerRef(), stored.OwnerReferences[0])
+	assert.Equal(t, int32(8080), stored.Spec.Ports[0].Port, "adoption must not change the content")
+}
+
+func TestSyncResource_AdoptsOwnerlessObjectWithDifferingContent(t *testing.T) {
+	ctx := context.Background()
+	s := newOwnershipTestScheme(t)
+
+	existing := seedService(t, ownershipTestService(9090))
+	r, c := newOwnershipTestReconciler(t, s, existing)
+
+	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(ownershipTestService(8080), false))
+
+	require.NoError(t, err)
+	assert.True(t, modified)
+
+	stored := storedService(t, c)
+	require.Len(t, stored.OwnerReferences, 1)
+	assert.Equal(t, parentControllerRef(), stored.OwnerReferences[0])
+	assert.Equal(t, int32(8080), stored.Spec.Ports[0].Port)
+}
+
+func TestSyncResource_SameControllerReconcilesNormally(t *testing.T) {
+	ctx := context.Background()
+	s := newOwnershipTestScheme(t)
+
+	existing := seedService(t, ownershipTestService(9090))
+	existing.OwnerReferences = []metav1.OwnerReference{parentControllerRef()}
+	r, c := newOwnershipTestReconciler(t, s, existing)
+
+	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(ownershipTestService(8080), false))
+
+	require.NoError(t, err)
+	assert.True(t, modified)
+
+	stored := storedService(t, c)
+	assert.Equal(t, int32(8080), stored.Spec.Ports[0].Port)
+	assert.Equal(t, []metav1.OwnerReference{parentControllerRef()}, stored.OwnerReferences)
+}
+
+func TestSyncResource_NilParentIgnoresOwnership(t *testing.T) {
+	ctx := context.Background()
+	s := newOwnershipTestScheme(t)
+
+	existing := seedService(t, ownershipTestService(9090))
+	existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
+	r, c := newOwnershipTestReconciler(t, s, existing)
+
+	modified, _, err := SyncResource(ctx, r, nil, serviceGenerator(ownershipTestService(8080), false))
+
+	require.NoError(t, err, "a nil parent asks for an independent lifecycle and must behave as before")
+	assert.True(t, modified)
+
+	stored := storedService(t, c)
+	assert.Equal(t, int32(8080), stored.Spec.Ports[0].Port)
+	assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences)
+}
+
+func TestSyncResource_SharedOwnershipToleratesForeignController(t *testing.T) {
+	ctx := context.Background()
+	s := newOwnershipTestScheme(t)
+
+	desired := ownershipTestService(8080)
+	existing := seedService(t, desired)
+	existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
+	r, c := newOwnershipTestReconciler(t, s, existing)
+
+	modified, res, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(desired, false), WithSharedOwnership())
+
+	require.NoError(t, err, "the shared-ownership opt-out must keep a second owner from failing")
+	assert.False(t, modified)
+	require.NotNil(t, res)
+
+	stored := storedService(t, c)
+	assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences,
+		"shared ownership must leave owner references alone")
 }
