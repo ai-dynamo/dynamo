@@ -23,6 +23,10 @@
 #   GMS_KV_INDEX_PATH unset -> control    (expect 0 cached tokens after failover)
 #   GMS_KV_INDEX_PATH set   -> treatment  (expect a hit)
 #
+# KVIDX_SCHEDULER_CLS names a scheduler explicitly instead of relying on the
+# plugin fallback, e.g.
+#   gpu_memory_service.integrations.vllm.schedulers.KvIndexScheduler
+#
 # Usage: ./kv_index_failover_check.sh [MODEL] [NUM_GPU_BLOCKS]
 set -u
 
@@ -133,6 +137,7 @@ start_engine() {  # <engine_id> <system_port> <log>
     setsid nohup python3 -m dynamo.vllm --model "$MODEL_NAME" -tp 1 \
         --load-format gms --gms-shadow-mode --enforce-eager \
         --num-gpu-blocks-override "$NUM_BLOCKS" --max-model-len 4096 \
+        ${KVIDX_SCHEDULER_CLS:+--scheduler-cls "$KVIDX_SCHEDULER_CLS"} \
         > "$3" 2>&1 < /dev/null &
     echo $!
 }

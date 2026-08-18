@@ -451,51 +451,59 @@ def _disarm(path: str | None) -> None:
         logger.warning("[kv_index] could not disarm mirror %s: %s", path, e)
 
 
-def _make_scheduler_cls(base: type) -> type:
-    """Derive from whatever scheduler vLLM (or Dynamo) already chose.
+class KvIndexMixin:
+    """Scheduler behaviour for the prefix-index mirror.
 
-    Four overrides on a class we own, replacing the two EngineCore patches and
-    the two instance wraps. ``set_pause_state`` is the interesting one: both the
-    sleep and the wake transition run through it, in the scheduler's own process,
-    at exactly the moments the takeover needs.
+    Mix in *ahead* of a vLLM scheduler:
+
+        class KvIndexScheduler(KvIndexMixin, AsyncScheduler): ...
+
+    ``set_pause_state`` is the interesting one: both the sleep and the wake
+    transition run through it, in the scheduler's own process, at exactly the
+    moments the takeover needs. ``EngineCore.pause_scheduler`` sets PAUSED_*
+    before clearing the prefix cache, and ``resume_scheduler`` sets UNPAUSED
+    after ``model_executor.wake_up()`` has returned -- a blocking collective, so
+    every rank has re-attached -- and before scheduling resumes.
     """
-    from vllm.v1.core.sched.interface import PauseState
 
-    class KvIndexScheduler(base):  # type: ignore[misc, valid-type]
-        def set_pause_state(self, pause_state) -> None:
-            if pause_state != PauseState.UNPAUSED:
-                # Entering a sleep. vLLM is about to clear its own prefix index
-                # on the assumption the KV is discarded; under a committed GMS
-                # layout it is not, so the mirror must survive that clear.
-                self._dyn_sleeping = True
-                super().set_pause_state(pause_state)
-                return
+    def set_pause_state(self, pause_state) -> None:
+        from vllm.v1.core.sched.interface import PauseState
 
+        if pause_state != PauseState.UNPAUSED:
+            # Entering a sleep. vLLM is about to clear its own prefix index on
+            # the assumption the KV is discarded; under a committed GMS layout
+            # it is not, so the mirror must survive that clear.
+            self._dyn_sleeping = True
             super().set_pause_state(pause_state)
-            if not getattr(self, "_dyn_sleeping", False):
-                return  # not a wake from a sleep -- nothing to take over
-            self._dyn_sleeping = False
-            try:
-                take_over(self)
-            except Exception as e:  # persistence must never break serving
-                logger.warning("[kv_index] takeover failed (%s); continuing cold", e)
-                _disarm(mirror_path())
+            return
 
-        def schedule(self, *args, **kwargs):
-            mirror = getattr(self, "_dyn_mirror", None)
-            if mirror is not None:
-                mirror.on_schedule()
-            return super().schedule(*args, **kwargs)
+        super().set_pause_state(pause_state)
+        if not getattr(self, "_dyn_sleeping", False):
+            return  # not a wake from a sleep -- nothing to take over
+        self._dyn_sleeping = False
+        try:
+            take_over(self)
+        except Exception as e:  # persistence must never break serving
+            logger.warning("[kv_index] takeover failed (%s); continuing cold", e)
+            _disarm(mirror_path())
 
-        def update_from_output(self, *args, **kwargs):
-            out = super().update_from_output(*args, **kwargs)
-            mirror = getattr(self, "_dyn_mirror", None)
-            if mirror is not None:
-                mirror.on_update()
-            return out
+    def schedule(self, *args, **kwargs):
+        mirror = getattr(self, "_dyn_mirror", None)
+        if mirror is not None:
+            mirror.on_schedule()
+        return super().schedule(*args, **kwargs)
 
-    KvIndexScheduler.__name__ = f"KvIndex{base.__name__}"
-    return KvIndexScheduler
+    def update_from_output(self, *args, **kwargs):
+        out = super().update_from_output(*args, **kwargs)
+        mirror = getattr(self, "_dyn_mirror", None)
+        if mirror is not None:
+            mirror.on_update()
+        return out
+
+
+def _make_scheduler_cls(base: type) -> type:
+    """Derive from whatever scheduler vLLM (or Dynamo) already chose."""
+    return type(f"KvIndex{base.__name__}", (KvIndexMixin, base), {})
 
 
 def _sleeping_for(pool) -> bool:
@@ -507,10 +515,10 @@ def _sleeping_for(pool) -> bool:
 def enable_kv_index() -> None:
     """Entry point for ``vllm.general_plugins``. Self-disables when unset.
 
-    Wraps the scheduler-class *resolver* rather than setting
-    ``scheduler_cls``: that field is already claimed by Dynamo's
-    InstrumentedScheduler, and naming a class there also silently disables async
-    scheduling. Wrapping keeps whatever base was chosen and derives from it.
+    This is the *fallback* path, for when nobody named a scheduler explicitly.
+    The supported route is ``--scheduler-cls`` naming one of the classes in
+    ``schedulers.py``; this wrap only says "if no one chose for us, choose well"
+    by deriving from whatever base vLLM or Dynamo already settled on.
     """
     if not mirror_path():
         return
