@@ -13,6 +13,10 @@ status: validated
 artifacts:
   recipe_specific_images:
   - nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-super-dev.1
+  recipe_specific_image_periods:
+  - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-super-dev.1
+    effective_from: '2026-06-03'
+    source_revision: 3424174cb83301418af5a000e9d09f2a4f93261c
 targets:
 - id: agg-b200-chat
   recommended: true

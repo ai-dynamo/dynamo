@@ -82,6 +82,58 @@ def test_recipe_specific_images_are_catalog_owned(
     assert tuple(document["artifacts"]["recipe_specific_images"]) == expected_images
 
 
+@pytest.mark.parametrize(
+    ("recipe_id", "expected_periods"),
+    (
+        (
+            "glm-5-2",
+            (
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1",
+                    "effective_from": "2026-07-20",
+                    "source_revision": "9ab57d7ecefdd2a2af2e2a2c889724a157457cd6",
+                },
+            ),
+        ),
+        (
+            "kimi-k3",
+            (
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1",
+                    "effective_from": "2026-07-27",
+                    "source_revision": "92ec0146e4221c7c9e5013e3bd51db6113f96935",
+                },
+            ),
+        ),
+        (
+            "qwen-3-8-2-4t-a95b-fp8",
+            (
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-qwen-3.8-2.4t-dev.1",
+                    "effective_from": "2026-08-12",
+                    "source_revision": "c8a33bf20d5478c3fa8fbdb5385d1663af5b496c",
+                },
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-qwen-3.8-2.4t-dev.1",
+                    "effective_from": "2026-08-12",
+                    "source_revision": "c8a33bf20d5478c3fa8fbdb5385d1663af5b496c",
+                },
+            ),
+        ),
+    ),
+)
+def test_recipe_specific_images_publish_effective_periods(
+    recipe_id: str,
+    expected_periods: tuple[dict[str, str], ...],
+) -> None:
+    document = yaml.safe_load((CATALOG / "recipes" / f"{recipe_id}.yaml").read_text())
+
+    assert (
+        tuple(document["artifacts"]["recipe_specific_image_periods"])
+        == expected_periods
+    )
+
+
 def test_recipe_catalog_schema_has_spdx_metadata() -> None:
     schema = json.loads((CATALOG / "schema.json").read_text())
 
@@ -174,6 +226,99 @@ def test_recipe_image_validation_rejects_duplicate_ownership() -> None:
     assert any(
         "declared by multiple recipes" in error for error in catalog_validate.ERRORS
     )
+
+
+def test_recipe_image_validation_allows_effective_dated_ownership_handoff() -> None:
+    image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-handoff-dev.1"
+    entries = {
+        "recipe-a": {
+            "artifacts": {
+                "recipe_specific_image_periods": [
+                    {
+                        "image": image,
+                        "effective_from": "2026-01-01",
+                        "effective_to": "2026-01-31",
+                        "source_revision": "a" * 40,
+                    }
+                ],
+            }
+        },
+        "recipe-b": {
+            "artifacts": {
+                "recipe_specific_images": [image],
+                "recipe_specific_image_periods": [
+                    {
+                        "image": image,
+                        "effective_from": "2026-02-01",
+                        "source_revision": "b" * 40,
+                    }
+                ],
+            }
+        },
+    }
+    catalog_validate.ERRORS.clear()
+
+    catalog_validate.check_recipe_specific_image_ownership(entries)
+
+    assert catalog_validate.ERRORS == []
+
+
+def test_recipe_image_validation_rejects_overlapping_effective_periods() -> None:
+    image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-overlap-dev.1"
+    entries = {
+        "recipe-a": {
+            "artifacts": {
+                "recipe_specific_image_periods": [
+                    {
+                        "image": image,
+                        "effective_from": "2026-01-01",
+                        "effective_to": "2026-02-01",
+                        "source_revision": "a" * 40,
+                    }
+                ],
+            }
+        },
+        "recipe-b": {
+            "artifacts": {
+                "recipe_specific_images": [image],
+                "recipe_specific_image_periods": [
+                    {
+                        "image": image,
+                        "effective_from": "2026-02-01",
+                        "source_revision": "b" * 40,
+                    }
+                ],
+            }
+        },
+    }
+    catalog_validate.ERRORS.clear()
+
+    catalog_validate.check_recipe_specific_image_ownership(entries)
+
+    assert any(
+        "overlapping ownership periods" in error for error in catalog_validate.ERRORS
+    )
+
+
+def test_recipe_image_validation_rejects_invalid_calendar_date() -> None:
+    artifacts = {
+        "recipe_specific_images": [
+            "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-invalid-date-dev.1"
+        ],
+        "recipe_specific_image_periods": [
+            {
+                "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-invalid-date-dev.1",
+                "effective_from": "2026-99-99",
+                "source_revision": "a" * 40,
+            }
+        ],
+    }
+
+    errors = catalog_validate._image_attribution.recipe_image_errors(
+        artifacts, [], "invalid-date"
+    )
+
+    assert any("invalid effective_from" in error for error in errors)
 
 
 def test_recipe_catalog_validator_runs_in_pre_merge(tmp_path: Path) -> None:
