@@ -587,6 +587,10 @@ async fn start_tool_event_relay(
         );
         shutdown.cancelled().await;
         relay.shutdown();
+        // Hold the generation until the relay's socket is actually released.
+        // `shutdown` only signals; a replacement woken any earlier can rebind
+        // the same endpoint while it is still bound and fail to start at all.
+        relay.wait_finished().await;
         tracing::info!("request trace tool event relay stopped");
     });
 
