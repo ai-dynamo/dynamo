@@ -935,9 +935,11 @@ navigation:
   - tab: reference
     layout:
       - page: Compatibility
+        icon: shield-halved
         path: ../pages-dev/reference/general/compatibility.mdx
         slug: compatibility
       - section: Releases
+        icon: tag
         slug: releases
         path: ../pages-dev/reference/general/releases/release-history.mdx
         collapsed: true
@@ -964,19 +966,24 @@ navigation:
       # Machine-readable mirror of releases.data.ts for agents; reachable
       # by URL and llms indexes, not the sidebar.
       - page: Releases (machine-readable)
+        icon: database
         path: ../pages-dev/reference/general/releases-machine-readable.mdx
         slug: releases-data
         hidden: true
       - page: Release Artifacts
+        icon: download
         path: ../pages-dev/reference/general/release-artifacts.mdx
         slug: release-artifacts
       - page: Nightly Releases
+        icon: moon
         path: ../pages-dev/reference/general/nightly-releases.md
         slug: nightly-releases
       - page: Model Early Access Builds
+        icon: microchip
         path: ../pages-dev/reference/general/model-early-access-builds.mdx
         slug: model-early-access-builds
       - page: Examples
+        icon: file-code
         path: ../pages-dev/reference/general/examples.md
         slug: examples
       # ==================== API Reference ====================
@@ -994,6 +1001,7 @@ navigation:
       # the twenty anchored redirects in docs.yml that carry the retired
       # NIXL Connect class pages -- would otherwise move.
       - page: API Reference
+        icon: code
         path: ../pages-dev/reference/api/README.mdx
         slug: api
       - section: Python API
@@ -1135,6 +1143,7 @@ navigation:
           - page: Overview
             path: ../pages-dev/reference/nixl-connect/overview.mdx
       - page: Glossary
+        icon: book-open
         path: ../pages-dev/reference/general/glossary.md
         slug: glossary
   - tab: blog
@@ -1180,6 +1189,7 @@ navigation:
   - tab: community
     layout:
       - page: Community
+        icon: users
         path: ../pages-dev/community/community.mdx
       - section: Contributing
         icon: code-pull-request

@@ -923,9 +923,11 @@ navigation:
   - tab: reference
     layout:
       - page: Compatibility
+        icon: shield-halved
         path: ../pages-dev/reference/general/compatibility.mdx
         slug: compatibility
       - section: Releases
+        icon: tag
         slug: releases
         path: ../pages-dev/reference/general/releases/release-history.mdx
         collapsed: true
@@ -952,22 +954,28 @@ navigation:
       # Machine-readable mirror of releases.data.ts for agents; reachable
       # by URL and llms indexes, not the sidebar.
       - page: Releases (machine-readable)
+        icon: database
         path: ../pages-dev/reference/general/releases-machine-readable.mdx
         slug: releases-data
         hidden: true
       - page: Release Artifacts
+        icon: download
         path: ../pages-dev/reference/general/release-artifacts.mdx
         slug: release-artifacts
       - page: Nightly Releases
+        icon: moon
         path: ../pages-dev/reference/general/nightly-releases.md
         slug: nightly-releases
       - page: Model Early Access Builds
+        icon: microchip
         path: ../pages-dev/reference/general/model-early-access-builds.mdx
         slug: model-early-access-builds
       - page: Examples
+        icon: file-code
         path: ../pages-dev/reference/general/examples.md
         slug: examples
       - page: Glossary
+        icon: book-open
         path: ../pages-dev/reference/general/glossary.md
         slug: glossary
       # ==================== API Reference ====================
