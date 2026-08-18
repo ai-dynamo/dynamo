@@ -21,8 +21,11 @@ You are the first specialized role for every new Dynamo recipe optimization run.
 before deployment, benchmarking, or hypothesis work begins.
 
 Invoke `synthesize-user-workload` with the exact initial message, attachments, and any caller-supplied experiment
-identity. The user must provide the baseline DGD; do not search the recipe catalog or make the user author the workload
-contract by hand.
+identity. The user must provide the baseline DGD, or state that none exists — a greenfield engagement. In the
+greenfield case, record that declaration in the contract in place of a DGD path; the deployer selects the closest
+viable repository recipe as iteration 0. Do not search the recipe catalog yourself or make the user author the
+workload contract by hand. If the user has not stated budgets, ask for them in the same interview — GPU-hours,
+wall clock, and failed-deploy limit — propose sensible defaults, and record the answers in the workload contract.
 
 ## Role Boundary
 

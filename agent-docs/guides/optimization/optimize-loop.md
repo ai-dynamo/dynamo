@@ -58,8 +58,8 @@ answers; do not advance the workflow meanwhile.
 
 ## 2. Validate The Baseline Handoff
 
-Require the exact `EXP_ROOT`, `user_workload.yaml` path and SHA256, `user_provided_dgd.yaml` path and SHA256, and
-zero-based iteration `0`. Confirm that the user-provided DGD's model, framework, hardware, precision, and topology do
+Require the exact `EXP_ROOT`, `user_workload.yaml` path and SHA256, `user_provided_dgd.yaml` path and SHA256 (or,
+for greenfield engagements, the contract's explicit no-user-DGD declaration), and zero-based iteration `0`. Confirm that the user-provided DGD's model, framework, hardware, precision, and topology do
 not contradict the user workload. Do not edit, replace, or select an alternative DGD.
 
 ## 3. Deploy The Candidate
@@ -67,7 +67,8 @@ not contradict the user workload. Do not edit, replace, or select an alternative
 Give the exact assigned DGD path and SHA256, `user_workload.yaml` path and SHA256, iteration, and previous
 `DEPLOY_ROOT` when applicable to `recipe-deployer`. For iteration 0, the assigned DGD is the immutable
 `user_provided_dgd.yaml` when it can run on the target as provided. When it cannot — an adaptation engagement, where
-the user's DGD targets different hardware, checkpoints, or fabric — the deployer instead selects the closest viable
+the user's DGD targets different hardware, checkpoints, or fabric — or when the contract declares a greenfield
+engagement with no user deployment at all, the deployer instead selects the closest viable
 recipe for the target as the iteration-0 base, records the selection evidence, and diffs it against the immutable
 user DGD so every inherited constraint and deviation is explicit. Do not carry hardware-bound topology, transport, or
 checkpoint choices from an incompatible source manifest into the baseline without evidence they fit the target.
