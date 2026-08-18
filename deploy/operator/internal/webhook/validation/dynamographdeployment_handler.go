@@ -46,7 +46,7 @@ type DynamoGraphDeploymentHandler struct {
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
 // mgr must not be nil.
 // operatorPrincipal is the full Kubernetes SA username of the operator, used to authorize
-// replica changes on scaling-adapter-enabled components (#7656).
+// legacy workload-provider materialization and replica changes on scaling-adapter-enabled components (#7656).
 func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
 		mgr:               mgr,

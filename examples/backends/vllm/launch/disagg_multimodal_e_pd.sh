@@ -92,8 +92,9 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
     EXTRA_ARGS="--enforce-eager --max-model-len $PD_MAX_MODEL_LEN"
 else
-    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
-    DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-2}
+    # Two workers, two GPUs: 0 and 1.
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
+    DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-1}
     DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.9}
 fi

@@ -31,8 +31,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // elasticEPArgs is the command line that marks a component as an elastic-EP Ray launch:
@@ -207,6 +209,11 @@ func TestGroveStableResourcesReconcilerElasticEPLeaderServiceLifecycle(t *testin
 						t.Errorf("Selector[%q] = %q, want %q", key, got, want)
 					}
 				}
+				// The controller reference is what lets the DGD's Owns(&corev1.Service{})
+				// watch map a deleted Service back to its DGD and recreate it.
+				if !metav1.IsControlledBy(service, dgd) {
+					t.Errorf("leader Service is not controlled by the DGD, so the owned-Service watch cannot recreate it: %v", service.OwnerReferences)
+				}
 				return
 			}
 			if !apierrors.IsNotFound(err) {
@@ -246,6 +253,119 @@ func TestGroveStableResourcesReconcilerDeletesElasticEPLeaderServiceWhenEligibil
 	}
 }
 
+func TestGroveStableResourcesReconcilerLeavesAnUnownedNameCollisionAlone(t *testing.T) {
+	t.Log("Pre-create a Service this DGD does not own, at the name the leader Service would take")
+	ctx := context.Background()
+	dgd := newElasticEPTestDGD(newElasticEPComponent("python3 -m dynamo.vllm"))
+	serviceName := dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, ""))
+	unowned := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: dgd.Namespace,
+			Labels:    map[string]string{"owner": "somebody-else"},
+		},
+		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: 80}}},
+	}
+	reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd, unowned)
+
+	t.Log("Reconcile a component that does not qualify, so it takes the delete path")
+	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+		t.Fatalf("Reconcile returned an error: %v", err)
+	}
+
+	t.Log("Verify the unowned Service survived: the operator must not delete what it never created")
+	survivor := &corev1.Service{}
+	if err := kubeClient.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: dgd.Namespace}, survivor); err != nil {
+		t.Fatalf("expected the unowned Service to survive, got error: %v", err)
+	}
+	if survivor.Labels["owner"] != "somebody-else" {
+		t.Errorf("unowned Service was modified: labels = %v", survivor.Labels)
+	}
+}
+
+func TestGroveStableResourcesReconcilerDeletesTheExactOwnershipCheckedService(t *testing.T) {
+	t.Log("Seed a DGD-owned leader Service carrying a known UID")
+	ctx := context.Background()
+	dgd := newElasticEPTestDGD(newElasticEPComponent("python3 -m dynamo.vllm"))
+	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	serviceName := dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, ""))
+	owned := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: dgd.Namespace,
+			UID:       types.UID("leader-service-uid"),
+		},
+	}
+	if err := ctrl.SetControllerReference(dgd, owned, scheme); err != nil {
+		t.Fatalf("failed to set the controller reference: %v", err)
+	}
+
+	t.Log("Reconcile a component that no longer qualifies, so it takes the delete path")
+	var deleteOptions client.DeleteOptions
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(dgd, owned).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				for _, opt := range opts {
+					opt.ApplyToDelete(&deleteOptions)
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	reconciler := newGroveStableResourcesReconciler(
+		kubeClient,
+		events.NewFakeRecorder(100),
+		&configv1alpha1.OperatorConfiguration{},
+	)
+	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+		t.Fatalf("Reconcile returned an error: %v", err)
+	}
+
+	t.Log("Verify the owned Service was deleted, pinned by UID to the object the ownership check read")
+	err := kubeClient.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: dgd.Namespace}, &corev1.Service{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected the owned Service to be deleted, got error %v", err)
+	}
+	if deleteOptions.Preconditions == nil || deleteOptions.Preconditions.UID == nil {
+		t.Fatal("delete carried no UID precondition, so a same-name replacement could be removed instead")
+	}
+	if got := *deleteOptions.Preconditions.UID; got != owned.UID {
+		t.Errorf("precondition UID = %q, want %q", got, owned.UID)
+	}
+}
+
+func TestGroveStableResourcesReconcilerConvergesLeaderServiceAnnotations(t *testing.T) {
+	t.Log("Reconcile a single-pod elastic-EP component so the leader Service is created")
+	ctx := context.Background()
+	dgd := newElasticEPTestDGD(newElasticEPComponent(elasticEPArgs))
+	dgd.Spec.Annotations = map[string]string{"example.com/note": "before"}
+	reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
+	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+		t.Fatalf("first Reconcile returned an error: %v", err)
+	}
+
+	t.Log("Edit the DGD annotation and reconcile again")
+	dgd.Spec.Annotations["example.com/note"] = "after"
+	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+		t.Fatalf("second Reconcile returned an error: %v", err)
+	}
+
+	t.Log("Verify the edit converged onto the Service, which SyncResource alone would not do")
+	service := &corev1.Service{}
+	key := types.NamespacedName{
+		Name:      dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
+		Namespace: dgd.Namespace,
+	}
+	if err := kubeClient.Get(ctx, key, service); err != nil {
+		t.Fatalf("expected the leader Service to exist: %v", err)
+	}
+	if got := service.Annotations["example.com/note"]; got != "after" {
+		t.Errorf("annotation example.com/note = %q, want %q", got, "after")
+	}
+}
+
 // newElasticEPTestDGD wraps a single component in the smallest DGD the stable-resources
 // reconciler accepts: no modelRef, so no model service, and no frontend, so no ingress.
 func newElasticEPTestDGD(component v1beta1.DynamoComponentDeploymentSharedSpec) *v1beta1.DynamoGraphDeployment {
@@ -265,11 +385,12 @@ func newElasticEPTestDGD(component v1beta1.DynamoComponentDeploymentSharedSpec) 
 func newElasticEPTestStableResourcesReconciler(
 	t testing.TB,
 	dgd *v1beta1.DynamoGraphDeployment,
+	existing ...client.Object,
 ) (*groveStableResourcesReconciler, client.Client) {
 	t.Helper()
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-		WithObjects(dgd).
+		WithObjects(append([]client.Object{dgd}, existing...)...).
 		Build()
 	reconciler := newGroveStableResourcesReconciler(
 		kubeClient,
