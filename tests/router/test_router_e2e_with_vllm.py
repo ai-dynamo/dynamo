@@ -67,11 +67,45 @@ VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
+# KV cache cap (2x safety over min=165_900_288), same figure the gpu_1 tests in
+# this file already run with on this model and max_model_len.
+DISAGG_KV_CACHE_MEMORY_BYTES = 331_801_000
 
-def _vllm_gpu_mem_args(gpu_memory_utilization: Optional[float]) -> list[str]:
+# Dedicated config for test_router_decisions_vllm_disagg, whose two prefill
+# workers share one GPU. A proportional gpu_memory_utilization leaves those
+# workers on vLLM's memory-profiling path, where the non-torch footprint is
+# measured as a *device-wide* delta: allocations a co-resident sibling makes
+# during this worker's profiling window are charged to this worker, and its KV
+# budget can come out negative. An absolute per-process byte budget makes vLLM
+# skip memory profiling altogether, so the racy branch is never taken.
+VLLM_ARGS_DISAGG: Dict[str, Any] = {
+    "block_size": BLOCK_SIZE,
+    "model": MODEL_NAME,
+    "kv_cache_memory_bytes": DISAGG_KV_CACHE_MEMORY_BYTES,
+    "max_model_len": 1024,  # Limit context length to reduce KV cache size
+    "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
+}
+
+
+def _vllm_gpu_mem_args(
+    gpu_memory_utilization: Optional[float],
+    kv_cache_memory_bytes: Optional[int] = None,
+) -> list[str]:
     args = build_gpu_mem_args("build_vllm_gpu_mem_args")
-    if args or gpu_memory_utilization is None:
+    if args:
         return args
+    if kv_cache_memory_bytes is not None:
+        # --gpu-memory-utilization 0.01 mirrors build_vllm_gpu_mem_args: vLLM
+        # checks free memory against the fraction *before* applying the byte
+        # cap, so co-resident workers would otherwise fail the startup check.
+        return [
+            "--kv-cache-memory-bytes",
+            str(kv_cache_memory_bytes),
+            "--gpu-memory-utilization",
+            "0.01",
+        ]
+    if gpu_memory_utilization is None:
+        return []
     return ["--gpu-memory-utilization", str(gpu_memory_utilization)]
 
 
@@ -107,6 +141,9 @@ class VLLMProcess(ManagedEngineProcessMixin):
             vllm_args: Configuration dict with keys:
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - gpu_memory_utilization: Fraction of GPU memory to allocate (optional)
+                - kv_cache_memory_bytes: Absolute per-process KV cache budget in
+                  bytes (optional); takes the place of gpu_memory_utilization and
+                  makes vLLM skip memory profiling
                 - num_gpu_blocks_override: Cap on number of KV cache blocks (optional)
                 - max_model_len: Maximum sequence length (optional)
                 - enforce_eager: Disable CUDA graphs (default: False)
@@ -191,6 +228,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
 
         model = vllm_args.get("model", MODEL_NAME)
         gpu_memory_utilization = vllm_args.get("gpu_memory_utilization")
+        kv_cache_memory_bytes = vllm_args.get("kv_cache_memory_bytes")
         num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
         max_model_len = vllm_args.get("max_model_len")
         enforce_eager = vllm_args.get("enforce_eager", False)
@@ -242,7 +280,9 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 command.append("--enforce-eager")
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
-            command.extend(_vllm_gpu_mem_args(gpu_memory_utilization))
+            command.extend(
+                _vllm_gpu_mem_args(gpu_memory_utilization, kv_cache_memory_bytes)
+            )
 
             # Add optional max_model_len if specified
             if max_model_len is not None:
@@ -635,8 +675,12 @@ def test_router_decisions_vllm_dp(
     )
 
 
+# No @pytest.mark.profiled_vram_gib here, deliberately: that marker moves a test
+# into the VRAM-aware parallel lane, which hands out exactly one device, while
+# this gpu_2 test pins its decode worker to absolute device 1.
 @pytest.mark.gpu_2
 @pytest.mark.nightly
+@pytest.mark.requested_vllm_kv_cache_bytes(DISAGG_KV_CACHE_MEMORY_BYTES)
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
 def test_router_decisions_vllm_disagg(
@@ -649,7 +693,7 @@ def test_router_decisions_vllm_disagg(
     run_disagg_router_decisions_test(
         engine_process_cls=VLLMProcess,
         engine_args_name="vllm_args",
-        engine_args=VLLM_ARGS,
+        engine_args=VLLM_ARGS_DISAGG,
         request=request,
         request_plane=request_plane,
         model_name=MODEL_NAME,
