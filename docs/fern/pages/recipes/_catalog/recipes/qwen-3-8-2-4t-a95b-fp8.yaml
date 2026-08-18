@@ -16,10 +16,8 @@ artifacts:
   - nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-qwen-3.8-2.4t-dev.1
   recipe_specific_image_periods:
   - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-qwen-3.8-2.4t-dev.1
-    effective_from: '2026-08-12'
     source_revision: c8a33bf20d5478c3fa8fbdb5385d1663af5b496c
   - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-qwen-3.8-2.4t-dev.1
-    effective_from: '2026-08-12'
     source_revision: c8a33bf20d5478c3fa8fbdb5385d1663af5b496c
 targets:
 - id: vllm-agg-gb300-chat

@@ -84,8 +84,10 @@ correspondence (no orphans, no dangling entries), internal-`id`/filename match,
 no duplicate ids, schema conformance, that every `page:` resolves under `docs/fern/`,
 that every deploy/perf/benchmark asset path resolves in the repo, that declared
 recipe-specific images are exact `image:` fields in their owning deploy assets
-and have non-overlapping, source-revision-backed ownership periods, and cross-catalog referential
-integrity (recipe `related_benchmarks` ↔ benchmark
+and have non-overlapping, source-revision-backed ownership periods. Omit
+`effective_from` when the exact tag belongs to the recipe for all retained
+telemetry; use explicit dates for ownership handoffs. The validator also checks
+cross-catalog referential integrity (recipe `related_benchmarks` ↔ benchmark
 ids; benchmark `related_recipes` and `promotion_candidate.deferred_recipe_id` ↔
 recipe ids, including deferred). It exits non-zero on any failure.
 

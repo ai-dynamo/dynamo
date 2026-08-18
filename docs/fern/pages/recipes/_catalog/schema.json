@@ -64,12 +64,12 @@
         },
         "recipe_specific_image_periods": {
           "type": "array",
-          "description": "Inclusive effective-date windows during which an image tag was exclusively attributable to this recipe.",
+          "description": "Inclusive ownership windows during which an image tag was exclusively attributable to this recipe. An omitted effective_from includes all retained telemetry before effective_to.",
           "minItems": 1,
           "uniqueItems": true,
           "items": {
             "type": "object",
-            "required": ["image", "effective_from", "source_revision"],
+            "required": ["image", "source_revision"],
             "properties": {
               "image": {
                 "type": "string",

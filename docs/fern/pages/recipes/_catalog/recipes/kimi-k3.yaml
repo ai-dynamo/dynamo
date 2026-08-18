@@ -15,7 +15,6 @@ artifacts:
   - nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
   recipe_specific_image_periods:
   - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
-    effective_from: '2026-07-27'
     source_revision: 92ec0146e4221c7c9e5013e3bd51db6113f96935
 targets:
 - id: vllm-agg-gb200

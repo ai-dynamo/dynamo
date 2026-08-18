@@ -72,7 +72,7 @@ def recipe_image_errors(artifacts, deploy_paths, label):
         source_revision = period.get("source_revision")
         if not isinstance(image, str):
             errors.append("[%s] recipe-specific image period is missing image" % label)
-        if not _is_iso_date(effective_from):
+        if effective_from is not None and not _is_iso_date(effective_from):
             errors.append(
                 "[%s] recipe-specific image period has invalid effective_from" % label
             )
@@ -123,9 +123,13 @@ def recipe_image_ownership_errors(entries):
                 image = period.get("image")
                 start = period.get("effective_from")
                 end = period.get("effective_to")
-                if isinstance(image, str) and isinstance(start, str):
+                if isinstance(image, str) and (start is None or isinstance(start, str)):
                     periods_by_image.setdefault(image, []).append(
-                        (start, end if isinstance(end, str) else None, recipe_id)
+                        (
+                            start or "0001-01-01",
+                            end if isinstance(end, str) else None,
+                            recipe_id,
+                        )
                     )
         elif isinstance(configured_images, list):
             for image in configured_images:

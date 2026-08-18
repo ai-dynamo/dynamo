@@ -15,7 +15,6 @@ artifacts:
   - nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
   recipe_specific_image_periods:
   - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
-    effective_from: '2026-07-16'
     source_revision: 73aa2073d12c8cbd5c955f618aed251be920b8cd
 targets:
 - id: agg-b200

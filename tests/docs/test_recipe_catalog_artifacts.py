@@ -90,7 +90,6 @@ def test_recipe_specific_images_are_catalog_owned(
             (
                 {
                     "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1",
-                    "effective_from": "2026-07-20",
                     "source_revision": "9ab57d7ecefdd2a2af2e2a2c889724a157457cd6",
                 },
             ),
@@ -100,7 +99,6 @@ def test_recipe_specific_images_are_catalog_owned(
             (
                 {
                     "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1",
-                    "effective_from": "2026-07-27",
                     "source_revision": "92ec0146e4221c7c9e5013e3bd51db6113f96935",
                 },
             ),
@@ -110,12 +108,10 @@ def test_recipe_specific_images_are_catalog_owned(
             (
                 {
                     "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-qwen-3.8-2.4t-dev.1",
-                    "effective_from": "2026-08-12",
                     "source_revision": "c8a33bf20d5478c3fa8fbdb5385d1663af5b496c",
                 },
                 {
                     "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-qwen-3.8-2.4t-dev.1",
-                    "effective_from": "2026-08-12",
                     "source_revision": "c8a33bf20d5478c3fa8fbdb5385d1663af5b496c",
                 },
             ),
@@ -319,6 +315,29 @@ def test_recipe_image_validation_rejects_invalid_calendar_date() -> None:
     )
 
     assert any("invalid effective_from" in error for error in errors)
+
+
+def test_recipe_image_validation_allows_retroactive_open_start(
+    tmp_path: Path,
+) -> None:
+    image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-retroactive-dev.1"
+    deploy = tmp_path / "deploy.yaml"
+    deploy.write_text(f"image: {image}\n")
+    artifacts = {
+        "recipe_specific_images": [image],
+        "recipe_specific_image_periods": [
+            {
+                "image": image,
+                "source_revision": "a" * 40,
+            }
+        ],
+    }
+
+    errors = catalog_validate._image_attribution.recipe_image_errors(
+        artifacts, [deploy], "retroactive"
+    )
+
+    assert errors == []
 
 
 def test_recipe_catalog_validator_runs_in_pre_merge(tmp_path: Path) -> None:
