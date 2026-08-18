@@ -95,9 +95,13 @@ def _vllm_gpu_mem_args(
     if args:
         return args
     if kv_cache_memory_bytes is not None:
-        # --gpu-memory-utilization 0.01 mirrors build_vllm_gpu_mem_args: vLLM
-        # checks free memory against the fraction *before* applying the byte
-        # cap, so co-resident workers would otherwise fail the startup check.
+        # --gpu-memory-utilization 0.01 mirrors build_vllm_gpu_mem_args. The
+        # byte cap replaces the fraction for *sizing* the KV cache, but vLLM's
+        # startup admission check (request_memory in v1/worker/utils.py) is a
+        # separate step that rejects a launch when free VRAM is below
+        # total * gpu_memory_utilization and never consults the byte cap. It
+        # runs first, so co-resident workers would fail startup on the default
+        # fraction if this were omitted.
         return [
             "--kv-cache-memory-bytes",
             str(kv_cache_memory_bytes),
@@ -141,9 +145,13 @@ class VLLMProcess(ManagedEngineProcessMixin):
             vllm_args: Configuration dict with keys:
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - gpu_memory_utilization: Fraction of GPU memory to allocate (optional)
-                - kv_cache_memory_bytes: Absolute per-process KV cache budget in
-                  bytes (optional); takes the place of gpu_memory_utilization and
-                  makes vLLM skip memory profiling
+                - kv_cache_memory_bytes: Absolute KV cache budget in bytes
+                  (optional). vLLM applies it per GPU, so each rank gets this
+                  budget; with the one-GPU-per-worker layout these tests use it
+                  is also the per-process budget. It replaces
+                  gpu_memory_utilization for sizing the KV cache and makes vLLM
+                  skip memory profiling, but not for the startup free-memory
+                  check (see _vllm_gpu_mem_args)
                 - num_gpu_blocks_override: Cap on number of KV cache blocks (optional)
                 - max_model_len: Maximum sequence length (optional)
                 - enforce_eager: Disable CUDA graphs (default: False)
