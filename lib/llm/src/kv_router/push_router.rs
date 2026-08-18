@@ -115,7 +115,16 @@ where
     }
 }
 
-pub struct KvPushRouter<Sel = DefaultWorkerSelector>
+/// Owns request routing from worker selection through response cleanup.
+///
+/// The current data plane is [`KvRouter`]. The host boundary lets cache-free
+/// selection reuse affinity, dispatch, and lifecycle handling without moving
+/// those concerns into `dynamo-runtime`.
+///
+/// [`PushRouter`] owns discovery, fault detection, and transport. [`KvRouter`]
+/// owns KV candidate selection and scheduler state. `RoutingHost` coordinates
+/// them and owns request state through response completion or cancellation.
+pub struct RoutingHost<Sel = DefaultWorkerSelector>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -125,39 +134,47 @@ where
     affinity: Option<AffinityCoordinator>,
 }
 
-impl<Sel> KvPushRouter<Sel>
+/// Compatibility name for the KV-only host used by existing callers.
+pub type KvPushRouter<Sel = DefaultWorkerSelector> = RoutingHost<Sel>;
+
+impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        chooser: Arc<KvRouter<Sel>>,
+        kv_router: Arc<KvRouter<Sel>>,
         session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
             .map(AffinityCoordinator::new)
             .transpose()?;
 
-        Ok(Self::new_with_coordinator(inner, chooser, affinity))
+        Ok(Self::new_with_coordinator(inner, kv_router, affinity))
     }
 
     pub(crate) fn new_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        chooser: Arc<KvRouter<Sel>>,
+        kv_router: Arc<KvRouter<Sel>>,
         affinity: Option<AffinityCoordinator>,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
-        // and the standalone router create KvPushRouter, so this covers both.
+        // and the standalone router create RoutingHost, so this covers both.
         let request_metrics =
-            RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+            RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
 
-        KvPushRouter {
+        RoutingHost {
             inner,
-            chooser,
+            chooser: kv_router,
             request_metrics,
             affinity,
         }
+    }
+
+    /// The active KV-aware data plane.
+    pub fn kv_router(&self) -> &Arc<KvRouter<Sel>> {
+        &self.chooser
     }
 
     pub(crate) fn query_affinity_worker(
@@ -545,7 +562,7 @@ where
 
 #[async_trait]
 impl<Sel> AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for KvPushRouter<Sel>
+    for RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -784,7 +801,7 @@ mod tests {
     fn selector_state_remains_owned_by_the_scheduler_actor() {
         fn assert_send_sync<T: Send + Sync>() {}
 
-        assert_send_sync::<KvPushRouter<WorkerSelectionPolicy>>();
+        assert_send_sync::<RoutingHost<WorkerSelectionPolicy>>();
     }
 
     #[tokio::test]
@@ -882,14 +899,14 @@ mod tests {
         runtime.shutdown();
     }
 
-    async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {
+    async fn router(session_affinity_ttl: Option<Duration>) -> (RoutingHost, Runtime) {
         router_with_workers(session_affinity_ttl, &[7]).await
     }
 
     async fn router_with_workers(
         session_affinity_ttl: Option<Duration>,
         worker_ids: &[u64],
-    ) -> (KvPushRouter, Runtime) {
+    ) -> (RoutingHost, Runtime) {
         let workers = worker_ids
             .iter()
             .copied()
@@ -901,7 +918,7 @@ mod tests {
     async fn router_with_worker_configs(
         session_affinity_ttl: Option<Duration>,
         workers: HashMap<u64, ModelRuntimeConfig>,
-    ) -> (KvPushRouter, Runtime) {
+    ) -> (RoutingHost, Runtime) {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -941,12 +958,12 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::KV)
             .await
             .unwrap();
-        let router = KvPushRouter::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+        let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
         (router, runtime)
     }
 
     async fn track_request(
-        router: &KvPushRouter,
+        router: &RoutingHost,
         is_query_only: bool,
     ) -> (SingleIn<PreprocessedRequest>, WorkerSelection, RequestGuard) {
         let request = Context::new(request());
@@ -1487,7 +1504,7 @@ mod tests {
                 .await
                 .unwrap();
         let chooser = Arc::new(chooser);
-        let kv_router = Arc::new(KvPushRouter::new(push_router, chooser.clone(), None).unwrap());
+        let kv_router = Arc::new(RoutingHost::new(push_router, chooser.clone(), None).unwrap());
         let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             kv_router;
         let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
