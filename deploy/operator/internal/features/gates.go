@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -123,6 +124,24 @@ const (
 	// Requires: N/A
 	// Default: true, since v1.0.0
 	GPUDiscovery Name = "gpuDiscovery"
+
+	// ElasticEPAutoscale enables the operator to fire elastic-EP scale calls on its own
+	// initiative (Phase 6). It is OFF by default and gated deliberately: until
+	// https://github.com/ai-dynamo/dynamo/pull/12991 gives scale_elastic_ep a clean
+	// rollback, a failed grow can leave the engine holding a reserved-but-dead rank and
+	// serving nothing while the pod still looks healthy -- an operator that can wedge a
+	// serving engine unattended is worse than a human choosing to take the risk. Flip the
+	// default to true once that rollback lands.
+	//
+	// Owner: @tzulingk
+	// Experimental since: v1.3.0
+	// Beta since: N/A
+	// GA since: N/A
+	// Configuration: DYN_OPERATOR_ENABLE_ELASTIC_EP_AUTOSCALE=1
+	// Auto-detection: N/A
+	// Requires: elastic-EP leader Service (Phase 3) and get_ep_capacity (Phase 5)
+	// Default: false
+	ElasticEPAutoscale Name = "elasticEPAutoscale"
 )
 
 var allNames = [...]Name{
@@ -134,6 +153,7 @@ var allNames = [...]Name{
 	DRA,
 	Istio,
 	GPUDiscovery,
+	ElasticEPAutoscale,
 }
 
 // Gate reports whether operator features are enabled.
@@ -143,14 +163,15 @@ type Gate interface {
 
 // Gates is the complete set of operator feature gates.
 type Gates struct {
-	Checkpoint       bool `json:"checkpoint"`
-	Grove            bool `json:"grove"`
-	LWS              bool `json:"lws"`
-	KaiScheduler     bool `json:"kaiScheduler"`
-	VolcanoScheduler bool `json:"volcanoScheduler"`
-	DRA              bool `json:"dra"`
-	Istio            bool `json:"istio"`
-	GPUDiscovery     bool `json:"gpuDiscovery"`
+	Checkpoint         bool `json:"checkpoint"`
+	Grove              bool `json:"grove"`
+	LWS                bool `json:"lws"`
+	KaiScheduler       bool `json:"kaiScheduler"`
+	VolcanoScheduler   bool `json:"volcanoScheduler"`
+	DRA                bool `json:"dra"`
+	Istio              bool `json:"istio"`
+	GPUDiscovery       bool `json:"gpuDiscovery"`
+	ElasticEPAutoscale bool `json:"elasticEPAutoscale"`
 }
 
 // Defaults returns the default feature gates.
@@ -163,6 +184,9 @@ func Defaults() Gates {
 // New detects cluster capabilities and resolves them with operator configuration.
 func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) (Gates, error) {
 	gates := Defaults()
+	// Off unless explicitly opted in; see the ElasticEPAutoscale gate doc for why it stays
+	// gated until the scale_elastic_ep rollback (#12991) lands.
+	gates.ElasticEPAutoscale = os.Getenv("DYN_OPERATOR_ENABLE_ELASTIC_EP_AUTOSCALE") == "1"
 	gates.Checkpoint = config.Checkpoint.Enabled
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 
