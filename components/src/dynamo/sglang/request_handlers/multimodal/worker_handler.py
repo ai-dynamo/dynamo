@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import sys
 from typing import Any, AsyncIterator, Callable, Literal, Optional, Protocol
 
 import sglang as sgl
@@ -761,6 +762,19 @@ class MultimodalPrefillWorkerHandler(
                 # consumer's try/finally owns the transferred tensor.
                 if task.done():
                     await task
+                # Do not authorize decode until embeddings have been received and
+                # the result consumer has advanced SGLang's lazy request iterator.
+                # Otherwise decode can start waiting before prefill is submitted.
+                bootstrap_info = {
+                    "bootstrap_host": self.bootstrap_host,
+                    "bootstrap_port": self.bootstrap_port,
+                    "bootstrap_room": bootstrap_room,
+                }
+
+                _end_bootstrap()
+                yield json.dumps(bootstrap_info)
+
+                await task
             except BaseException:
                 if not consumer_owns_tensor.is_set():
                     if task is not None and not task.done():
@@ -768,20 +782,32 @@ class MultimodalPrefillWorkerHandler(
                     if tensor_id is not None:
                         self.embeddings_processor.release_embeddings(tensor_id)
                 raise
-
-            # Do not authorize decode until embeddings have been received and
-            # the result consumer has advanced SGLang's lazy request iterator.
-            # Otherwise decode can start waiting before prefill is submitted.
-            bootstrap_info = {
-                "bootstrap_host": self.bootstrap_host,
-                "bootstrap_port": self.bootstrap_port,
-                "bootstrap_room": bootstrap_room,
-            }
-
-            _end_bootstrap()
-            yield json.dumps(bootstrap_info)
-
-            await task
+            finally:
+                pending_exception = sys.exc_info()[1]
+                if task is not None:
+                    if not task.done():
+                        task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as task_error:
+                        if pending_exception is None:
+                            raise
+                        if (
+                            task_error is not pending_exception
+                            and task_error
+                            is not getattr(pending_exception, "__cause__", None)
+                        ):
+                            logger.error(
+                                "Multimodal prefill consumer failed during request "
+                                "cleanup",
+                                exc_info=(
+                                    type(task_error),
+                                    task_error,
+                                    task_error.__traceback__,
+                                ),
+                            )
 
         except Exception as e:
             logger.error(f"Error in prefill generation: {e}", exc_info=True)
@@ -903,20 +929,44 @@ class MultimodalPrefillWorkerHandler(
                 async for result in results:
                     process_result(result)
         finally:
+            pending_exception = sys.exc_info()[1]
             if first_result_task is not None:
                 if not first_result_task.done():
                     first_result_task.cancel()
                 try:
                     await first_result_task
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
                     pass
+                except Exception as task_error:
+                    if pending_exception is None:
+                        raise
+                    if task_error is not pending_exception:
+                        logger.error(
+                            "SGLang prefill first-result task failed during cleanup",
+                            exc_info=(
+                                type(task_error),
+                                task_error,
+                                task_error.__traceback__,
+                            ),
+                        )
             if tensor_id is not None and not released:
                 self.embeddings_processor.release_embeddings(tensor_id)
 
-    def cleanup(self):
-        for task in self._consume_tasks:
+    async def cleanup(self) -> None:
+        tasks = list(self._consume_tasks)
+        for task in tasks:
             if not task.done():
                 task.cancel()
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    logger.error(
+                        "Multimodal prefill consumer failed during handler cleanup",
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
         self._consume_tasks.clear()
 
         super().cleanup()

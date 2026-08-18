@@ -264,6 +264,68 @@ async def test_multimodal_prefill_rejects_empty_engine_stream():
     assert released == [23]
 
 
+@pytest.mark.asyncio
+async def test_multimodal_prefill_cancellation_awaits_consumer_cleanup():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+
+    handler._validate_and_parse_disagg_request = lambda request: request
+    handler._generate_bootstrap_room = lambda: 17
+    result_stopped = asyncio.Event()
+
+    async def results():
+        try:
+            await asyncio.Event().wait()
+            yield {}
+        finally:
+            result_stopped.set()
+
+    async def start_prefill(request, bootstrap_room, context=None):
+        return results(), 23
+
+    @asynccontextmanager
+    async def cancellation_monitor(request_id_future, context):
+        yield
+
+    handler._start_prefill_generation = start_prefill
+    handler._cancellation_monitor = cancellation_monitor
+
+    stream = handler.generate(object(), SimpleNamespace())
+    await anext(stream)
+    await stream.aclose()
+
+    assert result_stopped.is_set()
+    assert released == [23]
+    assert not handler._consume_tasks
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_cleanup_awaits_consumers_before_engine_shutdown():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.publisher = None
+    events = []
+
+    async def consumer():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            events.append("consumer stopped")
+
+    task = asyncio.create_task(consumer())
+    await asyncio.sleep(0)
+    handler._consume_tasks = {task}
+    handler.engine = SimpleNamespace(shutdown=lambda: events.append("engine shutdown"))
+
+    await handler.cleanup()
+
+    assert events == ["consumer stopped", "engine shutdown"]
+    assert not handler._consume_tasks
+
+
 async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
     """The metadata shim gives pre-decoded ndarray frames a valid metadata dict.
 
