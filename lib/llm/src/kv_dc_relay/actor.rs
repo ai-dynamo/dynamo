@@ -986,6 +986,7 @@ async fn run_actor(
     fence: CancellationToken,
     stopped: CancellationToken,
 ) {
+    state.set_publication_materialization_enabled(false);
     let _stopped_guard = CancelOnDrop(stopped);
     let mut unknown_removal_events = 0u64;
     let mut capacity_omission_events = 0u64;
@@ -1212,6 +1213,9 @@ async fn run_actor(
                         let deltas = publisher.sink().sender.subscribe();
                         ActorSubscription { snapshot, deltas }
                     });
+                if result.is_ok() {
+                    state.set_publication_materialization_enabled(true);
+                }
                 let _ = response.send(result);
             }
             #[cfg(any(test, feature = "ckf-diagnostics"))]
