@@ -931,6 +931,7 @@ func (r observedResourceTestReconciler) GetRecorder() events.EventRecorder {
 }
 
 func TestSyncObservedResourceUsesProvidedObservation(t *testing.T) {
+	t.Log("Build an observed ConfigMap and record client reads")
 	ctx := context.Background()
 	g := gomega.NewGomegaWithT(t)
 	scheme := runtime.NewScheme()
@@ -967,7 +968,10 @@ func TestSyncObservedResourceUsesProvidedObservation(t *testing.T) {
 	desired := observed.DeepCopy()
 	desired.Data["value"] = "after"
 
+	t.Log("Sync the desired ConfigMap from the exact caller observation")
 	modified, synced, err := SyncObservedResource(ctx, reconciler, nil, observed, desired)
+
+	t.Log("Verify sync did not reread or mutate the supplied observation")
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(modified).To(gomega.BeTrue())
 	g.Expect(getCalls).To(gomega.Equal(1), "sync must use the caller's exact observation")

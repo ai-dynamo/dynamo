@@ -1546,6 +1546,268 @@ func TestEvaluateGroveReadinessSwitchesWorkersAtomically(t *testing.T) {
 	}
 }
 
+func TestEvaluateGroveReadinessPreservesPreviousWorkerNamespaceWithoutPodCliqueSet(t *testing.T) {
+	ctx := context.Background()
+	const componentName = "prefill"
+
+	t.Log("Build a worker with a previously published suffixed runtime namespace")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+			ComponentName: componentName,
+			ComponentType: v1beta1.ComponentTypePrefill,
+		}}},
+	}
+	component := dgd.GetComponentByName(componentName)
+	previousNamespace := ComponentRuntimeNamespace(
+		dgd.GetDynamoNamespaceForComponent(component),
+		string(component.ComponentType),
+		"previous-worker-hash",
+	)
+	dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
+		componentName: {RuntimeNamespace: previousNamespace},
+	}
+	podClique := &grovev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       GroveComponentResourceName(dgd, componentName),
+			Namespace:  dgd.Namespace,
+			Generation: 1,
+		},
+		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status: grovev1alpha1.PodCliqueStatus{
+			Replicas:           1,
+			ReadyReplicas:      1,
+			UpdatedReplicas:    1,
+			ScheduledReplicas:  1,
+			ObservedGeneration: ptr.To(int64(1)),
+		},
+	}
+
+	t.Log("Evaluate readiness from an observed missing PodCliqueSet")
+	readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), podClique), dgd, nil)
+
+	t.Log("Verify the missing PCS cannot replace the previously published namespace")
+	if err != nil {
+		t.Fatalf("EvaluateGroveReadiness() error = %v", err)
+	}
+	if !readiness.Ready {
+		t.Fatal("EvaluateGroveReadiness().Ready = false, want true")
+	}
+	if got := readiness.ComponentStatuses[componentName].RuntimeNamespace; got != previousNamespace {
+		t.Fatalf("runtime namespace = %q, want %q", got, previousNamespace)
+	}
+}
+
+func TestEvaluateGroveReadinessRejectsInvalidAcceptedWorkerPodCliqueSet(t *testing.T) {
+	ctx := context.Background()
+	const acceptedRevision = "accepted-revision"
+
+	tests := []struct {
+		name        string
+		cliques     []*grovev1alpha1.PodCliqueTemplateSpec
+		wantMessage string
+	}{
+		{
+			name: "missing worker clique",
+			cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoComponent:  "prefill",
+					commonconsts.KubeLabelDynamoWorkerHash: "worker-hash",
+				},
+			}},
+			wantMessage: "has no worker clique for component",
+		},
+		{
+			name: "mixed legacy and suffixed worker cliques",
+			cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+				{Labels: map[string]string{
+					commonconsts.KubeLabelDynamoComponent:  "prefill",
+					commonconsts.KubeLabelDynamoWorkerHash: "worker-hash",
+				}},
+				{Labels: map[string]string{
+					commonconsts.KubeLabelDynamoComponent: "decode",
+				}},
+			},
+			wantMessage: "mixes suffixed and legacy worker cliques",
+		},
+		{
+			name: "inconsistent worker hashes",
+			cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+				{Labels: map[string]string{
+					commonconsts.KubeLabelDynamoComponent:  "prefill",
+					commonconsts.KubeLabelDynamoWorkerHash: "prefill-hash",
+				}},
+				{Labels: map[string]string{
+					commonconsts.KubeLabelDynamoComponent:  "decode",
+					commonconsts.KubeLabelDynamoWorkerHash: "decode-hash",
+				}},
+			},
+			wantMessage: "has inconsistent worker hashes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build an accepted PCS and completed worker children with the invalid layout")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill},
+					{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeDecode},
+				}},
+			}
+			podCliqueSet := &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+					Namespace:  dgd.Namespace,
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: tt.cliques,
+				}},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					ObservedGeneration:    ptr.To(int64(1)),
+					CurrentGenerationHash: ptr.To(acceptedRevision),
+				},
+			}
+			completedAt := metav1.Now()
+			children := make([]client.Object, 0, len(dgd.Spec.Components))
+			for i := range dgd.Spec.Components {
+				component := &dgd.Spec.Components[i]
+				children = append(children, &grovev1alpha1.PodClique{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       GroveComponentResourceName(dgd, component.ComponentName),
+						Namespace:  dgd.Namespace,
+						Generation: 1,
+					},
+					Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+					Status: grovev1alpha1.PodCliqueStatus{
+						Replicas:                          1,
+						ReadyReplicas:                     1,
+						UpdatedReplicas:                   1,
+						ScheduledReplicas:                 1,
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision),
+						UpdateProgress:                    &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt},
+					},
+				})
+			}
+
+			t.Log("Evaluate runtime namespace selection from the invalid accepted snapshot")
+			_, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), children...), dgd, podCliqueSet)
+
+			t.Log("Verify the invalid accepted layout is rejected rather than publishing a namespace")
+			if err == nil || !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Fatalf("EvaluateGroveReadiness() error = %v, want message containing %q", err, tt.wantMessage)
+			}
+		})
+	}
+}
+
+func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t *testing.T) {
+	ctx := context.Background()
+	const (
+		componentName    = "prefill"
+		acceptedHash     = "accepted-worker-hash"
+		acceptedRevision = "accepted-revision"
+	)
+
+	tests := []struct {
+		name      string
+		multinode bool
+	}{
+		{name: "PodClique"},
+		{name: "PodCliqueScalingGroup", multinode: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build an accepted suffixed PCS and a completed zero-replica worker")
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: componentName,
+				ComponentType: v1beta1.ComponentTypePrefill,
+			}
+			if tt.multinode {
+				component.Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Spec:       v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
+			}
+			podCliqueSet := &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+					Namespace:  dgd.Namespace,
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent:  componentName,
+							commonconsts.KubeLabelDynamoWorkerHash: acceptedHash,
+						},
+					}},
+				}},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					ObservedGeneration:    ptr.To(int64(1)),
+					CurrentGenerationHash: ptr.To(acceptedRevision),
+				},
+			}
+			completedAt := metav1.Now()
+			var child client.Object
+			if tt.multinode {
+				child = &grovev1alpha1.PodCliqueScalingGroup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       GroveComponentResourceName(dgd, componentName),
+						Namespace:  dgd.Namespace,
+						Generation: 1,
+					},
+					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 0},
+					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision),
+						UpdateProgress:                    &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: &completedAt},
+					},
+				}
+			} else {
+				child = &grovev1alpha1.PodClique{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       GroveComponentResourceName(dgd, componentName),
+						Namespace:  dgd.Namespace,
+						Generation: 1,
+					},
+					Spec: grovev1alpha1.PodCliqueSpec{Replicas: 0},
+					Status: grovev1alpha1.PodCliqueStatus{
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision),
+						UpdateProgress:                    &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt},
+					},
+				}
+			}
+
+			t.Log("Evaluate the accepted zero-replica revision")
+			readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), child), dgd, podCliqueSet)
+
+			t.Log("Verify both child kinds publish the accepted worker namespace")
+			if err != nil {
+				t.Fatalf("EvaluateGroveReadiness() error = %v", err)
+			}
+			if !readiness.Ready {
+				t.Fatal("EvaluateGroveReadiness().Ready = false, want true")
+			}
+			dgdComponent := dgd.GetComponentByName(componentName)
+			wantNamespace := ComponentRuntimeNamespace(
+				dgd.GetDynamoNamespaceForComponent(dgdComponent),
+				string(dgdComponent.ComponentType),
+				acceptedHash,
+			)
+			if got := readiness.ComponentStatuses[componentName].RuntimeNamespace; got != wantNamespace {
+				t.Fatalf("runtime namespace = %q, want %q", got, wantNamespace)
+			}
+		})
+	}
+}
+
 func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 	ctx := context.Background()
 	g := gomega.NewWithT(t)

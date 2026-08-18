@@ -133,7 +133,7 @@ func TestGroveWorkerHashSuffixMigration(t *testing.T) {
 		workerGenerationChanged bool
 		wantSuffix              bool
 	}{
-		{name: "new PCS renders a suffix", workerGenerationChanged: true, wantSuffix: true},
+		{name: "new PCS renders a suffix without a worker generation change", wantSuffix: true},
 		{name: "legacy PCS with no generation change remains unsuffixed", existing: true},
 		{name: "legacy PCS renders a suffix after a worker generation change", existing: true, workerGenerationChanged: true, wantSuffix: true},
 		{name: "suffixed PCS continues rendering the suffix", existing: true, existingHash: "active", wantSuffix: true},
@@ -183,7 +183,8 @@ func TestPlanUnsupportedWorkerHashTransitionIgnoresScaling(t *testing.T) {
 	assert.False(t, transition.needsCommit())
 }
 
-func TestUnsupportedWorkerHashTransitionDefersCommitUntilAfterWorkloadSync(t *testing.T) {
+func TestPlanUnsupportedWorkerHashTransitionDoesNotCommit(t *testing.T) {
+	t.Log("Build a DGD with a persisted worker hash and a changed worker spec")
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: consts.ComponentTypeWorker,
@@ -200,13 +201,13 @@ func TestUnsupportedWorkerHashTransitionDefersCommitUntilAfterWorkloadSync(t *te
 	worker.PodTemplate.Spec.Containers[0].Env[0].Value = "new"
 	reconciler := createTestReconcilerWithStatus(dgd)
 
+	t.Log("Plan the unsupported worker hash transition")
 	transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
 	require.NoError(t, err)
+
+	t.Log("Verify planning detects the transition without mutating the DGD")
 	require.True(t, transition.workerGenerationChanged)
 	assert.Equal(t, currentHash, currentWorkerHashV2(dgd), "planning must not commit the DGD hash")
-
-	require.NoError(t, reconciler.commitUnsupportedWorkerHashTransition(context.Background(), dgd, transition, true))
-	assert.Equal(t, transition.next.v2, currentWorkerHashV2(dgd))
 }
 
 func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {

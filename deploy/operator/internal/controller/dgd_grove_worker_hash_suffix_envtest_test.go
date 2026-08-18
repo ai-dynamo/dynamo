@@ -52,6 +52,9 @@ func TestGroveWorkerHashSuffixForNewDGD(t *testing.T) {
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(createdDGD)
 	require.NoError(t, err)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, createdDGD, wantHash)
+
+	t.Log("Wait for the DGD to commit the rendered worker hash")
+	waitForGroveWorkerHash(t, ctx, env, createdDGD, wantHash)
 }
 
 func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
@@ -63,12 +66,17 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 
 	t.Log("Start reconciliation and verify the legacy workers remain unsuffixed")
 	startGroveWorkerHashSuffixTestController(t, env)
-	triggerGroveWorkerHashSuffixReconcile(t, ctx, env, dgd)
+	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
+	require.NoError(t, env.Client().Get(ctx, key, current))
+	if current.Annotations == nil {
+		current.Annotations = make(map[string]string)
+	}
+	current.Annotations["operatorenv.dynamo.nvidia.com/reconcile"] = "true"
+	require.NoError(t, env.Client().Update(ctx, current))
 	waitForGroveWorkerHashSuffixes(t, ctx, env, dgd, "")
 
 	t.Log("Read the baseline DGD and wait for its worker hash commit")
-	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
 	require.NoError(t, env.Client().Get(ctx, key, current))
 	initialWorkerHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
 	require.NoError(t, err)
@@ -83,10 +91,11 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 		corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
 	require.NoError(t, env.Client().Update(ctx, current))
 
-	t.Log("Verify the frontend update does not enable or render a worker suffix")
+	t.Log("Verify the frontend update preserves the legacy worker hash state")
 	require.NoError(t, env.Client().Get(ctx, key, current))
 	waitForGroveFrontendEnv(t, ctx, env, current, "FRONTEND_CONFIG_REVISION", "2")
-	checkGroveWorkerHashSuffixes(t, ctx, env, current, "")
+	waitForGroveWorkerHashSuffixes(t, ctx, env, current, "")
+	waitForGroveWorkerHash(t, ctx, env, current, initialWorkerHash)
 
 	t.Log("Apply a worker update and verify it starts the suffix migration")
 	require.NoError(t, env.Client().Get(ctx, key, current))
@@ -100,23 +109,6 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	require.NotEqual(t, initialWorkerHash, wantHash)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, current, wantHash)
 	waitForGroveWorkerHash(t, ctx, env, current, wantHash)
-}
-
-func triggerGroveWorkerHashSuffixReconcile(
-	t *testing.T,
-	ctx context.Context,
-	env *operatorenv.TestEnv,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) {
-	t.Helper()
-	current := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	key := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
-	require.NoError(t, env.Client().Get(ctx, key, current))
-	if current.Annotations == nil {
-		current.Annotations = make(map[string]string)
-	}
-	current.Annotations["operatorenv.dynamo.nvidia.com/reconcile"] = "true"
-	require.NoError(t, env.Client().Update(ctx, current))
 }
 
 func newGroveWorkerHashSuffixTestEnv(t *testing.T) *operatorenv.TestEnv {
