@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+{{- include "power-agent.validateTransactional" . -}}
 {{- if .Values.rbac.create }}
 {{- $effectiveRestricted := include "power-agent.effectiveNamespaceRestricted" . }}
 {{- if eq $effectiveRestricted "true" }}
@@ -21,7 +22,13 @@ rules:
   # instead of the cluster-wide default; see daemonset.yaml + dev-pod.yaml.
   - apiGroups: [""]
     resources: ["pods"]
+    {{- if .Values.agent.transactional.enabled }}
+    # Patch owns the bounded enforcement-report annotation. Kubernetes RBAC
+    # cannot restrict it to that key, so every bound namespace trusts the Agent.
+    verbs: ["get", "list", "watch", "patch"]
+    {{- else }}
     verbs: ["get", "list", "watch"]
+    {{- end }}
 {{- else }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -30,11 +37,18 @@ metadata:
   labels:
     {{- include "power-agent.labels" . | nindent 4 }}
 rules:
-  # Cluster-wide pod read: the production DS sees worker pods in any
+  # Cluster-wide Pod access: the production DS sees worker pods in any
   # namespace on its node (GPU workloads may be spread across tenant
-  # namespaces). Verbs limited to read-only — the agent never mutates pods.
+  # namespaces).
   - apiGroups: [""]
     resources: ["pods"]
+    {{- if .Values.agent.transactional.enabled }}
+    # Patch is required for the one bounded enforcement-report annotation.
+    # Kubernetes RBAC cannot restrict patch to one annotation key, so this is
+    # the chart's explicit trusted-node-Agent privilege boundary.
+    verbs: ["get", "list", "watch", "patch"]
+    {{- else }}
     verbs: ["get", "list", "watch"]
+    {{- end }}
 {{- end }}
 {{- end }}

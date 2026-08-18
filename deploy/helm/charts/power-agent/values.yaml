@@ -31,6 +31,14 @@ imagePullSecrets: []
 #   - name: ngc-secret
 
 agent:
+  transactional:
+    # Phase 2 transactional enforcement is deliberately default-off. Enable
+    # only after qualifying the exact GPU/driver/DCGM pool and installing an
+    # operator/runtime image set that includes the DGPB controller and
+    # dynamo-power-gate. When false, the chart preserves the Phase 1 RBAC and
+    # does not mount kubelet's PodResources socket.
+    enabled: false
+
   # Per-SKU safety floor. The agent applies this cap to an opted-in GPU (one
   # whose pod carries dynamo.nvidia.com/gpu-power-limit) when the annotated
   # value cannot be used:
@@ -115,21 +123,23 @@ agent:
     # that already-set target; issued right after Set it re-applies a value
     # that is already current, so it is redundant. An earlier revision exposed
     # it behind an `enforce` flag; that flag was removed as dead config. Notes:
-    #   - The cap does NOT survive Power Agent restart (SIGTERM restores
-    #     default regardless).
+    #   - On Power Agent shutdown, static ownership restores the factory
+    #     default. Transactional ownership intentionally retains its live cap
+    #     so a replacement Agent can resume the same durable GPU identity.
     #   - External `nvidia-smi -pl` clobbering is repaired on the Power
     #     Agent's next 15-s reconcile (which re-issues dcgmConfigSet),
     #     same as NVML.
 
-# Pod termination grace period (seconds). On SIGTERM the agent restores each
-# managed GPU's default power cap before exit; that cleanup runs from the
+# Pod termination grace period (seconds). On SIGTERM the agent restores static
+# ownership to the factory default and retains active transactional caps for a
+# replacement Agent. That cleanup and durable-state work runs from the
 # reconcile loop's `finally`, AFTER any in-flight pod LIST returns. The LIST is
 # best-effort bounded client- and server-side (K8S_LIST_*_TIMEOUT_S in
 # power_agent.py) to substantially limit cleanup delay, but the default is set
 # to 60s (2× the previous 30s) to leave headroom for the LIST to return and for
-# per-GPU restore on high-density nodes. Kubelet SIGKILLs the pod when this
-# elapses, so values below 60s are rejected by the chart; too-small values risk
-# killing the agent mid-cleanup and leaving managed caps live. Applies to both
+# per-GPU identity-safe cleanup on high-density nodes. Kubelet SIGKILLs the pod
+# when this elapses, so values below 60s are rejected by the chart; too-small
+# values risk interrupting ownership cleanup or persistence. Applies to both
 # DaemonSet and dev-pod modes.
 terminationGracePeriodSeconds: 60
 
@@ -203,19 +213,21 @@ rbac:
 daemonset:
   enabled: true
 
-  # Conservative default by design: when a Power Agent restarts, the GPUs
-  # on its node have no power-cap enforcement until it comes back. If worker
-  # pods on that node carry DGD-owned per-GPU cap annotations (applied by the
-  # operator), those caps are not enforced during the gap. `maxUnavailable: 1`
-  # ensures only one node's worth of GPUs ever loses enforcement at a time.
+  # Conservative default by design. In static mode, a Power Agent restart
+  # restores managed GPUs and may leave an enforcement gap until replacement.
+  # In transactional mode, durable ownership retains active caps across Agent
+  # replacement, while the unavailable Agent still delays fresh evidence and
+  # identity-safe cleanup. `maxUnavailable: 1` bounds either exposure to one
+  # node at a time.
   #
   # Override for large fleets: on clusters with hundreds of GPU nodes,
   # a 1-at-a-time rollout (~30s/pod × N nodes) gets slow. Operators can
   # opt into faster rollouts with:
   #   --set daemonset.updateStrategy.rollingUpdate.maxUnavailable=10%
-  # (or any percentage / integer). The trade-off is more concurrent
-  # enforcement gaps during a rollout; safe when the agent's reconcile
-  # interval (15s) is much shorter than the rollout duration anyway.
+  # (or any percentage / integer). The trade-off is more concurrent static
+  # enforcement gaps, or more nodes without fresh transactional reports,
+  # during the rollout. Qualify that wider exposure before overriding the
+  # conservative default.
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:

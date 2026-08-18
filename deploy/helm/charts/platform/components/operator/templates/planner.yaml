@@ -49,6 +49,11 @@ rules:
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 {{- if .Values.planner.powerAwareness.enabled }}
+# DGPB is the operator-owned transactional policy/inventory snapshot. Planner
+# reads one object by name and never writes its spec, status, or subresources.
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographpowerbudgets"]
+  verbs: ["get"]
 # Pods (list only): startup settlement reads non-terminal pod annotations to
 # verify the DGD-owned power cap has propagated before caching it. No write
 # surface: caps are authored on the DGD podTemplate and enforced by the Power
@@ -100,6 +105,11 @@ rules:
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 {{- if .Values.planner.powerAwareness.enabled }}
+# DGPB is the operator-owned transactional policy/inventory snapshot. Planner
+# reads one object by name and never writes its spec, status, or subresources.
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographpowerbudgets"]
+  verbs: ["get"]
 # Pods (list only): startup settlement reads non-terminal pod annotations to
 # verify the DGD-owned power cap has propagated before caching it. No write
 # surface: caps are authored on the DGD podTemplate and enforced by the Power

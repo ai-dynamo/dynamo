@@ -102,6 +102,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        - name: DYNAMO_POWER_QUALIFICATION_CATALOG
+          value: {{ .Values.dynamo.powerManagement.qualificationCatalog | default dict | toJson | quote }}
         imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | quote }}
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
         livenessProbe:

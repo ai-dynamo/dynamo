@@ -105,6 +105,13 @@ dynamo-operator:
     # -- DEVELOPMENT AND TESTING ONLY: Enable GPU discovery in namespace-restricted mode.
     enabled: true
 
+  planner:
+    powerAwareness:
+      # -- Grant the Planner the read-only DGPB and Pod access required by
+      # Phase 2 transactional power planning. Default-off for graduated
+      # hardware-pool canaries; enabling this does not enroll a DGD by itself.
+      enabled: false
+
   # -- The Dynamo discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery. --
   discoveryBackend: "kubernetes"
 
@@ -147,6 +154,18 @@ dynamo-operator:
   dynamo:
     # -- How long to wait before forcefully terminating Grove instances
     groveTerminationDelay: 4h
+
+    # Power-aware transactional control remains default-off at the DGD level.
+    # When enabling it, qualify each exact nvidia.com/gpu.product value on the
+    # deployed driver/DCGM/image pool and add its observed limits here. The
+    # Operator reads this immutable process-start snapshot; an empty catalog
+    # fails transactional workloads closed as UnqualifiedHardware.
+    powerManagement:
+      qualificationCatalog: {}
+      # NVIDIA-GB200:
+      #   minWatts: 200
+      #   defaultWatts: 1200
+      #   maxWatts: 1200
 
     # Docker registry configuration for private repositories
     dockerRegistry:

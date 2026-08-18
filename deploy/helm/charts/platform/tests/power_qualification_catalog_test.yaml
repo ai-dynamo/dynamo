@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Operator power qualification catalog
+templates:
+  - charts/dynamo-operator/templates/deployment.yaml
+  - charts/dynamo-operator/templates/operator-config.yaml
+
+tests:
+  - it: renders a fail-closed empty catalog by default
+    template: charts/dynamo-operator/templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DYNAMO_POWER_QUALIFICATION_CATALOG
+            value: '{}'
+
+  - it: renders exact qualified product bounds as immutable JSON
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.dynamo.powerManagement.qualificationCatalog.NVIDIA-GB200.minWatts: 200
+      dynamo-operator.dynamo.powerManagement.qualificationCatalog.NVIDIA-GB200.defaultWatts: 1200
+      dynamo-operator.dynamo.powerManagement.qualificationCatalog.NVIDIA-GB200.maxWatts: 1200
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DYNAMO_POWER_QUALIFICATION_CATALOG
+            value: '{"NVIDIA-GB200":{"defaultWatts":1200,"maxWatts":1200,"minWatts":200}}'
