@@ -1251,18 +1251,32 @@ impl TraceCollector {
     }
 
     pub fn finish(mut self) -> ReplayReport {
-        let Self {
-            requests,
-            itl_distribution,
-            output_token_throughput_per_user,
-            ..
-        } = &mut self;
-        for stats in requests.values_mut() {
+        let mut request_order = self.requests.keys().copied().collect::<Vec<_>>();
+        request_order.sort_unstable_by(|left_uuid, right_uuid| {
+            let left = self
+                .requests
+                .get(left_uuid)
+                .expect("request order must reference retained request");
+            let right = self
+                .requests
+                .get(right_uuid)
+                .expect("request order must reference retained request");
+            left.authored_id
+                .as_deref()
+                .cmp(&right.authored_id.as_deref())
+                .then_with(|| left_uuid.cmp(right_uuid))
+        });
+
+        for uuid in &request_order {
+            let stats = self
+                .requests
+                .get_mut(uuid)
+                .expect("request order must reference retained request");
             stats.finalize_token_timeline(
                 stats.terminal_status == Some(ReplayTerminalStatus::Completed)
                     && stats.first_admit_ms.is_some(),
-                itl_distribution,
-                output_token_throughput_per_user,
+                &mut self.itl_distribution,
+                &mut self.output_token_throughput_per_user,
             );
         }
 
@@ -1312,7 +1326,10 @@ impl TraceCollector {
         let mut goodput_requests = 0usize;
         let mut goodput_output_tokens = 0usize;
 
-        for stats in requests.values() {
+        for uuid in request_order {
+            let stats = requests
+                .get(&uuid)
+                .expect("request order must reference retained request");
             if stats.first_admit_ms.is_none() {
                 continue;
             }
@@ -1498,13 +1515,15 @@ impl TraceCollector {
                 terminal_status,
             });
         }
-        // Stable ordering: by arrival_time_ms (with uuid as tiebreaker) so the
-        // JSONL file is reproducible across runs and matches the order
-        // analysis tools usually expect.
+        // Authored IDs make agentic output stable across equivalent import
+        // paths even when runtime UUIDs differ. Legacy requests retain their
+        // historical arrival-time ordering.
         records.sort_by(|a, b| {
-            a.arrival_time_ms
-                .total_cmp(&b.arrival_time_ms)
-                .then_with(|| a.uuid.cmp(&b.uuid))
+            match (a.request_id.as_deref(), b.request_id.as_deref()) {
+                (Some(left), Some(right)) => left.cmp(right),
+                _ => a.arrival_time_ms.total_cmp(&b.arrival_time_ms),
+            }
+            .then_with(|| a.uuid.cmp(&b.uuid))
         });
         records
     }
@@ -2085,6 +2104,56 @@ mod tests {
             .map(|r| r.arrival_time_ms)
             .collect();
         assert_eq!(arrivals, vec![0.0, 10.0, 30.0]);
+    }
+
+    #[test]
+    fn agentic_summary_is_independent_of_runtime_uuid_and_insertion_order() {
+        fn report(requests: [(&str, u128, f64); 3]) -> ReplayReport {
+            let mut collector = TraceCollector::default();
+            collector.set_capture_per_request(true);
+            collector.set_defer_token_timeline_finalization(true);
+            for (request_id, uuid, ttft_ms) in requests {
+                let uuid = Uuid::from_u128(uuid);
+                collector.on_arrival(uuid, 0.0, 100, 1);
+                collector.on_agentic_metadata(
+                    uuid,
+                    request_id.to_string(),
+                    "play".to_string(),
+                    0.0,
+                );
+                collector.on_admit(uuid, 0.0, 0);
+                collector.on_decode_assigned(uuid, 0);
+                collector.on_token(uuid, ttft_ms);
+                collector.on_terminal(uuid, ttft_ms, ReplayTerminalStatus::Completed);
+            }
+            collector.finish()
+        }
+
+        let left = report([
+            ("request-a", 3, 1.0e16),
+            ("request-b", 1, 1.0),
+            ("request-c", 2, 1.0),
+        ]);
+        let right = report([
+            ("request-c", 300, 1.0),
+            ("request-a", 100, 1.0e16),
+            ("request-b", 200, 1.0),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&left).unwrap(),
+            serde_json::to_value(&right).unwrap()
+        );
+        for report in [&left, &right] {
+            assert_eq!(
+                report
+                    .per_request
+                    .iter()
+                    .map(|record| record.request_id.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                vec!["request-a", "request-b", "request-c"]
+            );
+        }
     }
 
     /// Each record must round-trip cleanly to JSON. Guards against accidental
