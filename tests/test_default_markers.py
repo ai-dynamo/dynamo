@@ -42,7 +42,9 @@ def test_unmarked_test_gets_both_defaults(root_conftest):
     assert item.markers == {"pre_merge", "gpu_0"}
 
 
-def test_unmarked_test_in_sibling_collection_root_gets_both_defaults(pytester):
+def test_unmarked_test_in_sibling_collection_root_gets_both_defaults(
+    pytester, monkeypatch
+):
     """The root hook must cover trees that do not load tests/conftest.py."""
     root_conftest_path = Path(__file__).parents[1] / "conftest.py"
     pytester.makeconftest(root_conftest_path.read_text())
@@ -50,6 +52,8 @@ def test_unmarked_test_in_sibling_collection_root_gets_both_defaults(pytester):
     sibling_root.mkdir(parents=True)
     sibling_test = sibling_root / "test_unmarked.py"
     sibling_test.write_text("def test_unmarked():\n    pass\n")
+
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
 
     result = pytester.runpytest(
         "-o",
