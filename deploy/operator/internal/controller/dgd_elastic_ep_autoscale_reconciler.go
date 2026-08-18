@@ -46,7 +46,11 @@ const elasticEPFollowerSuffix = "flw"
 // until the scale_elastic_ep rollback #12991 lands) -- an operator that can wedge a serving
 // engine unattended is worse than a human choosing to take the risk.
 type dgdElasticEPAutoscaleReconciler struct {
-	client       client.Client
+	client client.Client
+	// podReader is an UNCACHED reader. The manager's cached client has no Pod informer (this
+	// controller does not watch Pods), so listing pods through it returns empty -- which a
+	// cluster run caught as observedOwned=0 for a leader whose IP plainly matched Ray.
+	podReader    client.Reader
 	gate         features.Gate
 	httpClient   *http.Client
 	settleWindow time.Duration
@@ -65,9 +69,10 @@ type epAutoscaleState struct {
 	lastApplied  int
 }
 
-func newDGDElasticEPAutoscaleReconciler(c client.Client, gate features.Gate) *dgdElasticEPAutoscaleReconciler {
+func newDGDElasticEPAutoscaleReconciler(c client.Client, podReader client.Reader, gate features.Gate) *dgdElasticEPAutoscaleReconciler {
 	return &dgdElasticEPAutoscaleReconciler{
 		client:       c,
+		podReader:    podReader,
 		gate:         gate,
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 		settleWindow: 60 * time.Second, // starting point; tune from join times on the target cluster
@@ -173,7 +178,7 @@ func (r *dgdElasticEPAutoscaleReconciler) ownedPodIPs(
 	componentName string,
 ) (map[string]struct{}, error) {
 	pods := &corev1.PodList{}
-	if err := r.client.List(ctx, pods,
+	if err := r.podReader.List(ctx, pods,
 		client.InNamespace(dgd.Namespace),
 		client.MatchingLabels{
 			commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
