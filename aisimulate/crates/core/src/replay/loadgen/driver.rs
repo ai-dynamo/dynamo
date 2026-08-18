@@ -711,6 +711,12 @@ impl WorkloadDriver {
                 node.max_output_tokens,
                 &mut output_rng,
             ));
+            let deterministic_request_id = Uuid::from_u128(
+                u128::try_from(node_index)
+                    .expect("usize always fits in u128")
+                    .checked_add(1)
+                    .context("agentic request UUID ordinal overflow")?,
+            );
             sessions.push(SessionRuntime {
                 session_id: node.session_id,
                 turns: vec![TurnRuntime {
@@ -724,7 +730,7 @@ impl WorkloadDriver {
                     priority: node.priority,
                     strict_priority: node.strict_priority,
                     policy_class: node.policy_class,
-                    deterministic_request_id: None,
+                    deterministic_request_id: Some(deterministic_request_id),
                 }],
                 cumulative_tokens: Vec::new(),
                 next_turn_index: 0,
@@ -2216,6 +2222,38 @@ mod tests {
         assert_eq!(emitted.len(), 2);
         assert_eq!(emitted[0].authored_request_id.as_deref(), Some("parent"));
         assert_eq!(emitted[1].authored_request_id.as_deref(), Some("child"));
+    }
+
+    #[test]
+    fn agentic_request_ids_are_stable_graph_ordinals() {
+        let trace = agentic_trace(vec![
+            agentic_node("parent", "play", 0.0, Vec::new()),
+            agentic_node(
+                "child",
+                "play",
+                0.0,
+                vec![dependency(
+                    "parent",
+                    AgenticDependencyTrigger::Dispatch,
+                    0.0,
+                    AgenticDependencyRelation::Spawn,
+                )],
+            ),
+        ]);
+
+        let ids = (0..2)
+            .map(|_| {
+                WorkloadDriver::new_agentic_trace(trace.clone(), 1)
+                    .unwrap()
+                    .pop_ready(0.0, usize::MAX)
+                    .into_iter()
+                    .map(|turn| turn.request_uuid)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(ids[0], vec![Uuid::from_u128(1), Uuid::from_u128(2)]);
     }
 
     #[test]
