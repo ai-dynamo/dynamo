@@ -16,7 +16,7 @@ use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 use crate::{
     kv_router::{
         FindBestMatchAdmission, FindBestMatchInnerOutcome, FindBestMatchOutcome,
-        push_router::KvPushRouter,
+        push_router::RoutingHost,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
@@ -75,7 +75,7 @@ struct BestMatchArgs<'a> {
     routing_constraints: RoutingConstraints,
 }
 
-impl<Sel> KvPushRouter<Sel>
+impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {

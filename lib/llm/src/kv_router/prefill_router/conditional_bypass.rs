@@ -354,7 +354,7 @@ where
             .flatten();
 
         let outcome = router
-            .chooser
+            .kv_router()
             .find_best_match_details_without_admission(
                 None,
                 routing_token_ids,
