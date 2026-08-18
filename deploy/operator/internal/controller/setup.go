@@ -87,6 +87,7 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
 	if err := (&DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
+		APIReader:             mgr.GetAPIReader(),
 		Recorder:              mgr.GetEventRecorder("dynamographdeployment"),
 		Config:                opts.Config,
 		RuntimeConfig:         opts.RuntimeConfig,

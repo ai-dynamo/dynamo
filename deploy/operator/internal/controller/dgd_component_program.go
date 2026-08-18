@@ -57,7 +57,7 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 		restartProgress:    newComponentRestartProgressResolver(r.Client),
 		workloads:          newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
 		scalingAdapters:    newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
-		elasticEPAutoscale: newDGDElasticEPAutoscaleReconciler(r.Client, r.RuntimeConfig.Gate),
+		elasticEPAutoscale: newDGDElasticEPAutoscaleReconciler(r.Client, r.APIReader, r.RuntimeConfig.Gate),
 		lwsEnabled:         r.RuntimeConfig.Gate.Enabled(features.LWS),
 	}
 }
