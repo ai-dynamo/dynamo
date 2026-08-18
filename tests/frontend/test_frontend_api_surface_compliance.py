@@ -99,12 +99,14 @@ _RETRY_BACKOFF_INITIAL_S = 2.0
 # CI environment would expose `GITHUB_TOKEN`, AWS creds, registry credentials,
 # etc. Keep to a minimal allowlist covering only what the runtime needs:
 # PATH to resolve the binaries, locale/TLS/proxy for HTTPS, HOME so Node/bun
-# finds per-user caches, and NVIDIA/CUDA vars so any GPU-touching side effects
-# see the same device the test was given.
+# finds per-user caches, IS_SANDBOX so privileged containers can identify their
+# sandbox boundary, and NVIDIA/CUDA vars so any GPU-touching side effects see
+# the same device the test was given.
 _SUBPROCESS_ENV_ALLOWLIST: frozenset[str] = frozenset(
     {
         "PATH",
         "HOME",
+        "IS_SANDBOX",
         "LANG",
         "LC_ALL",
         "TZ",
@@ -142,6 +144,21 @@ def _agent_subprocess_env(
         base["PATH"] = f"{prefix}{os.pathsep}{existing}" if existing else prefix
     base.update(extra_env)
     return base
+
+
+@pytest.mark.unit
+@pytest.mark.sglang
+@pytest.mark.core
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_agent_subprocess_env_forwards_sandbox_without_credentials(monkeypatch) -> None:
+    monkeypatch.setenv("IS_SANDBOX", "1")
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-leak")
+
+    env = _agent_subprocess_env({})
+
+    assert env["IS_SANDBOX"] == "1"
+    assert "GITHUB_TOKEN" not in env
 
 
 # ---------------------------------------------------------------------------
