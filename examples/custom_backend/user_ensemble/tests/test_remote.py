@@ -148,7 +148,10 @@ def test_remote_plan_uses_only_inline_json_edges() -> None:
     assert plan.bindings["response"] == InlineBinding("response")
     assert plan.bindings["classifier"].endpoint_id == CLASSIFIER_ENDPOINT
     assert plan.bindings["generator"].endpoint_id == GENERATOR_ENDPOINT
-    assert {edge.transfer_id: edge.carrier for edge in plan.edges} == {
+    assert {
+        f"{edge.target_stage}.{edge.target_port}": edge.carrier
+        for edge in plan.edges
+    } == {
         "classifier.request": "inline",
         "generator.request": "inline",
         "response.completion": "inline",
@@ -160,7 +163,10 @@ def test_response_stage_can_bind_to_remote_endpoint() -> None:
     plan = compile_remote_workflow(response_placement="remote")
 
     assert plan.bindings["response"] == RemoteBinding(RESPONSE_ENDPOINT)
-    assert {edge.transfer_id: edge.carrier for edge in plan.edges} == {
+    assert {
+        f"{edge.target_stage}.{edge.target_port}": edge.carrier
+        for edge in plan.edges
+    } == {
         "classifier.request": "inline",
         "generator.request": "inline",
         "response.completion": "inline",
