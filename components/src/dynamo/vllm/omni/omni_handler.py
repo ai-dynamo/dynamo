@@ -25,6 +25,7 @@ from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
+from dynamo.common.lora.manager import get_lora_manager
 from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
@@ -44,7 +45,6 @@ from dynamo.llm import (
     register_model,
 )
 from dynamo.llm.exceptions import EngineShutdown
-from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 from dynamo.vllm.omni.output_formatter import OutputFormatter

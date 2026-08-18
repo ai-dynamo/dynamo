@@ -355,16 +355,16 @@ class TestClassifyWorkerExclusivity:
         with pytest.raises(ValueError, match="headless"):
             config._validate_classify_worker_exclusivity()
 
-    def test_enable_lora_combination_rejected(self):
-        """The pooling-family handler never forwards lora_request to
-        engine_client.encode(), so an adapter-targeted request would silently
-        run against the base model."""
+    def test_enable_lora_combination_accepted(self):
+        """The pooling-family handler forwards lora_request to
+        engine_client.encode(), so adapters are served rather than silently
+        ignored. Architectures that cannot take an adapter are rejected by
+        vLLM at engine start, not here."""
         config = create_config()
         config.classify_worker = True
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.engine_args = SimpleNamespace(enable_lora=True)
-        with pytest.raises(ValueError, match="enable-lora"):
-            config._validate_classify_worker_exclusivity()
+        config._validate_classify_worker_exclusivity()
 
     def test_no_op_when_classify_worker_disabled(self):
         config = create_config()

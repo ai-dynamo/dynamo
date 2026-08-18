@@ -77,11 +77,15 @@ def _load_vllm_main() -> ModuleType:
     [
         (True, dynamo_llm.ModelType.Prefill, 3),
         (True, dynamo_llm.ModelType.Chat, 3),
-        (True, dynamo_llm.ModelType.Embedding, None),
+        # Pooling-family workers serve the adapter lifecycle endpoints and
+        # forward lora_request, so they advertise capacity like generation
+        # roles. Architectures that cannot take an adapter never reach
+        # registration: vLLM raises at engine start.
+        (True, dynamo_llm.ModelType.Embedding, 3),
         (
             True,
             dynamo_llm.ModelType.Classify | dynamo_llm.ModelType.Pooling,
-            None,
+            3,
         ),
         (False, dynamo_llm.ModelType.Prefill, None),
     ],

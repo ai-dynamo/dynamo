@@ -754,10 +754,8 @@ class DynamoVllmConfig(ConfigBase):
                 "Headless mode returns before WorkerFactory.create(), so the "
                 "classify/pooling endpoint would never be registered."
             )
-        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
-            raise ValueError(
-                "--classify-worker cannot be combined with --enable-lora. "
-                "The pooling-family handler does not forward lora_request to "
-                "engine_client.encode(), so an adapter-targeted request would "
-                "silently run against the base model."
-            )
+        # --enable-lora is supported here: the pooling-family handler forwards
+        # lora_request into engine_client.encode(). Whether an adapter can
+        # attach depends on the model architecture, and vLLM enforces that
+        # itself, raising "does not support LoRA yet" at engine start for
+        # encoder-backed pooling models such as BERT and RoBERTa.

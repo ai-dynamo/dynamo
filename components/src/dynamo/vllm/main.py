@@ -793,16 +793,12 @@ async def register_vllm_model(
 def _base_model_lora_capacity(config: Config, model_type: ModelType) -> int | None:
     if not getattr(config.engine_args, "enable_lora", False):
         return None
-    # Pooling-family workers (embedding, classify|pooling) do not serve the
-    # LoRA load endpoints, so they must not advertise adapter capacity. Use
-    # capability checks, not identity: the classify worker registers the
-    # combined ModelType.Classify | ModelType.Pooling bits.
-    if (
-        model_type.supports_embedding()
-        or model_type.supports_classify()
-        or model_type.supports_pooling()
-    ):
-        return None
+    # Pooling-family workers now serve the LoRA load endpoints and forward
+    # lora_request into encode(), so they advertise capacity like the
+    # generation roles. Whether an adapter can actually attach is a model
+    # property: vLLM raises at engine start for architectures that are not
+    # SupportsLoRA (BERT/RoBERTa encoders), so a worker that reached
+    # registration can serve adapters.
     return config.engine_args.max_loras
 
 
