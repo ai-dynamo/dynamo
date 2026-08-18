@@ -792,6 +792,7 @@ mod tests {
         },
         storage::kv::Selector,
     };
+    use rstest::rstest;
     use tokio::sync::watch;
 
     use super::*;
@@ -1299,8 +1300,13 @@ mod tests {
         runtime.shutdown();
     }
 
+    #[rstest]
+    #[case(SessionAffinityMode::Hard)]
+    #[case(SessionAffinityMode::Soft)]
     #[tokio::test]
-    async fn migration_exclusion_rebinds_soft_affinity_without_escaping_explicit_pins() {
+    async fn migration_exclusion_rebinds_affinity_without_escaping_explicit_pins(
+        #[case] mode: SessionAffinityMode,
+    ) {
         let mut constrained_worker = ModelRuntimeConfig::default();
         constrained_worker.taints.insert("retry-pool".to_string());
         let workers = HashMap::from([
@@ -1308,12 +1314,8 @@ mod tests {
             (8, ModelRuntimeConfig::default()),
             (9, ModelRuntimeConfig::default()),
         ]);
-        let (router, runtime) = router_with_worker_configs_and_mode(
-            Some(Duration::from_secs(10)),
-            workers,
-            SessionAffinityMode::Soft,
-        )
-        .await;
+        let (router, runtime) =
+            router_with_worker_configs_and_mode(Some(Duration::from_secs(10)), workers, mode).await;
         let session_id = SessionAffinityId::new("migration-exclusion");
         let original_target = AffinityTarget {
             worker_id: 7,

@@ -173,7 +173,7 @@ where
             .as_ref()
             .map(|state| state.excluded_worker_ids())
             .unwrap_or_default();
-        if pinned_worker.is_none() && !migration_excluded_worker_ids.is_empty() {
+        if explicit_pin.is_none() && !migration_excluded_worker_ids.is_empty() {
             let workers = self.chooser.workers_with_configs.borrow();
             let eligible =
                 allowed_worker_ids.get_or_insert_with(|| workers.keys().copied().collect());

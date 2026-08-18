@@ -138,7 +138,7 @@ custom policy can select another eligible worker, and Dynamo rebinds the session
 after successful dispatch to that worker. Router modes without policy selection
 continue to use exact affinity regardless of this setting.
 
-During a rolling upgrade, update every frontend in the default `hard` mode before enabling `soft`; pre-revision frontends do not converge on session migrations published by newer routers.
+During a rolling upgrade, update every frontend in the default `hard` mode before enabling `soft`; pre-revision and current frontends do not reliably converge on each other's session migrations.
 
 Concurrent requests can share a binding. Active requests prevent expiry. When a
 request lease ends after EOF, early drop, error, or cancellation, the idle timer
