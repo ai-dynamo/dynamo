@@ -14,9 +14,11 @@ import pytest
 pytest.importorskip("torch", reason="the vLLM workflow components require PyTorch")
 
 from dynamo.workflow import (  # noqa: E402
+    ExecutionPlan,
     GenerateEndpointBinding,
     InlineBinding,
     RemoteBinding,
+    ValueRef,
     WorkflowOrchestrator,
 )
 from dynamo.workflow.remote import StageResponseEnvelope  # noqa: E402
@@ -140,7 +142,20 @@ class _ClientRuntime:
         return _ClientEndpoint(self._clients[endpoint_id])
 
 
-def test_remote_plan_uses_only_inline_json_edges() -> None:
+def _assert_logical_wiring(plan: ExecutionPlan) -> None:
+    stages = {stage.id: stage for stage in plan.workflow.stages}
+
+    assert stages["classifier"].inputs["request"] == ValueRef.for_input("request")
+    assert stages["generator"].inputs["request"] == ValueRef.for_input("request")
+    assert stages["response"].inputs["completion"] == ValueRef.for_stage_output(
+        "generator", "completion"
+    )
+    assert stages["response"].inputs["scores"] == ValueRef.for_stage_output(
+        "classifier", "scores"
+    )
+
+
+def test_remote_plan_preserves_logical_request_fanout() -> None:
     plan = compile_remote_workflow()
 
     assert type(plan.bindings["classifier"]) is RemoteBinding
@@ -148,30 +163,14 @@ def test_remote_plan_uses_only_inline_json_edges() -> None:
     assert plan.bindings["response"] == InlineBinding("response")
     assert plan.bindings["classifier"].endpoint_id == CLASSIFIER_ENDPOINT
     assert plan.bindings["generator"].endpoint_id == GENERATOR_ENDPOINT
-    assert {
-        f"{edge.target_stage}.{edge.target_port}": edge.carrier
-        for edge in plan.edges
-    } == {
-        "classifier.request": "inline",
-        "generator.request": "inline",
-        "response.completion": "inline",
-        "response.scores": "inline",
-    }
+    _assert_logical_wiring(plan)
 
 
 def test_response_stage_can_bind_to_remote_endpoint() -> None:
     plan = compile_remote_workflow(response_placement="remote")
 
     assert plan.bindings["response"] == RemoteBinding(RESPONSE_ENDPOINT)
-    assert {
-        f"{edge.target_stage}.{edge.target_port}": edge.carrier
-        for edge in plan.edges
-    } == {
-        "classifier.request": "inline",
-        "generator.request": "inline",
-        "response.completion": "inline",
-        "response.scores": "inline",
-    }
+    _assert_logical_wiring(plan)
 
 
 def test_response_placement_rejects_unknown_value() -> None:
