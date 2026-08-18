@@ -168,14 +168,16 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 
 	var err error
-	podSnapshotAvailable, err := detectPodSnapshotAvailability(ctx, mgr.GetConfig())
-	if err != nil {
-		return Gates{}, err
-	}
-
-	if gates.Checkpoint, err = resolve(ptr.To(config.Checkpoint.Enabled), podSnapshotAvailable,
-		"checkpoint is explicitly enabled in config but the nvidia.com/v1alpha1 PodSnapshot API was not detected in the cluster"); err != nil {
-		return Gates{}, err
+	// Enable Checkpoint only when explicitly configured and its external API dependency is available.
+	if config.Checkpoint.Enabled {
+		podSnapshotAvailable, detectErr := detectPodSnapshotAvailability(ctx, mgr.GetConfig())
+		if detectErr != nil {
+			return Gates{}, detectErr
+		}
+		if gates.Checkpoint, err = resolve(ptr.To(true), podSnapshotAvailable,
+			"checkpoint is explicitly enabled in config but the nvidia.com/v1alpha1 PodSnapshot API was not detected in the cluster"); err != nil {
+			return Gates{}, err
+		}
 	}
 	if gates.Grove, err = resolve(config.Orchestrators.Grove.Enabled, detectAPIGroup(ctx, mgr, "grove.io", ""),
 		"Grove is explicitly enabled in config but the Grove API group was not detected in the cluster"); err != nil {
@@ -230,6 +232,8 @@ func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) bool
 	return detectAPIGroup(ctx, mgr, "inference.networking.k8s.io", "")
 }
 
+// detectPodSnapshotAvailability reports whether PodSnapshot is discoverable.
+// A nil cfg is supported and returns an error because discovery is unavailable.
 func detectPodSnapshotAvailability(ctx context.Context, cfg *rest.Config) (bool, error) {
 	logger := log.FromContext(ctx)
 	resource := snapshotv1alpha1.GroupVersion.WithResource("podsnapshots")
@@ -238,10 +242,13 @@ func detectPodSnapshotAvailability(ctx context.Context, cfg *rest.Config) (bool,
 		return false, errors.New("PodSnapshot API detection failed, no discovery client available")
 	}
 
+	// Create a client for direct API resource discovery.
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
 		return false, fmt.Errorf("create discovery client for PodSnapshot API detection: %w", err)
 	}
+
+	// Query the exact group version and distinguish absence from discovery failures.
 	apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(resource.GroupVersion().String())
 	if apierrors.IsNotFound(err) {
 		logger.Info("API resource not available", logValues...)
@@ -250,6 +257,8 @@ func detectPodSnapshotAvailability(ctx context.Context, cfg *rest.Config) (bool,
 	if err != nil {
 		return false, fmt.Errorf("discover PodSnapshot API resource: %w", err)
 	}
+
+	// Match the exact resource because other Dynamo APIs share this group version.
 	for _, candidate := range apiResourceList.APIResources {
 		if candidate.Name == resource.Resource {
 			logger.Info("API resource is available", logValues...)

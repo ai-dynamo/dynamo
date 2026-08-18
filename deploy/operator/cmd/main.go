@@ -667,12 +667,12 @@ func registerControllers(
 	}); err != nil {
 		return err
 	}
-	if runtimeConfig.Gate.Enabled(features.Checkpoint) {
-		if err := controller.SetupDynamoCheckpoint(mgr, setupOptions); err != nil {
-			return err
-		}
-	} else {
-		setupLog.Info("Skipping DynamoCheckpoint controller because the checkpoint feature gate is disabled")
+	// A disabled gate omits the external watch while retaining finalizer cleanup reconciliation.
+	if !runtimeConfig.Gate.Enabled(features.Checkpoint) {
+		setupLog.Info("Registering DynamoCheckpoint controller without PodSnapshot watch because the checkpoint feature gate is disabled")
+	}
+	if err := controller.SetupDynamoCheckpoint(mgr, setupOptions); err != nil {
+		return err
 	}
 	// PodSnapshot/PodSnapshotContent reconciliation is owned by the external
 	// Snapshot operator (github.com/ai-dynamo/snapshot).
