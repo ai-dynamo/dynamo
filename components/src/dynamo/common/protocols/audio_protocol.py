@@ -20,9 +20,6 @@ from pydantic import BaseModel, Field
 class AudioNvExt(BaseModel):
     """NVIDIA extensions for audio generation requests."""
 
-    annotations: Optional[list[str]] = None
-    """Annotations for SSE stream events."""
-
     frontend_accepts_audio_chunks: Optional[bool] = None
     """Internal compatibility signal for frontends that accept audio chunks.
 
