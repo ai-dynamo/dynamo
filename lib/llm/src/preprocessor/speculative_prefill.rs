@@ -357,11 +357,19 @@ async fn prefill_task(
         uuid::Uuid::new_v4().to_string(),
         Default::default(),
     );
+    // Published before the call, not after it. `generate` is itself a place the
+    // warmup can sit for a long time — the KV router waits for a worker in
+    // there — and a stop that arrives during that wait has to find a handle in
+    // the slot or it lands on nothing. The router wraps that wait in
+    // `cancel_on_stop`, so a request context that is already stopped ends the
+    // call promptly rather than after the whole grace window.
+    *context_slot.lock() = Some(context.context());
+
     // Drain the stream so the KV router's RequestGuard runs its full lifecycle
     // (mark_prefill_completed, block tracking, free) instead of relying on drop.
     if let Ok(mut stream) = next.generate(context).await {
-        // Published before the drain, because a drain that never returns is
-        // exactly the case in which the caller needs this handle.
+        // Swapped for the stream's own context once there is one, so a stop
+        // during the drain reaches the stream rather than only the request.
         *context_slot.lock() = Some(stream.context());
         while stream.next().await.is_some() {}
     }
@@ -521,6 +529,52 @@ mod tests {
                 });
 
             Ok(ResponseStream::new(Box::pin(winding), ctx))
+        }
+    }
+
+    /// A backend that never returns a stream, because the wait for a worker is
+    /// itself somewhere the warmup can be stuck when the runtime goes down.
+    /// It mirrors the router's `cancel_on_stop`: it publishes the request
+    /// context, waits, and ends the call once that context is stopped.
+    #[derive(Debug, Default)]
+    struct StalledInGenerateBackend {
+        generate_calls: AtomicUsize,
+        context: Mutex<Option<Arc<dyn AsyncEngineContext>>>,
+    }
+
+    impl StalledInGenerateBackend {
+        fn generate_calls(&self) -> usize {
+            self.generate_calls.load(Ordering::SeqCst)
+        }
+
+        /// Whether the stop reached the request context — which it can only do
+        /// if that context was published before `generate` was awaited.
+        fn was_asked_to_stop(&self) -> bool {
+            self.context
+                .lock()
+                .as_ref()
+                .map(|ctx| ctx.is_stopped())
+                .unwrap_or(false)
+        }
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for StalledInGenerateBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            self.generate_calls.fetch_add(1, Ordering::SeqCst);
+            let (_request, context) = request.transfer(());
+            let ctx = context.context();
+            *self.context.lock() = Some(ctx.clone());
+
+            // No stream is ever produced: the call sits here until the request
+            // context is stopped, then reports the cancellation.
+            ctx.stopped().await;
+            Err(Error::msg("cancelled while selecting a worker"))
         }
     }
 
@@ -920,6 +974,61 @@ mod tests {
             Arc::strong_count(&backend),
             1,
             "the task should have released the engine without dispatching"
+        );
+    }
+
+    /// A warmup still waiting for a worker must be reachable by the stop.
+    ///
+    /// `generate` is not instantaneous — the KV router waits for a worker
+    /// inside it — so the handle the bail-out paths need has to be in the slot
+    /// before that call is awaited, not after it returns. Published late, the
+    /// stop lands on an empty slot, the router's `cancel_on_stop` never fires,
+    /// and the grace window is spent waiting on a call that was never told to
+    /// end.
+    #[tokio::test(start_paused = true)]
+    async fn a_warmup_still_waiting_for_a_worker_is_reachable_by_the_stop() {
+        let (formatter, tokenizer) = sample_model_parts();
+        let backend = Arc::new(StalledInGenerateBackend::default());
+        let engine: Arc<BackendEngine> = backend.clone();
+
+        let cancel = CancellationToken::new();
+        let request = chat_request(true);
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-stalled-in-generate",
+            &engine,
+            &formatter,
+            &tokenizer,
+            Some(&cancel),
+        );
+        drop(engine);
+
+        let items: Vec<_> = wrapped.collect().await;
+        assert_eq!(items.len(), 2);
+
+        settle().await;
+        assert_eq!(
+            backend.generate_calls(),
+            1,
+            "the warmup should be in flight, still waiting for a worker"
+        );
+
+        cancel.cancel();
+        settle().await;
+
+        assert!(
+            backend.was_asked_to_stop(),
+            "a warmup stuck in generate must still be reachable by the stop"
+        );
+
+        // And because it was reachable, the call ends on the stop rather than
+        // outliving the grace window.
+        settle().await;
+        assert_eq!(
+            Arc::strong_count(&backend),
+            1,
+            "the task should have released the engine once generate returned"
         );
     }
 
