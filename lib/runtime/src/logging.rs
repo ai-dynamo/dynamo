@@ -535,14 +535,18 @@ impl TraceParent {
             tracestate = Some(header_value.to_string());
         }
 
-        // Read request-id from internal headers, with fallback to deprecated x-dynamo-request-id
+        // Internal request IDs are opaque nonempty values. The deprecated public
+        // x-dynamo-request-id remains UUID-only for backwards compatibility.
         if let Some(header_value) = headers.get("request-id") {
-            request_id = Some(header_value.to_string());
+            if !header_value.trim().is_empty() {
+                request_id = Some(header_value.to_string());
+            }
         } else if let Some(header_value) = headers.get("x-dynamo-request-id") {
-            request_id = Some(header_value.to_string());
+            if uuid::Uuid::parse_str(header_value).is_ok() {
+                request_id = Some(header_value.to_string());
+            }
         }
 
-        let request_id = request_id.filter(|id| uuid::Uuid::parse_str(id).is_ok());
         TraceParent {
             trace_id,
             parent_id,
@@ -747,9 +751,14 @@ pub fn make_handle_payload_span_from_tcp_headers(
     let x_request_id = headers.get("x-request-id").cloned();
     let request_id = headers
         .get("request-id")
-        .or_else(|| headers.get("x-dynamo-request-id"))
-        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-        .cloned();
+        .filter(|id| !id.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            headers
+                .get("x-dynamo-request-id")
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+                .cloned()
+        });
     let tracestate = headers.get("tracestate").cloned();
     let trace_flags = headers.get("traceparent").and_then(|value| {
         let (_, _, flags) = parse_traceparent(value);
@@ -2498,6 +2507,48 @@ pub mod tests {
         );
         assert_eq!(trace_parent.parent_id.as_deref(), Some("2222222222222222"));
         assert_eq!(trace_parent.trace_flags.as_deref(), Some("00"));
+    }
+
+    #[test]
+    fn trace_parent_accepts_opaque_internal_request_id() {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("request-id", "opaque-request-g7-42");
+        headers.insert("x-request-id", "gateway-request-42");
+        headers.insert(
+            "traceparent",
+            "00-11111111111111111111111111111111-2222222222222222-01",
+        );
+
+        let trace_parent = TraceParent::from_headers(&headers);
+
+        assert_eq!(
+            trace_parent.request_id.as_deref(),
+            Some("opaque-request-g7-42")
+        );
+        assert_eq!(
+            trace_parent.x_request_id.as_deref(),
+            Some("gateway-request-42")
+        );
+        assert_eq!(
+            trace_parent.trace_id.as_deref(),
+            Some("11111111111111111111111111111111")
+        );
+    }
+
+    #[test]
+    fn deprecated_request_id_header_remains_uuid_only() {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("x-dynamo-request-id", "not-a-uuid");
+        assert_eq!(TraceParent::from_headers(&headers).request_id, None);
+
+        headers.insert(
+            "x-dynamo-request-id",
+            "12345678-1234-5678-9234-567812345678",
+        );
+        assert_eq!(
+            TraceParent::from_headers(&headers).request_id.as_deref(),
+            Some("12345678-1234-5678-9234-567812345678")
+        );
     }
 
     #[test]

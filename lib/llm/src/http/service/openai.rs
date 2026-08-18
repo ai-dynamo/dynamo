@@ -92,6 +92,7 @@ use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
+const INTERNAL_REQUEST_ID_HEADER: &str = "request-id";
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
@@ -555,14 +556,21 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
 /// Return the request ID for the current request.
 ///
-/// The canonical request ID is set by `make_inference_request_span()` and stored
-/// in the `DistributedTraceContext` via `DistributedTraceIdLayer`. This function
-/// retrieves it, falling back to a validated `x-dynamo-request-id` header value
-/// (deprecated, DEP #7812) or a new UUID.
+/// The canonical request ID comes from the internal `request-id` header. When
+/// that header is absent, use the ID created by `make_inference_request_span()`,
+/// then fall back to the deprecated `x-dynamo-request-id` header or a new UUID.
 ///
 /// **Deprecation (DEP #7812):** The `x-dynamo-request-id` header is deprecated.
 /// Clients should rely on server-generated request IDs instead of supplying their own.
 pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
+    if let Some(request_id) = headers
+        .get(INTERNAL_REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return request_id.to_string();
+    }
+
     // Validate x-dynamo-request-id header if present, warn on invalid values.
     // DEP #7812: x-dynamo-request-id is deprecated — clients should rely on
     // server-generated request IDs instead of supplying their own.
@@ -626,7 +634,6 @@ where
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
-    super::engine_stats::attach_correlation_id(&mut request, headers);
     if let Some(mut agent_context) = agent_context_from_headers(headers) {
         agent_context.input_trigger = classify_input_trigger(request.content());
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
@@ -4636,6 +4643,22 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    #[test]
+    fn canonical_internal_request_id_is_used_verbatim() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            INTERNAL_REQUEST_ID_HEADER,
+            "opaque-request-g7-42".parse().unwrap(),
+        );
+        headers.insert("x-request-id", "external-request".parse().unwrap());
+        headers.insert(
+            DYNAMO_REQUEST_ID_HEADER,
+            "2fe691e1-1006-41a5-bd04-9b660975dec4".parse().unwrap(),
+        );
+
+        assert_eq!(get_or_create_request_id(&headers), "opaque-request-g7-42");
+    }
 
     fn binary_pooling_response() -> NvCreatePoolingResponse {
         NvCreatePoolingResponse {

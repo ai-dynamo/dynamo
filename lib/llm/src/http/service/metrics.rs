@@ -1691,14 +1691,10 @@ impl ResponseMetricCollector {
         &mut self,
         stats: super::engine_stats::EngineStats,
         request_id: &str,
-        correlation_id: Option<String>,
         model: &str,
     ) {
         self.request_stats = Some(super::engine_stats::RequestStats::new(
-            stats,
-            request_id,
-            correlation_id,
-            model,
+            stats, request_id, model,
         ));
     }
 

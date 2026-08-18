@@ -10,10 +10,9 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, Method, header};
+use axum::http::{HeaderValue, Method, header};
 use axum::response::Response;
 use axum::routing::get;
-use dynamo_runtime::pipeline::Context;
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -21,33 +20,9 @@ use tokio_util::sync::CancellationToken;
 use super::{RouteDoc, service_v2};
 
 const STATS_PATH: &str = "/v1/stats/stream";
-const CORRELATION_ID_HEADER: &str = "x-dynamo-stats-correlation-id";
-const CORRELATION_ID_CONTEXT_KEY: &str = "engine_stats_correlation_id";
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 const PING_INTERVAL: Duration = Duration::from_secs(15);
 const PING_LINE: &[u8] = b"{\"v\":1,\"type\":\"ping\"}\n";
-
-pub(super) fn attach_correlation_id<T: Send + Sync + 'static>(
-    request: &mut Context<T>,
-    headers: &HeaderMap,
-) {
-    let Some(correlation_id) = headers
-        .get(CORRELATION_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return;
-    };
-    request.insert(CORRELATION_ID_CONTEXT_KEY, correlation_id.to_owned());
-}
-
-pub(super) fn correlation_id<T: Send + Sync + 'static>(request: &Context<T>) -> Option<String> {
-    request
-        .get::<String>(CORRELATION_ID_CONTEXT_KEY)
-        .ok()
-        .map(|value| value.as_ref().clone())
-}
 
 #[derive(Clone)]
 pub(super) struct EngineStats {
@@ -86,8 +61,6 @@ struct RequestStatsEvent<'a> {
     #[serde(rename = "type")]
     event_type: &'static str,
     request_id: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    correlation_id: Option<&'a str>,
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens_processed: Option<u64>,
@@ -99,23 +72,16 @@ struct RequestStatsEvent<'a> {
 pub(super) struct RequestStats {
     stats: EngineStats,
     request_id: String,
-    correlation_id: Option<String>,
     model: String,
     tokens_processed: Option<u64>,
     tokens_generated: Option<u64>,
 }
 
 impl RequestStats {
-    pub(super) fn new(
-        stats: EngineStats,
-        request_id: &str,
-        correlation_id: Option<String>,
-        model: &str,
-    ) -> Self {
+    pub(super) fn new(stats: EngineStats, request_id: &str, model: &str) -> Self {
         Self {
             stats,
             request_id: request_id.to_owned(),
-            correlation_id,
             model: model.to_owned(),
             tokens_processed: None,
             tokens_generated: None,
@@ -158,7 +124,6 @@ impl RequestStats {
             v: 1,
             event_type: "stats",
             request_id: &self.request_id,
-            correlation_id: self.correlation_id.as_deref(),
             model: &self.model,
             tokens_processed,
             tokens_generated,
@@ -241,36 +206,12 @@ mod tests {
         serde_json::from_slice(line).unwrap()
     }
 
-    #[test]
-    fn correlation_id_is_separate_from_the_native_request_id() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            CORRELATION_ID_HEADER,
-            HeaderValue::from_static("dynamo-correlation"),
-        );
-        let mut context =
-            Context::with_id_and_metadata((), "dynamo-request".to_string(), Default::default());
-
-        attach_correlation_id(&mut context, &headers);
-
-        assert_eq!(context.id(), "dynamo-request");
-        assert_eq!(
-            correlation_id(&context).as_deref(),
-            Some("dynamo-correlation")
-        );
-    }
-
     #[tokio::test]
     async fn request_stats_are_cumulative_and_finish_once() {
         let stats = EngineStats::default();
         let mut receiver = stats.subscribe();
         {
-            let mut request = RequestStats::new(
-                stats.clone(),
-                "dynamo-id",
-                Some("dynamo-correlation".to_string()),
-                "dynamo-model",
-            );
+            let mut request = RequestStats::new(stats.clone(), "dynamo-id", "dynamo-model");
             request.observe(3, 0);
             request.observe(3, 2);
             request.observe(3, 3);
@@ -279,7 +220,7 @@ mod tests {
 
         let processed = json(&receiver.recv().await.unwrap());
         assert_eq!(processed["request_id"], "dynamo-id");
-        assert_eq!(processed["correlation_id"], "dynamo-correlation");
+        assert!(processed.get("correlation_id").is_none());
         assert_eq!(processed["model"], "dynamo-model");
         assert_eq!(processed["tokens_processed"], 3);
         assert!(processed.get("tokens_generated").is_none());
@@ -306,7 +247,7 @@ mod tests {
         let stats = EngineStats::default();
         let mut receiver = stats.subscribe();
         {
-            let mut request = RequestStats::new(stats.clone(), "dynamo-id", None, "dynamo-model");
+            let mut request = RequestStats::new(stats.clone(), "dynamo-id", "dynamo-model");
             request.observe(0, 2);
             request.observe(12, 3);
         }
@@ -330,7 +271,7 @@ mod tests {
     async fn unobserved_request_finishes_without_counters() {
         let stats = EngineStats::default();
         let mut receiver = stats.subscribe();
-        let request = RequestStats::new(stats.clone(), "dynamo-id", None, "dynamo-model");
+        let request = RequestStats::new(stats.clone(), "dynamo-id", "dynamo-model");
 
         drop(request);
 

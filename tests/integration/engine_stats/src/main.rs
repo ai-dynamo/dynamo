@@ -686,8 +686,6 @@ struct StatsEvent {
     #[serde(rename = "type")]
     event_type: String,
     request_id: String,
-    #[serde(default)]
-    correlation_id: Option<String>,
     model: String,
     #[serde(default)]
     tokens_processed: Option<u64>,
@@ -766,18 +764,10 @@ impl DiagnosticStream {
                 {
                     DiagnosticMessage::Ping => {}
                     DiagnosticMessage::Stats(event) => {
-                        let correlation_id = event
-                            .correlation_id
-                            .as_deref()
-                            .context("Dynamo stats event omitted its correlation ID")?;
                         ensure!(
-                            !gateway_request_ids.contains(event.request_id.as_str()),
-                            "Dynamo stats leaked gateway request ID {}",
+                            gateway_request_ids.contains(event.request_id.as_str()),
+                            "Dynamo stats emitted an unknown request ID {}",
                             event.request_id
-                        );
-                        ensure!(
-                            !gateway_request_ids.contains(correlation_id),
-                            "Dynamo stats leaked gateway correlation ID {correlation_id}"
                         );
                         if event.finished {
                             ensure!(
@@ -835,9 +825,12 @@ impl DiagnosticStream {
             requests.len(),
             events.len()
         );
-        for (request_id, request_events) in &events {
+        for request in requests {
+            let request_events = events
+                .get(&request.id)
+                .with_context(|| format!("missing stats for {}", request.id))?;
             validate_request_events(
-                request_id,
+                &request.id,
                 ACTUAL_INPUT_TOKENS,
                 request_events,
                 success_batch,
@@ -891,6 +884,10 @@ async fn read_diagnostic_stream(
                         let _ = sender.send(DiagnosticMessage::Ping);
                     }
                     Some("stats") => {
+                        ensure!(
+                            value.get("correlation_id").is_none(),
+                            "Dynamo stats event retained correlation_id: {value}"
+                        );
                         let event = serde_json::from_value::<StatsEvent>(value)?;
                         let _ = sender.send(DiagnosticMessage::Stats(event));
                     }
@@ -922,21 +919,12 @@ fn validate_request_events(
     success_batch: bool,
 ) -> Result<()> {
     ensure!(!events.is_empty(), "no events for {request_id}");
-    let correlation_id = events[0]
-        .correlation_id
-        .as_deref()
-        .context("stats event omitted its correlation ID")?;
     ensure!(
         events.iter().all(|event| event.v == 1
             && event.event_type == "stats"
             && event.request_id == request_id
-            && event.correlation_id.as_deref() == Some(correlation_id)
             && event.model == MODEL),
         "invalid identity or schema for {request_id}: {events:?}"
-    );
-    ensure!(
-        correlation_id != request_id,
-        "Dynamo request and correlation IDs unexpectedly matched: {events:?}"
     );
     ensure!(
         events.first().and_then(|event| event.tokens_processed) == Some(input_tokens),

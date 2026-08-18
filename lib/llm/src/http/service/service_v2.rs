@@ -507,12 +507,7 @@ impl State {
         request: &dynamo_runtime::pipeline::Context<T>,
     ) -> metrics::ResponseMetricCollector {
         let mut collector = self.metrics_clone().create_response_collector(model);
-        collector.attach_request_stats(
-            self.engine_stats.clone(),
-            request.id(),
-            super::engine_stats::correlation_id(request),
-            model,
-        );
+        collector.attach_request_stats(self.engine_stats.clone(), request.id(), model);
         collector
     }
 
