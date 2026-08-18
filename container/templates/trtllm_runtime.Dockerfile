@@ -289,6 +289,85 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     done; \
     /usr/bin/python3 -c 'import nvidia.dali'
 
+# Upgrade PyNvVideoCodec past the release that stopped bundling a full FFmpeg.
+# rc24 is the first TensorRT-LLM base image to ship this package at all, and it
+# ships 2.1.0, which bundles libavcodec, libavdevice, libavfilter, libswresample
+# and libswscale alongside the libavformat and libavutil it actually uses. 2.2.0
+# drops everything except those two.
+#
+# This is a surface reduction, not a codec removal, and the difference from the
+# DALI block above matters because the two look identical. Measured with
+# enumerate_bundled_decoders.py against the rc24 image, 2.1.0's libavcodec
+# registers exactly one decoder -- vp9 -- and no encoders: none of h264, hevc,
+# aac, aac_fixed or aac_latm. Nothing prohibited ships today. What fails is
+# container/compliance/policy/codec_policy.yaml, whose deny globs match on a
+# libavcodec being present at all, and whose two PyNvVideoCodec waivers are
+# deliberately scoped to libavutil and libavformat so that a bundled libavcodec
+# has to be looked at rather than absorbed silently.
+#
+# Upgrade rather than waive. A waiver has to be written as a glob, and a glob
+# cannot say "this version's libavcodec is empty" -- it would carry forward to a
+# future version whose libavcodec is not, disarming the check that just fired.
+# Removing the file keeps the narrow waivers, and the tripwire, intact.
+#
+# A floor rather than an exact pin, unlike DALI above: requirements.trtllm.txt
+# already installs PyNvVideoCodec>=2.2.0 into /opt/dynamo/venv, and pinning the
+# system copy exactly would let the two diverge inside one image. Keep this
+# specifier identical to the one there. The assertion below is content-based, so
+# a future release that reintroduces libavcodec fails the build rather than
+# shipping.
+#
+# This deliberately overrides a dependency of TensorRT-LLM's, which is why the
+# build log carries a pip resolver complaint here:
+#
+#     tensorrt-llm 1.3.0rc24 requires PyNvVideoCodec~=2.1.0,
+#     but you have pynvvideocodec 2.2.0 which is incompatible
+#
+# The complaint is expected and the override is deliberate. `~=2.1.0` excludes
+# 2.2.0 by construction, and 2.1.0 is the version that bundles the libavcodec.
+# tensorrt_llm/media/decoding.py is the only consumer; it uses CreateDemuxer,
+# CreateDecoder, PyNvVCException and OutputColorType, all of which 2.2.0 still
+# exports, and it imports PyNvVideoCodec function-locally so `import
+# tensorrt_llm` does not touch it. Re-check that list when this base image moves:
+# if upstream relaxes the pin to allow 2.2.0, this note is the thing to delete.
+#
+# System interpreter for the same reason as the opencv removal and the DALI
+# upgrade above: with VIRTUAL_ENV set, plain pip targets the venv and leaves the
+# system-site copy -- the one the scan reads -- in place.
+#
+# No `import PyNvVideoCodec` smoke test here, deliberately. Unlike nvidia.dali it
+# dlopens libnvcuvid and needs NVIDIA_DRIVER_CAPABILITIES to include "video",
+# which the builder does not have, so an import check would fail every build.
+RUN set -eu; \
+    before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none); \
+    echo "PyNvVideoCodec in base image: $before"; \
+    if [ "$before" = "none" ]; then \
+        echo "ERROR: base image no longer ships PyNvVideoCodec, so this upgrade has" >&2; \
+        echo "       nothing to act on -- delete this RUN and the whiteout entry that" >&2; \
+        echo "       pairs with it. The venv copy installed from" >&2; \
+        echo "       requirements.trtllm.txt is the one that matters." >&2; \
+        exit 1; \
+    fi; \
+    newest=$(printf '%s\n2.2.0\n' "$before" | sort -V | tail -1); \
+    if [ "$newest" != "2.2.0" ]; then \
+        echo "ERROR: base image already carries PyNvVideoCodec $before, so this block" >&2; \
+        echo "       is obsolete -- delete it and let the base version stand. Keep the" >&2; \
+        echo "       libavcodec assertion below and the post-overlay one in" >&2; \
+        echo "       pre_runtime, which are what stop this from regressing." >&2; \
+        exit 1; \
+    fi; \
+    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
+        'PyNvVideoCodec>=2.2.0'; \
+    v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))'); \
+    echo "PyNvVideoCodec version: $v"; \
+    [ "$(printf '%s\n2.2.0\n' "$v" | sort -V | head -1)" = "2.2.0" ] \
+        || { echo "ERROR: wanted PyNvVideoCodec >= 2.2.0, got $v" >&2; exit 1; }; \
+    if find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' | grep -q .; then \
+        echo "ERROR: PyNvVideoCodec $v still bundles a libavcodec:" >&2; \
+        find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' >&2; \
+        exit 1; \
+    fi
+
 # Align the base image's aiohttp with the floor requirements.common.txt sets for
 # the other Dynamo images. The base ships an older release and the --no-deps
 # installs above deliberately leave upstream's solve alone, so this one package is
@@ -363,6 +442,17 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # would leave the base image's dist-info beside the new one, and the inventory
 # reads that directory, so the upgrade would not show.
 #
+# PyNvVideoCodec is here for the DALI reason too, and it is the case the codec
+# scan actually catches: the scan runs on this stage (compliance_base_stage is
+# pre_runtime), not on runtime_full. runtime_full UPGRADES the package, and an
+# upgrade is a deletion plus an install -- 2.1.0's libavcodec/libavdevice/
+# libavfilter/libswresample/libswscale have no counterpart in 2.2.0, so the
+# overlay COPY has nothing to write over them and the base image's copies would
+# come straight back. Without this entry the upgrade buys nothing and the scan
+# fails exactly as it did before. The version-stamped dist-info is renamed by the
+# upgrade (pynvvideocodec-2.1.0.dist-info -> -2.2.0.dist-info), so the glob takes
+# that and the stray `pynvvideocodec.` entry beside it.
+#
 # Its runtime dependencies are listed for the same reason. pip upgrades those too
 # when the new aiohttp requires versions the base does not carry, and each rename
 # has the same doubling problem. Dropping them here is free: the overlay restores
@@ -379,6 +469,8 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
     /usr/local/lib/python3.12/dist-packages/nvidia/dali \
     /usr/local/lib/python3.12/dist-packages/nvidia_dali_* \
+    /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
+    /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
     /usr/local/lib/python3.12/dist-packages/aiohttp \
     /usr/local/lib/python3.12/dist-packages/aiohttp-* \
     /usr/local/lib/python3.12/dist-packages/multidict \
@@ -415,7 +507,15 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     set -eu; \
     for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
-    done
+    done; \
+    if find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' 2>/dev/null | grep -q .; then \
+        echo "ERROR: post-overlay PyNvVideoCodec carries a libavcodec, so the base" >&2; \
+        echo "       image's 2.1.0 copy survived the overlay -- its whiteout entry is" >&2; \
+        echo "       missing or misspelled. The upgrade in runtime_full cannot fix this" >&2; \
+        echo "       on its own: COPY cannot represent a deletion." >&2; \
+        find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' >&2; \
+        exit 1; \
+    fi
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
