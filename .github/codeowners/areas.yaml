@@ -437,6 +437,8 @@ areas:
   path_globs:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
+  - components/src/dynamo/common/tests/test_snapshot_lifecycle.py
+  - components/src/dynamo/common/tests/test_snapshot_restore_context.py
   - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/checkpointjob/
@@ -884,6 +886,10 @@ shared:
   owners:
   - backend-sglang
   - gms
+- glob: components/src/dynamo/trtllm/snapshot.py
+  owners:
+  - backend-trtllm
+  - gms
 - glob: components/src/dynamo/trtllm/workers/llm_worker.py
   owners:
   - backend-trtllm
@@ -908,6 +914,10 @@ shared:
   owners:
   - backend-trtllm
   - gms
+- glob: components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py
+  owners:
+  - backend-trtllm
+  - gms
 - glob: deploy/inference-gateway/ext-proc/
   owners:
   - epp
@@ -928,6 +938,110 @@ shared:
   owners:
   - operator
   - observability
+- glob: deploy/operator/api/v1alpha1/dynamocheckpoint_types.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/config/crd/bases/nvidia.com_dynamocheckpoints.yaml
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/checkpoint_cleanup_job.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/checkpoint_coverage_test.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/checkpoint_job.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/checkpoint_podsnapshot.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/checkpoint_podsnapshot_test.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/dcd_checkpoint_storage_reconciler.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/dcd_checkpoint_storage_reconciler_test.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/dgd_checkpoints_reconciler.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/dgd_checkpoints_reconciler_test.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/dgd_gms_resource_claims_reconciler.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/dgd_gms_resource_claims_reconciler_test.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/dynamocheckpoint_controller.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/dynamocheckpoint_controller_test.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/gms_pod_replacement_controller.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/gms_pod_replacement_controller_test.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/testing/nvidia/nvidia.com_podsnapshots.yaml
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/testing/nvidia/nvidia.com_podsnapshotcontents.yaml
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/webhook/mutation/pod_checkpoint_restore_handler.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/webhook/mutation/pod_checkpoint_restore_handler_test.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/webhook/validation/dynamocheckpoint.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/webhook/validation/dynamocheckpoint_handler.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/webhook/validation/dynamocheckpoint_handler_test.go
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/webhook/validation/dynamocheckpoint_helpers.go
+  owners:
+  - operator
+  - gms
 - glob: dev/docker-compose.yml
   owners:
   - ops
@@ -1041,6 +1155,11 @@ shared:
   owners:
   - ops
   - operator
+- glob: tests/deploy/test_dynamocheckpoint.py
+  owners:
+  - ops
+  - operator
+  - gms
 - glob: tests/fault_tolerance/cancellation/utils.py
   owners:
   - fault-tolerance
