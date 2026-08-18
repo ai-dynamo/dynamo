@@ -8,7 +8,7 @@ use dynamo_kv_router::{
     selector::WorkerSelector,
 };
 use dynamo_runtime::{
-    error::{DynamoError, ErrorType, match_error_chain},
+    error::DynamoError,
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
@@ -33,7 +33,7 @@ use crate::{
     },
     session_affinity::{
         AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityMode, affinity_id,
-        explicit_target,
+        explicit_target, is_cancelled,
     },
 };
 
@@ -47,10 +47,6 @@ use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
-
-fn is_cancelled(error: &Error) -> bool {
-    match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
-}
 
 fn invalidate_selected_on_non_cancellation(
     operation: &mut Option<AffinityAcquire>,
@@ -67,6 +63,13 @@ fn invalidate_selected_on_non_cancellation(
 
 fn route_target(worker: WorkerWithDpRank) -> AffinityTarget {
     AffinityTarget::new(worker.worker_id, Some(worker.dp_rank))
+}
+
+fn requested_target_matches_binding(requested: AffinityTarget, bound: AffinityTarget) -> bool {
+    requested.worker_id == bound.worker_id
+        && requested
+            .dp_rank
+            .is_none_or(|rank| bound.dp_rank == Some(rank))
 }
 
 fn monitor_response_stream<Sel>(
@@ -286,16 +289,21 @@ where
                     && operation.target().is_some()
                     && explicit.is_none() =>
             {
+                let failed_target = operation.target();
                 operation.invalidate();
                 let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
                     .await?;
-                let retry_target = retry.target().and_then(affinity_worker);
+                let retry_target = retry
+                    .target()
+                    .filter(|target| Some(*target) != failed_target)
+                    .and_then(affinity_worker);
                 match self
                     .select_request(request, phase, false, retry_target)
                     .await
                 {
                     Ok(selection) => Ok((selection, Some(retry))),
+                    Err(retry_error) if is_cancelled(&retry_error) => Err(retry_error),
                     Err(retry_error) => {
                         retry.invalidate();
                         Err(retry_error)
@@ -303,7 +311,13 @@ where
                 }
             }
             Err(error) if self.session_affinity_mode == SessionAffinityMode::Hard => {
-                operation.invalidate();
+                if explicit.is_none_or(|requested| {
+                    operation
+                        .target()
+                        .is_none_or(|bound| requested_target_matches_binding(requested, bound))
+                }) {
+                    operation.invalidate();
+                }
                 Err(error)
             }
             Err(error) => Err(error),
@@ -1023,6 +1037,27 @@ mod tests {
         runtime.shutdown();
     }
 
+    #[test]
+    fn worker_only_explicit_target_matches_any_bound_rank() {
+        let bound = AffinityTarget::new(7, Some(3));
+        assert!(requested_target_matches_binding(
+            AffinityTarget::new(7, None),
+            bound
+        ));
+        assert!(requested_target_matches_binding(
+            AffinityTarget::new(7, Some(3)),
+            bound
+        ));
+        assert!(!requested_target_matches_binding(
+            AffinityTarget::new(7, Some(2)),
+            bound
+        ));
+        assert!(!requested_target_matches_binding(
+            AffinityTarget::new(8, None),
+            bound
+        ));
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn router_request_counters_follow_admission_and_completion_lifecycle() {
@@ -1192,6 +1227,40 @@ mod tests {
         };
         assert_eq!(target, original_target);
         drop(lease);
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn failed_explicit_retarget_preserves_existing_binding() {
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+        let affinity = router.affinity.as_ref().unwrap();
+        let session_id = SessionAffinityId::new("failed-explicit-retarget");
+        let original_target = AffinityTarget::new(7, Some(0));
+        let AffinityAcquire::Initialize(initializer) =
+            affinity.acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("first request must initialize");
+        };
+        drop(initializer.commit(original_target).unwrap());
+
+        let mut input = request();
+        input.routing_mut().backend_instance_id = Some(8);
+        input.routing_mut().dp_rank = Some(0);
+        let mut request = Context::new(input);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+        assert!(
+            router
+                .select_with_affinity(&request, RequestPhase::Aggregated, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(original_target)
+        );
 
         drop(router);
         runtime.shutdown();

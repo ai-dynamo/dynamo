@@ -9,10 +9,24 @@ use dynamo_runtime::pipeline::{
 };
 
 use super::{
-    AffinityCoordinator, AffinityTarget, LlmResponse,
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse,
     coordinator::{affinity_id, invalid_argument},
-    explicit_target,
+    explicit_target, is_cancelled,
 };
+
+fn invalidate_on_non_cancellation(
+    operation: AffinityAcquire,
+    selected: Option<AffinityTarget>,
+    error: &Error,
+) {
+    if is_cancelled(error) {
+        return;
+    }
+    match selected {
+        Some(selected) => operation.invalidate_selected(selected),
+        None => operation.invalidate(),
+    }
+}
 use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::timing::{
@@ -272,11 +286,7 @@ impl SessionAffinityPushRouter {
         let ((metadata, tracker, target), stream) = match dispatch {
             Ok(result) => result,
             Err(error) => {
-                if let Some(selected) = selected {
-                    operation.invalidate_selected(selected);
-                } else {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(operation, selected, &error);
                 return Err(error);
             }
         };
@@ -381,11 +391,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
         let ((tracker, target), stream) = match dispatch {
             Ok(result) => result,
             Err(error) => {
-                if let Some(selected) = selected {
-                    operation.invalidate_selected(selected);
-                } else {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(operation, selected, &error);
                 return Err(error);
             }
         };

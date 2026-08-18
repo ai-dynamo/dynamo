@@ -1308,6 +1308,7 @@ fn effective_router_config<'a>(
         .kv_router_config
         .router_decode_policy
         .clone();
+    effective.session_affinity_mode = frontend_config.session_affinity_mode;
     Cow::Owned(effective)
 }
 
@@ -1358,6 +1359,7 @@ mod tests {
     use super::*;
     use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
+    use crate::session_affinity::SessionAffinityMode;
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::Error;
 
@@ -1993,6 +1995,7 @@ mod tests {
         let mut frontend = RouterConfig::default();
         frontend.kv_router_config.router_prefill_policy = Some("frontend-prefill".to_string());
         frontend.kv_router_config.router_decode_policy = Some("frontend-decode".to_string());
+        frontend.session_affinity_mode = SessionAffinityMode::Soft;
 
         let mut worker = RouterConfig::default();
         worker.kv_router_config.router_temperature = 0.75;
@@ -2012,6 +2015,7 @@ mod tests {
             effective.kv_router_config.router_decode_policy.as_deref(),
             Some("frontend-decode")
         );
+        assert_eq!(effective.session_affinity_mode, SessionAffinityMode::Soft);
         assert!(worker.kv_router_config.router_prefill_policy.is_none());
         assert!(worker.kv_router_config.router_decode_policy.is_none());
     }

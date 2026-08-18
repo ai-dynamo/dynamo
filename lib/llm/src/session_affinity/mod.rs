@@ -9,7 +9,11 @@ mod state;
 
 use std::{str::FromStr, time::Duration};
 
-use dynamo_runtime::{component::Client, pipeline::Error};
+use dynamo_runtime::{
+    component::Client,
+    error::{ErrorType, match_error_chain},
+    pipeline::Error,
+};
 use serde::{Deserialize, Serialize};
 
 pub(crate) use coordinator::affinity_id;
@@ -18,6 +22,10 @@ pub(crate) use lifecycle::AffinityAcquire;
 pub use push_router::SessionAffinityPushRouter;
 
 pub type AffinityTarget = dynamo_runtime::pipeline::RouteTarget;
+
+pub(crate) fn is_cancelled(error: &Error) -> bool {
+    match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
