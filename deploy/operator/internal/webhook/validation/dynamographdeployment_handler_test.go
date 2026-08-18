@@ -83,8 +83,74 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD := oldDGD.DeepCopy()
 		now := metav1.Now()
 		newDGD.DeletionTimestamp = &now
-		if _, err := handler.ValidateUpdate(ctx, nil, newDGD); err != nil {
+		// Admission always supplies the old object on UPDATE, and the
+		// terminating path now reads it to enforce durable metadata rules.
+		if _, err := handler.ValidateUpdate(ctx, oldDGD, newDGD); err != nil {
 			t.Fatalf("ValidateUpdate() error = %v", err)
+		}
+	})
+
+	// A finalizer can hold a DGD terminating for an arbitrary period. Durable
+	// controller-owned metadata still has to be protected during that window,
+	// while anything required for cleanup to finish must still be allowed.
+	t.Run("terminating rejects replacing the workload provider", func(t *testing.T) {
+		oldDGD := newBetaDGDForValidation()
+		oldDGD.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}
+		newDGD := oldDGD.DeepCopy()
+		now := metav1.Now()
+		newDGD.DeletionTimestamp = &now
+		newDGD.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderComponent
+
+		_, err := handler.ValidateUpdate(ctx, oldDGD, newDGD)
+		assertBetaValidationErrors(t, err, []string{
+			`metadata.annotations[nvidia.com/workload-provider]: Invalid value: "component": field is immutable`,
+		})
+	})
+
+	t.Run("terminating rejects removing the workload provider", func(t *testing.T) {
+		oldDGD := newBetaDGDForValidation()
+		oldDGD.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}
+		newDGD := oldDGD.DeepCopy()
+		now := metav1.Now()
+		newDGD.DeletionTimestamp = &now
+		delete(newDGD.Annotations, consts.KubeAnnotationWorkloadProvider)
+
+		_, err := handler.ValidateUpdate(ctx, oldDGD, newDGD)
+		assertBetaValidationErrors(t, err, []string{
+			// Removal reports a null bad value, since there is no new value to name.
+			"metadata.annotations[nvidia.com/workload-provider]: Invalid value: null: field is immutable",
+		})
+	})
+
+	t.Run("terminating rejects an unsupported workload provider", func(t *testing.T) {
+		operatorCtx := dgdAdmissionContextWithUserInfo(
+			admissionv1.Update,
+			nvidiacomv1beta1.DynamoGraphDeploymentGVK,
+			&authenticationv1.UserInfo{Username: "system:serviceaccount:dynamo:dynamo-operator"},
+		)
+		oldDGD := newBetaDGDForValidation()
+		newDGD := oldDGD.DeepCopy()
+		now := metav1.Now()
+		newDGD.DeletionTimestamp = &now
+		newDGD.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: "bogus"}
+
+		_, err := handler.ValidateUpdate(operatorCtx, oldDGD, newDGD)
+		assertBetaValidationErrors(t, err, []string{
+			`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "bogus": supported values: "component", "grove"`,
+		})
+	})
+
+	t.Run("terminating accepts a finalizer-only update", func(t *testing.T) {
+		oldDGD := newBetaDGDForValidation()
+		oldDGD.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}
+		oldDGD.Finalizers = []string{"nvidia.com/dynamo-graph-deployment-finalizer"}
+		newDGD := oldDGD.DeepCopy()
+		now := metav1.Now()
+		newDGD.DeletionTimestamp = &now
+		newDGD.Finalizers = nil
+
+		if _, err := handler.ValidateUpdate(ctx, oldDGD, newDGD); err != nil {
+			t.Fatalf("ValidateUpdate() on finalizer removal error = %v, want nil", err)
 		}
 	})
 
