@@ -28,13 +28,14 @@ import (
 )
 
 type componentProgram struct {
-	sharedResources *dgdSharedResourcesReconciler
-	rollout         *dgdWorkerRolloutReconciler
-	restart         *dgdRestartReconciler
-	restartProgress *componentRestartProgressResolver
-	workloads       *componentWorkloadsReconciler
-	scalingAdapters *dgdScalingAdaptersReconciler
-	lwsEnabled      bool
+	sharedResources    *dgdSharedResourcesReconciler
+	rollout            *dgdWorkerRolloutReconciler
+	restart            *dgdRestartReconciler
+	restartProgress    *componentRestartProgressResolver
+	workloads          *componentWorkloadsReconciler
+	scalingAdapters    *dgdScalingAdaptersReconciler
+	elasticEPAutoscale *dgdElasticEPAutoscaleReconciler
+	lwsEnabled         bool
 }
 
 // newComponentProgram wires the DCD pathway at the DGD composition root.
@@ -51,12 +52,13 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 			r.SSHKeyManager,
 			r.RBACManager,
 		),
-		rollout:         rollout,
-		restart:         newDGDRestartReconciler(),
-		restartProgress: newComponentRestartProgressResolver(r.Client),
-		workloads:       newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
-		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
-		lwsEnabled:      r.RuntimeConfig.Gate.Enabled(features.LWS),
+		rollout:            rollout,
+		restart:            newDGDRestartReconciler(),
+		restartProgress:    newComponentRestartProgressResolver(r.Client),
+		workloads:          newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
+		scalingAdapters:    newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
+		elasticEPAutoscale: newDGDElasticEPAutoscaleReconciler(r.Client, r.RuntimeConfig.Gate),
+		lwsEnabled:         r.RuntimeConfig.Gate.Enabled(features.LWS),
 	}
 }
 
@@ -132,6 +134,13 @@ func (p *componentProgram) Reconcile(
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
+	}
+
+	// Phase 6: converge the elastic-EP engine's data-parallel size on joined capacity. Gated
+	// off by default; a no-op unless ElasticEPAutoscale is enabled. It never fails the program
+	// -- a scale hiccup must not wedge the DGD reconcile.
+	if err := p.elasticEPAutoscale.Reconcile(ctx, req.DGD); err != nil {
+		log.FromContext(ctx).Error(err, "elastic-EP autoscale reconcile failed")
 	}
 
 	programResult.applyReconcileResult(req.DGD.Generation, result)
