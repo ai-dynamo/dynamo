@@ -25,7 +25,7 @@
 #
 # KVIDX_SCHEDULER_CLS names a scheduler explicitly instead of relying on the
 # plugin fallback, e.g.
-#   gpu_memory_service.integrations.vllm.schedulers.KvIndexScheduler
+#   gpu_memory_service.integrations.vllm.kv_cache.scheduler.BlockIndexScheduler
 #
 # Usage: ./kv_index_failover_check.sh [MODEL] [NUM_GPU_BLOCKS]
 set -u

@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The takeover decision: which situation we woke into, and what we do about it.
+"""Whether a woken engine may reuse its predecessor's index.
 
-``test_kv_index.py`` covers the mirror's mechanics. This covers the scheduler
-side: the pause/unpause transitions that bracket a sleep, and the takeover they
+``test_block_index.py`` covers the store's mechanics. This covers the decision:
+the pause/unpause transitions that bracket a sleep, and the handover they
 trigger.
 
-These mix the *real* ``KvIndexMixin`` into a stand-in base, exactly as
-``schedulers.py`` does, so the transition logic under test is the shipped code.
+These mix the *real* ``MirrorsBlockIndex`` into a stand-in base, exactly as
+``scheduler.py`` does, so the transition logic under test is the shipped code.
 """
 
 from __future__ import annotations
@@ -20,7 +20,9 @@ import pytest
 
 pytest.importorskip("vllm")
 
-from gpu_memory_service.integrations.vllm import kv_index  # noqa: E402
+from gpu_memory_service.integrations.vllm.kv_cache.scheduler import (  # noqa: E402
+    MirrorsBlockIndex,
+)
 from vllm.v1.core import kv_cache_utils  # noqa: E402
 from vllm.v1.core.block_pool import BlockPool  # noqa: E402
 from vllm.v1.core.kv_cache_utils import (  # noqa: E402
@@ -58,7 +60,7 @@ class _Cfg:
 
 
 class FakeBaseScheduler:
-    """The surface KvIndexScheduler expects of whatever it derives from."""
+    """The surface MirrorsBlockIndex expects of whatever it derives from."""
 
     def __init__(self, pool):
         self.kv_cache_manager = type("M", (), {"block_pool": pool})()
@@ -77,8 +79,7 @@ class FakeBaseScheduler:
 
 
 def new_scheduler(pool):
-    cls = type("T", (kv_index.KvIndexMixin, FakeBaseScheduler), {})
-    return cls(pool)
+    return type("T", (MirrorsBlockIndex, FakeBaseScheduler), {})(pool)
 
 
 def key_for(tag: str):
@@ -97,7 +98,7 @@ def _seeded_none_hash(monkeypatch):
 
 @pytest.fixture
 def path(tmp_path, monkeypatch):
-    p = str(tmp_path / "kvidx.mirror")
+    p = str(tmp_path / "index.store")
     monkeypatch.setenv("GMS_KV_INDEX_PATH", p)
     return p
 
@@ -120,39 +121,39 @@ def sleep_wake(sched):
 
 
 def populate(pool, n=5):
-    pool._dyn_mirror.on_schedule()
+    pool._dyn_store.on_schedule()
     blocks = pool.get_new_blocks(n)
     for i, b in enumerate(blocks):
         pool._insert_block_hash(key_for(f"k{i}"), b, BLOCK_SIZE * (i + 1))
-    pool._dyn_mirror.on_update()
+    pool._dyn_store.on_complete()
     pool.free_blocks(blocks)
     return blocks
 
 
-def test_sleep_does_not_wipe_the_mirror(path):
+def test_sleep_does_not_wipe_the_store(path):
     pool = new_pool()
     set_adoption(path, False)
     sched = new_scheduler(pool)
     sleep_wake(sched)
     blocks = populate(pool)
-    assert pool._dyn_mirror.live_block_ids() == {b.block_id for b in blocks}
+    assert pool._dyn_store.live() == {b.block_id for b in blocks}
 
     sched.set_pause_state(PauseState.PAUSED_ALL)
     assert pool.reset_prefix_cache() is True
     assert not any(b.block_hash for b in pool.blocks), "vLLM's index should be gone"
-    assert pool._dyn_mirror.live_block_ids() == {
+    assert pool._dyn_store.live() == {
         b.block_id for b in blocks
-    }, "the mirror must survive a sleep -- GMS still holds the pages"
+    }, "the store must survive a sleep -- GMS still holds the pages"
 
 
-def test_reset_outside_a_sleep_does_wipe_the_mirror(path):
+def test_reset_outside_a_sleep_does_wipe_the_store(path):
     pool = new_pool()
     set_adoption(path, False)
     sleep_wake(new_scheduler(pool))
     populate(pool)
 
     assert pool.reset_prefix_cache() is True
-    assert pool._dyn_mirror.live_block_ids() == set()
+    assert pool._dyn_store.live() == set()
 
 
 def test_unpause_without_a_preceding_pause_does_nothing(path):
@@ -161,13 +162,13 @@ def test_unpause_without_a_preceding_pause_does_nothing(path):
     sched = new_scheduler(pool)
     sleep_wake(sched)
     populate(pool)
-    before = pool._dyn_mirror.live_block_ids()
+    before = pool._dyn_store.live()
     assert before, "nothing to protect -- test is vacuous"
 
     set_adoption(path, True)
     sched.set_pause_state(PauseState.UNPAUSED)
 
-    assert pool._dyn_mirror.live_block_ids() == before
+    assert pool._dyn_store.live() == before
 
 
 def test_inherited_pages_replay(path):

@@ -76,7 +76,7 @@ logger.info("[GMS] Worker module loaded - model loader registered, all patches a
 def _publish_kv_adoption(rank: int, adopted: bool) -> None:
     """Tell the scheduler process whether THIS rank inherited its KV pages.
 
-    The prefix-index takeover runs in the scheduler's process, which at TP>1 is
+    The block-index handover runs in the scheduler's process, which at TP>1 is
     not this one and has no handle on the executor -- so it cannot ask us over
     ``collective_rpc``. One tiny file per rank next to the mirror is the cheapest
     channel that crosses the boundary. Rewritten on every wake, so a rank that
