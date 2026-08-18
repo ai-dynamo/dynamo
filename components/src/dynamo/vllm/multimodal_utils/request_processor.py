@@ -241,6 +241,8 @@ class VllmMultimodalRequestProcessor:
         self._mm_kwargs_receiver: Optional[MmKwargsNixlReceiver] = None
         self._model_family = resolve_model_family(model)
         self._qwen_grid_params: Optional[QwenGridParams] = None
+        self._k3_expansion: Optional[tuple[int, list[int]]] = None
+        self._k3_expansion_cached = False
 
         if use_unified_vision_chunk is None:
             model_config = getattr(
@@ -254,6 +256,117 @@ class VllmMultimodalRequestProcessor:
                 )
             )
         self.use_unified_vision_chunk = use_unified_vision_chunk
+
+    def _kimi_k3_pad_expansion(self) -> Optional[tuple[int, list[int]]]:
+        """Return the structural-pad mapping for Kimi K3.
+
+        The native frontend emits one ``<|media_pad|>`` token per image.
+        vLLM's K3 processor instead matches the checkpoint's
+        ``<|kimi_image_placeholder|>`` sequence, so the adapter converts the
+        stable vocabulary token into that checkpoint-native sequence.
+
+        Successful K3 mappings and definite non-K3 model types are cached.
+        Incomplete engine metadata is not cached because it may become
+        available later during startup. Once a model identifies itself as K3,
+        malformed metadata is an error rather than a silent no-op.
+        """
+        if self._k3_expansion_cached:
+            return self._k3_expansion
+
+        model_config = getattr(
+            getattr(self.engine_client, "vllm_config", None), "model_config", None
+        )
+        hf_config = getattr(model_config, "hf_config", None)
+        if hf_config is None:
+            return None
+
+        model_type = getattr(hf_config, "model_type", None)
+        if model_type is None:
+            return None
+        if model_type != "kimi_k3":
+            self._k3_expansion_cached = True
+            return None
+
+        pad_id = getattr(hf_config, "media_placeholder_token_id", None)
+        if type(pad_id) is not int:
+            raise ValueError(
+                "Kimi-K3 requires an integer media_placeholder_token_id in "
+                "the model config"
+            )
+
+        image_placeholder = getattr(hf_config, "image_placeholder", None)
+        if not isinstance(image_placeholder, str) or not image_placeholder:
+            raise ValueError(
+                "Kimi-K3 requires a non-empty image_placeholder in the model config"
+            )
+
+        tokenizer = self.engine_client.get_tokenizer()
+        if tokenizer is None:
+            raise RuntimeError("Kimi-K3 tokenizer is unavailable")
+        native_ids = list(tokenizer.encode(image_placeholder, add_special_tokens=False))
+        if not native_ids or any(type(token_id) is not int for token_id in native_ids):
+            raise ValueError(
+                "Kimi-K3 image_placeholder must encode to a non-empty integer "
+                "token sequence"
+            )
+
+        self._k3_expansion = (pad_id, native_ids)
+        self._k3_expansion_cached = True
+        return self._k3_expansion
+
+    def _expand_kimi_k3_pads(
+        self, token_ids: list[int], multi_modal_data: Optional[dict[str, Any]]
+    ) -> list[int]:
+        """Replace each K3 structural image pad with its native token sequence."""
+        if not multi_modal_data:
+            return token_ids
+
+        image_modality = _normalize_forwarded_mm_modality(
+            "image",
+            self.use_unified_vision_chunk,
+        )
+        images = multi_modal_data.get(image_modality)
+        if images is None:
+            return token_ids
+        expected = len(images) if isinstance(images, (list, tuple)) else 1
+        if expected == 0:
+            return token_ids
+
+        expansion = self._kimi_k3_pad_expansion()
+        if expansion is None:
+            return token_ids
+        pad_id, native_ids = expansion
+
+        # Prompts here can exceed 100k tokens while pads number in the single
+        # digits. Locate the rare token in C and splice around it instead of
+        # walking every id in Python.
+        try:
+            first = token_ids.index(pad_id)
+        except ValueError:
+            return token_ids
+
+        pad_positions = [first]
+        while True:
+            try:
+                pad_positions.append(token_ids.index(pad_id, pad_positions[-1] + 1))
+            except ValueError:
+                break
+
+        if len(pad_positions) != expected:
+            raise ValueError(
+                f"Kimi-K3 prompt carries {len(pad_positions)} <|media_pad|> "
+                f"token(s) but {expected} image(s) were supplied; refusing to "
+                "expand."
+            )
+
+        expanded: list[int] = []
+        previous = 0
+        for position in pad_positions:
+            expanded.extend(token_ids[previous:position])
+            expanded.extend(native_ids)
+            previous = position + 1
+        expanded.extend(token_ids[previous:])
+        return expanded
 
     @staticmethod
     def _multimodal_disabled_error() -> ValueError:
@@ -562,7 +675,10 @@ class VllmMultimodalRequestProcessor:
                 )
 
         prompt_kwargs: dict[str, Any] = {
-            "prompt_token_ids": request["token_ids"],
+            "prompt_token_ids": self._expand_kimi_k3_pads(
+                request["token_ids"],
+                multi_modal_data,
+            ),
             "multi_modal_data": multi_modal_data,
         }
         if mm_uuids is not None:
