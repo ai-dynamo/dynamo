@@ -123,9 +123,11 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
         bindings_cargo = tomllib.load(handle)
 
     root_requirements = _project_requirements(ROOT / "pyproject.toml", extra="mocker")
-    aisimulate_requirements = (
-        _installed_requirements("aisimulate") if sys.version_info < (3, 13) else {}
-    )
+    if sys.version_info < (3, 13):
+        aisimulate_requirements = _installed_requirements("aisimulate")
+        assert set(aisimulate_requirements) == AIC_PACKAGES
+    else:
+        aisimulate_requirements = {}
     benchmark_requirements = _project_requirements(ROOT / "benchmarks/pyproject.toml")
     frontend_requirements = _requirements_file(
         ROOT / "container/deps/requirements.frontend.txt"
@@ -135,8 +137,6 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
     )
 
     assert set(root_requirements) == {"aiconfigurator-core"}
-    if aisimulate_requirements:
-        assert set(aisimulate_requirements) == AIC_PACKAGES
     assert set(benchmark_requirements) == {"aiconfigurator-core"}
     assert set(frontend_requirements) == {"aiconfigurator-core"}
     assert set(planner_requirements) == AIC_PACKAGES
