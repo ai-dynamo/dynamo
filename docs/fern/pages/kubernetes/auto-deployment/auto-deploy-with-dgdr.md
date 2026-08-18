@@ -393,9 +393,24 @@ spec:
                   value: kv
 ```
 
-Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` to find the generated
-component names. An override can modify only components already present in that generated DGD; it
-cannot add a new worker, EPP, or other topology component.
+Add overrides before profiling starts, using the exact, case-sensitive component names generated
+for the selected backend and topology. To discover the names for a specific Dynamo release:
+
+1. Create a temporary DGDR with `autoApply: false` and without component overrides.
+2. Wait for the DGDR to reach the `Ready` phase, then list the generated names:
+
+```bash
+kubectl get dgdr <name> -n <namespace> \
+  -o jsonpath='{range .status.profilingResults.selectedConfig.spec.components[*]}{.name}{"\n"}{end}'
+```
+
+3. Delete the temporary DGDR, then create the final DGDR with overrides that use those names.
+
+The DGDR spec becomes immutable after profiling starts, so you cannot add or change overrides on
+the temporary resource. An override can modify only components already present in the generated
+DGD; it cannot add a new worker, EPP, or other topology component. See
+[Generated component names](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-component-names)
+for the current profiler names by backend and topology.
 
 > [!IMPORTANT]
 > Older overrides used the `nvidia.com/v1alpha1` DGD shape. They remain supported for compatibility,
