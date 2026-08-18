@@ -161,6 +161,11 @@ impl SystemHealth {
     }
 
     /// Register a health check target for an endpoint
+    ///
+    /// A repeat registration under the same subject is a restart, not an error: the new
+    /// incarnation replaces the previous target and is announced to the health check
+    /// manager so the canary re-arms against it. Its health resets to `NotReady`, since
+    /// the earlier incarnation's verdict says nothing about the process now serving.
     pub fn register_health_check_target(
         &self,
         endpoint_subject: &str,
@@ -169,27 +174,21 @@ impl SystemHealth {
     ) {
         let key = endpoint_subject.to_owned();
 
-        // Atomically check+insert under a single write lock to avoid races.
-        let inserted = {
+        // Atomically replace under a single write lock to avoid races.
+        let replaced = {
             let mut targets = self.health_check_targets.write().unwrap();
-            match targets.entry(key.clone()) {
-                std::collections::hash_map::Entry::Occupied(_) => false,
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert(HealthCheckTarget { instance, payload });
-                    true
-                }
-            }
+            targets
+                .insert(key.clone(), HealthCheckTarget { instance, payload })
+                .is_some()
         };
 
-        if !inserted {
-            tracing::warn!(
-                "Attempted to re-register health check for endpoint '{}'; ignoring.",
-                key
-            );
-            return;
+        if replaced {
+            tracing::debug!("Re-registering health check for endpoint '{key}'; replacing target.");
         }
 
-        // Create and store a unique notifier for this endpoint (idempotent).
+        // Create and store a unique notifier for this endpoint (idempotent). The existing
+        // notifier is kept on replace so an outgoing monitor is not left holding a handle
+        // nobody signals.
         {
             let mut notifiers = self.health_check_notifiers.write().unwrap();
             notifiers
@@ -200,9 +199,13 @@ impl SystemHealth {
         // Initialize endpoint health status conservatively to NotReady.
         {
             let mut endpoint_health = self.endpoint_health.write().unwrap();
-            endpoint_health
-                .entry(key.clone())
-                .or_insert(HealthStatus::NotReady);
+            if replaced {
+                endpoint_health.insert(key.clone(), HealthStatus::NotReady);
+            } else {
+                endpoint_health
+                    .entry(key.clone())
+                    .or_insert(HealthStatus::NotReady);
+            }
         }
 
         if let Err(e) = self.new_endpoint_tx.send(key.clone()) {
@@ -212,6 +215,31 @@ impl SystemHealth {
                 key,
                 e
             );
+        }
+    }
+
+    /// Deregister an endpoint's health check target
+    ///
+    /// Clears the target, its notifier, and its health status together. Worker health is
+    /// derived from the registered targets, so a target left behind for an endpoint that
+    /// never finished starting — or that has shut down — holds the whole worker unhealthy
+    /// against an endpoint nobody can reach.
+    pub fn deregister_health_check_target(&self, endpoint_subject: &str) {
+        let removed = {
+            let mut targets = self.health_check_targets.write().unwrap();
+            targets.remove(endpoint_subject).is_some()
+        };
+        {
+            let mut notifiers = self.health_check_notifiers.write().unwrap();
+            notifiers.remove(endpoint_subject);
+        }
+        {
+            let mut endpoint_health = self.endpoint_health.write().unwrap();
+            endpoint_health.remove(endpoint_subject);
+        }
+
+        if removed {
+            tracing::debug!("Deregistered health check target for endpoint '{endpoint_subject}'");
         }
     }
 
@@ -409,5 +437,90 @@ mod tests {
             health.get_health_status().0,
             "after the canary marks it ready the worker is healthy"
         );
+    }
+
+    /// An endpoint that restarts under the same subject re-registers. The second
+    /// registration must take effect — the canary has to probe the process that is
+    /// actually serving now, with the payload that incarnation asked for.
+    #[test]
+    fn re_registration_installs_the_restarts_target_and_withholds_ready() {
+        let health = system_health(true);
+        health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "first"}),
+        );
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        assert!(health.get_health_status().0);
+
+        let mut restarted = instance();
+        restarted.instance_id = 2;
+        health.register_health_check_target(
+            ENDPOINT,
+            restarted,
+            serde_json::json!({"generation": "second"}),
+        );
+
+        let target = health
+            .get_health_check_target(ENDPOINT)
+            .expect("the restart is the registered target");
+        assert_eq!(target.payload, serde_json::json!({"generation": "second"}));
+        assert_eq!(target.instance.instance_id, 2);
+        assert!(
+            !health.get_health_status().0,
+            "the previous incarnation's canary verdict must not carry over to the restart"
+        );
+    }
+
+    /// The health check manager learns about endpoints through the registration
+    /// channel, so a restart has to be announced there too — otherwise the canary
+    /// keeps probing on behalf of an endpoint that is gone and never re-arms.
+    #[test]
+    fn re_registration_is_announced_to_the_health_check_manager() {
+        let health = system_health(true);
+        let mut rx = health
+            .take_new_endpoint_receiver()
+            .expect("the receiver is available before the manager takes it");
+
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+
+        assert_eq!(rx.try_recv().ok().as_deref(), Some(ENDPOINT));
+        assert_eq!(
+            rx.try_recv().ok().as_deref(),
+            Some(ENDPOINT),
+            "the restart must reach the manager as well as the first registration"
+        );
+    }
+
+    /// A target left behind for an endpoint that stopped keeps the worker unhealthy
+    /// forever: it is never probed, so it never becomes ready, and worker health is
+    /// the conjunction over registered targets.
+    #[test]
+    fn deregistering_a_stopped_endpoint_releases_the_worker() {
+        let mut health = system_health(true);
+        health.set_health_status(HealthStatus::Ready);
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        assert!(
+            !health.get_health_status().0,
+            "an unverified target holds the worker unhealthy"
+        );
+
+        health.deregister_health_check_target(ENDPOINT);
+
+        assert!(health.get_health_check_target(ENDPOINT).is_none());
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_none(),
+            "the notifier is endpoint-scoped state and goes with the target"
+        );
+        assert!(health.get_endpoint_health_status(ENDPOINT).is_none());
+        let (healthy, endpoints) = health.get_health_status();
+        assert!(
+            healthy,
+            "with the stopped endpoint's target gone the worker is judged on what remains"
+        );
+        assert!(!endpoints.contains_key(ENDPOINT));
     }
 }

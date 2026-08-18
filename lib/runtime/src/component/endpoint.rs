@@ -102,6 +102,90 @@ pub struct EndpointConfig {
     #[educe(Debug(ignore))]
     #[builder(default, setter(into, strip_option))]
     health_check_payload: Option<serde_json::Value>,
+
+    /// Engine to publish in the local endpoint registry for direct in-process calls
+    ///
+    /// Held here rather than registered eagerly: the registry is process-wide state whose
+    /// lifetime must match the endpoint's, so the start path owns both installing and
+    /// releasing it.
+    #[educe(Debug(ignore))]
+    #[builder(default, setter(custom))]
+    local_engine: Option<crate::local_endpoint_registry::LocalAsyncEngine>,
+}
+
+/// Process-wide state a start installs on behalf of one endpoint: its engine in the local
+/// registry and its health check target in [`SystemHealth`](crate::system_health::SystemHealth).
+///
+/// Neither is owned by the endpoint's task, so neither goes away when a start fails or an
+/// endpoint stops. Both are keyed by endpoint name alone, so a leftover from one start is
+/// indistinguishable from a live registration: the canary keeps dispatching into an engine
+/// for an endpoint that has no request-plane or discovery presence, and the abandoned
+/// target holds the whole worker unhealthy. This handle ties both to a single start.
+struct EndpointScopedState {
+    endpoint_name: String,
+    registry: crate::local_endpoint_registry::LocalEndpointRegistry,
+    system_health: Arc<parking_lot::Mutex<crate::system_health::SystemHealth>>,
+    local_engine: Option<crate::local_endpoint_registry::LocalAsyncEngine>,
+    health_check_registered: bool,
+}
+
+impl EndpointScopedState {
+    /// Install this start's endpoint-scoped state.
+    ///
+    /// Returns the handle that releases it, together with the canary notifier the handler
+    /// must be given when a health check target was registered.
+    fn acquire(
+        endpoint_name: String,
+        registry: crate::local_endpoint_registry::LocalEndpointRegistry,
+        system_health: Arc<parking_lot::Mutex<crate::system_health::SystemHealth>>,
+        local_engine: Option<crate::local_endpoint_registry::LocalAsyncEngine>,
+        health_check_target: Option<(Instance, serde_json::Value)>,
+    ) -> (Self, Option<Arc<tokio::sync::Notify>>) {
+        if let Some(engine) = &local_engine {
+            // Before the health check target, so the canary never sees a target whose
+            // engine has not landed yet.
+            registry.register(endpoint_name.clone(), engine.clone());
+            tracing::debug!("Registered engine for endpoint '{endpoint_name}' in local registry");
+        }
+
+        let health_check_registered = health_check_target.is_some();
+        let notifier = health_check_target.and_then(|(instance, payload)| {
+            tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
+            let guard = system_health.lock();
+            guard.register_health_check_target(&endpoint_name, instance, payload);
+            guard.get_endpoint_health_check_notifier(&endpoint_name)
+        });
+
+        (
+            Self {
+                endpoint_name,
+                registry,
+                system_health,
+                local_engine,
+                health_check_registered,
+            },
+            notifier,
+        )
+    }
+
+    /// Release everything [`acquire`](Self::acquire) installed.
+    ///
+    /// Every exit from the start path runs this: a start that never reached a serving
+    /// endpoint has to leave the process as it found it, and an endpoint that has stopped
+    /// must stop being dispatchable and stop counting towards worker health.
+    fn release(self) {
+        if self.health_check_registered {
+            self.system_health
+                .lock()
+                .deregister_health_check_target(&self.endpoint_name);
+        }
+        if let Some(engine) = &self.local_engine {
+            // Conditional on engine identity: an endpoint that restarted under the same
+            // name has already installed its own engine, and this cleanup must not evict
+            // the replacement.
+            self.registry.remove_if_current(&self.endpoint_name, engine);
+        }
+    }
 }
 
 impl EndpointConfigBuilder {
@@ -110,18 +194,14 @@ impl EndpointConfigBuilder {
     }
 
     /// Register an async engine in the local endpoint registry for direct in-process calls
+    ///
+    /// The engine is published when the endpoint starts and withdrawn when it stops or
+    /// fails to start.
     pub fn register_local_engine(
-        self,
+        mut self,
         engine: crate::local_endpoint_registry::LocalAsyncEngine,
     ) -> Result<Self> {
-        if let Some(endpoint) = &self.endpoint {
-            let registry = endpoint.drt().local_endpoint_registry();
-            registry.register(endpoint.name.clone(), engine);
-            tracing::debug!(
-                "Registered engine for endpoint '{}' in local registry",
-                endpoint.name
-            );
-        }
+        self.local_engine = Some(Some(engine));
         Ok(self)
     }
 
@@ -131,8 +211,14 @@ impl EndpointConfigBuilder {
 
     /// Start an endpoint and return once its exact discovery instance is callable.
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
-        let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
-            self.build_internal()?.dissolve();
+        let (
+            endpoint,
+            handler,
+            metrics_labels,
+            graceful_shutdown,
+            health_check_payload,
+            local_engine,
+        ) = self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -159,42 +245,46 @@ impl EndpointConfigBuilder {
         let server = endpoint.drt().request_plane_server().await?;
         let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
-        // Register health check target in SystemHealth if provided
-        if let Some(health_check_payload) = &health_check_payload {
-            if system_health.lock().health_check_enabled()
-                && endpoint
-                    .drt()
-                    .local_endpoint_registry()
-                    .get(&endpoint.name)
-                    .is_none()
-            {
-                anyhow::bail!(
-                    "Endpoint '{}' has a health_check_payload and canary is enabled, \
-                     but no local engine is registered. Call .register_local_engine() \
-                     before .start() so the canary health check can function.",
-                    endpoint.name
-                );
-            }
+        // Build the health check target in SystemHealth if provided
+        let health_check_target = match &health_check_payload {
+            Some(health_check_payload) => {
+                if system_health.lock().health_check_enabled() && local_engine.is_none() {
+                    anyhow::bail!(
+                        "Endpoint '{}' has a health_check_payload and canary is enabled, \
+                         but no local engine is registered. Call .register_local_engine() \
+                         before .start() so the canary health check can function.",
+                        endpoint.name
+                    );
+                }
 
-            let instance = Instance {
-                component: endpoint_id.component.clone(),
-                endpoint: endpoint_id.name.clone(),
-                namespace: endpoint_id.namespace.clone(),
-                instance_id: connection_id,
-                transport: transport.clone(),
-                device_type: endpoint_device_type(),
-                request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
-            };
-            tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
-            let guard = system_health.lock();
-            guard.register_health_check_target(
-                &endpoint.name,
-                instance,
-                health_check_payload.clone(),
-            );
-            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
-                handler.set_endpoint_health_check_notifier(notifier)?;
+                let instance = Instance {
+                    component: endpoint_id.component.clone(),
+                    endpoint: endpoint_id.name.clone(),
+                    namespace: endpoint_id.namespace.clone(),
+                    instance_id: connection_id,
+                    transport: transport.clone(),
+                    device_type: endpoint_device_type(),
+                    request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+                };
+                Some((instance, health_check_payload.clone()))
             }
+            None => None,
+        };
+
+        // Everything from here on is rollback territory: each exit below releases.
+        let (scoped_state, notifier) = EndpointScopedState::acquire(
+            endpoint.name.clone(),
+            endpoint.drt().local_endpoint_registry().clone(),
+            system_health.clone(),
+            local_engine,
+            health_check_target,
+        );
+
+        if let Some(notifier) = notifier
+            && let Err(error) = handler.set_endpoint_health_check_notifier(notifier)
+        {
+            scoped_state.release();
+            return Err(error);
         }
 
         tracing::debug!(
@@ -204,7 +294,7 @@ impl EndpointConfigBuilder {
         );
 
         // Register endpoint with the server (unified interface)
-        server
+        if let Err(error) = server
             .register_endpoint(
                 endpoint_name_for_task.clone(),
                 handler,
@@ -213,7 +303,11 @@ impl EndpointConfigBuilder {
                 component_name_for_task.clone(),
                 system_health.clone(),
             )
-            .await?;
+            .await
+        {
+            scoped_state.release();
+            return Err(error);
+        }
 
         let tracker_clone = if graceful_shutdown {
             tracing::debug!(
@@ -254,6 +348,7 @@ impl EndpointConfigBuilder {
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
                 }
+                scoped_state.release();
                 anyhow::bail!(
                     "Unable to register service for discovery. Check discovery service status"
                 );
@@ -297,6 +392,10 @@ impl EndpointConfigBuilder {
                 tracing::debug!("Unregister endpoint from graceful shutdown tracker");
                 tracker.unregister_endpoint();
             }
+
+            // Last: the endpoint is off the request plane and out of discovery, so it must
+            // also stop being locally dispatchable and stop counting towards worker health.
+            scoped_state.release();
 
             anyhow::Ok(())
         });
