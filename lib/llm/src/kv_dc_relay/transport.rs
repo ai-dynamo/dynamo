@@ -8,6 +8,7 @@ mod conformance;
 mod grpc;
 mod identity;
 mod load;
+mod metrics;
 mod server;
 mod source;
 #[cfg(test)]

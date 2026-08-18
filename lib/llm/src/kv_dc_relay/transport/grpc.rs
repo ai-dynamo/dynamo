@@ -24,6 +24,7 @@ use super::identity::{
     relay_identity_to_wire, unix_timestamp, worker_role_to_wire,
 };
 use super::load::LoadUpdateHub;
+use super::metrics::{StreamKind, SubscriberLimitScope, TransportMetrics};
 use super::source::WanPublicationSource;
 
 type CatalogStream =
@@ -47,14 +48,6 @@ impl SubscriberLimit {
             maximum,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum StreamKind {
-    Catalog,
-    Pool,
-    Readiness,
-    Load,
 }
 
 #[derive(Clone)]
@@ -99,6 +92,7 @@ impl SubscriberLimits {
 pub(crate) struct KvEventRelayService {
     source: WanPublicationSource,
     cancel: CancellationToken,
+    metrics: Arc<TransportMetrics>,
     pool_heartbeat_interval: Duration,
     readiness_heartbeat_interval: Duration,
     load_updates: LoadUpdateHub,
@@ -118,11 +112,13 @@ impl KvEventRelayService {
     pub(crate) fn new(
         source: WanPublicationSource,
         cancel: CancellationToken,
+        metrics: Arc<TransportMetrics>,
         config: KvEventRelayServiceConfig,
     ) -> Self {
         Self {
             source,
             cancel,
+            metrics,
             pool_heartbeat_interval: config.pool_heartbeat_interval,
             readiness_heartbeat_interval: config.readiness_heartbeat_interval,
             load_updates: config.load_updates,
@@ -133,7 +129,10 @@ impl KvEventRelayService {
 
     #[allow(clippy::result_large_err)]
     fn acquire_stream_permit(&self, stream: StreamKind) -> Result<OwnedSemaphorePermit, Status> {
-        self.limits.acquire(stream)
+        self.limits.acquire(stream).inspect_err(|_| {
+            self.metrics
+                .subscriber_limit_rejected(stream, SubscriberLimitScope::Total);
+        })
     }
 }
 
@@ -167,10 +166,12 @@ impl proto::KvEventRelay for KvEventRelayService {
         tracing::debug!(%subscriber_id, "KV Relay pool catalog subscriber connected");
         let mut catalogs = self.source.watch_catalog();
         let cancel = self.cancel.clone();
+        let metrics = self.metrics.clone();
         let relay = self.source.relay_identity();
         let initial = catalogs.borrow().clone();
         let stream = try_stream! {
             let _permit = permit;
+            let _subscriber = metrics.subscriber_guard(StreamKind::Catalog);
             yield catalog_to_wire(initial, relay);
             loop {
                 let changed = tokio::select! {
@@ -217,6 +218,18 @@ impl proto::KvEventRelay for KvEventRelayService {
             .await
         {
             Ok(subscription) => subscription,
+            Err(error @ PublicationHubError::SubscriberLimit { .. }) => {
+                self.metrics
+                    .subscriber_limit_rejected(StreamKind::Pool, SubscriberLimitScope::PerPool);
+                return Err(publication_status(error));
+            }
+            Err(error @ PublicationHubError::InitializedHubLimit { .. }) => {
+                self.metrics.subscriber_limit_rejected(
+                    StreamKind::Pool,
+                    SubscriberLimitScope::InitializedHub,
+                );
+                return Err(publication_status(error));
+            }
             Err(error) => return Err(publication_status(error)),
         };
         let identity = subscription.snapshot().identity();
@@ -241,6 +254,7 @@ impl proto::KvEventRelay for KvEventRelayService {
             PoolStreamContext {
                 relay: self.source.relay_identity(),
                 cancel: self.cancel.clone(),
+                metrics: self.metrics.clone(),
                 heartbeat_interval: self.pool_heartbeat_interval,
                 subscriber_id,
                 pool_id,
@@ -260,11 +274,13 @@ impl proto::KvEventRelay for KvEventRelayService {
         tracing::debug!(%subscriber_id, "KV Relay serving-readiness subscriber connected");
         let mut snapshots = self.source.watch_readiness();
         let cancel = self.cancel.clone();
+        let metrics = self.metrics.clone();
         let relay = self.source.relay_identity();
         let heartbeat_interval = self.readiness_heartbeat_interval;
         let initial = snapshots.borrow().clone();
         let stream = try_stream! {
             let _permit = permit;
+            let _subscriber = metrics.subscriber_guard(StreamKind::Readiness);
             yield readiness_to_wire(&initial, relay);
             let first_heartbeat = tokio::time::Instant::now() + heartbeat_interval;
             let mut heartbeat = tokio::time::interval_at(first_heartbeat, heartbeat_interval);
@@ -299,8 +315,10 @@ impl proto::KvEventRelay for KvEventRelayService {
         let mut updates = self.load_updates.subscribe();
         let initial = self.load_updates.current();
         let cancel = self.cancel.clone();
+        let metrics = self.metrics.clone();
         let stream = try_stream! {
             let _permit = permit;
+            let _subscriber = metrics.subscriber_guard(StreamKind::Load);
             let mut current_sequence = initial.window_sequence;
             yield initial;
             loop {
@@ -316,6 +334,7 @@ impl proto::KvEventRelay for KvEventRelayService {
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        metrics.subscriber_lagged(StreamKind::Load);
                         tracing::warn!(%subscriber_id, skipped, "KV Relay load subscriber lagged; forcing resubscribe");
                         Err(Status::resource_exhausted(format!(
                             "load subscriber lagged by {skipped} complete windows; resubscribe"
@@ -334,6 +353,7 @@ impl proto::KvEventRelay for KvEventRelayService {
 struct PoolStreamContext {
     relay: DcRelayIdentity,
     cancel: CancellationToken,
+    metrics: Arc<TransportMetrics>,
     heartbeat_interval: Duration,
     subscriber_id: String,
     pool_id: PoolId,
@@ -348,6 +368,7 @@ fn pool_update_stream(
     let PoolStreamContext {
         relay,
         cancel,
+        metrics,
         heartbeat_interval,
         subscriber_id,
         pool_id,
@@ -357,6 +378,7 @@ fn pool_update_stream(
     let initial_sequence = subscription.snapshot().sequence();
     Box::pin(stream! {
         let _permit = permit;
+        let _subscriber = metrics.subscriber_guard(StreamKind::Pool);
         let mut current_sequence = initial_sequence;
         for frame in bootstrap {
             current_sequence = frame.sequence;
@@ -381,6 +403,7 @@ fn pool_update_stream(
                         heartbeat.reset();
                     }
                     Err(PublicationHubError::SubscriberLagged(_)) => {
+                        metrics.subscriber_lagged(StreamKind::Pool);
                         tracing::warn!(%subscriber_id, %pool_id, "KV Relay pool subscriber exceeded its bounded queue; forcing resubscribe");
                         yield Err(Status::resource_exhausted(
                             "pool subscriber exceeded its bounded queue; resubscribe for a fresh snapshot",
@@ -393,6 +416,7 @@ fn pool_update_stream(
                     }
                 },
                 _ = heartbeat.tick() => {
+                    metrics.pool_heartbeats_total.inc();
                     yield Ok(filter_update(encode_heartbeat(initial_identity, current_sequence), relay));
                 }
             }

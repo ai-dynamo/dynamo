@@ -21,6 +21,7 @@ use super::super::protocol::{FILE_DESCRIPTOR_SET, KvEventRelayServer};
 use super::super::transport_config::KvDcRelayTransportConfig;
 use super::grpc::{KvEventRelayService, KvEventRelayServiceConfig, SubscriberLimits};
 use super::load::{LoadUpdateHub, run_load_publisher};
+use super::metrics::{MetricsLease, TransportMetrics};
 use super::source::WanPublicationSource;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,6 +38,7 @@ pub(crate) struct KvDcRelayTransport {
     cancel: CancellationToken,
     health: Arc<RwLock<KvDcRelayTransportHealth>>,
     task: Mutex<Option<JoinHandle<()>>>,
+    metrics_lease: Mutex<Option<MetricsLease>>,
 }
 
 impl KvDcRelayTransport {
@@ -56,6 +58,8 @@ impl KvDcRelayTransport {
         let bound_address = listener
             .local_addr()
             .context("reading bound KV Relay gRPC listener address")?;
+        let (metrics, metrics_lease) =
+            TransportMetrics::acquire(&source, server_cert_not_after, client_ca_not_after)?;
         let cancel = source.lifecycle().child_token();
         let fatal_cancel = source.lifecycle().clone();
         let health = Arc::new(RwLock::new(KvDcRelayTransportHealth {
@@ -77,6 +81,7 @@ impl KvDcRelayTransport {
         let service = KvEventRelayServer::new(KvEventRelayService::new(
             source.clone(),
             cancel.clone(),
+            metrics.clone(),
             KvEventRelayServiceConfig {
                 pool_heartbeat_interval: Duration::from_millis(config.pool_heartbeat_interval_ms),
                 readiness_heartbeat_interval: Duration::from_millis(
@@ -133,6 +138,7 @@ impl KvDcRelayTransport {
             source,
             load_window,
             load_updates,
+            metrics,
             cancel.clone(),
         ));
         let supervisor_cancel = cancel.clone();
@@ -148,6 +154,7 @@ impl KvDcRelayTransport {
             cancel,
             health,
             task: Mutex::new(Some(task)),
+            metrics_lease: Mutex::new(Some(metrics_lease)),
         })
     }
 
@@ -165,6 +172,7 @@ impl KvDcRelayTransport {
             tracing::warn!(%error, "KV Relay transport supervisor failed during shutdown");
         }
         self.health.write().serving = false;
+        self.metrics_lease.lock().take();
     }
 }
 

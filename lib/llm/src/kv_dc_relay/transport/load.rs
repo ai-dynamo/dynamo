@@ -12,6 +12,7 @@ use super::super::identity::DcRelayIdentity;
 use super::super::load::PoolLoadSnapshot;
 use super::super::protocol as proto;
 use super::identity::{producer_to_wire, relay_identity_to_wire, unix_timestamp};
+use super::metrics::TransportMetrics;
 use super::source::WanPublicationSource;
 
 #[derive(Clone)]
@@ -48,6 +49,7 @@ pub(crate) async fn run_load_publisher(
     source: WanPublicationSource,
     window: Duration,
     updates: LoadUpdateHub,
+    metrics: Arc<TransportMetrics>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let first_tick = tokio::time::Instant::now() + window;
@@ -64,8 +66,10 @@ pub(crate) async fn run_load_publisher(
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("KV Relay load window sequence exhausted"))?;
         let snapshots = source.load_snapshots();
+        metrics.observe_load_window(&snapshots);
         let update = load_update(source.relay_identity(), snapshots, window, sequence);
         updates.publish(update);
+        metrics.load_updates_total.inc();
     }
 }
 

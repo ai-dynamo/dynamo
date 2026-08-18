@@ -24,12 +24,12 @@ The `type` on each field below is a [Prometheus metric type](https://prometheus.
 | Family | Emitted by | Scrape endpoint |
 |--------|------------|-----------------|
 | `dynamo_frontend_*` | HTTP frontend (`python -m dynamo.frontend`) | `/metrics` on `DYN_HTTP_PORT` (default 8000) |
-| `dynamo_component_*` | Backend workers, standalone router | `/metrics` on `DYN_SYSTEM_PORT` (must be set) |
+| `dynamo_component_*` | Backend workers, standalone router, DC KV Relay | `/metrics` on `DYN_SYSTEM_PORT` (must be set) |
 | `dynamo_router_overhead_*` | Frontend with KV routing | `/metrics` on `DYN_HTTP_PORT` |
 | `dynamo_epp_*` | Endpoint picker (Gateway API Inference Extension routing) | `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090) |
 | `dynamo_operator_*` | Kubernetes operator | See [Operator Metrics](operator-metrics.mdx) |
 
-Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (disabled by default; the Kubernetes operator typically sets `9090`, local examples use `8081`). See [Environment Variables](environment-variables.mdx#system-and-metrics).
+Backend workers and standalone components expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (disabled by default; the Kubernetes operator typically sets `9090`, local examples use `8081`). See [Environment Variables](environment-variables.mdx#system-and-metrics).
 
 Engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`) are emitted by the backend engines themselves and are cataloged separately — see [Metrics Comparison](metrics-comparison.md). NIXL transfer metrics are exposed on their own port and owned by the [upstream NIXL project](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md).
 
@@ -201,7 +201,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 ## Component metrics
 
-Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) at `/metrics` on `DYN_SYSTEM_PORT`. All carry the hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`) — see [Runtime-injected labels](metric-labels.mdx#runtime-injected-labels).
+Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) and standalone components at `/metrics` on `DYN_SYSTEM_PORT`. All carry the hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`) — see [Runtime-injected labels](metric-labels.mdx#runtime-injected-labels).
 
 <ParamField path="dynamo_component_inflight_requests" type="gauge">
   Requests currently being processed by the component.
@@ -250,6 +250,72 @@ The following worker-side gauges and counter appear only when a hard concurrency
 </ParamField>
 
 Specialized components expose additional families under their own prefix, e.g. `dynamo_preprocessor_*` for preprocessor components.
+
+### KV DC Relay metrics
+
+`dynamo_component_kv_dc_relay_*` metrics are registered when the KV DC Relay WAN server is
+enabled with `--bind`. Set `DYN_SYSTEM_PORT` to expose them through Dynamo's system metrics
+endpoint. The Relay does not open a separate metrics listener.
+
+<ParamField path="dynamo_component_kv_dc_relay_subscribers" type="gauge">
+  Current Relay stream subscribers. Labeled by [`stream`](metric-labels.mdx#stream).
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_subscriber_lagged_total" type="counter">
+  Relay streams terminated because a subscriber fell behind its bounded queue. Labeled by
+  [`stream`](metric-labels.mdx#stream).
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_subscriber_limit_rejected_total" type="counter">
+  Relay subscriptions rejected because the configured concurrency limit was reached. Labeled by
+  [`stream`](metric-labels.mdx#stream).
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_pool_heartbeats_total" type="counter">
+  Application-level heartbeats emitted across CKF pool streams.
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_load_updates_total" type="counter">
+  Complete atomic pool-load windows emitted by the Relay.
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_catalog_pool_count" type="gauge">
+  Pools currently advertised in the Relay catalog.
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_requested_publication_hub_count" type="gauge">
+  Pools whose lazy publication hub has been requested by at least one subscriber.
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_initialized_publication_hub_count" type="gauge">
+  Per-pool publication hubs initialized by at least one pool subscriber and still owned by an
+  active generation.
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_ready_publication_hub_count" type="gauge">
+  Publication hubs with a contiguous, ready CKF mirror.
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_idle_publication_hub_count" type="gauge">
+  Ready publication hubs with no active subscribers.
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_terminal_publication_failures_total" type="counter">
+  Pool generations fenced after a terminal publication failure.
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_degraded_load_coverage_pool_count" type="gauge">
+  Pools where at least one load signal has no expected ranks or fewer observed ranks than expected.
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_serving_topology_count" type="gauge">
+  Current namespace model topologies by serving-readiness [`state`](metric-labels.mdx#state).
+</ParamField>
+
+<ParamField path="dynamo_component_kv_dc_relay_tls_expiry_timestamp_seconds" type="gauge">
+  TLS material expiry as a Unix timestamp in seconds. Labeled by
+  [`material`](metric-labels.mdx#material).
+</ParamField>
 
 ## Router metrics
 
