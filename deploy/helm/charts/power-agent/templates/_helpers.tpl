@@ -220,14 +220,15 @@ not both enabled, and that dev mode has a pinned nodeName. Surfaces at
 {{- end -}}
 
 {{/*
-Validate the pod termination grace period. SIGTERM cleanup restores managed GPU
-caps from run()'s finally after any in-flight pod LIST returns, so very small
-values defeat the safety invariant this knob exists to protect.
+Validate the pod termination grace period. SIGTERM cleanup restores static GPU
+caps, retains active transactional ownership, and persists final state from
+run()'s finally after any in-flight pod LIST returns, so very small values
+defeat the safety invariant this knob exists to protect.
 */}}
 {{- define "power-agent.validateTerminationGracePeriod" -}}
 {{- $grace := int .Values.terminationGracePeriodSeconds -}}
 {{- if lt $grace 60 -}}
-{{- fail (printf "terminationGracePeriodSeconds=%d is too low for safe Power Agent shutdown; must be >= 60 seconds so SIGTERM cleanup has time to restore managed GPU caps after an in-flight pod LIST returns. Default is 60." $grace) -}}
+{{- fail (printf "terminationGracePeriodSeconds=%d is too low for safe Power Agent shutdown; must be >= 60 seconds so SIGTERM cleanup has time to restore static caps and persist transactional ownership after an in-flight pod LIST returns. Default is 60." $grace) -}}
 {{- end -}}
 {{- end -}}
 
@@ -246,6 +247,17 @@ Pod objects (no leftover ImagePullBackOff, no leftover RBAC).
 {{- $a := .Values.agent.actuator | default "" -}}
 {{- if not (or (eq $a "nvml") (eq $a "dcgm")) -}}
 {{- fail (printf "agent.actuator must be 'nvml' or 'dcgm'; got %q" $a) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Transactional mode needs the production DaemonSet's kubelet PodResources
+socket. Dev-pod mode intentionally retains its Phase 1 surface, and an install
+with both workload modes disabled would provide no enforcing Agent.
+*/}}
+{{- define "power-agent.validateTransactional" -}}
+{{- if and .Values.agent.transactional.enabled (not .Values.daemonset.enabled) -}}
+{{- fail "agent.transactional.enabled=true requires daemonset.enabled=true; transactional mode needs the production DaemonSet" -}}
 {{- end -}}
 {{- end -}}
 

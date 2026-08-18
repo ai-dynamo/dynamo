@@ -41,6 +41,28 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## 🔄 Upgrading Notes
 
+### Power-aware Planner Phase 2 is default-off
+
+Upgrades preserve Phase 1 behavior. The platform chart does not grant the
+Planner Phase 2 DGPB/Pod permissions unless explicitly enabled:
+
+```yaml
+dynamo-operator:
+  planner:
+    powerAwareness:
+      enabled: false
+```
+
+Before setting this to `true`, qualify the exact GPU SKU, driver, and DCGM
+pair, deploy the Power Agent chart with `agent.transactional.enabled=true`
+only on a labeled canary node pool, and verify that every transactional runtime
+image contains `dynamo-power-gate`. Enroll one DGD, wait for its
+`DynamoGraphPowerBudget` `status.phase` to reach `Idle` rather than
+`Unqualified`, and inspect a pending DGDSA's `status.pendingReason` for
+`UnqualifiedHardware` before expanding the Power Agent `nodeSelector`. Keep
+the setting false for static-only clusters.
+
+
 ### Runtime version override for custom runtime images (v1.4.0+)
 
 Each `DynamoGraphDeployment` (DGD) or standalone `DynamoComponentDeployment` (DCD)

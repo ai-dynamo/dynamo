@@ -36,6 +36,34 @@ tests:
               - list
         documentIndex: 0
 
+  - it: grants only DGPB get in ClusterRole when powerAwareness is enabled
+    set:
+      dynamo-operator.planner.powerAwareness.enabled: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographpowerbudgets
+            verbs:
+              - get
+        documentIndex: 0
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographpowerbudgets
+            verbs:
+              - create
+              - update
+              - patch
+              - delete
+        documentIndex: 0
+
   # ── namespace-restricted mode ─────────────────────────────────────────────────
 
   - it: omits pods/list from Role when powerAwareness is disabled in namespace-restricted mode
@@ -69,4 +97,34 @@ tests:
               - pods
             verbs:
               - list
+        documentIndex: 1
+
+  - it: grants only DGPB get in Role when powerAwareness is enabled in namespace-restricted mode
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+      dynamo-operator.planner.powerAwareness.enabled: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographpowerbudgets
+            verbs:
+              - get
+        documentIndex: 1
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographpowerbudgets
+            verbs:
+              - create
+              - update
+              - patch
+              - delete
         documentIndex: 1

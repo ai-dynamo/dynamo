@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: transactional Pod access and kubelet PodResources mount
+release:
+  name: power-agent
+  namespace: dynamo-system
+
+tests:
+  - it: preserves exact Phase 1 cluster-wide Pod verbs by default
+    templates:
+      - templates/role.yaml
+    set:
+      image.tag: v1.0.0
+    asserts:
+      - isKind:
+          of: ClusterRole
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["get", "list", "watch"]
+
+  - it: preserves exact Phase 1 namespace-scoped Pod verbs by default
+    templates:
+      - templates/role.yaml
+    set:
+      image.tag: v1.0.0
+      rbac.namespaceRestricted: true
+    asserts:
+      - isKind:
+          of: Role
+      - equal:
+          path: metadata.namespace
+          value: dynamo-system
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["get", "list", "watch"]
+
+  - it: does not mount kubelet PodResources by default
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.0.0
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: pod-resources
+            mountPath: /var/lib/kubelet/pod-resources
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: pod-resources
+            hostPath:
+              path: /var/lib/kubelet/pod-resources
+              type: Directory
+
+  - it: grants exact cluster-wide transactional Pod verbs when enabled
+    templates:
+      - templates/role.yaml
+    set:
+      image.tag: v1.0.0
+      agent.transactional.enabled: true
+    asserts:
+      - isKind:
+          of: ClusterRole
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["get", "list", "watch", "patch"]
+
+  - it: grants exact namespace-scoped transactional Pod verbs when enabled
+    templates:
+      - templates/role.yaml
+    set:
+      image.tag: v1.0.0
+      agent.transactional.enabled: true
+      rbac.namespaceRestricted: true
+    asserts:
+      - isKind:
+          of: Role
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["get", "list", "watch", "patch"]
+
+  - it: mounts kubelet PodResources read-only when transactional mode is enabled
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.0.0
+      agent.transactional.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: pod-resources
+            mountPath: /var/lib/kubelet/pod-resources
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: pod-resources
+            hostPath:
+              path: /var/lib/kubelet/pod-resources
+              type: Directory
+
+  - it: rejects transactional dev-pod mode
+    templates:
+      - templates/role.yaml
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node
+      agent.transactional.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "agent.transactional.enabled=true requires daemonset.enabled=true; transactional mode needs the production DaemonSet"
+
+  - it: rejects transactional mode when no Agent workload is enabled
+    templates:
+      - templates/role.yaml
+    set:
+      daemonset.enabled: false
+      dev.enabled: false
+      agent.transactional.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "agent.transactional.enabled=true requires daemonset.enabled=true; transactional mode needs the production DaemonSet"

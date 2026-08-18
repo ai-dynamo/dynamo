@@ -1,6 +1,7 @@
 {{- include "power-agent.validateImageTag" . -}}
 {{- include "power-agent.validateMutex" . -}}
 {{- include "power-agent.validateActuator" . -}}
+{{- include "power-agent.validateTransactional" . -}}
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -37,10 +38,11 @@ spec:
       # returned by nvmlDeviceGetComputeRunningProcesses. See power_agent.py
       # _extract_pod_uid_from_cgroup.
       hostPID: true
-      # Graceful shutdown restores default TGP on managed GPUs before exit
-      # (the reconcile loop runs the restore after SIGTERM, not the signal
-      # handler itself). Give it headroom to finish within the grace period;
-      # the pod LIST best-effort bounds (see power_agent.py
+      # Graceful shutdown restores static ownership to default TGP and keeps
+      # active transactional caps for the replacement Agent (the reconcile
+      # loop performs cleanup after SIGTERM, not the signal handler itself).
+      # Give it headroom to finish within the grace period; the pod LIST
+      # best-effort bounds (see power_agent.py
       # K8S_LIST_*_TIMEOUT_S) substantially limit cleanup delay if SIGTERM lands
       # mid-LIST. Configurable so operators on high-density nodes can extend it.
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
@@ -127,6 +129,11 @@ spec:
               readOnly: true
             - name: state
               mountPath: /var/lib/dynamo-power-agent
+            {{- if .Values.agent.transactional.enabled }}
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+            {{- end }}
       volumes:
         - name: proc
           hostPath:
@@ -135,4 +142,10 @@ spec:
           hostPath:
             path: {{ .Values.state.hostPath | quote }}
             type: DirectoryOrCreate
+        {{- if .Values.agent.transactional.enabled }}
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+            type: Directory
+        {{- end }}
 {{- end }}
