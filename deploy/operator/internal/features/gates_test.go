@@ -8,9 +8,12 @@ package features
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 )
 
 func TestDefaults(t *testing.T) {
@@ -97,6 +100,65 @@ func TestAPIGroupServesVersion(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := apiGroupServesVersion(apiGroups, tt.groupName, tt.version); got != tt.want {
 				t.Fatalf("apiGroupServesVersion() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectPodSnapshotAvailability(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		want       bool
+		wantErr    bool
+	}{
+		{
+			name:       "API group version absent",
+			statusCode: http.StatusNotFound,
+			body:       `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`,
+		},
+		{
+			name:       "PodSnapshot resource absent",
+			statusCode: http.StatusOK,
+			body:       `{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"nvidia.com/v1alpha1","resources":[]}`,
+		},
+		{
+			name:       "PodSnapshot resource present",
+			statusCode: http.StatusOK,
+			body:       `{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"nvidia.com/v1alpha1","resources":[{"name":"podsnapshots","singularName":"podsnapshot","namespaced":true,"kind":"PodSnapshot","verbs":["get","list","watch"]}]}`,
+			want:       true,
+		},
+		{
+			name:       "discovery error",
+			statusCode: http.StatusInternalServerError,
+			body:       `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"InternalError","code":500}`,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Serve the scenario's API resource discovery response")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/apis/nvidia.com/v1alpha1" {
+					t.Errorf("discovery path = %q, want %q", r.URL.Path, "/apis/nvidia.com/v1alpha1")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.statusCode)
+				if _, err := w.Write([]byte(tt.body)); err != nil {
+					t.Errorf("write discovery response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			t.Log("Detect whether the exact PodSnapshot resource is available")
+			got, err := detectPodSnapshotAvailability(context.Background(), &rest.Config{Host: server.URL})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("detectPodSnapshotAvailability() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("detectPodSnapshotAvailability() = %v, want %v", got, tt.want)
 			}
 		})
 	}

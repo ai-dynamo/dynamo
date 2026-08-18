@@ -13,7 +13,9 @@ import (
 	"reflect"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
@@ -33,8 +35,8 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Configuration: checkpoint.enabled
-	// Auto-detection: N/A
-	// Requires: N/A
+	// Auto-detection: nvidia.com/v1alpha1 PodSnapshot resource
+	// Requires: Snapshot operator serving nvidia.com/v1alpha1 PodSnapshot resources
 	// Default: false
 	Checkpoint Name = "checkpoint"
 
@@ -163,10 +165,18 @@ func Defaults() Gates {
 // New detects cluster capabilities and resolves them with operator configuration.
 func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) (Gates, error) {
 	gates := Defaults()
-	gates.Checkpoint = config.Checkpoint.Enabled
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 
 	var err error
+	podSnapshotAvailable, err := detectPodSnapshotAvailability(ctx, mgr.GetConfig())
+	if err != nil {
+		return Gates{}, err
+	}
+
+	if gates.Checkpoint, err = resolve(ptr.To(config.Checkpoint.Enabled), podSnapshotAvailable,
+		"checkpoint is explicitly enabled in config but the nvidia.com/v1alpha1 PodSnapshot API was not detected in the cluster"); err != nil {
+		return Gates{}, err
+	}
 	if gates.Grove, err = resolve(config.Orchestrators.Grove.Enabled, detectAPIGroup(ctx, mgr, "grove.io", ""),
 		"Grove is explicitly enabled in config but the Grove API group was not detected in the cluster"); err != nil {
 		return Gates{}, err
@@ -218,6 +228,36 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 // DetectInferencePoolAvailability checks whether the Gateway API Inference Extension is registered.
 func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroup(ctx, mgr, "inference.networking.k8s.io", "")
+}
+
+func detectPodSnapshotAvailability(ctx context.Context, cfg *rest.Config) (bool, error) {
+	logger := log.FromContext(ctx)
+	resource := snapshotv1alpha1.GroupVersion.WithResource("podsnapshots")
+	logValues := []any{"groupVersion", resource.GroupVersion().String(), "resource", resource.Resource}
+	if cfg == nil {
+		return false, errors.New("PodSnapshot API detection failed, no discovery client available")
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		return false, fmt.Errorf("create discovery client for PodSnapshot API detection: %w", err)
+	}
+	apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(resource.GroupVersion().String())
+	if apierrors.IsNotFound(err) {
+		logger.Info("API resource not available", logValues...)
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("discover PodSnapshot API resource: %w", err)
+	}
+	for _, candidate := range apiResourceList.APIResources {
+		if candidate.Name == resource.Resource {
+			logger.Info("API resource is available", logValues...)
+			return true, nil
+		}
+	}
+	logger.Info("API resource not available", logValues...)
+	return false, nil
 }
 
 // resolve uses auto-detection when unset, disables on false, and requires availability on true.
