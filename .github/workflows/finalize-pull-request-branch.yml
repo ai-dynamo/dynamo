@@ -37,6 +37,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "ai-dynamo/dynamo" ]]; then
+            echo "::error title=Pull request branch finalizer::Unexpected repository: $GITHUB_REPOSITORY"
+            exit 1
+          fi
           if [[ ! "$GITHUB_REF_NAME" =~ ^pull-request/[0-9]+$ ]]; then
             echo "::error title=Pull request branch finalizer::Unexpected branch: $GITHUB_REF_NAME"
             exit 1
@@ -56,7 +60,7 @@ jobs:
 
           for attempt in 1 2 3 4 5; do
             run_paths=$(gh api --method GET --paginate \
-              "repos/${GITHUB_REPOSITORY}/actions/runs" \
+              "repos/ai-dynamo/dynamo/actions/runs" \
               --raw-field branch="$GITHUB_REF_NAME" \
               --raw-field event=push \
               --raw-field head_sha="$GITHUB_SHA" \
@@ -86,27 +90,38 @@ jobs:
         with:
           client-id: ${{ vars.PR_BRANCH_CLEANER_CLIENT_ID }}
           private-key: ${{ secrets.PR_BRANCH_CLEANER_PRIVATE_KEY }}
+          owner: ai-dynamo
+          repositories: dynamo
           permission-contents: write
-
-      - name: Checkout the exact workflow commit
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          ref: ${{ github.sha }}
-          token: ${{ steps.maintenance-token.outputs.token }}
 
       - name: Delete the unchanged branch
         shell: bash
+        env:
+          BRANCH_DELETE_TOKEN: ${{ steps.maintenance-token.outputs.token }}
+          GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           delete_ref="refs/heads/${GITHUB_REF_NAME}"
+          repository_url="https://github.com/ai-dynamo/dynamo.git"
+          git_directory="${RUNNER_TEMP}/pull-request-branch-finalizer.git"
+          git -c init.templateDir= init --bare --quiet "$git_directory"
 
-          if git push --porcelain \
+          # Supply the token through the environment at authentication time. It
+          # never enters the remote URL, process arguments, or git configuration.
+          git_auth=(
+            -c credential.helper=
+            -c 'credential.helper=!f() { printf "%s\n" "username=x-access-token" "password=$BRANCH_DELETE_TOKEN"; }; f'
+            -c core.hooksPath=/dev/null
+          )
+
+          if git -C "$git_directory" "${git_auth[@]}" push --porcelain \
             --force-with-lease="${delete_ref}:${GITHUB_SHA}" \
-            origin ":${delete_ref}"; then
+            "$repository_url" ":${delete_ref}"; then
             exit 0
           fi
 
-          current_sha=$(git ls-remote --heads origin "$delete_ref" | awk '{print $1}')
+          current_sha=$(git -C "$git_directory" "${git_auth[@]}" ls-remote \
+            --heads "$repository_url" "$delete_ref" | awk '{print $1}')
           if [[ -z "$current_sha" ]]; then
             echo "::notice title=Pull request branch finalizer::Branch is already absent"
             exit 0

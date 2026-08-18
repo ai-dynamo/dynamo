@@ -37,6 +37,13 @@ def test_finalizer_keeps_privileged_logic_on_the_default_branch():
     assert "refs/heads/pull-request/" in job["if"]
 
     steps = {step["name"]: step for step in job["steps"]}
+    validate_script = steps["Validate caller identity"]["run"]
+    assert '"$GITHUB_REPOSITORY" != "ai-dynamo/dynamo"' in validate_script
+
+    wait_script = steps["Wait for trusted workflows to materialize"]["run"]
+    assert '"repos/ai-dynamo/dynamo/actions/runs"' in wait_script
+    assert "repos/${GITHUB_REPOSITORY}/actions/runs" not in wait_script
+
     token_step = steps["Create a short-lived maintenance token"]
     assert re.fullmatch(
         r"actions/create-github-app-token@[0-9a-f]{40}", token_step["uses"]
@@ -44,15 +51,15 @@ def test_finalizer_keeps_privileged_logic_on_the_default_branch():
     assert token_step["with"] == {
         "client-id": "${{ vars.PR_BRANCH_CLEANER_CLIENT_ID }}",
         "private-key": "${{ secrets.PR_BRANCH_CLEANER_PRIVATE_KEY }}",
+        "owner": "ai-dynamo",
+        "repositories": "dynamo",
         "permission-contents": "write",
     }
 
-    checkout_step = steps["Checkout the exact workflow commit"]
-    assert re.fullmatch(r"actions/checkout@[0-9a-f]{40}", checkout_step["uses"])
-    assert checkout_step["with"] == {
-        "ref": "${{ github.sha }}",
-        "token": "${{ steps.maintenance-token.outputs.token }}",
-    }
+    assert all(
+        not step.get("uses", "").startswith("actions/checkout@")
+        for step in job["steps"]
+    )
 
 
 def test_finalizer_uses_exact_ref_identity_for_deletion():
@@ -63,8 +70,11 @@ def test_finalizer_uses_exact_ref_identity_for_deletion():
     delete_script = steps["Delete the unchanged branch"]["run"]
 
     assert 'delete_ref="refs/heads/${GITHUB_REF_NAME}"' in delete_script
+    assert 'repository_url="https://github.com/ai-dynamo/dynamo.git"' in delete_script
+    assert "credential.helper=!f()" in delete_script
+    assert "https://x-access-token" not in delete_script
     assert '--force-with-lease="${delete_ref}:${GITHUB_SHA}"' in delete_script
-    assert 'origin ":${delete_ref}"' in delete_script
+    assert '"$repository_url" ":${delete_ref}"' in delete_script
     assert '[[ "$current_sha" != "$GITHUB_SHA" ]]' in delete_script
 
 
