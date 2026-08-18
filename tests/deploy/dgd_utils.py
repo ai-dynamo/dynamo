@@ -45,8 +45,6 @@ def _get_workspace_dir() -> str:
 SCHEMA_V1ALPHA1 = "v1alpha1"
 SCHEMA_V1BETA1 = "v1beta1"
 
-_PORT_FORWARD_STOP_TIMEOUT = 5.0
-
 
 class ServiceSpec:
     """Wrapper around a single service/component in the deployment spec.
@@ -1586,7 +1584,10 @@ class ManagedDeployment:
             self._logger.warning(
                 f"Port forward failed after {max_connection_attempts} attempts for pod {pod.name}"
             )
-            self._stop_port_forward(port_forward)
+            try:
+                port_forward.stop()
+            except Exception as e:
+                self._logger.debug("Error stopping port forward: %s", e)
             return None
 
         except Exception as e:
@@ -1595,34 +1596,6 @@ class ManagedDeployment:
             )
             return None
 
-    def _stop_port_forward(self, port_forward: Any) -> None:
-        """Stop a kr8s port forward and wait for its background thread to exit."""
-        try:
-            try:
-                port_forward.stop()
-            except RuntimeError as e:
-                # Expected when the pod is terminated while kr8s is cleaning up
-                # its async generator.
-                if "anext()" in str(e) or "already running" in str(e):
-                    self._logger.debug("Port forward cleanup: %s", e)
-                else:
-                    self._logger.warning(
-                        "Unexpected error stopping port forward: %s", e
-                    )
-                    raise
-        finally:
-            # kr8s 0.20.x stop() closes the asyncio servers but does not join the
-            # thread created by start(). Reaping it prevents a subsequent forward
-            # from racing the old listener for the same ephemeral port.
-            background_thread = port_forward._bg_thread
-            if background_thread is not None:
-                background_thread.join(timeout=_PORT_FORWARD_STOP_TIMEOUT)
-                if background_thread.is_alive():
-                    self._logger.warning(
-                        "Port forward background thread did not stop within %.1fs",
-                        _PORT_FORWARD_STOP_TIMEOUT,
-                    )
-
     async def _cleanup(self):
         try:
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
@@ -1630,12 +1603,14 @@ class ManagedDeployment:
             self._logger.info(
                 f"Cleaning up {len(self._active_port_forwards)} active port forwards"
             )
-            await asyncio.gather(
-                *(
-                    asyncio.to_thread(self._stop_port_forward, port_forward)
-                    for port_forward in self._active_port_forwards
-                )
-            )
+            for port_forward in self._active_port_forwards:
+                try:
+                    port_forward.stop()
+                except Exception as e:
+                    # Port-forward teardown is best-effort. A third-party cleanup
+                    # failure must not mask the deployment test result or prevent
+                    # the remaining forwards from being stopped.
+                    self._logger.debug("Error stopping port forward: %s", e)
             self._active_port_forwards.clear()
         finally:
             await self._delete_deployment()
