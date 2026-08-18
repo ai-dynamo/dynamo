@@ -1330,7 +1330,7 @@ mod tests {
                 {"t":0.2,"type":"subagent","agent_id":"a","subagent_type":"Explore","duration_ms":400,"status":"completed","requests":[
                     {"t":0.3,"type":"s","model":"model","in":6,"out":1,"hash_ids":[3,4],"api_time":0.2}
                 ],"models":["model"]},
-                {"t":0.8,"type":"s","model":"model","in":9,"out":1,"hash_ids":[1,2,5]},
+                {"t":1.0,"type":"s","model":"model","in":9,"out":1,"hash_ids":[1,2,5]},
                 {"t":1.1,"type":"subagent","agent_id":"bg","subagent_type":"Explore","status":"async_launched","requests":[
                     {"t":1.2,"type":"s","model":"model","in":4,"out":0,"hash_ids":[9],"api_time":0.1}
                 ],"models":["model"]},
