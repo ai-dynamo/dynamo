@@ -67,6 +67,39 @@ async fn echo_request_id_header(
     response
 }
 
+/// State used to select the error format for unmatched routes.
+#[derive(Clone)]
+struct UnmatchedRouteState {
+    /// Base path of the Anthropic Messages API, or `None` when those endpoints
+    /// are disabled and every miss belongs to the OpenAI surface.
+    anthropic_path: Option<Arc<str>>,
+}
+
+/// Returns a protocol-compatible JSON `404` error response for an
+/// unmatched route.
+///
+/// Requests under the configured Anthropic Messages path receive an Anthropic
+/// error envelope. All other requests receive an OpenAI-compatible envelope.
+async fn unmatched_route_fallback(
+    axum::extract::State(state): axum::extract::State<UnmatchedRouteState>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    match state.anthropic_path.as_deref() {
+        Some(path) if path_within_namespace(uri.path(), path) => {
+            super::anthropic::unmatched_route_response(&method, &uri)
+        }
+        _ => super::openai::unmatched_route_response(&method, &uri).into_response(),
+    }
+}
+
+/// Returns whether `path` is `namespace` or a route beneath it.
+fn path_within_namespace(path: &str, namespace: &str) -> bool {
+    let namespace = namespace.trim_end_matches('/');
+    path.strip_prefix(namespace)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
 async fn track_inflight_inference(
     axum::extract::State(state): axum::extract::State<Arc<State>>,
     request: axum::extract::Request,
@@ -1255,10 +1288,6 @@ impl HttpServiceConfigBuilder {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
         }
-
-        // Return an OpenAI-compatible JSON error for unmatched routes.
-        inference_router = inference_router.fallback(super::openai::unmatched_route_fallback);
-
         inference_router = inference_router.layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_inference_request_span)
@@ -1282,6 +1311,27 @@ impl HttpServiceConfigBuilder {
         );
 
         let router = system_router.merge(inference_router);
+
+        // Return protocol-compatible JSON errors for unmatched routes. Register this router
+        // outside `track_inflight_inference` so unmatched requests do not acquire an
+        // inference permit or return `503` while the service is draining.
+        let unmatched_router = axum::Router::new()
+            .fallback(unmatched_route_fallback)
+            .with_state(UnmatchedRouteState {
+                anthropic_path: anthropic_endpoints_enabled.then(|| {
+                    var(HTTP_SVC_ANTHROPIC_PATH_ENV)
+                        .unwrap_or_else(|_| super::anthropic::DEFAULT_MESSAGES_PATH.to_string())
+                        .into()
+                }),
+            })
+            .layer(
+                // Use the inference span maker so 404s retain method, URI, and request ID
+                // at the default log level.
+                TraceLayer::new_for_http()
+                    .make_span_with(make_inference_request_span)
+                    .on_response(on_response),
+            );
+        let router = router.fallback_service(unmatched_router);
 
         // Echo x-request-id from request to response headers for client correlation
         let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
@@ -1702,26 +1752,39 @@ mod tests {
         handle.abort();
     }
 
-    /// Starts a default `HttpService` on an ephemeral local port.
-    /// These tests exercise request handling before the readiness check,
-    /// so no model registration is required.
-    async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {
+    /// Starts an `HttpService` on an ephemeral local port.
+    ///
+    /// Applies `configure` before starting the service. These tests run before the
+    /// readiness check, so no model registration is required.
+    async fn spawn_service(
+        configure: impl FnOnce(HttpServiceConfigBuilder) -> HttpServiceConfigBuilder,
+    ) -> (u16, Arc<State>, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let service = HttpService::builder().port(port).build().unwrap();
+        let service = configure(HttpService::builder().port(port))
+            .build()
+            .unwrap();
+        let state = service.state_clone();
         let handle = tokio::spawn(async move {
             service
                 .run_with_listener(CancellationToken::new(), listener)
                 .await
                 .ok();
         });
+
         // Allow the server to begin accepting connections.
         tokio::time::sleep(Duration::from_millis(20)).await;
+
+        (port, state, handle)
+    }
+
+    async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {
+        let (port, _, handle) = spawn_service(|builder| builder).await;
         (port, handle)
     }
 
     /// Verifies that an unsupported content type returns the standard JSON error
-    /// envelope instead of Axum's default plain-text extractor rejection.
+    /// envelope instead of Axum's default plain-text rejection.
     #[tokio::test]
     async fn test_responses_non_json_content_type_returns_json_error() {
         let (port, handle) = spawn_default_service().await;
@@ -1746,7 +1809,7 @@ mod tests {
     }
 
     /// Verifies that malformed JSON returns the standard JSON error envelope
-    /// instead of Axum's default plain-text extractor rejection.
+    /// instead of Axum's default plain-text rejection.
     #[tokio::test]
     async fn test_responses_malformed_json_returns_json_error() {
         let (port, handle) = spawn_default_service().await;
@@ -1774,8 +1837,7 @@ mod tests {
         handle.abort();
     }
 
-    /// Verifies that an unknown response ID returns a JSON `404 Not Found`
-    /// response instead of Axum's default empty fallback response.
+    /// Verifies that an unknown response ID returns a JSON `404 Not Found` response.
     #[tokio::test]
     async fn test_unknown_response_id_returns_json_404() {
         let (port, handle) = spawn_default_service().await;
@@ -1791,33 +1853,150 @@ mod tests {
         assert_eq!(body["code"], 404);
         assert_eq!(
             body["message"],
-            "Invalid URL (GET /v1/responses/resp_missing)"
+            "Route not found: GET /v1/responses/resp_missing"
         );
 
         handle.abort();
     }
 
-    /// Verifies that an unmatched route returns the standard JSON `404 Not Found`
-    /// error envelope.
+    /// Verifies that an oversized request body returns a JSON `413 Payload Too Large`
+    /// response.
     #[tokio::test]
-    async fn test_unknown_path_returns_json_404() {
-        let (port, handle) = spawn_default_service().await;
+    #[serial_test::serial]
+    async fn test_oversized_body_returns_json_413() {
+        temp_env::async_with_vars([(env_llm::DYN_HTTP_BODY_LIMIT_MB, Some("1"))], async move {
+            let (port, handle) = spawn_default_service().await;
+
+            let oversized = serde_json::json!({
+                "model": "model",
+                "input": "x".repeat(2 * 1024 * 1024),
+            });
+            let resp = reqwest::Client::new()
+                .post(format!("http://localhost:{port}/v1/responses"))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&oversized).unwrap())
+                .send()
+                .await
+                .expect("request failed");
+
+            assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+            let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+            assert_eq!(body["code"], 413);
+            assert_eq!(
+                body["message"],
+                format!(
+                    "Request body exceeds the limit of 1 MB set by {}",
+                    env_llm::DYN_HTTP_BODY_LIMIT_MB
+                )
+            );
+
+            handle.abort();
+        })
+        .await;
+    }
+
+    /// Verifies that unmatched routes return `404 Not Found` while registered
+    /// inference routes return `503 Service Unavailable` during draining.
+    #[tokio::test]
+    async fn test_unmatched_route_while_draining_returns_json_404() {
+        let (port, state, handle) = spawn_service(|builder| builder).await;
+        state.start_draining();
+
+        let client = reqwest::Client::new();
+        let unmatched = client
+            .get(format!("http://localhost:{port}/v1/not_a_route"))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(unmatched.status(), reqwest::StatusCode::NOT_FOUND);
+        let body: serde_json::Value = unmatched.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 404);
+
+        let registered = client
+            .post(format!("http://localhost:{port}/v1/responses"))
+            .json(&serde_json::json!({"model": "model", "input": "hi"}))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(
+            registered.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "draining must still reject registered inference routes"
+        );
+
+        handle.abort();
+    }
+
+    /// Verifies that unmatched routes under the Anthropic Messages API path return
+    /// the Anthropic error envelope.
+    #[tokio::test]
+    async fn test_unmatched_anthropic_route_returns_anthropic_envelope() {
+        let (port, _state, handle) =
+            spawn_service(|builder| builder.enable_anthropic_endpoints(true)).await;
 
         let resp = reqwest::Client::new()
-            .get(format!("http://localhost:{port}/v1/not_a_route"))
+            .get(format!("http://localhost:{port}/v1/messages/missing"))
+            .header("anthropic-version", "2023-06-01")
             .send()
             .await
             .expect("request failed");
 
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
         let body: serde_json::Value = resp.json().await.expect("body must be JSON");
-        assert_eq!(body["code"], 404);
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "not_found_error");
+        assert_eq!(
+            body["error"]["message"],
+            "Route not found: GET /v1/messages/missing"
+        );
+
+        let openai_response = reqwest::Client::new()
+            .get(format!("http://localhost:{port}/v1/messages_beta/missing"))
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(openai_response.status(), reqwest::StatusCode::NOT_FOUND);
+        let openai_body: serde_json::Value =
+            openai_response.json().await.expect("body must be JSON");
+        assert_eq!(openai_body["code"], 404);
+        assert_eq!(
+            openai_body["message"],
+            "Route not found: GET /v1/messages_beta/missing"
+        );
+        assert!(
+            openai_body.get("error").is_none(),
+            "sibling paths must use the OpenAI error envelope"
+        );
 
         handle.abort();
     }
 
-    /// Verifies that unsupported methods return `405 Method Not Allowed` with the
-    /// expected `Allow` header instead of the unmatched-route fallback `404`.
+    /// Verifies that Anthropic fallback routing matches complete path segments.
+    #[test]
+    fn test_path_within_namespace() {
+        assert!(path_within_namespace("/v1/messages", "/v1/messages"));
+        assert!(path_within_namespace("/v1/messages/", "/v1/messages"));
+        assert!(path_within_namespace(
+            "/v1/messages/missing",
+            "/v1/messages"
+        ));
+        assert!(path_within_namespace(
+            "/v1/messages/missing",
+            "/v1/messages/"
+        ));
+        assert!(!path_within_namespace("/v1/messages_beta", "/v1/messages"));
+        assert!(!path_within_namespace("/v1/messages-v2", "/v1/messages"));
+        assert!(!path_within_namespace(
+            "/v1/chat/completions",
+            "/v1/messages"
+        ));
+    }
+
+    /// Verifies that `GET /v1/responses` returns `405 Method Not Allowed` and an
+    /// `Allow: POST` header.
     #[tokio::test]
     async fn test_registered_route_with_unsupported_method_returns_405() {
         let (port, handle) = spawn_default_service().await;
