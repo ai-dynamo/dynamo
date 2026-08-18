@@ -218,12 +218,14 @@ def test_partial_adoption_across_ranks_refuses(path):
 
 
 def test_a_missing_rank_answer_refuses(path):
+    """Losing the signal is a miss, never a guess."""
     pool_a = new_pool()
     set_adoption(path, False)
     sleep_wake(new_scheduler(pool_a))
     populate(pool_a)
-    os.unlink(f"{path}.rank0")
+    assert not os.path.exists(f"{path}.rank0"), "consumed by the takeover"
 
+    # nobody publishes an answer for this wake
     pool_b = new_pool()
     sleep_wake(new_scheduler(pool_b))
     assert not any(b.block_hash for b in pool_b.blocks)
@@ -286,3 +288,26 @@ def test_disabled_without_the_env_var(tmp_path, monkeypatch):
     pool = new_pool()
     sleep_wake(new_scheduler(pool))
     assert not hasattr(pool, "_dyn_mirror")
+
+
+def test_a_stale_rank_answer_is_not_reused(path):
+    """The sentinel is consumed, so a rank that fails to publish reads as "no".
+
+    This is the failure that would turn a miss into a wrong answer: engine A
+    adopts and says so; engine B builds a FRESH pool but never publishes its own
+    answer. If A's file survived, B would replay A's labels onto pages B
+    allocated itself.
+    """
+    pool_a = new_pool()
+    set_adoption(path, True)
+    sleep_wake(new_scheduler(pool_a))
+    populate(pool_a)
+    assert not os.path.exists(f"{path}.rank0"), "the answer must be consumed"
+
+    # engine B wakes having built its own pool, and publishes nothing at all.
+    pool_b = new_pool()
+    sleep_wake(new_scheduler(pool_b))
+
+    assert not any(
+        b.block_hash for b in pool_b.blocks
+    ), "a stale adoption answer was reused"

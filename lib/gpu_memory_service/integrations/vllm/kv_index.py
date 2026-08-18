@@ -335,17 +335,32 @@ def _probe_adopted(path: str, world_size: int) -> bool:
     workers directly. Each rank drops a one-byte answer next to the mirror at
     wake (``_publish_kv_adoption`` in worker.py) and we read them here.
 
-    Missing or unreadable is a NO -- the index is engine-wide but the bytes are
-    per-rank, so anything short of unanimity has to refuse.
+    Consumed, not just read. A file left behind is a *stale* answer, and a stale
+    "1" is the one input to this whole design that turns a miss into a wrong
+    answer -- it would replay a predecessor's labels onto pages this engine
+    allocated itself. Deleting after each read makes absence the resting state,
+    so a rank that fails to publish reads as "no" rather than as whatever the
+    previous engine said.
+
+    Missing or unreadable is therefore a NO, and so is anything short of
+    unanimity: the index is engine-wide but the bytes are per-rank.
     """
+    answers = []
     for rank in range(world_size):
+        rank_path = f"{path}.rank{rank}"
         try:
-            with open(f"{path}.rank{rank}") as f:
-                if f.read(1) != "1":
-                    return False
+            with open(rank_path) as f:
+                answers.append(f.read(1) == "1")
         except OSError:
-            return False
-    return world_size > 0
+            answers.append(False)
+        try:
+            os.unlink(rank_path)
+        except OSError:
+            # Could not consume it, so we cannot promise the next wake sees a
+            # fresh answer. Refuse now rather than trust it later.
+            logger.warning("[kv_index] could not consume %s; refusing", rank_path)
+            answers.append(False)
+    return bool(answers) and all(answers)
 
 
 def _identity(cfg, num_blocks: int) -> bytes:
