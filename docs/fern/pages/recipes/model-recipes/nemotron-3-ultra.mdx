@@ -86,7 +86,7 @@ The Refresh manifests use the pinned `vllm-runtime:1.4.0-rc.4` image digest show
 
 The 256K 1P1D rows and the H200/B200 1M 1P1D rows are closed concurrency boundaries. GB200 1M concurrency 28 is the current complete SLA-passing anchor; the next boundary point remains to be rerun after an infrastructure interruption.
 
-The B200 and GB200 256K 1P1D profiles use FlashInfer attention; the H200 256K profile uses FlashAttention. B200 and H200 1P1D profiles also require a scheduler-accessible GPU node pool that advertises one `rdma/ib` resource per GPU. If those pods remain pending even though suitable nodes exist, correct the namespace or queue placement instead of removing the qualified RDMA transport.
+The B200 and GB200 256K 1P1D profiles use FlashInfer attention; the H200 256K profile uses FlashAttention.
 
 Deploy a Refresh profile by selecting the GPU and context length:
 
@@ -427,7 +427,6 @@ All targets serve `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` on the dedica
 - The recipes pin `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` and pass `--no-enable-flashinfer-autotune` on vLLM workers. Do not remove these unless rerunning the benchmark qualification — they select the non-FlashInfer FP8 linear kernel path and avoid a measured vLLM 0.22 FlashInfer FP8 regression.
 - No-MTP fallback manifests are included for every Day-0 aggregated target at `vllm/agg-<sku>-<usecase>-256k-nomtp/deploy.yaml`; their DGD names carry the `-nomtp` suffix, and their measured rows appear in the performance table above.
 - Reasoning is controlled per request via `chat_template_kwargs` (`enable_thinking`, `force_nonempty_content`) and `nvext.max_thinking_tokens`. Do not send `force_nonempty_content` as a top-level request parameter. Top-level reasoning controls such as `include_reasoning` and `reasoning_effort` are part of shared Dynamo API compatibility work, not Ultra-specific failures.
-- For deterministic structured-output and required or named tool-call smoke tests, disable thinking with the nested `chat_template_kwargs` control. Leaving thinking enabled can add reasoning-mode output that does not satisfy the constrained response envelope.
 - Raw Moontrace replay may contain over-context or pathological long-generation rows. Preserve them as HTTP/error evidence rather than dropping them silently.
 - Tool calling uses the `qwen3_coder` parser; reasoning parsing uses the model-local `ultra_v3_reasoning_parser.py` (validated by the model-validate Job).
 
