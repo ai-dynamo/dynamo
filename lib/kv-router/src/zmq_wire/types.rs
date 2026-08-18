@@ -192,13 +192,25 @@ impl RawKvEvent {
     }
 
     pub fn source_kind(&self) -> Result<KvEventSourceKind, &str> {
-        let wire = match self {
+        KvEventSourceKind::from_wire(self.source_kind_wire())
+    }
+
+    pub fn source_kind_wire(&self) -> Option<&str> {
+        match self {
             Self::BlockStored { source_kind, .. }
             | Self::BlockRemoved { source_kind, .. }
             | Self::AllBlocksCleared { source_kind } => source_kind.as_deref(),
             Self::Ignored => None,
-        };
-        KvEventSourceKind::from_wire(wire)
+        }
+    }
+
+    pub fn set_medium(&mut self, canonical_medium: Option<&str>) {
+        match self {
+            Self::BlockStored { medium, .. } | Self::BlockRemoved { medium, .. } => {
+                *medium = canonical_medium.map(str::to_string);
+            }
+            Self::AllBlocksCleared { .. } | Self::Ignored => {}
+        }
     }
 
     pub fn block_size(&self) -> Option<usize> {

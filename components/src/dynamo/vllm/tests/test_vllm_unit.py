@@ -13,7 +13,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -452,6 +452,38 @@ def test_should_prefetch_model_for_default_load_format():
     )
 
     assert should_prefetch_model(config) is True
+
+
+@pytest.mark.parametrize(
+    ("structured_outputs_config", "expected_excludes_reasoning"),
+    [
+        (
+            SimpleNamespace(enable_in_reasoning=False, reasoning_parser=""),
+            False,
+        ),
+        (
+            SimpleNamespace(enable_in_reasoning=False, reasoning_parser="qwen3"),
+            True,
+        ),
+        (
+            SimpleNamespace(enable_in_reasoning=True, reasoning_parser="qwen3"),
+            False,
+        ),
+    ],
+)
+def test_vllm_publishes_structural_tag_reasoning_policy(
+    structured_outputs_config, expected_excludes_reasoning
+):
+    vllm_main = _load_vllm_main()
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(structured_outputs_config=structured_outputs_config)
+
+    vllm_main.publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        vllm_main.TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+        json.dumps(expected_excludes_reasoning),
+    )
 
 
 @pytest.mark.parametrize("load_format", ["modelexpress", "mx"])

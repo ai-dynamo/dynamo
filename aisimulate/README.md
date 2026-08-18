@@ -11,15 +11,34 @@ SPDX-License-Identifier: Apache-2.0
 > without a standard deprecation period. They provide no SLA, accuracy, or configuration-optimality
 > guarantees.
 
-AI Simulate is a standalone Python distribution in the Dynamo repository. Its first package,
-`aisimulate.sweeper`, searches backend deployment settings by evaluating serializable replay
-specifications. The package does not depend on `ai-dynamo`.
+AI Simulate is a standalone Python distribution in the Dynamo repository. Its engine-only replay
+CLI and `aisimulate.sweeper` package evaluate serializable replay specifications without depending
+on `ai-dynamo`.
 
 Sweeper accepts a replay `RunnerFactory` through its Python API. Optional feature adapters own
-their search spaces and runtime hooks. A backend-only sweep can use a Dynamo-free replay runner;
+their search spaces and runtime hooks. An engine-only sweep can use a Dynamo-free replay runner;
 a sweep configured with Dynamo Planner or Router adapters uses Dynamo's runner composition.
 
-Install AI Simulate by itself for backend-only development:
+For an engine-only single replay run, use `python -m aisimulate.replay`. For a replay with Dynamo
+Router, Planner, or online adapters, use `python -m dynamo.replay`. Both commands share the
+engine, topology, traffic, replay-mode, SLA, and output arguments; Dynamo adds its adapter options.
+They share option names and the base `ReplaySpec` schema; the selected runtime validates each
+`--*-engine-args` JSON payload, which can therefore contain runtime-specific fields.
+For configuration search, call `Sweeper(runner_factory=...).run(config)` or start from an example
+under `aisimulate/examples/sweeper`.
+
+For example, run one engine-only synthetic replay with fixed timing:
+
+```bash
+python -m aisimulate.replay \
+  --extra-engine-args '{"engine_type":"vllm","num_gpu_blocks":1024,"block_size":16,"timing_model":{"type":"fixed","prefill_ms":10,"decode_ms":2}}' \
+  --input-tokens 1024 \
+  --output-tokens 128 \
+  --request-count 16 \
+  --replay-concurrency 4
+```
+
+Install AI Simulate by itself for engine-only development:
 
 ```bash
 uv venv .venv
@@ -36,6 +55,10 @@ uv pip install --no-deps -e .
 uv pip install -r container/deps/requirements.planner.txt
 ```
 
+The `ai-dynamo` wheel registers the `dynamo.planner` and `dynamo.router` Sweeper provider entry
+points. Its Dynamo runner composes the materialized runtime hooks with the shared AI Simulate
+Replayer.
+
 Run a sweep from Python with an explicit runner:
 
 ```python
@@ -51,7 +74,7 @@ candidates = Sweeper(
 The standalone module validates the backend-neutral core schema but intentionally has no implicit
 replay runtime. Adapter-owned search spaces are validated when the selected adapters are resolved
 by `Sweeper.run`.
-KVBM sweep fields have been removed; native G2 is their replacement.
+KVBM sweep fields have been removed and have no adapter migration.
 
 Read the canonical [Sweeper documentation](docs/sweeper/overview.md) for its configuration,
 search-space, and replay behavior. Backend-neutral and Dynamo integration examples live under
