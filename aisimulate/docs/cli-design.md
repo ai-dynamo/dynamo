@@ -128,7 +128,7 @@ contain only the expanded concrete knobs.
 
 If the optional `router` or `planner` section is absent, that component stays fixed at its concrete
 default. A present Router searches its direct knob ranges. A present Planner activates its default
-preset sweep.
+sub-item preset sweeps.
 
 ### Parallelism Preset Behavior
 
@@ -678,33 +678,44 @@ planner:
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `planner.preset` | `default` in `recommend` | `{choices: [disabled, throughput_180_5, throughput_600_5, load_180_5, load_180_10, hybrid_180_5, hybrid_600_5]}` | `-` | Built-in preset choices, complete mapping list, `false`, or `{}`. |
-| `planner.policy` | `disabled` | `{choices: [disabled, planner]}` | `planner` | `disabled` or `planner`. |
-| `planner.target` | `throughput` | `x` | `planner` | Derived from `optimization.target` in `recommend`. |
-| `planner.enable_throughput_scaling` | `true` | `{choices: [false, true]}` | `planner` | Planner policy only. |
-| `planner.enable_load_scaling` | `false` | `{choices: [false, true]}` | `planner` | Planner policy only. |
-| `planner.throughput_adjustment_interval_seconds` | `180` | `{choices: [180, 600]}` | `planner` | Positive; throughput scaling only. |
-| `planner.load_adjustment_interval_seconds` | `5` | `{choices: [5, 10]}` | `planner` | Positive and shorter than throughput interval when used. |
-| `planner.max_num_fpm_samples` | `64` | `{choices: [32, 64, 128]}` | `planner` | Positive. |
-| `planner.fpm_sample_bucket_size` | `16` | `{choices: [4, 16, 64]}` | `planner` | Positive perfect square. |
-| `planner.load_scaling_down_sensitivity` | `80` | `{choices: [70, 80, 90]}` | `planner` | From `0` through `100`; load scaling only. |
-| `planner.load_min_observations` | `5` | `{choices: [3, 5, 8]}` | `planner` | Positive; load scaling only. |
-| `planner.load_predictor` | `arima` | `{choices: [constant, arima, prophet, kalman]}` | `planner` | Throughput scaling only. |
-| `planner.load_predictor_log1p` | `false` | `{choices: [false, true]}` | `planner` | Throughput scaling only. |
-| `planner.prophet_window_size` | `50` | `{choices: [20, 50]}` | `planner` | Positive; Prophet only. |
-| `planner.kalman_q_level` | `1.0` | `{choices: [1.0, 10.0]}` | `planner` | Positive; Kalman only. |
-| `planner.kalman_q_trend` | `0.1` | `{choices: [0.1, 1.0]}` | `planner` | Positive; Kalman only. |
-| `planner.kalman_r` | `10.0` | `{choices: [5.0, 10.0]}` | `planner` | Positive; Kalman only. |
-| `planner.kalman_min_points` | `5` | `{choices: [3, 5]}` | `planner` | Positive; Kalman only. |
-| `planner.min_workers` | `1` | `-` | `planner` | Nonnegative. |
-| `planner.prefill_min_workers` | `null` | `-` | `planner` | Positive when set. |
-| `planner.decode_min_workers` | `null` | `-` | `planner` | Positive when set. |
+| `planner.scaling_policy.preset` | `default` in `recommend` | `{choices: [disabled, throughput_180_5, throughput_600_5, load_180_5, load_180_10, hybrid_180_5, hybrid_600_5]}` | `-` | Built-in preset choices, complete mapping list, `false`, or `{}`. |
+| `planner.fpm_sampling.preset` | `default` in `recommend` | `{choices: [small, default, large, fine]}` | `-` | Built-in preset choices, complete mapping list, `false`, or `{}`. |
+| `planner.load_sensitivity.preset` | `default` in `recommend` | `{choices: [aggressive, default, conservative]}` | `-` | Built-in preset choices, complete mapping list, `false`, or `{}`. |
+| `planner.load_predictor.preset` | `default` in `recommend` | `{choices: [constant_last, arima_raw, arima_log1p, prophet_w20_raw, prophet_w20_log1p, prophet_w50_raw, prophet_w50_log1p, kalman_default_raw, kalman_default_log1p, kalman_reactive_raw, kalman_reactive_log1p]}` | `-` | Interval-level predictor pre-sweep candidates; complete mapping list, `false`, or `{}`. |
+| `planner.policy` | `disabled` | `{choices: [disabled, planner]}` | `-` | `disabled` or `planner`. |
+| `planner.target` | `throughput` | `x` | `-` | Derived from `optimization.target` in `recommend`. |
+| `planner.enable_throughput_scaling` | `true` | `{choices: [false, true]}` | `scaling_policy` | Planner policy only. |
+| `planner.enable_load_scaling` | `false` | `{choices: [false, true]}` | `scaling_policy` | Planner policy only. |
+| `planner.throughput_adjustment_interval_seconds` | `180` | `{choices: [180, 600]}` | `scaling_policy` | Positive; throughput scaling only. |
+| `planner.load_adjustment_interval_seconds` | `5` | `{choices: [5, 10]}` | `scaling_policy` | Positive and shorter than throughput interval when used. |
+| `planner.max_num_fpm_samples` | `64` | `{choices: [32, 64, 128]}` | `fpm_sampling` | Positive. |
+| `planner.fpm_sample_bucket_size` | `16` | `{choices: [4, 16, 64]}` | `fpm_sampling` | Positive perfect square. |
+| `planner.load_scaling_down_sensitivity` | `80` | `{choices: [70, 80, 90]}` | `load_sensitivity` | From `0` through `100`; load scaling only. |
+| `planner.load_min_observations` | `5` | `{choices: [3, 5, 8]}` | `load_sensitivity` | Positive; load scaling only. |
+| `planner.load_predictor` | `arima` | `{choices: [constant, arima, prophet, kalman]}` | `load_predictor` | Throughput scaling only. |
+| `planner.load_predictor_log1p` | `false` | `{choices: [false, true]}` | `load_predictor` | Throughput scaling only. |
+| `planner.prophet_window_size` | `50` | `{choices: [20, 50]}` | `load_predictor` | Positive; Prophet only. |
+| `planner.kalman_q_level` | `1.0` | `{choices: [1.0, 10.0]}` | `load_predictor` | Positive; Kalman only. |
+| `planner.kalman_q_trend` | `0.1` | `{choices: [0.1, 1.0]}` | `load_predictor` | Positive; Kalman only. |
+| `planner.kalman_r` | `10.0` | `{choices: [5.0, 10.0]}` | `load_predictor` | Positive; Kalman only. |
+| `planner.kalman_min_points` | `5` | `{choices: [3, 5]}` | `load_predictor` | Positive; Kalman only. |
+| `planner.min_workers` | `1` | `-` | `-` | Nonnegative. |
+| `planner.prefill_min_workers` | `null` | `-` | `-` | Positive when set. |
+| `planner.decode_min_workers` | `null` | `-` | `-` | Positive when set. |
 
-These are all Planner knobs exposed by version 1. `simulate` may set a concrete `planner.target` and
-otherwise uses `throughput`. In `recommend`, the target is not a search dimension: throughput targets
-and Pareto map to `throughput`, `ttft` and `e2e_latency` map to `latency`, and goodput targets map to
-`sla`. A complete recommendation preset uses `target: null`; materialization writes the derived
-concrete value.
+Planner has four independent preset sub-items rather than one whole-Planner preset. Each named or
+custom mapping covers every knob in exactly one sub-item. The nested `*.preset` selectors disappear
+after materialization; expanded knobs are written directly under `planner` in concrete simulation
+YAML.
+
+`scaling_policy`, `fpm_sampling`, and `load_sensitivity` are composed as independent main-search
+dimensions. `load_predictor` is different: its candidates run in a pre-sweep for every selected
+throughput-adjustment interval, and the winning predictor mapping is materialized into the candidate.
+
+`planner.policy`, `planner.target`, and the three runtime minimum-worker knobs are not covered by a
+preset. `simulate` may set a concrete target and otherwise uses `throughput`. In `recommend`, target
+is derived: throughput targets and Pareto map to `throughput`, `ttft` and `e2e_latency` map to
+`latency`, and goodput targets map to `sla`.
 
 Planner runtime minimums and recommendation candidate GPU constraints are separate:
 
@@ -712,8 +723,8 @@ Planner runtime minimums and recommendation candidate GPU constraints are separa
   during one simulated candidate run.
 - `optimization.constraints` constrains which static candidate deployments the recommender evaluates.
 
-When `planner.policy: disabled`, conditionally inactive Planner knobs are `null` in a complete preset
-mapping and are omitted from the concrete simulation output.
+When `planner.policy: disabled` or the `disabled` scaling-policy preset is selected, no Planner
+runtime hook is materialized and conditionally inactive fields are omitted from concrete output.
 
 ## Evaluation
 
@@ -781,7 +792,7 @@ A field accepts at most one domain form. Domains are allowed only where **Defaul
 - Engine mode, backend, `hardware: auto`, parallelism preset and leaves, scheduler, and supported
   backend-specific fields.
 - Router policy, load model, and supported policy-specific fields.
-- Planner preset, policy, and supported Planner-specific fields.
+- Planner preset sub-items, policy, and supported Planner-specific fields.
 - Traffic load intensity and timing fields marked `-` in the table.
 
 The following stay concrete in version 1:
