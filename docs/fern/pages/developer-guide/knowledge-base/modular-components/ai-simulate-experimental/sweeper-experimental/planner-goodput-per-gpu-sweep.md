@@ -148,7 +148,7 @@ spread within the `load_180_10` family is noise).
   runs TPOT ~78 ms (near the 50 ms ITL bound) and TTFT ~1100 ms (under the 2000 ms bound),
   letting goodput dip to ~1000 while avg_gpu drops to ~8 → goodput/gpu peaks. The conservative
   predictive policies keep latency low but waste GPUs.
-- **Caveat:** `load_*` policies don't use `planner_fpm_sampling` (it only affects predictive
+- **Caveat:** `load_*` policies don't use `fpm_sampling` (it only affects predictive
   throughput scaling), so the `sens`/`fpm` spread *within* the `load_180_10` family (117–121) is
   mostly mocker noise (~5%). The robust conclusion is the **policy family** (`load_180_10`), not
   a precise `sens`/`fpm` setting.

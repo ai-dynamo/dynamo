@@ -288,7 +288,7 @@ class PlannerSearchSpace(BaseModel):
                 f"{_LEGACY_PRESET_REMOVAL_NOTE} Legacy fields: "
                 f"{', '.join(legacy_fields)}.",
                 FutureWarning,
-                stacklevel=2,
+                stacklevel=4,
             )
         return upgraded
 

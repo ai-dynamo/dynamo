@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import replace
 
 import pytest
@@ -148,6 +149,96 @@ def test_legacy_flat_presets_warn_and_remain_compatible() -> None:
     assert space.fpm_sampling.preset == ["default"]
     assert space.load_sensitivity.preset == ["default"]
     assert space.load_predictor.preset == ["constant_last"]
+
+
+def test_legacy_warning_points_to_user_callsite() -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        create_provider().generate_search_space(
+            {"scaling_policy": ["disabled"]},
+            _sweep_context(),
+        )
+
+    assert len(caught) == 1
+    assert caught[0].category is FutureWarning
+    assert caught[0].filename == __file__
+
+
+def test_legacy_and_structured_inputs_generate_identical_plans() -> None:
+    adapter = create_provider()
+    structured = {
+        "scaling_policy": {"preset": ["throughput_180_5"]},
+        "fpm_sampling": {"preset": ["fine"]},
+        "load_sensitivity": {"preset": ["conservative"]},
+        "load_predictor": {"preset": ["constant_last"]},
+        "min_endpoint": 2,
+    }
+    legacy = {
+        "scaling_policy": ["throughput_180_5"],
+        "fpm_sampling": ["fine"],
+        "load_sensitivity": ["conservative"],
+        "load_predictor_candidates": ["constant_last"],
+        "min_endpoint": 2,
+    }
+
+    structured_plan = adapter.generate_search_space(structured, _sweep_context())
+    with pytest.warns(FutureWarning, match="removed after the 1.5 release"):
+        legacy_plan = adapter.generate_search_space(legacy, _sweep_context())
+
+    assert legacy_plan == structured_plan
+    selection = {
+        "scaling_policy": "throughput_180_5",
+        "fpm_sampling": "fine",
+        "load_sensitivity": "conservative",
+    }
+    assert adapter.materialize_replay(
+        legacy_plan,
+        selection,
+        _candidate_context(),
+    ) == adapter.materialize_replay(
+        structured_plan,
+        selection,
+        _candidate_context(),
+    )
+
+
+def test_pre_refactor_serialized_plan_state_still_materializes() -> None:
+    adapter = create_provider()
+    structured_plan = adapter.generate_search_space(
+        {
+            "scaling_policy": {"preset": ["throughput_180_5"]},
+            "fpm_sampling": {"preset": ["fine"]},
+            "load_sensitivity": {"preset": ["conservative"]},
+            "load_predictor": {"preset": ["constant_last"]},
+        },
+        _sweep_context(),
+    )
+    legacy_state = dict(structured_plan.state)
+    legacy_state["search_space"] = {
+        "scaling_policy": ["throughput_180_5"],
+        "fpm_sampling": ["fine"],
+        "load_sensitivity": ["conservative"],
+        "load_predictor_candidates": ["constant_last"],
+    }
+    legacy_plan = replace(structured_plan, state=legacy_state)
+    selection = {
+        "scaling_policy": "throughput_180_5",
+        "fpm_sampling": "fine",
+        "load_sensitivity": "conservative",
+    }
+
+    with pytest.warns(FutureWarning, match="removed after the 1.5 release"):
+        legacy_spec = adapter.materialize_replay(
+            legacy_plan,
+            selection,
+            _candidate_context(),
+        )
+
+    assert legacy_spec == adapter.materialize_replay(
+        structured_plan,
+        selection,
+        _candidate_context(),
+    )
 
 
 def test_legacy_predictor_field_conflicts_with_structured_subitem() -> None:
