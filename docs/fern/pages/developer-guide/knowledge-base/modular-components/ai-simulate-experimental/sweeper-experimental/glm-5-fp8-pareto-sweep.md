@@ -65,8 +65,7 @@ provide one config as a strict pin or several configs as a custom projection poo
 
 ## Configuration
 
-The reference configuration is
-[`glm5-disagg-pareto-frontier.yaml`](https://github.com/ai-dynamo/aisimulate/blob/main/examples/sweeper/configs/glm5-disagg-pareto-frontier.yaml):
+Use this reference configuration:
 
 ```yaml
 search_space:

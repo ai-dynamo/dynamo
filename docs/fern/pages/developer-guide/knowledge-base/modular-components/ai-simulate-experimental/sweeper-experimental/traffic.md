@@ -14,9 +14,7 @@ subtitle: Trace, request-rate, concurrency, and KV-load workload definitions
 The `workload:` block of a `SmartSearchConfig` YAML is the traffic **every candidate is
 replayed against**. Most workload fields are pinned. The exception is a ranged
 `kv_load_ratio` under a `pareto` goal: Vizier searches it as a continuous load dimension.
-The block maps to
-[`Workload`](https://github.com/ai-dynamo/aisimulate/blob/main/src/aisimulate/sweeper/config.py)
-in the standalone AI Simulate repository.
+The block maps to `aisimulate.sweeper.config.Workload`.
 
 A workload is **exactly one of four load shapes**. The shape is inferred from which field
 is set (`Workload._validate_workload`), and each shape is either **open-loop** (requests
