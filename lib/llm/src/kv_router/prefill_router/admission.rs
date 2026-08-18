@@ -17,7 +17,7 @@ use dynamo_runtime::{
 
 use super::{PrefillCompletion, PrefillError, PrefillRouter};
 use crate::{
-    kv_router::KvPushRouter,
+    kv_router::RoutingHost,
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
         llm_backend::{FinishReason, LLMEngineOutput, PreprocessedRequest},
@@ -30,7 +30,7 @@ pub(super) enum InnerPrefillRouter<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    KvRouter(Arc<KvPushRouter<Sel>>),
+    KvRouter(Arc<RoutingHost<Sel>>),
     SimpleRouter(Arc<SessionAffinityPushRouter>),
 }
 
