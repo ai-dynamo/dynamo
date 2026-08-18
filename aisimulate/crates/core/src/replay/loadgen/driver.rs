@@ -638,6 +638,7 @@ impl WorkloadDriver {
         Self::new_agentic_trace_with_options(trace, engine_block_size, true, Some(agentic_lanes))
     }
 
+    #[allow(clippy::needless_range_loop)] // The index updates both play and lane tables.
     pub fn new_agentic_trace_with_options(
         trace: AgenticTrace,
         engine_block_size: usize,
@@ -771,9 +772,9 @@ impl WorkloadDriver {
                     next_play: 0,
                 })
                 .collect();
-            for (play_index, play) in plays.iter_mut().enumerate() {
+            for play_index in 0..plays.len() {
                 let lane_index = play_index % lane_count;
-                play.lane_index = Some(lane_index);
+                plays[play_index].lane_index = Some(lane_index);
                 lanes[lane_index].plays.push(play_index);
             }
         }
@@ -1199,6 +1200,7 @@ impl WorkloadDriver {
     /// failure is observed, then calls [`Self::on_quiescent`] only after all
     /// P/D resources and coordinator actions settle. Aggregated replay uses
     /// [`Self::on_terminal`], where both events coincide.
+    #[allow(clippy::collapsible_if)] // Keep agentic-only duplicate detection explicit.
     pub fn on_causal_terminal(
         &mut self,
         request_uuid: Uuid,
@@ -1218,13 +1220,14 @@ impl WorkloadDriver {
             }
             return Ok(());
         };
-        if is_agentic
-            && self
+        if is_agentic {
+            if self
                 .agentic_settling
                 .insert(request_uuid, resolution.session_index)
                 .is_some()
-        {
-            bail!("agentic request {request_uuid} received duplicate causal terminal");
+            {
+                bail!("agentic request {request_uuid} received duplicate causal terminal");
+            }
         }
         self.apply_resolution(resolution, now_ms);
         Ok(())
