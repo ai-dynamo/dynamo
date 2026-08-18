@@ -109,8 +109,6 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 		dgd,
 		nil,
 		nil,
-		false,
-		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)

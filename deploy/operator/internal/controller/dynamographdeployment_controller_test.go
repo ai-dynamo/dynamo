@@ -1046,8 +1046,6 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				dgd,
 				nil,
 				nil,
-				false,
-				nil,
 			)
 			if tt.wantErrSubstring != "" {
 				g.Expect(err).To(gomega.HaveOccurred())
@@ -1138,8 +1136,6 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 		ctx,
 		dgd,
 		nil,
-		nil,
-		false,
 		nil,
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())

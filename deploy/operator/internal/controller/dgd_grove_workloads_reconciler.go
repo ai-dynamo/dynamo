@@ -39,6 +39,7 @@ import (
 // exposing no dependency on the top-level DGD controller.
 type groveWorkloadsReconciler struct {
 	syncer          dgdResourceSyncer
+	rollout         *dgdWorkerRolloutReconciler
 	reader          client.Reader
 	renderer        *groveWorkloadRenderer
 	scaler          *groveScaler
@@ -48,14 +49,16 @@ type groveWorkloadsReconciler struct {
 func newGroveWorkloadsReconciler(
 	kubeClient client.Client,
 	recorder events.EventRecorder,
+	rollout *dgdWorkerRolloutReconciler,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
 	dockerSecretRetriever DockerSecretRetriever,
 	scaleClient scale.ScalesGetter,
 ) *groveWorkloadsReconciler {
 	return &groveWorkloadsReconciler{
-		syncer: newDGDResourceSyncer(kubeClient, recorder),
-		reader: kubeClient,
+		syncer:  newDGDResourceSyncer(kubeClient, recorder),
+		rollout: rollout,
+		reader:  kubeClient,
 		renderer: newGroveWorkloadRenderer(
 			kubeClient,
 			config,
@@ -72,17 +75,19 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-	workerGenerationChanged bool,
-	afterPodCliqueSetSync func() error,
 ) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
+	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(dgd)
+	if err != nil {
+		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
 	renderedPodCliqueSet, err := r.renderer.Render(
 		ctx,
 		dgd,
 		restartState,
 		checkpointInfos,
-		workerGenerationChanged,
+		workerHashTransition.workerGenerationChanged,
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
@@ -102,12 +107,13 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
-	// The PCS write is the transition's write barrier. A failed callback
-	// leaves the DGD hash unchanged, so the next reconcile replans from live state.
-	if afterPodCliqueSetSync != nil {
-		if err := afterPodCliqueSetSync(); err != nil {
-			return ReconcileResult{}, fmt.Errorf("commit worker hash after Grove PodCliqueSet sync: %w", err)
-		}
+	// The PCS write is the transition's write barrier. A failed DGD update
+	// leaves its hash unchanged, so the next reconcile replans from live state.
+	if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, true); err != nil {
+		return ReconcileResult{}, failWorkloadProgram(
+			reasonRollingUpdateFailed,
+			fmt.Errorf("commit worker hash after Grove PodCliqueSet sync: %w", err),
+		)
 	}
 
 	if err := r.scaler.Reconcile(ctx, dgd, checkpointInfos); err != nil {
