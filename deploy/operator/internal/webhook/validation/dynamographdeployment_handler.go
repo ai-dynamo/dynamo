@@ -90,22 +90,25 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
 	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 
+	// Get user info from admission request context for identity-based validation
+	var terminatingUserInfo *authenticationv1.UserInfo
+	if req, reqErr := admission.RequestFromContext(ctx); reqErr == nil {
+		terminatingUserInfo = &req.UserInfo
+	}
+
 	// A finalizer can hold an object terminating for an arbitrary period, so
 	// admission still has to protect durable controller-owned metadata during
-	// that window. Only the current-state validation is skipped: an object whose
-	// unchanged legacy spec no longer satisfies today's admission rules must
-	// stay deletable, and rejecting it here would leave it impossible to
-	// finalize. The update rules below still run, so finalizer-only updates pass
-	// while metadata mutations do not.
-	var warnings admission.Warnings
+	// that window. Only the metadata rules run: anything that judges the new
+	// object on its own can refuse the cleanup update a legacy object needs and
+	// leave it impossible to finalize.
 	if !newObj.DeletionTimestamp.IsZero() {
-		logger.Info("validating update on terminating resource", "name", newObj.Name)
-	} else {
-		stateWarnings, err := validator.Validate(ctx, newObj, runtimeVersionSourceDisabled)
-		if err != nil {
-			return stateWarnings, err
-		}
-		warnings = stateWarnings
+		logger.Info("validating metadata-only update on terminating resource", "name", newObj.Name)
+		return validator.ValidateTerminatingUpdate(ctx, oldObj, newObj, terminatingUserInfo, h.operatorPrincipal)
+	}
+
+	warnings, err := validator.Validate(ctx, newObj, runtimeVersionSourceDisabled)
+	if err != nil {
+		return warnings, err
 	}
 
 	// Get user info from admission request context for identity-based validation

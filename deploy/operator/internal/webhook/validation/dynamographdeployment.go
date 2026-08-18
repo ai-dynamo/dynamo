@@ -128,6 +128,44 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	return validation.warnings, invalidDynamoGraphDeploymentError(newDGD, allErrs)
 }
 
+// ValidateTerminatingUpdate validates an update to a DynamoGraphDeployment that
+// already carries a deletionTimestamp.
+//
+// Only the metadata update rules run. A finalizer can hold an object terminating
+// for an arbitrary period, so durable controller-owned metadata still has to be
+// protected, but any rule that judges the new object on its own can refuse the
+// cleanup update a legacy object needs and leave it impossible to finalize. The
+// spec update traversal is not purely comparative: it validates new-state GPU
+// memory service settings, and the v1alpha1 compatibility view returns a hard
+// error for an object that cannot round-trip.
+//
+// ctx, oldDGD, and newDGD must not be nil. If userInfo is nil, provider
+// materialization fails closed.
+func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
+	ctx context.Context,
+	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	newDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	userInfo *authenticationv1.UserInfo,
+	operatorPrincipal string,
+) (admission.Warnings, error) {
+	validation := &dynamoGraphDeploymentValidation{
+		sharedValidation: sharedValidation{
+			ctx:                  ctx,
+			mgr:                  v.mgr,
+			runtimeVersionSource: runtimeVersionSourceDisabled,
+		},
+		userInfo:          userInfo,
+		operatorPrincipal: operatorPrincipal,
+	}
+
+	allErrs := validation.validateObjectMetaUpdate(
+		&newDGD.ObjectMeta,
+		&oldDGD.ObjectMeta,
+		field.NewPath("metadata"),
+	)
+	return validation.warnings, invalidDynamoGraphDeploymentError(newDGD, allErrs)
+}
+
 // validateDynamoGraphDeployment validates dgd. dgd must not be nil.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -558,10 +596,13 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
 		))
 	}
 
-	// A provider being set or changed must name a program the controller
+	// A newly materialized provider must name a program the controller
 	// implements. The create-side metadata rules do not run while an object is
-	// terminating, so this has to hold on the update path as well.
-	if newProviderExists && (!oldProviderExists || newProvider != oldProvider) &&
+	// terminating, so this has to hold on the update path as well. Only
+	// materialization needs it: once a provider exists, the immutability rule
+	// below rejects any change to it, so checking the value again there would
+	// report the same annotation twice.
+	if !oldProviderExists && newProviderExists &&
 		!isSupportedWorkloadProvider(newProvider) {
 		allErrs = append(allErrs, field.NotSupported(
 			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
