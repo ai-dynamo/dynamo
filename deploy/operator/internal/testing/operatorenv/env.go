@@ -470,6 +470,8 @@ func defaultOperatorConfig(in *configv1alpha1.OperatorConfiguration) *configv1al
 }
 
 func defaultRuntimeConfig(cfg *configv1alpha1.OperatorConfiguration) *commoncontroller.RuntimeConfig {
+	// Build config-derived defaults before the envtest API server exists. Tests that override
+	// dependency CRDs must resolve API-derived gates with features.New after creating a manager.
 	gate := features.Defaults()
 	gate.Checkpoint = cfg.Checkpoint.Enabled
 	gate.GPUDiscovery = cfg.Namespace.Restricted == "" || ptr.Deref(cfg.GPU.DiscoveryEnabled, true)
