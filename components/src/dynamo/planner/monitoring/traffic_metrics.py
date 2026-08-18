@@ -476,11 +476,20 @@ class PrometheusAPIClient:
                 # answer, so stop here: falling through would read a different
                 # router's traffic.
                 return None if math.isnan(value) else value
-            logger.info(f"No prometheus data for {full_metric_name}, returning None")
+            logger.info("No prometheus data for %s, returning None", full_metric_name)
             return None
-        except Exception as e:
-            logger.warning(f"Error getting avg kv hit rate: {e}")
+        except (
+            PrometheusApiClientException,
+            RequestsConnectionError,
+            RequestsTimeout,
+        ) as e:
+            logger.warning("Error getting avg kv hit rate: %s", e)
             return None
+        except Exception:
+            # A malformed response is a broken query contract, not missing data.
+            # Reporting it as absent would silently suppress the KV discount.
+            logger.exception("Unexpected error getting avg kv hit rate")
+            raise
 
     @staticmethod
     def _quote_label_value(value: str) -> str:
