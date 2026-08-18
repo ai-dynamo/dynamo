@@ -142,20 +142,11 @@ func desiredWorkerHashes(
 		return workerGenerationHashes{}, fmt.Errorf("failed to compute v2 worker hash: %w", err)
 	}
 
+	// Preserve v1 as the opaque suffix of an existing worker generation.
 	current := currentWorkerHashes(dgd)
-	v1Hash := v2Hash
-	if current.v2 != "" {
-		v1Hash = current.v1
-	}
-	if current.v2 == "" && current.v1 != "" && current.v1 != v2Hash {
-		// Keep v1 only when its value proves a pre-dual generation or is the explicit sentinel.
-		legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
-		if err != nil {
-			return workerGenerationHashes{}, fmt.Errorf("failed to compute v1 worker hash: %w", err)
-		}
-		if current.v1 == consts.LegacyWorkerHash || current.v1 == legacyHash {
-			v1Hash = legacyHash
-		}
+	v1Hash := current.v1
+	if v1Hash == consts.LegacyWorkerHash {
+		v1Hash = v2Hash
 	}
 
 	return workerGenerationHashes{v1: v1Hash, v2: v2Hash}, nil
@@ -317,10 +308,7 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 	logger := log.FromContext(ctx)
 
 	current := r.currentWorkerHashes(dgd)
-	if current.empty() {
-		return nil
-	}
-	if current.v1 == consts.LegacyWorkerHash {
+	if current.v1 == "" || current.v2 != "" || current.v1 == consts.LegacyWorkerHash {
 		return nil
 	}
 
@@ -329,20 +317,8 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 		return err
 	}
 
-	var next workerGenerationHashes
-	var eventMessage string
-	switch {
-	case current.v1 == desired.v1 && current.v2 == "" && current.v1 != desired.v2:
-		next = current
-		next.v2 = desired.v2
-		eventMessage = "Recorded compatible v1 and v2 worker hash annotations without rolling workers"
-	default:
-		return nil
-	}
-
-	if next == current {
-		return nil
-	}
+	// Record the current desired state as v2 without changing the active v1 suffix.
+	next := workerGenerationHashes{v1: current.v1, v2: desired.v2}
 	r.setCurrentWorkerHashes(dgd, next)
 	if err := r.Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to migrate worker hash annotations: %w", err)
@@ -351,7 +327,8 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 		"v1Hash", next.v1,
 		"v2Hash", next.v2)
 	if r.recorder != nil {
-		r.recorder.Eventf(dgd, nil, corev1.EventTypeNormal, "WorkerHashMigrated", "Update", "%s", eventMessage)
+		r.recorder.Eventf(dgd, nil, corev1.EventTypeNormal, "WorkerHashMigrated", "Update",
+			"Recorded v2 worker hash annotation without rolling workers")
 	}
 
 	return nil
