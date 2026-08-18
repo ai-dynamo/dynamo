@@ -62,6 +62,32 @@ def test_absent_tools_are_not_passed_to_the_chat_template():
     assert "tools" not in tokenizer.kwargs
 
 
+def test_tool_choice_none_keeps_tools_out_of_the_template():
+    # The ModelInput::Tokens path drops tool_dicts for tool_choice="none" so the
+    # model does not see the tools and emit raw XML tool calls in its prose.
+    # Rendering them here would make the two paths disagree about "none".
+    tokenizer = RecordingTokenizer()
+
+    InputParamManager(tokenizer).get_input_param(
+        {"messages": MESSAGES, "tools": TOOLS, "tool_choice": "none"},
+        use_tokenizer=True,
+    )
+
+    assert "tools" not in tokenizer.kwargs
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+def test_tools_are_forwarded_for_non_none_tool_choice(tool_choice):
+    tokenizer = RecordingTokenizer()
+
+    InputParamManager(tokenizer).get_input_param(
+        {"messages": MESSAGES, "tools": TOOLS, "tool_choice": tool_choice},
+        use_tokenizer=True,
+    )
+
+    assert tokenizer.kwargs.get("tools") == TOOLS
+
+
 def test_explicit_chat_template_kwargs_tools_win():
     # chat_template_kwargs is a deliberate escape hatch, and forwarding the
     # request's tools as a keyword alongside it would raise
