@@ -341,13 +341,15 @@ The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examp
 
 ### Session Affinity
 
-`affinity_target()` returns the session target that the request host resolved before selection. The value remains fixed for every policy callback in one selection attempt.
+With `--router-session-affinity-mode soft`, `affinity_target()` returns the session target that the request host resolved before selection. The value remains fixed for every policy callback in one selection attempt.
 
 Session affinity is a preference, not an eligibility constraint. Dynamo keeps all host-eligible workers in the policy candidate table. The affinity target can be absent when the worker is unavailable, overloaded, disallowed, or rejected by a filter.
 
 Dynamo's built-in policy selects an eligible affinity target. A custom filter can reject it, a scorer can change its cost, and a picker can select another eligible worker. The frontend rebinds the session only after it dispatches successfully to a different worker.
 
 An explicit target is different. Dynamo validates and reserves that exact worker without calling custom filters, scorers, or pickers.
+
+The default `hard` session-affinity mode follows the same exact-target path and does not invoke policy callbacks for an existing binding.
 
 The standalone selection service does not own a session-affinity store. Its `select` and `select_and_reserve` requests accept an optional `affinity_target` that an external controller resolved.
 

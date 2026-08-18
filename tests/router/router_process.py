@@ -58,6 +58,7 @@ class FrontendRouterProcess(ManagedProcess):
         use_remote_indexer: bool = False,
         event_plane: str | None = None,
         session_affinity_ttl_secs: int | None = None,
+        session_affinity_mode: str | None = None,
         extra_env: Mapping[str, str | None] | None = None,
     ):
         command = [
@@ -101,6 +102,9 @@ class FrontendRouterProcess(ManagedProcess):
             command.extend(
                 ["--router-session-affinity-ttl-secs", str(session_affinity_ttl_secs)]
             )
+
+        if session_affinity_mode is not None:
+            command.extend(["--router-session-affinity-mode", session_affinity_mode])
 
         if router_aic_config is not None:
             command.extend(

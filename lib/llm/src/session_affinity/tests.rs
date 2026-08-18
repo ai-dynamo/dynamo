@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use dynamo_runtime::{
     engine::AsyncEngineContext,
@@ -12,8 +12,8 @@ use dynamo_runtime::{
 use futures::{StreamExt, stream};
 
 use super::{
-    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
-    explicit_target,
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, SessionAffinityMode,
+    affinity_id, explicit_target,
     state::{ReplicaApplyOutcome, revision_timestamp},
 };
 use crate::{
@@ -52,6 +52,16 @@ fn error_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse> {
         Box::pin(stream::iter([Annotated::from_error("backend failed")])),
         Arc::new(Controller::default()),
     )
+}
+
+#[test]
+fn session_affinity_mode_defaults_to_hard_and_parses_soft() {
+    assert_eq!(SessionAffinityMode::default(), SessionAffinityMode::Hard);
+    assert_eq!(
+        SessionAffinityMode::from_str("soft").unwrap(),
+        SessionAffinityMode::Soft
+    );
+    assert!(SessionAffinityMode::from_str("invalid").is_err());
 }
 
 fn cancelled_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse> {

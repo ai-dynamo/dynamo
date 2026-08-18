@@ -50,7 +50,7 @@ behavior, and oversized-request bulk credit, see
 
 ## Default Selection and Scoring
 
-The default selector returns a live, eligible session-affinity target before scoring. Custom policies receive the target as a preference alongside all eligible candidates and may migrate it.
+Hard session affinity, the default, bypasses worker-selection policies. With `--router-session-affinity-mode soft`, the default selector returns a live, eligible affinity target before scoring. Custom policies receive the target as a preference alongside all eligible candidates and may migrate it.
 
 Without an eligible affinity target, these signals affect candidate scoring:
 

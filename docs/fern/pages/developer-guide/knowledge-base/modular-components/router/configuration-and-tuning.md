@@ -126,16 +126,23 @@ a value from `1` through `31536000` to enable it, then send
 without the TTL option provides session identity but does not enable router affinity.
 
 The first successfully dispatched request binds the session ID to its selected
-worker and, when available, data-parallel rank. In KV mode, later requests pass
-that target to worker selection as a preference. The built-in policy retains an
-eligible target. A custom policy can select another eligible worker. Dynamo
-rebinds the session after successful dispatch to that worker. Router modes
-without policy selection keep using the bound target while it remains available.
+worker and, when available, data-parallel rank. By default,
+`--router-session-affinity-mode hard` treats that binding like an explicit worker
+target: it bypasses custom filters, scorers, and pickers. If the target is no
+longer routable, Dynamo invalidates the binding and selects again.
+
+Set `--router-session-affinity-mode soft` or
+`DYN_ROUTER_SESSION_AFFINITY_MODE=soft` to pass an existing binding to KV worker
+selection as a preference. The built-in policy retains an eligible target. A
+custom policy can select another eligible worker, and Dynamo rebinds the session
+after successful dispatch to that worker. Router modes without policy selection
+continue to use exact affinity regardless of this setting.
 
 Concurrent requests can share a binding. Active requests prevent expiry. When a
 request lease ends after EOF, early drop, error, or cancellation, the idle timer
 restarts. A setup or dispatch failure invalidates the binding only when the failed
-worker is the current target. A policy error does not invalidate the binding.
+worker is the current target. In soft mode, a policy error does not invalidate the
+binding.
 
 The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
@@ -164,8 +171,8 @@ temporarily reduce affinity. In particular, a long request can outlive a peer's
 local TTL, and a dropped lease-completion update can leave peer deadlines out of
 sync until a later request republishes the binding.
 
-If the bound worker disappears, normal eligibility excludes it. A successful
-dispatch to another worker replaces the binding. Router restart clears all
+If the bound worker disappears, Dynamo invalidates the stale binding. A successful
+dispatch to another worker installs its replacement. Router restart clears all
 bindings. Bindings received from replicas are not authoritative storage. For
 strict affinity, configure the ingress or load balancer to consistently route a
 session to one frontend, or use an authoritative external binding store. When

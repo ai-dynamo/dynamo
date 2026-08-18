@@ -15,7 +15,7 @@ use crate::protocols::common::{
     llm_backend::PreprocessedRequest,
     preprocessor::RoutingHints,
 };
-use crate::session_affinity::AffinityTarget;
+use crate::session_affinity::{AffinityTarget, SessionAffinityMode};
 
 /// Conditional-disagg decision: which decode worker to pin the request to,
 /// plus diagnostic counts for logging.
@@ -67,6 +67,7 @@ fn decode_gate_allows_bypass(
 
 fn resolve_affinity_binding(
     target: Option<AffinityTarget>,
+    mode: SessionAffinityMode,
     unique_dp_rank_for_worker: impl Fn(u64) -> Option<u32>,
 ) -> Option<(Option<WorkerWithDpRank>, Option<WorkerWithDpRank>)> {
     let Some(target) = target else {
@@ -76,7 +77,10 @@ fn resolve_affinity_binding(
         .dp_rank
         .or_else(|| unique_dp_rank_for_worker(target.worker_id))?;
     let worker = WorkerWithDpRank::new(target.worker_id, dp_rank);
-    Some((Some(worker), None))
+    Some(match mode {
+        SessionAffinityMode::Hard => (None, Some(worker)),
+        SessionAffinityMode::Soft => (Some(worker), None),
+    })
 }
 
 impl<Sel> PrefillRouter<Sel>
@@ -166,9 +170,11 @@ where
         let (affinity_target, pinned_worker) = match request_pinned_worker {
             Some(worker) => (None, Some(worker)),
             None => {
-                let Some(resolved) = resolve_affinity_binding(decode_affinity_target, |id| {
-                    decode_router.unique_dp_rank_for_worker(id)
-                }) else {
+                let Some(resolved) = resolve_affinity_binding(
+                    decode_affinity_target,
+                    self.session_affinity_mode,
+                    |id| decode_router.unique_dp_rank_for_worker(id),
+                ) else {
                     tracing::debug!(
                         request_id,
                         "Skipping conditional disagg because decode affinity target has no resolved DP rank"
@@ -359,7 +365,9 @@ where
         }
         let binding = router.query_affinity_target(&probe_context).ok().flatten();
         let (affinity_target, pinned_worker) =
-            resolve_affinity_binding(binding, |id| router.chooser.unique_dp_rank_for_worker(id))?;
+            resolve_affinity_binding(binding, self.session_affinity_mode, |id| {
+                router.chooser.unique_dp_rank_for_worker(id)
+            })?;
 
         let outcome = router
             .chooser
@@ -403,16 +411,21 @@ mod tests {
         resolve_affinity_binding, resolve_request_decode_pin,
     };
     use crate::protocols::common::preprocessor::RoutingHints;
+    use crate::session_affinity::SessionAffinityMode;
     use dynamo_kv_router::protocols::WorkerWithDpRank;
     use dynamo_runtime::pipeline::RouteTarget;
 
     #[test]
-    fn affinity_binding_resolves_to_a_soft_target() {
+    fn affinity_binding_resolves_by_mode() {
         let target = RouteTarget::new(7, Some(2));
         let worker = WorkerWithDpRank::new(7, 2);
 
         assert_eq!(
-            resolve_affinity_binding(Some(target), |_| None),
+            resolve_affinity_binding(Some(target), SessionAffinityMode::Hard, |_| None),
+            Some((None, Some(worker)))
+        );
+        assert_eq!(
+            resolve_affinity_binding(Some(target), SessionAffinityMode::Soft, |_| None),
             Some((Some(worker), None))
         );
     }

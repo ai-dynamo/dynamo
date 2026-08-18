@@ -556,6 +556,7 @@ def _test_session_affinity(
     router_ports: list[int],
     test_payload: dict[str, Any],
     store_backend: str = "etcd",
+    session_affinity_mode: str = "hard",
 ):
     """Verify replica affinity overrides conflicting per-frontend KV placement."""
     with (
@@ -569,6 +570,7 @@ def _test_session_affinity(
             min_initial_workers=engine_workers.num_workers,
             event_plane="nats",
             session_affinity_ttl_secs=300,
+            session_affinity_mode=session_affinity_mode,
         ),
         FrontendRouterProcess(
             request,
@@ -580,6 +582,7 @@ def _test_session_affinity(
             min_initial_workers=engine_workers.num_workers,
             event_plane="nats",
             session_affinity_ttl_secs=300,
+            session_affinity_mode=session_affinity_mode,
         ),
     ):
         urls = [f"http://localhost:{port}/v1/chat/completions" for port in router_ports]
