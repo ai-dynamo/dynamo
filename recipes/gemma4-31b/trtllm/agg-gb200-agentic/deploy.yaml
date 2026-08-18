@@ -12,7 +12,7 @@ data:
     backend: pytorch
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
-    max_batch_size: 24
+    max_batch_size: 32
     max_num_tokens: 12288
     max_seq_len: 262144
     enable_chunked_prefill: true
@@ -24,7 +24,7 @@ data:
       avg_seq_len: 24576
     cuda_graph_config:
       enable_padding: true
-      max_batch_size: 24
+      max_batch_size: 32
     multimodal_config:
       encoder_cache_max_bytes: 0
     speculative_config:
@@ -138,7 +138,7 @@ spec:
                 - --tensor-parallel-size
                 - "1"
                 - --max-batch-size
-                - "24"
+                - "32"
                 - --max-num-tokens
                 - "12288"
                 - --max-seq-len
