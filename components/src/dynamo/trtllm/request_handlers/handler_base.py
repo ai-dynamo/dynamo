@@ -1130,7 +1130,19 @@ class HandlerBase(BaseGenerativeHandler):
             if default_max_tokens is not None:
                 sampling_params.max_tokens = default_max_tokens
 
-        if is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name]):
+        # PREFILL forces max_tokens=1 above but must still apply the full stop
+        # conditions to match native TRT-LLM context_only behavior -- it
+        # overrides only max_tokens, not the rest of the request's stop
+        # parameters. Skipping ignore_eos here in particular let TRT-LLM treat
+        # EOS as a stop condition on prefill's single sampled token, so a
+        # prompt whose first token happened to be EOS terminated the request
+        # right there instead of letting the KV handoff to decode proceed --
+        # the request "succeeded" with zero visible output instead of
+        # continuing generation normally.
+        if (
+            is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name])
+            or self.disaggregation_mode == DisaggregationMode.PREFILL
+        ):
             apply_stop_conditions_to_sampling_params(
                 sampling_params, request["stop_conditions"]
             )
