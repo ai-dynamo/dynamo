@@ -1,11 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Optional-dependency preflight must run before replay CLI imports.
+# ruff: noqa: E402
 
 """Regression tests for planner replay warmup wiring."""
 
 import json
 
 import pytest
+
+pytest.importorskip(
+    "aisimulate.replay",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
 
 import dynamo.planner.offline.replay_adapter as replay_adapter_module
 import dynamo.replay.main as replay_main
@@ -51,6 +58,9 @@ def test_planner_replay_passes_configured_dynamo_warmup_observations(
         def _is_easy_mode(self):
             return True
 
+        def set_bootstrap_metadata(self, metadata):
+            captured["bootstrap_metadata"] = metadata
+
     adapter = FakeAdapter()
 
     def fake_create_replay_planner_adapter(*, warmup_observations, **_kwargs):
@@ -87,3 +97,4 @@ def test_planner_replay_passes_configured_dynamo_warmup_observations(
         (1.0, 64.0, 4.0),
         (1.0, 128.0, 5.0),
     ]
+    assert captured["bootstrap_metadata"] == {"status": "not_required"}

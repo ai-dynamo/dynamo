@@ -56,8 +56,11 @@ WORKDIR /workspace
 
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
-# for shells, not K8s python3 launches), swap upstream's single-binary etcd
-# for dynamo_base's directory, and symlink system libstdc++ to a stable
+# for shells, not K8s python3 launches), swap upstream's standalone etcd
+# tooling (etcd, etcdctl, etcdutl) for dynamo_base's directory so the image
+# carries a single copy of each tool, drop the unused wandb developer tooling
+# the DLFW base carries (upstream removes it on main, Dockerfile.multi), and
+# symlink system libstdc++ to a stable
 # path for LD_PRELOAD — keeps PyInstaller-bundled tools (specifically `jet`,
 # NVIDIA's internal PyInstaller-packaged CI runner) from shadowing it with an
 # older copy.
@@ -79,10 +82,37 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         "/opt/nvidia/nvda_nixl/lib64" \
         > /etc/ld.so.conf.d/00-dynamo-trtllm.conf && \
     ldconfig && \
-    rm -f /usr/local/bin/etcd && \
+    rm -f \
+        /usr/local/bin/etcd \
+        /usr/local/bin/etcdctl \
+        /usr/local/bin/etcdutl && \
+    /usr/bin/python3 -m pip uninstall -y --break-system-packages wandb && \
+    ! /usr/bin/python3 -c "import wandb" 2>/dev/null && \
+    [ ! -e /usr/local/lib/python3.12/dist-packages/wandb ] && \
     mkdir -p /opt/dynamo && \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
     test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
+
+# Bring base-image OS packages up to the current patch releases published in
+# the distro archives. --only-upgrade skips anything not already installed, so
+# no new packages are added; versions are left unpinned so a cache-busted
+# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
@@ -123,6 +153,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     # Dynamo's own wheels — --no-deps preserves upstream's solve.
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    uv pip install --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
     \
     # nixl/nixl-cu13 for KVBM's `import nixl` ABI; version from NIXL_REF, matching
     # the nixl-sys wheel_builder links. LD_PRELOAD swaps the runtime .so (nixl#1668).
@@ -167,6 +198,126 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 
+# Positive codec guard: the shipped ffmpeg MUST expose the VP9 encoder and MUST
+# NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
+# or a codec regression fails the build here rather than at runtime — closing the
+# gap where an image with no working encoder passed every PR gate.
+RUN set -eu; \
+    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
+    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
+      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
+    if "$ff" -hide_banner -encoders 2>/dev/null \
+         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
+        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
+        exit 1; \
+    fi
+
+# Drop upstream's preinstalled opencv-python-headless (and the libav*/ffmpeg
+# copies its wheel vendors under opencv_python_headless.libs/). TRT-LLM made
+# cv2 an optional video extra (NVIDIA/TensorRT-LLM#16206) and its imports are
+# already function-local in 1.3.x, so nothing in the image needs it at import
+# time; video-decode users can install it explicitly per upstream docs.
+# Must run via the system interpreter: with VIRTUAL_ENV set, plain `pip`
+# targets the venv and exits 0 WITHOUT touching the system-site install.
+# The guards fail the build if the package survives. Mirrored by the
+# pre_runtime whiteout below — the squash COPY cannot represent deletions.
+RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-headless && \
+    ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
+    [ ! -e /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs ]
+
+# Upgrade DALI past its own media-codec cleanup. Upstream restricted DALI's
+# vendored ffmpeg build to drop the software h264/hevc/aac decoders
+# (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352), first released in 2.1.1; the base
+# image here carries 2.1.0, which predates it.
+#
+# Upgrade rather than remove. The vendored libav*/libsw* set cannot be trimmed
+# on its own -- every one of them is DT_NEEDED by libdali.so and its siblings, so
+# deleting the codec libraries breaks `import nvidia.dali` outright -- and while
+# nothing in this image imports DALI today, it belongs to TensorRT-LLM rather
+# than to us. A version bump removes the codec surface without taking a package
+# out of someone else's image.
+#
+# Measured on the shipped image: 2.1.0 registers 446 decoders including h264,
+# hevc, aac, aac_fixed and aac_latm; 2.1.1 and 2.2.0 each register 440 with all
+# five absent and vp8/vp9/mjpeg/av1 retained.
+#
+# Pinned exactly, not a floor. `>=2.1.1` resolves to whatever is newest -- 2.2.0
+# at the time of writing -- which is a minor-version jump into a component this
+# repo does not own, taken silently at build time. 2.1.1 is the smallest change
+# that removes the decoders, so it is the one to take.
+#
+# A pin can go stale in the one direction that matters: if TensorRT-LLM later
+# ships a base image with a newer DALI, installing 2.1.1 over it is a downgrade.
+# The check below turns that into a build failure with instructions rather than a
+# silent regression, which also makes this block self-retiring -- when upstream
+# catches up, the build tells whoever is looking to delete it.
+#
+# THIS BLOCK IS TRANSITIONAL. It exists because the base image predates upstream's
+# own cleanup. The guards after it and the bundled-libavcodec assertion in
+# tests/dependencies/test_no_software_video_codecs.py are NOT transitional: they
+# are the permanent statement of what this image may contain, and they must
+# outlive the workaround.
+#
+# System interpreter for the same reason as the opencv removal above: with
+# VIRTUAL_ENV set, plain pip targets the venv and leaves the system-site copy in
+# place. The guard enumerates what the library actually registers rather than
+# trusting the version string, so a wheel that reintroduces a decoder fails the
+# build. Mirrored by the pre_runtime whiteout below, which matters more here than
+# for a deletion: DALI's libraries are hash-named, so an upgrade RENAMES them and
+# the squash COPY would otherwise leave the old codec-carrying copy in place
+# beside the new one.
+RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
+    set -eu; \
+    before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
+    echo "DALI in base image: $before"; \
+    newest=$(printf '%s\n2.1.1\n' "$before" | sort -V | tail -1); \
+    if [ "$newest" != "2.1.1" ]; then \
+        echo "ERROR: base image already carries DALI $before, so pinning 2.1.1 would" >&2; \
+        echo "       downgrade it. Upstream has caught up -- delete this RUN and let" >&2; \
+        echo "       the base version stand. Keep the guards below and the bundled-" >&2; \
+        echo "       libavcodec assertion in tests/dependencies/, which are what stop" >&2; \
+        echo "       this from regressing." >&2; \
+        exit 1; \
+    fi; \
+    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
+        --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130==2.1.1'; \
+    v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
+    echo "DALI version: $v"; \
+    [ "$v" = "2.1.1" ] || { echo "ERROR: wanted DALI 2.1.1, got $v" >&2; exit 1; }; \
+    for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*'); do \
+        /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
+    done; \
+    /usr/bin/python3 -c 'import nvidia.dali'
+
+# Align the base image's aiohttp with the floor requirements.common.txt sets for
+# the other Dynamo images. The base ships an older release and the --no-deps
+# installs above deliberately leave upstream's solve alone, so this one package is
+# raised explicitly. Narrow by design: a single named package, not a re-solve.
+#
+# System interpreter for the same reason as the opencv removal and the DALI
+# upgrade above: with VIRTUAL_ENV set, plain pip targets /opt/dynamo/venv and
+# leaves the system-site copy in place. The venv is --system-site-packages, so a
+# venv-only install would shadow the old version at import time while leaving it
+# on disk under dist-packages, where the image inventory reads it. The guard
+# checks the system interpreter specifically, so a venv-only install fails here.
+#
+# Mirrored by the pre_runtime whiteout below. An upgrade renames the metadata
+# directory (aiohttp-3.13.5.dist-info -> aiohttp-3.14.3.dist-info) and the squash
+# COPY only replaces paths that match, so without dropping the old tree first the
+# base image's dist-info would ship alongside the new one.
+#
+# Checked against the base's own constraints (datasets, fsspec), which cap nothing
+# here. cp312 manylinux_2_28 wheels exist for x86_64 and aarch64, so neither
+# architecture builds from source.
+# The guard asserts on dist-info directories, not on an importable version,
+# because those directories are what an image inventory reads and they are what
+# a venv-only install or a missed whiteout would leave wrong. It requires exactly
+# one, in range, so a surviving old copy beside the new one fails the build.
+# Version-compared rather than glob-matched: a glob range silently stops matching
+# at the end of the series it was written for.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.3,<4.0" && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 3) <= tv(vs[0]) < (4, 0, 0) else 1)'
+
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
 RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
@@ -194,10 +345,77 @@ CMD ["/bin/bash"]
 # single layer. Only Dynamo-specific env needs redeclaring below.
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # Whiteout paths runtime_full removed — COPY can't represent deletions, so
-# without this, upstream's /workspace, /home/ubuntu, and single-file
-# /usr/local/bin/etcd would leak alongside our content.
-RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd
+# without this, upstream's /workspace, /home/ubuntu, standalone
+# /usr/local/bin/etcd* tools, and preinstalled opencv (cv2/ + vendored
+# opencv_python_headless.libs/ + dist-info) would leak alongside our content.
+# Keep this list in sync with any deletion RUNs in the stages above.
+#
+# DALI is here for a different reason: runtime_full UPGRADES it rather than
+# removing it, and its vendored libraries are hash-named
+# (libavcodec-847b0373.so.62 -> libavcodec-7e11e4e3.so.62). An overlay COPY only
+# replaces paths that match, so without dropping the old tree first, the base
+# image's 2.1.0 libraries — the ones carrying h264/hevc/aac — would ship
+# alongside the upgraded ones and the upgrade would buy nothing.
+#
+# aiohttp is here for the DALI reason, not the opencv one: runtime_full upgrades
+# it in system site, and the version-stamped metadata directory is renamed by the
+# upgrade (aiohttp-3.13.5.dist-info -> aiohttp-3.14.3.dist-info). The overlay COPY
+# would leave the base image's dist-info beside the new one, and the inventory
+# reads that directory, so the upgrade would not show.
+#
+# Its runtime dependencies are listed for the same reason. pip upgrades those too
+# when the new aiohttp requires versions the base does not carry, and each rename
+# has the same doubling problem. Dropping them here is free: the overlay restores
+# whatever runtime_full holds, so listing one that did not move costs nothing and
+# omitting one that did would leave stale metadata behind.
+RUN rm -rf /workspace /home/ubuntu \
+    /usr/local/bin/etcd \
+    /usr/local/bin/etcdctl \
+    /usr/local/bin/etcdutl \
+    /usr/local/bin/wandb \
+    /usr/local/lib/python3.12/dist-packages/wandb \
+    /usr/local/lib/python3.12/dist-packages/wandb-* \
+    /usr/local/lib/python3.12/dist-packages/cv2 \
+    /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
+    /usr/local/lib/python3.12/dist-packages/nvidia/dali \
+    /usr/local/lib/python3.12/dist-packages/nvidia_dali_* \
+    /usr/local/lib/python3.12/dist-packages/aiohttp \
+    /usr/local/lib/python3.12/dist-packages/aiohttp-* \
+    /usr/local/lib/python3.12/dist-packages/multidict \
+    /usr/local/lib/python3.12/dist-packages/multidict-* \
+    /usr/local/lib/python3.12/dist-packages/yarl \
+    /usr/local/lib/python3.12/dist-packages/yarl-* \
+    /usr/local/lib/python3.12/dist-packages/propcache \
+    /usr/local/lib/python3.12/dist-packages/propcache-* \
+    /usr/local/lib/python3.12/dist-packages/frozenlist \
+    /usr/local/lib/python3.12/dist-packages/frozenlist-* \
+    /usr/local/lib/python3.12/dist-packages/aiosignal \
+    /usr/local/lib/python3.12/dist-packages/aiosignal-* \
+    /usr/local/lib/python3.12/dist-packages/aiohappyeyeballs \
+    /usr/local/lib/python3.12/dist-packages/aiohappyeyeballs-* \
+    /usr/local/lib/python3.12/dist-packages/attr \
+    /usr/local/lib/python3.12/dist-packages/attrs \
+    /usr/local/lib/python3.12/dist-packages/attrs-* && \
+    ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
+    ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
+
+# Post-overlay guard for the DALI whiteout above. This is the only stage where
+# the failure can appear: runtime_full holds exactly one DALI, and the whiteout
+# is what keeps the overlay from re-adding the base image's copy beside it.
+# Because those libraries are hash-named, a missed whiteout leaves TWO -- the
+# upgraded one and the 2.1.0 one that registers h264/hevc/aac -- and the image
+# then reports version 2.1.0 while carrying both. Verified by building this
+# stage with and without the rm -rf: without it, two copies and the codecs are
+# back; with it, one copy and clean.
+#
+# Every match is checked, not just the first: the whole point is catching the
+# case where more than one exists.
+RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
+    set -eu; \
+    for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
+        /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
+    done
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
@@ -243,6 +461,10 @@ CMD ["/bin/bash"]
 
 
 FROM pre_runtime AS runtime
+# NVDEC (PyNvVideoCodec, added in requirements.trtllm.txt) needs the driver
+# "video" capability at runtime so libnvcuvid is exposed; without it
+# PyNvVideoCodec cannot import. Ensure the K8s pod/runtimeClass does not drop it.
+ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 {% if target not in ("dev", "local-dev") %}
 COPY --from=licenses /legal /legal
 {% endif %}

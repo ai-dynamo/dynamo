@@ -63,6 +63,50 @@ prophet_window_size: 100   # Larger window for seasonal detection
 load_predictor_log1p: true
 ```
 
+## Power-Aware Budget Scaling
+
+Keep the Planner's projected GPU power draw within a configured rack/DGD budget.
+Per-GPU caps are DGD-owned: authored on each worker component's `podTemplate`
+annotation (`dynamo.nvidia.com/gpu-power-limit`), applied to Pods by the
+operator, and enforced by the Power Agent. The Planner only reads them and
+combines them with `total_gpu_power_limit` (in its config) to project a budget
+and clamp scale-up — it never patches Pods.
+
+The mounted PlannerConfig enables it:
+
+```json
+{
+  "enable_power_awareness": true,
+  "total_gpu_power_limit": 5200
+}
+```
+
+`enable_power_awareness` requires `environment: "kubernetes"` and
+`mode` set to `disagg`, `prefill`, or `decode` (`agg` is not supported).
+The Planner caches each annotated component's cap, effective main-container GPU
+count, and node count at startup. DGD admission rejects changes to those fields;
+delete and recreate the DGD to change them. Restart the Planner after changing
+`total_gpu_power_limit`.
+
+You must also enable `pods/list` RBAC for the Planner's ServiceAccount at
+install time. The Planner reads Pod annotations during startup to verify that
+power caps have propagated before caching them. Without the permission the
+startup settlement check fails. Pass this flag when installing or upgrading the
+platform chart:
+
+```bash
+helm dependency build deploy/helm/charts/platform
+helm upgrade --install dynamo deploy/helm/charts/platform \
+  --set dynamo-operator.planner.powerAwareness.enabled=true
+```
+
+See the `power-aware-budget/` directory in
+[Dynamo examples](https://github.com/ai-dynamo/dynamo/tree/main/examples) for
+the full annotation + config contract and its limitations (the budget is a
+projected ceiling over requested caps, not a proven hardware limit). Mixed GPU
+generations, dynamic cap retargeting, and DRA-backed GPU allocation are not
+supported.
+
 ## Virtual Connector
 
 For non-Kubernetes environments, use the VirtualConnector to communicate scaling

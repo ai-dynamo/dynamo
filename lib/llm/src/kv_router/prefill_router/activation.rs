@@ -5,11 +5,13 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::make_conditional_disagg_policy,
+    DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
+    conditional_disagg::make_conditional_disagg_policy,
     config::KvRouterConfig,
+    selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -19,10 +21,13 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
+use super::{
+    InnerPrefillRouter, PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter,
+};
 use crate::{
     discovery::ModelManager,
-    kv_router::{KvPushRouter, KvRouter},
+    kv_router::{KvPushRouter, KvRouter, WorkerSelectorFactory},
+    local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -31,31 +36,14 @@ use crate::{
     session_affinity::create_affinity_coordinator,
 };
 
-impl PrefillRouter {
+impl PrefillRouter<DefaultWorkerSelector> {
     /// Create a disabled prefill router that will never activate (passthrough only)
     pub fn disabled(
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            prefill_router: std::sync::OnceLock::new(),
-            decode_router: None,
-            decode_session_affinity: std::sync::OnceLock::new(),
-            model_manager,
-            endpoint_id: std::sync::OnceLock::new(),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            router_mode,
-            session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
-            conditional_disagg_policy: make_conditional_disagg_policy(None),
-            conditional_disagg_prefill_busy_threshold: None,
-            conditional_disagg_decode_busy_threshold: None,
-            prefill_load_estimator: None,
-            model_name: String::new(), // Not used for disabled router
-            namespace: String::new(),  // Not used for disabled router
-            is_eagle: false,
-            lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
-        })
+        Self::disabled_with_selector(model_manager, router_mode, session_affinity_ttl_secs)
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -73,8 +61,83 @@ impl PrefillRouter {
         is_eagle: bool,
         worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
     ) -> Arc<Self> {
-        let prefill_router = std::sync::OnceLock::new();
+        Self::new_with_selector_factory(
+            Some(activation_rx),
+            model_manager,
+            router_mode,
+            kv_cache_block_size,
+            kv_router_config,
+            decode_router,
+            Arc::new(|config, worker_type, _partition| {
+                DefaultWorkerSelector::new(
+                    Some(config.clone()),
+                    worker_type.default_selector_label(),
+                )
+            }),
+            prefill_load_estimator,
+            session_affinity_ttl_secs,
+            model_name,
+            namespace,
+            is_eagle,
+            worker_monitor,
+            None,
+        )
+    }
+}
+
+impl<Sel> PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    pub(crate) fn disabled_with_selector(
+        model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
+        session_affinity_ttl_secs: Option<u64>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            binding: arc_swap::ArcSwapOption::empty(),
+            target: parking_lot::Mutex::new(None),
+            target_tx: None,
+            decode_router: None,
+            worker_selector_factory: None,
+            decode_session_affinity: std::sync::OnceLock::new(),
+            model_manager,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            router_mode,
+            session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            conditional_disagg_policy: make_conditional_disagg_policy(None),
+            conditional_disagg_prefill_busy_threshold: None,
+            conditional_disagg_decode_busy_threshold: None,
+            prefill_load_estimator: None,
+            model_name: String::new(), // Not used for disabled router
+            namespace: String::new(),  // Not used for disabled router
+            is_eagle: false,
+            task_guard: None,
+            lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
+            #[cfg(test)]
+            activation_task_state: Arc::new(()),
+        })
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn new_with_selector_factory(
+        activation_rx: Option<oneshot::Receiver<Endpoint>>,
+        model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        decode_router: Option<Arc<KvRouter<Sel>>>,
+        worker_selector_factory: WorkerSelectorFactory<Sel>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        session_affinity_ttl_secs: Option<u64>,
+        model_name: String,
+        namespace: String,
+        is_eagle: bool,
+        worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+        task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    ) -> Arc<Self> {
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let (target_tx, target_rx) = watch::channel(None);
         let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
         let conditional_disagg_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
             c.conditional_disagg_prefill_busy_threshold
@@ -85,11 +148,13 @@ impl PrefillRouter {
             .and_then(|c| c.conditional_disagg_decode_busy_threshold);
 
         let router = Arc::new(Self {
-            prefill_router,
+            binding: arc_swap::ArcSwapOption::empty(),
+            target: parking_lot::Mutex::new(None),
+            target_tx: Some(target_tx),
             decode_router,
+            worker_selector_factory: Some(worker_selector_factory),
             decode_session_affinity: std::sync::OnceLock::new(),
             model_manager: model_manager.clone(),
-            endpoint_id: std::sync::OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
@@ -100,105 +165,127 @@ impl PrefillRouter {
             model_name,
             namespace,
             is_eagle,
+            task_guard: task_guard.clone(),
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
+            #[cfg(test)]
+            activation_task_state: Arc::new(()),
         });
 
-        // Spawn background task to wait for activation
-        let router_clone = router.clone();
+        let router_weak = Arc::downgrade(&router);
+        let drive_cancel_token = cancel_token.clone();
+        let drive_task_guard = task_guard.clone();
+        #[cfg(test)]
+        let drive_task_state = router.activation_task_state.clone();
         tokio::spawn(async move {
-            tokio::select! {
-                result = activation_rx => {
-                    let Ok(endpoint) = result else {
-                        tracing::debug!("Prefill router activation channel closed without receiving endpoint");
-                        return;
-                    };
-
-                    if let Err(e) = router_clone.activate(
-                        endpoint,
-                        model_manager,
-                        kv_cache_block_size,
-                        kv_router_config,
-                        router_clone.prefill_load_estimator.clone(),
-                        worker_monitor.as_ref(),
-                    ).await {
-                        tracing::error!(error = %e, "Failed to activate prefill router");
-                    }
-                }
-                _ = cancel_token.cancelled() => {
-                    tracing::debug!("Prefill router activation cancelled");
-                }
-            }
+            let _drive_task_guard = drive_task_guard;
+            #[cfg(test)]
+            let _drive_task_state = drive_task_state;
+            Self::drive_target(
+                router_weak,
+                target_rx,
+                drive_cancel_token,
+                kv_cache_block_size,
+                kv_router_config,
+                worker_monitor,
+            )
+            .await;
         });
+        if let Some(activation_rx) = activation_rx {
+            let router = Arc::downgrade(&router);
+            let activation_task_guard = task_guard;
+            #[cfg(test)]
+            let activation_task_state = router
+                .upgrade()
+                .expect("prefill router exists during construction")
+                .activation_task_state
+                .clone();
+            tokio::spawn(async move {
+                let _activation_task_guard = activation_task_guard;
+                #[cfg(test)]
+                let _activation_task_state = activation_task_state;
+                tokio::select! {
+                    result = activation_rx => {
+                        if let (Ok(endpoint), Some(router)) = (result, router.upgrade()) {
+                            router.set_target(Some(endpoint));
+                        }
+                    }
+                    _ = cancel_token.cancelled() => {}
+                }
+            });
+        }
 
         router
     }
 
-    /// Activate the prefill router with the provided endpoint
-    async fn activate(
-        &self,
+    async fn build_binding(
+        context: &PrefillBuildContext<Sel>,
         endpoint: Endpoint,
-        model_manager: Arc<ModelManager>,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        worker_monitor: Option<&crate::discovery::KvWorkerMonitor>,
-    ) -> Result<()> {
+    ) -> Result<(PrefillBinding<Sel>, Client)> {
         tracing::info!(
-            router_mode = ?self.router_mode,
+            router_mode = ?context.router_mode,
             "Activating prefill router"
         );
 
-        // Store endpoint metadata for bootstrap and topology preparation.
-        let _ = self.endpoint_id.set(endpoint.id());
+        let endpoint_id = endpoint.id();
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
         // This must be done before creating the router so bootstrap info is available
-        model_manager
+        context
+            .model_manager
             .get_or_create_runtime_config_watcher(&endpoint)
             .await?;
 
-        let inner_router = if self.router_mode.is_kv_routing() {
-            let endpoint_id = endpoint.id();
+        let inner_router = if context.router_mode.is_kv_routing() {
             let discovered_cards = endpoint
                 .component()
                 .drt()
                 .discovery()
                 .list(DiscoveryQuery::EndpointModels {
-                    namespace: endpoint_id.namespace,
-                    component: endpoint_id.component,
-                    endpoint: endpoint_id.name,
+                    namespace: endpoint_id.namespace.clone(),
+                    component: endpoint_id.component.clone(),
+                    endpoint: endpoint_id.name.clone(),
                 })
                 .await;
             let is_eagle = match discovered_cards {
                 Ok(instances) => instances
                     .into_iter()
                     .find_map(|instance| instance.deserialize_model::<ModelDeploymentCard>().ok())
-                    .map_or(self.is_eagle, |card| card.runtime_config.enable_eagle),
+                    .map_or(context.is_eagle, |card| card.runtime_config.enable_eagle),
                 Err(error) => {
                     tracing::warn!(%error, "Failed to read prefill model card; using configured EAGLE mode");
-                    self.is_eagle
+                    context.is_eagle
                 }
             };
 
             // Create KV chooser using the endpoint (this is a prefill router)
-            let kv_chooser = model_manager
-                .kv_chooser_for_with_worker_role(
+            let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
+            let selector = (context.worker_selector_factory)(
+                &effective_kv_router_config,
+                crate::worker_type::WorkerType::Prefill,
+                RoutingPartitionRef::new(&context.model_name, DEFAULT_ROUTING_GROUP),
+            );
+            let kv_chooser = context
+                .model_manager
+                .kv_chooser_for_with_selector(
                     &endpoint,
                     kv_cache_block_size,
+                    selector,
                     kv_router_config,
-                    prefill_load_estimator,
+                    context.prefill_load_estimator.clone(),
                     Some(crate::worker_type::WorkerType::Prefill),
                     WORKER_TYPE_PREFILL,
-                    Some(self.model_name.clone()),
+                    Some(context.model_name.clone()),
                     is_eagle,
                 )
                 .await?;
 
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
-            Self::attach_prefill_client(worker_monitor, &client);
             let affinity =
-                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
+                create_affinity_coordinator(context.session_affinity_ttl, client.clone()).await?;
+            let prefill_client = client.clone();
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -209,68 +296,50 @@ impl PrefillRouter {
             .await?;
 
             // Wrap it in KvPushRouter
-            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
-                push_router,
-                kv_chooser,
-                affinity,
-            )))
+            (
+                InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
+                    push_router,
+                    kv_chooser,
+                    affinity,
+                ))),
+                prefill_client,
+            )
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
-            Self::attach_prefill_client(worker_monitor, &client);
             let affinity =
-                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
+                create_affinity_coordinator(context.session_affinity_ttl, client.clone()).await?;
+            let prefill_client = client.clone();
 
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
                 client,
-                self.router_mode,
+                context.router_mode,
                 None, // worker_monitor
             )
             .await?;
 
-            InnerPrefillRouter::SimpleRouter(Arc::new(
-                crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
-                    push_router,
-                    affinity,
-                    self.router_mode.is_direct_routing(),
-                ),
-            ))
+            (
+                InnerPrefillRouter::SimpleRouter(Arc::new(
+                    crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
+                        push_router,
+                        affinity,
+                        context.router_mode.is_direct_routing(),
+                    ),
+                )),
+                prefill_client,
+            )
         };
 
-        // Set the router (ignore error if already set).
-        let _ = self.prefill_router.set(inner_router);
-        match self.complete_activation() {
-            PrefillLifecycleState::Active => {
-                tracing::info!(
-                    router_mode = ?self.router_mode,
-                    "Prefill router activated successfully"
-                );
-            }
-            PrefillLifecycleState::Unavailable => {
-                tracing::info!(
-                    router_mode = ?self.router_mode,
-                    "Prefill router initialized after its workers became unavailable"
-                );
-            }
-            PrefillLifecycleState::Pending => unreachable!("activation must leave pending state"),
-        }
-
-        Ok(())
-    }
-
-    pub(super) fn complete_activation(&self) -> PrefillLifecycleState {
-        match self.lifecycle.compare_exchange(
-            PrefillLifecycleState::Pending as u8,
-            PrefillLifecycleState::Active as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => PrefillLifecycleState::Active,
-            Err(current) => PrefillLifecycleState::from_atomic(current),
-        }
+        Ok((
+            PrefillBinding {
+                endpoint_id,
+                router: inner_router.0,
+            },
+            inner_router.1,
+        ))
     }
 
     /// Attach the freshly-created prefill `Client` to this WorkerSet's monitor (handed in
@@ -285,105 +354,170 @@ impl PrefillRouter {
         }
     }
 
-    // -- Prefill death handling --
-
-    /// Deactivate the prefill router. Called when all prefill workers are removed.
-    /// After deactivation, requests fall back to aggregated mode.
-    /// The inner router is preserved so that when workers rejoin (same endpoint/discovery),
-    /// the Client's discovery subscription picks them up automatically.
-    pub fn deactivate(&self) {
-        let transition =
-            self.lifecycle
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                    match PrefillLifecycleState::from_atomic(current) {
-                        PrefillLifecycleState::Pending | PrefillLifecycleState::Active => {
-                            Some(PrefillLifecycleState::Unavailable as u8)
+    async fn drive_target(
+        router: std::sync::Weak<Self>,
+        mut target_rx: watch::Receiver<Option<Endpoint>>,
+        cancel_token: tokio_util::sync::CancellationToken,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+    ) {
+        loop {
+            let target = target_rx.borrow_and_update().clone();
+            let Some(endpoint) = target else {
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => return,
+                    changed = target_rx.changed() => {
+                        if changed.is_err() {
+                            return;
                         }
-                        PrefillLifecycleState::Unavailable => None,
                     }
-                });
-        if transition.is_err() {
-            return;
+                }
+                continue;
+            };
+            let endpoint_id = endpoint.id();
+            let Some(router_ref) = router.upgrade() else {
+                return;
+            };
+            let reuses_binding = router_ref
+                .binding
+                .load_full()
+                .is_some_and(|binding| binding.endpoint_id == endpoint_id)
+                && router_ref.lifecycle_state() == PrefillLifecycleState::Active;
+            if reuses_binding {
+                drop(router_ref);
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => return,
+                    changed = target_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
+                }
+                continue;
+            }
+            let build_context = PrefillBuildContext {
+                model_manager: router_ref.model_manager.clone(),
+                router_mode: router_ref.router_mode,
+                worker_selector_factory: router_ref
+                    .worker_selector_factory
+                    .clone()
+                    .expect("enabled prefill router has a worker selector factory"),
+                prefill_load_estimator: router_ref.prefill_load_estimator.clone(),
+                session_affinity_ttl: router_ref.session_affinity_ttl,
+                model_name: router_ref.model_name.clone(),
+                is_eagle: router_ref.is_eagle,
+            };
+            drop(router_ref);
+            let build = Self::build_binding(
+                &build_context,
+                endpoint,
+                kv_cache_block_size,
+                kv_router_config.clone(),
+            );
+            tokio::pin!(build);
+            let result = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return,
+                changed = target_rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                result = &mut build => result,
+            };
+            let Some(router_ref) = router.upgrade() else {
+                return;
+            };
+            match result {
+                Ok((binding, prefill_client)) => {
+                    let current_target = router_ref.target.lock();
+                    if current_target.as_ref() != Some(&endpoint_id) {
+                        continue;
+                    }
+                    Self::attach_prefill_client(worker_monitor.as_ref(), &prefill_client);
+                    router_ref.binding.store(Some(Arc::new(binding)));
+                    router_ref
+                        .lifecycle
+                        .store(PrefillLifecycleState::Active as u8, Ordering::Release);
+                    drop(current_target);
+                    tracing::info!(
+                        model_name = %router_ref.model_name,
+                        namespace = %router_ref.namespace,
+                        %endpoint_id,
+                        "Prefill router target activated"
+                    );
+                }
+                Err(error) => {
+                    if router_ref.target.lock().as_ref() != Some(&endpoint_id) {
+                        continue;
+                    }
+                    tracing::error!(
+                        %error,
+                        model_name = %router_ref.model_name,
+                        namespace = %router_ref.namespace,
+                        %endpoint_id,
+                        "Failed to activate prefill router target"
+                    );
+                    drop(router_ref);
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => return,
+                        changed = target_rx.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                    }
+                }
+            }
         }
-        tracing::info!(
-            model_name = %self.model_name,
-            namespace = %self.namespace,
-            "Prefill router deactivated (all prefill workers removed)"
-        );
     }
 
-    /// Reactivate a deactivated router. Called when prefill workers rejoin.
-    /// The inner router's Client re-discovers workers via its discovery subscription.
-    ///
-    /// Note: there is a brief race between entering `Active` and the Client
-    /// actually rediscovering workers. Requests arriving in this window may fail at prefill resolution.
-    /// This is bounded by discovery propagation time (typically sub-second).
-    ///
-    /// Also note: reactivation reuses the existing inner router built from the
-    /// original endpoint. If prefill rejoins under a different endpoint identity
-    /// (e.g., reconfigured deployment), the stale Client would not discover the
-    /// new workers. This is acceptable for normal restart scenarios where the
-    /// endpoint identity is stable.
-    pub fn reactivate(&self) {
-        let initialized = self.prefill_router.get().is_some();
-        let target = if initialized {
+    /// Update the desired Prefill endpoint. Clearing is synchronous so requests
+    /// holding an older catalog snapshot bypass a removed endpoint before the
+    /// replacement catalog is published.
+    pub(crate) fn set_target(&self, target: Option<Endpoint>) {
+        let target_id = target.as_ref().map(Endpoint::id);
+        let mut current = self.target.lock();
+        if *current == target_id {
+            return;
+        }
+        *current = target_id.clone();
+        let reuses_binding = target_id.is_some()
+            && self
+                .binding
+                .load_full()
+                .is_some_and(|binding| Some(&binding.endpoint_id) == target_id.as_ref());
+        let lifecycle = if target.is_none() {
+            PrefillLifecycleState::Unavailable
+        } else if reuses_binding {
             PrefillLifecycleState::Active
         } else {
+            self.binding.store(None);
             PrefillLifecycleState::Pending
         };
-        let transition = self.lifecycle.compare_exchange(
-            PrefillLifecycleState::Unavailable as u8,
-            target as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        if let Err(current) = transition {
-            PrefillLifecycleState::from_atomic(current);
-            return;
-        }
-        let state =
-            if target == PrefillLifecycleState::Pending && self.prefill_router.get().is_some() {
-                self.complete_activation()
-            } else {
-                target
-            };
-        match state {
-            PrefillLifecycleState::Active => {
-                tracing::info!(
-                    model_name = %self.model_name,
-                    namespace = %self.namespace,
-                    "Prefill router reactivated (prefill workers rejoined)"
-                );
-            }
-            PrefillLifecycleState::Pending => {
-                tracing::info!(
-                    model_name = %self.model_name,
-                    namespace = %self.namespace,
-                    "Prefill workers rejoined before router initialization completed"
-                );
-            }
-            PrefillLifecycleState::Unavailable => {}
+        self.lifecycle.store(lifecycle as u8, Ordering::Release);
+        if let Some(target_tx) = &self.target_tx {
+            target_tx.send_replace(target);
         }
     }
 
-    /// Whether this router is currently deactivated (prefill workers died).
-    pub fn is_deactivated(&self) -> bool {
-        self.lifecycle_state() == PrefillLifecycleState::Unavailable
-    }
-
-    /// Whether the inner router has initialized, even if workers are unavailable.
+    /// Whether the inner router has initialized.
     pub fn is_activated(&self) -> bool {
-        self.prefill_router.get().is_some()
+        self.binding.load().is_some()
     }
 
     pub(super) fn lifecycle_state(&self) -> PrefillLifecycleState {
         PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
     }
 
-    /// Mark this router as active for testing purposes.
     #[cfg(test)]
-    pub(crate) fn mark_active_for_test(&self) {
-        self.lifecycle
-            .store(PrefillLifecycleState::Active as u8, Ordering::Release);
+    pub(crate) fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
+        self.target.lock().clone()
     }
 }

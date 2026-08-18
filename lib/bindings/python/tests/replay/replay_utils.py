@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,16 @@ AIC_PARITY_BACKENDS = [
     pytest.param("vllm", id="vllm"),
     pytest.param("sglang", id="sglang"),
 ]
+
+
+def _require_aisimulate_distribution(*, allow_module_level: bool = False) -> None:
+    try:
+        distribution("aisimulate")
+    except PackageNotFoundError:
+        pytest.skip(
+            "Dynamo replay integration tests require the optional AISimulate distribution",
+            allow_module_level=allow_module_level,
+        )
 
 
 def _vllm_args_payload():
@@ -248,7 +259,15 @@ def _partial_router_config():
     )
 
 
+def _report_summary(report):
+    if not isinstance(report, dict):
+        return report.summary
+    summary = report.get("summary")
+    return summary if isinstance(summary, dict) else report
+
+
 def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_tokens):
+    report = _report_summary(report)
     assert report["num_requests"] == num_requests
     assert report["completed_requests"] == num_requests
     assert report["total_input_tokens"] == num_requests * input_tokens
@@ -256,6 +275,7 @@ def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_to
 
 
 def _assert_basic_report_metrics(report):
+    report = _report_summary(report)
     assert report["request_throughput_rps"] > 0
     assert report["output_throughput_tok_s"] > 0
     assert report["duration_ms"] > 0
@@ -265,6 +285,7 @@ def _replay_cli_env() -> dict[str, str]:
     repo_root = Path(__file__).resolve().parents[5]
     env = os.environ.copy()
     pythonpath_entries = [
+        str(repo_root / "aisimulate/src"),
         str(repo_root / "lib/bindings/python/src"),
         str(repo_root / "components/src"),
     ]

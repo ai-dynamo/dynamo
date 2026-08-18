@@ -14,7 +14,7 @@
 # limitations under the License.
 
 default_install_hook_types: [pre-commit, commit-msg]
-exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/vllm/proto/vllm_grpc\.proto$|lib/sidecar/trtllm/proto/trtllm_service\.proto$)
+exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/vllm/proto/(control|inference)\.proto$|lib/sidecar/trtllm/proto/trtllm_service\.proto$)
 repos:
 - repo: https://github.com/timothycrosley/isort
   rev: 5.12.0
@@ -48,7 +48,7 @@ repos:
 # More details about these pre-commit hooks here:
 # https://pre-commit.com/hooks.html
 - repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v4.4.0
+  rev: v6.0.0
   hooks:
   - id: check-case-conflict
   - id: check-executables-have-shebangs
@@ -80,6 +80,12 @@ repos:
 # and give it visiblity into all the local and third_party packages expected.
 - repo: local
   hooks:
+    - id: sync-aisimulate-docs
+      name: Check canonical AI Simulate docs are synced to Fern
+      entry: python3 docs/fern/scripts/sync_aisimulate_docs.py --check
+      language: system
+      always_run: true
+      pass_filenames: false
     - id: sync-site-css
       name: Check CustomFooter SITE_CSS mirrors main.css
       entry: python3 docs/fern/scripts/sync_site_css.py --check
@@ -100,6 +106,71 @@ repos:
       entry: python3 docs/fern/scripts/check_asset_paths.py --test
       language: system
       files: ^docs/fern/scripts/check_asset_paths\.py$
+    - id: check-style-components
+      name: Check component CSS template literals
+      entry: python3 docs/fern/scripts/check_style_components.py
+      language: system
+      # ReleaseSupportMatrix and FeatureInteractions hold large CSS template
+      # literals under a name the *Styles.tsx convention misses, and a stray
+      # backtick there breaks the Fern build the same way. Named rather than
+      # matching every component: the check forbids interpolation, which is
+      # correct for a pure CSS literal and wrong for ordinary TSX, and a
+      # components/.*\.tsx pattern fails on FeatureHeatmap, ModelEABuildCards
+      # and TerminalDemo, all of which interpolate legitimately.
+      files: ^docs/fern/(components/(.*Styles|ReleaseSupportMatrix|FeatureInteractions)\.tsx|scripts/check_style_components\.py)$
+    - id: check-agent-twins
+      name: Check component-rendered data has an agent-readable twin
+      entry: python3 docs/fern/scripts/check_agent_twins.py
+      language: system
+      # releases.data.ts is the reason this runs at all: it is where a new
+      # release appears, and the twin then has to carry it. It is .ts, not
+      # .tsx, so a components/*.tsx pattern misses it entirely. Component
+      # files matter for the undeclared-component tripwire, and the page list
+      # here has to stay in step with IN_SCOPE in check_agent_twins.py --
+      # a page it governs but this pattern misses is ungated, and a rename
+      # of one throws the script's hard-fail onto an unrelated PR later.
+      files: ^docs/fern/(components/releases\.data\.ts|components/.*\.tsx|pages/reference/general/(compatibility|release-artifacts|model-early-access-builds)\.mdx|scripts/check_agent_twins\.py)$
+      pass_filenames: false
+    - id: check-agent-twins-selftest
+      name: Self-test the agent-twin matcher
+      entry: python3 docs/fern/scripts/check_agent_twins.py --test
+      language: system
+      files: ^docs/fern/scripts/check_agent_twins\.py$
+      pass_filenames: false
+    - id: check-published-styles-selftest
+      name: Self-test the published-styles regex helpers
+      entry: python3 docs/fern/scripts/check_published_styles.py --test
+      language: system
+      files: ^docs/fern/scripts/check_published_styles\.py$
+      pass_filenames: false
+    - id: gen-llms-tables
+      name: Test the generated docs tables (gen_llms_tables.py)
+      entry: pytest -c docs/fern/scripts/pytest.ini -p no:cacheprovider docs/fern/scripts/test_gen_llms_tables.py
+      language: python
+      files: ^docs/fern/(scripts/(gen_llms_tables|test_gen_llms_tables)\.py|scripts/pytest\.ini|components/releases\.data\.ts)$
+      pass_filenames: false
+      additional_dependencies:
+        - pytest
+    - id: gen-llms-tables-check
+      name: Check the generated docs tables are current
+      entry: python3 docs/fern/scripts/gen_llms_tables.py --check
+      language: system
+      # The hook above proves the generator works; this one proves it was
+      # run. Without it, editing releases.data.ts and forgetting to
+      # regenerate leaves every committed generated span stale.
+      files: ^docs/fern/(scripts/gen_llms_tables\.py|components/releases\.data\.ts|pages/reference/general/.*\.mdx)$
+      pass_filenames: false
+    - id: check-component-imports
+      name: Check Fern components trigger no rolldown bundling
+      entry: python3 docs/fern/scripts/check_component_imports.py
+      language: system
+      files: ^docs/fern/(components/.*\.(js|jsx|ts|tsx)|scripts/check_component_imports\.py|fern\.config\.json)$
+      pass_filenames: false
+    - id: check-component-imports-selftest
+      name: Self-test the Fern component import scanner
+      entry: python3 docs/fern/scripts/check_component_imports.py --test
+      language: system
+      files: ^docs/fern/scripts/check_component_imports\.py$
       pass_filenames: false
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)

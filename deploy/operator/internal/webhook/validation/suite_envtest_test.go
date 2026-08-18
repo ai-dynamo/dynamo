@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -139,6 +140,8 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 		t.Log("Submit the update request through the Kubernetes API server")
 		admissionGate.set(test.gates)
 		warnings.clear()
+		oldFixture, _ := admissionObject(t, test.oldObject, env.Namespace(), nil)
+		current = applyAdmissionFixtureChanges(old, oldFixture, current)
 		current.SetResourceVersion(old.GetResourceVersion())
 		result, err = resourceClient.Update(t.Context(), current, metav1.UpdateOptions{})
 	}
@@ -269,7 +272,9 @@ func seedAdmissionObject(
 		t.Fatalf("create old resource state: %v", err)
 	}
 	if test.oldBeforeUpdate != nil {
-		old, _ := admissionObject(t, test.oldObject, namespace, nil)
+		before, _ := admissionObject(t, test.oldBeforeUpdate, namespace, nil)
+		oldFixture, _ := admissionObject(t, test.oldObject, namespace, nil)
+		old := applyAdmissionFixtureChanges(created, before, oldFixture)
 		old.SetResourceVersion(created.GetResourceVersion())
 		created, err = resourceClient.Update(t.Context(), old, metav1.UpdateOptions{})
 		if err != nil {
@@ -291,6 +296,64 @@ func seedAdmissionObject(
 		}
 	}
 	return created
+}
+
+func applyAdmissionFixtureChanges(
+	live *unstructured.Unstructured,
+	oldFixture *unstructured.Unstructured,
+	newFixture *unstructured.Unstructured,
+) *unstructured.Unstructured {
+	updated := live.DeepCopy()
+	updated.Object = applyAdmissionFixtureValueChanges(
+		updated.Object,
+		oldFixture.Object,
+		newFixture.Object,
+	).(map[string]any)
+	return updated
+}
+
+func applyAdmissionFixtureValueChanges(live, oldFixture, newFixture any) any {
+	if reflect.DeepEqual(oldFixture, newFixture) {
+		return runtime.DeepCopyJSONValue(live)
+	}
+
+	oldMap, oldIsMap := oldFixture.(map[string]any)
+	newMap, newIsMap := newFixture.(map[string]any)
+	liveMap, liveIsMap := live.(map[string]any)
+	if oldIsMap && newIsMap && liveIsMap {
+		updated := runtime.DeepCopyJSONValue(liveMap).(map[string]any)
+		for key := range oldMap {
+			if _, exists := newMap[key]; !exists {
+				delete(updated, key)
+			}
+		}
+		for key, newValue := range newMap {
+			oldValue, existed := oldMap[key]
+			if !existed {
+				updated[key] = runtime.DeepCopyJSONValue(newValue)
+				continue
+			}
+			updated[key] = applyAdmissionFixtureValueChanges(updated[key], oldValue, newValue)
+		}
+		return updated
+	}
+
+	oldList, oldIsList := oldFixture.([]any)
+	newList, newIsList := newFixture.([]any)
+	liveList, liveIsList := live.([]any)
+	if oldIsList && newIsList && liveIsList {
+		updated := make([]any, len(newList))
+		for i, newValue := range newList {
+			if i < len(oldList) && i < len(liveList) {
+				updated[i] = applyAdmissionFixtureValueChanges(liveList[i], oldList[i], newValue)
+				continue
+			}
+			updated[i] = runtime.DeepCopyJSONValue(newValue)
+		}
+		return updated
+	}
+
+	return runtime.DeepCopyJSONValue(newFixture)
 }
 
 func pruneZeroValues(value any) (any, bool) {

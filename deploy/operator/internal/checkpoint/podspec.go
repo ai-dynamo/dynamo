@@ -23,9 +23,9 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -103,7 +103,6 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	delete(labels, snapshotprotocol.RestoreTargetLabel)
 	delete(labels, snapshotprotocol.CheckpointSourceLabel)
 	delete(annotations, snapshotprotocol.CheckpointArtifactVersionAnnotation)
-	delete(annotations, snapshotprotocol.CheckpointStatusAnnotation)
 	delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
 	delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
 	delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
@@ -195,42 +194,30 @@ func ResolvePodSpecRestore(
 	}
 
 	info := *checkpointInfo
-	if info.Hash == "" {
-		if info.CheckpointName == "" {
-			if info.Identity == nil {
-				return nil, fmt.Errorf("checkpoint enabled but identity is nil and hash is not set")
-			}
-
-			hash, err := ComputeIdentityHash(*info.Identity)
-			if err != nil {
-				return nil, fmt.Errorf("failed to compute identity hash: %w", err)
-			}
-			info.Hash = hash
-		} else {
-			ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
-			if err := reader.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: info.CheckpointName}, ckpt); err != nil {
-				return nil, fmt.Errorf("failed to get checkpoint %s/%s: %w", namespace, info.CheckpointName, err)
-			}
-			hash, err := CheckpointID(ckpt)
-			if err != nil {
-				return nil, err
-			}
-			info.Hash = hash
-			if info.ArtifactVersion == "" {
-				info.ArtifactVersion = checkpointArtifactVersion(ckpt)
-			}
-			if info.GPUMemoryService == nil {
-				info.GPUMemoryService = ckpt.Spec.GPUMemoryService
-			}
+	if info.Hash == "" && info.CheckpointName != "" {
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		if err := reader.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: info.CheckpointName}, ckpt); err != nil {
+			return nil, fmt.Errorf("failed to get checkpoint %s/%s: %w", namespace, info.CheckpointName, err)
 		}
+		hash, err := CheckpointID(ckpt)
+		if err != nil {
+			return nil, err
+		}
+		info.Hash = hash
+		if info.ArtifactVersion == "" {
+			info.ArtifactVersion = checkpointArtifactVersion(ckpt)
+		}
+		if info.GPUMemoryService == nil {
+			info.GPUMemoryService = ckpt.Spec.GPUMemoryService
+		}
+	}
+
+	if info.Hash == "" {
+		return nil, fmt.Errorf("checkpoint is ready but hash is not set")
 	}
 
 	if info.ArtifactVersion == "" {
 		info.ArtifactVersion = snapshotprotocol.DefaultCheckpointArtifactVersion
-	}
-
-	if info.Hash == "" {
-		return nil, fmt.Errorf("checkpoint enabled but hash is not set")
 	}
 
 	storage, err := ResolveStorage(

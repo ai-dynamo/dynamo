@@ -21,6 +21,7 @@ Build each entrypoint with `--no-default-features` and its matching feature:
 | Entrypoint | Feature |
 |---|---|
 | `claude_trace_export` | `claude-trace-export` |
+| `request_trace_to_mooncake` | `request-trace-to-mooncake` |
 | `request_trace_to_satf` | `satf` |
 | `multiturn_bench` | `multiturn` |
 | `offline_replay_bench` | `offline-replay` |
@@ -156,23 +157,6 @@ cargo bench --package dynamo-bench --bench offline_replay_bench \
   --kv-transfer-bandwidth 64 \
   --kv-bytes-per-token 131072
 ```
-
-KVBM offload is available only when the benchmark is built with
-`mocker-kvbm-offload`. Build and run this configuration on a supported Linux
-environment:
-
-```bash
-cargo bench --package dynamo-bench --bench offline_replay_bench \
-  --no-default-features --features mocker-kvbm-offload -- \
-  /path/to/mooncake_trace.jsonl \
-  --engine-type vllm \
-  --num-gpu-blocks 1024 \
-  --num-g2-blocks 8192 \
-  --kv-bytes-per-token 131072
-```
-
-The KVBM capacity and bandwidth flags are omitted from the benchmark CLI when
-the feature is disabled.
 
 ## KV router / sharded indexer benchmarks
 

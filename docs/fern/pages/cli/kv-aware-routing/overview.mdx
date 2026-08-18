@@ -17,11 +17,11 @@ A KV-routed deployment is still just a frontend plus workers (see the [Overview]
 - The **frontend** runs in KV routing mode so it tracks cache state across workers.
 - Each **worker** publishes KV cache events (over ZMQ by default) so the frontend knows what each worker holds.
 
-You run **two or more workers** so the router has somewhere to choose between. The pre-built `launch/agg_router.sh` presets wire this up for you.
+Use **two or more workers** when you want to evaluate worker selection. The vLLM and SGLang `launch/agg_router.sh` presets wire up two workers; the TensorRT-LLM preset is a one-worker router-path smoke setup.
 
 ## Aggregated serving with KV routing
 
-Two workers behind the KV-aware router, maximizing cache reuse. Requires 2 GPUs.
+The vLLM and SGLang presets start two workers and require 2 GPUs. The TensorRT-LLM preset starts one worker and requires 1 GPU; use it to verify the router path, then add workers when you need worker selection.
 
 <Tabs>
   <Tab title="vLLM" language="vllm">
@@ -50,7 +50,7 @@ Two workers behind the KV-aware router, maximizing cache reuse. Requires 2 GPUs.
 
 ## Disaggregated serving with KV routing
 
-Scales to 2 prefill + 2 decode workers with KV-aware routing on both pools. The frontend runs in KV routing mode and automatically detects prefill workers to activate an internal prefill router. Requires 4 GPUs.
+The vLLM and SGLang presets start 2 prefill and 2 decode workers and require 4 GPUs. The TensorRT-LLM preset starts 1 prefill and 1 decode worker and requires 2 GPUs. The frontend runs in KV routing mode and activates its internal prefill router after discovering compatible typed prefill and decode services for the same model and namespace.
 
 <Tabs>
   <Tab title="vLLM" language="vllm">

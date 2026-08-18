@@ -6,38 +6,76 @@ SPDX-License-Identifier: Apache-2.0
 # AI Simulate
 
 > [!WARNING]
-> **Experimental.** AI Simulate and Spica are intended for evaluation and feedback, not production
+> **Experimental.** AI Simulate and Sweeper are intended for evaluation and feedback, not production
 > capacity planning. Their APIs, configuration schemas, search behavior, and output may change
 > without a standard deprecation period. They provide no SLA, accuracy, or configuration-optimality
 > guarantees.
 
-AI Simulate is a standalone Python distribution in the Dynamo repository. Its first package,
-`aisimulate.spica`, searches engine and Dynamo deployment settings by evaluating candidates with
-Dynamo Replay.
+AI Simulate is a standalone Python distribution in the Dynamo repository. Its engine-only replay
+CLI and `aisimulate.sweeper` package evaluate serializable replay specifications without depending
+on `ai-dynamo`.
 
-Spica uses replay APIs and Rust features from the same Dynamo revision. For local source use,
-build and install the matching runtime before AI Simulate:
+Sweeper accepts a replay `RunnerFactory` through its Python API. Optional feature adapters own
+their search spaces and runtime hooks. An engine-only sweep can use a Dynamo-free replay runner;
+a sweep configured with Dynamo Planner or Router adapters uses Dynamo's runner composition.
+
+For an engine-only single replay run, use `python -m aisimulate.replay`. For a replay with Dynamo
+Router, Planner, or online adapters, use `python -m dynamo.replay`. Both commands share the
+engine, topology, traffic, replay-mode, SLA, and output arguments; Dynamo adds its adapter options.
+They share option names and the base `ReplaySpec` schema; the selected runtime validates each
+`--*-engine-args` JSON payload, which can therefore contain runtime-specific fields.
+For configuration search, call `Sweeper(runner_factory=...).run(config)` or start from an example
+under `aisimulate/examples/sweeper`.
+
+For example, run one engine-only synthetic replay with fixed timing:
+
+```bash
+python -m aisimulate.replay \
+  --extra-engine-args '{"engine_type":"vllm","num_gpu_blocks":1024,"block_size":16,"timing_model":{"type":"fixed","prefill_ms":10,"decode_ms":2}}' \
+  --input-tokens 1024 \
+  --output-tokens 128 \
+  --request-count 16 \
+  --replay-concurrency 4
+```
+
+Install AI Simulate by itself for engine-only development:
 
 ```bash
 uv venv .venv
 source .venv/bin/activate
-uv pip install pip "maturin[patchelf]"
-cd lib/bindings/python
-maturin develop --uv --release --features aic-forward-pass,mocker-kvbm-offload
-cd ../../..
-uv pip install --no-deps -e .
 uv pip install -e ./aisimulate
 ```
 
-Do not combine a source checkout of AI Simulate with an older released `ai-dynamo` runtime. The
-`dynamo-planner` image builds and installs both wheels from the same commit.
-
-Run Spica with a YAML configuration:
+The `dynamo-planner` image builds and installs AI Simulate from the same source revision as Dynamo.
+The AI Simulate wheel is an image-local artifact, not a standalone release artifact. For Dynamo
+feature development from a source checkout, also install `ai-dynamo` and the Planner requirements:
 
 ```bash
-python -m aisimulate.spica --config examples/aisimulate/spica/configs/smart_sweep.yaml
+uv pip install --no-deps -e .
+uv pip install -r container/deps/requirements.planner.txt
 ```
 
-Read the [Spica documentation](../docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/overview.md)
-for its configuration, search-space, and replay behavior. Runnable configurations and tools live
-under [`examples/aisimulate/spica`](../examples/aisimulate/spica/README.md).
+The `ai-dynamo` wheel registers the `dynamo.planner` and `dynamo.router` Sweeper provider entry
+points. Its Dynamo runner composes the materialized runtime hooks with the shared AI Simulate
+Replayer.
+
+Run a sweep from Python with an explicit runner:
+
+```python
+from aisimulate.sweeper import SmartSearchConfig, Sweeper
+from dynamo.replay.simulation import DynamoReplayRunnerFactory
+
+config = SmartSearchConfig.from_yaml("smart_sweep.yaml")
+candidates = Sweeper(
+    runner_factory=DynamoReplayRunnerFactory(),
+).run(config)
+```
+
+The standalone module validates the backend-neutral core schema but intentionally has no implicit
+replay runtime. Adapter-owned search spaces are validated when the selected adapters are resolved
+by `Sweeper.run`.
+KVBM sweep fields have been removed and have no adapter migration.
+
+Read the canonical [Sweeper documentation](docs/sweeper/overview.md) for its configuration,
+search-space, and replay behavior. Backend-neutral and Dynamo integration examples live under
+[`aisimulate/examples/sweeper`](examples/sweeper/README.md).

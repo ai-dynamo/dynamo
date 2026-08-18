@@ -22,10 +22,9 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -144,11 +143,7 @@ func CreateOrGetAutoCheckpoint(
 	deletionPolicy nvidiacomv1alpha1.CheckpointDeletionPolicy,
 	gpuMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec,
 	owner client.Object,
-	gate features.Gate,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
-	if err := ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gpuMemoryService, gate); err != nil {
-		return nil, err
-	}
 	if targetContainerName == "" {
 		targetContainerName = commonconsts.MainContainerName
 	}

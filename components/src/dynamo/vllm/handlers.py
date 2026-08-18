@@ -32,7 +32,7 @@ from typing import (
 
 import torch
 from vllm import PoolingParams
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -64,6 +64,7 @@ from dynamo.common.rl import (
 )
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
@@ -77,22 +78,26 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
 )
+from dynamo.vllm.router_hints import enable_router_hint_support
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
+from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
+from .dp_topology import get_dp_range_for_worker
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
-from .multimodal_utils.async_vision_encoder import AsyncVisionEncoder
-from .multimodal_utils.custom_encoder_adapter import (
+from .multimodal_utils.custom_encoder import (
+    AsyncVisionEncoder,
     CustomEncoderAdapter,
+    VisionEncoderBackend,
     create_custom_encoder_adapter,
 )
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
@@ -102,7 +107,6 @@ from .multimodal_utils.request_processor import (
     MissingMultimodalHandoffError,
     VllmMultimodalRequestProcessor,
 )
-from .multimodal_utils.vision_encoder_backend import VisionEncoderBackend
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -116,6 +120,10 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
+_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
+# Request payload key under extra_args.kv_transfer_params. This intentionally
+# matches the runtime capability string, but it lives in a different namespace.
+_ROUTER_HINT_EXTRA_ARGS_KEY: Final = "router_hint"
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -717,8 +725,11 @@ def build_sampling_params(
             sampling_options.update(passthrough_sampling_options)
     guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
+        json_schema = guided_decoding.get("json")
+        if json_schema is not None:
+            reject_nonprogressing_guided_json_ref_cycles(json_schema)
         sampling_params.structured_outputs = StructuredOutputsParams(
-            json=guided_decoding.get("json"),
+            json=json_schema,
             regex=guided_decoding.get("regex"),
             choice=guided_decoding.get("choice"),
             grammar=guided_decoding.get("grammar"),
@@ -788,7 +799,14 @@ def build_sampling_params(
     # Apply output_options (logprobs, prompt_logprobs, etc.)
     output_options = request.get("output_options", {}) or {}
     logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(output_options)
-    if logprobs is not None:
+    # Explicit `logprob_token_ids` replace vLLM's natural top-k selection, so the
+    # requested width no longer applies. vLLM's own OpenAI adapters null `logprobs`
+    # in this case and let `num_logprobs` derive the width from the id list; mirror
+    # that here, otherwise `SamplingParams.verify()` rejects the pair unless the
+    # caller happens to set `top_logprobs == len(logprob_token_ids)`.
+    if getattr(sampling_params, "logprob_token_ids", None):
+        sampling_params.logprobs = None
+    elif logprobs is not None:
         sampling_params.logprobs = logprobs
     if prompt_logprobs is not None:
         sampling_params.prompt_logprobs = prompt_logprobs
@@ -808,6 +826,40 @@ def build_sampling_params(
         configured_default = default_sampling_params.get("max_tokens", dynamic_default)
         sampling_params.max_tokens = min(configured_default, dynamic_default)
 
+    # Forward only Dynamo's router-generated hint from
+    # request.extra_args.kv_transfer_params into vLLM SamplingParams. Today,
+    # router_hint is the only kv_transfer_params key the Rust preprocessor adds,
+    # so do not pass through any other request-provided connector inputs. Copy
+    # extra_args before mutation because SamplingParams may reuse the
+    # default_sampling_params dict across requests.
+    if isinstance(extra_args, dict):
+        request_kv_transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
+        if isinstance(request_kv_transfer_params, dict):
+            passthrough_router_hint = request_kv_transfer_params.get(
+                _ROUTER_HINT_EXTRA_ARGS_KEY
+            )
+            if isinstance(passthrough_router_hint, dict):
+                passthrough_extra_args = (
+                    dict(sampling_params.extra_args)
+                    if isinstance(sampling_params.extra_args, dict)
+                    else {}
+                )
+                existing_kv_transfer_params = passthrough_extra_args.get(
+                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
+                )
+                passthrough_kv_transfer_params = (
+                    dict(existing_kv_transfer_params)
+                    if isinstance(existing_kv_transfer_params, dict)
+                    else {}
+                )
+                passthrough_kv_transfer_params[
+                    _ROUTER_HINT_EXTRA_ARGS_KEY
+                ] = passthrough_router_hint
+                passthrough_extra_args[
+                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
+                ] = passthrough_kv_transfer_params
+                sampling_params.extra_args = passthrough_extra_args
+
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
     # bridge pressure before chunks cross into Dynamo.
@@ -815,6 +867,45 @@ def build_sampling_params(
     sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
 
     return sampling_params
+
+
+def _update_kv_transfer_params(
+    sampling_params: SamplingParams,
+    kv_transfer_params: Mapping[str, Any],
+    *,
+    preserve_router_hint: bool = False,
+) -> None:
+    """Set vLLM KV transfer params, optionally carrying Dynamo's router hint.
+
+    ``build_sampling_params`` may have copied ``router_hint`` from the Dynamo
+    request into ``sampling_params.extra_args["kv_transfer_params"]``. The new
+    ``kv_transfer_params`` value comes from vLLM's ``KVTransferConfig``
+    (``engine_client.vllm_config.kv_transfer_config``), via the connector
+    protocol selected in ``make_kv_connector_protocol``.
+
+    Prefill preserves the request hint when replacing the object with fresh
+    protocol params. Decode handoff uses prefill-produced params and should not
+    inherit a stale prefill-side hint.
+    """
+    extra_args = (
+        dict(sampling_params.extra_args)
+        if isinstance(sampling_params.extra_args, dict)
+        else {}
+    )
+    updated_params = dict(kv_transfer_params)
+    updated_params.pop(_ROUTER_HINT_EXTRA_ARGS_KEY, None)
+
+    existing_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
+    router_hint = (
+        existing_params.get(_ROUTER_HINT_EXTRA_ARGS_KEY)
+        if preserve_router_hint and isinstance(existing_params, Mapping)
+        else None
+    )
+    if isinstance(router_hint, Mapping):
+        updated_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = router_hint
+
+    extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = updated_params
+    sampling_params.extra_args = extra_args
 
 
 def build_sampling_params_openai(
@@ -954,34 +1045,36 @@ def _request_reasoning_metadata(
     return reasoning_ended, reasoning_parser_kwargs
 
 
-def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
-    """
-    Get the global DP rank range that this worker is responsible for based on vLLM config.
-    Note that the 'vllm_config' is normalized so the load balancing flags are set properly.
-    The return value is in the format of (start_dp_rank, managed_dp_size)."""
-    if vllm_config.parallel_config.data_parallel_external_lb:
-        # external load balancing, each worker is responsible for exactly 1 rank
-        return (vllm_config.parallel_config.data_parallel_rank, 1)
-    elif vllm_config.parallel_config.data_parallel_hybrid_lb:
-        # hybrid load balancing, each worker is responsible for a subset of local ranks
-        return (
-            vllm_config.parallel_config.data_parallel_rank,
-            vllm_config.parallel_config.data_parallel_size_local,
-        )
-    else:
-        # internal load balancing, the worker is responsible for all DP ranks
-        logger.warning(
-            "vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment,"
-            " hybrid or external load balancing is recommended."
-        )
-        return (
-            vllm_config.parallel_config.data_parallel_rank,
-            vllm_config.parallel_config.data_parallel_size,
-        )
+def apply_data_parallel_runtime_config(
+    runtime_config: ModelRuntimeConfig, dp_range: tuple[int, int]
+) -> None:
+    runtime_config.data_parallel_start_rank = dp_range[0]
+    runtime_config.data_parallel_size = dp_range[1]
 
 
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
+
+
+def _as_exact_int(value: object) -> Optional[int]:
+    """Return ``value`` as an int only if it represents an exact integer.
+
+    Rejects bools and fractional numbers/strings. A bare ``int(value)`` would
+    truncate ``1.5`` to ``1`` and coerce ``True`` to ``1``, silently scaling to a
+    size the caller never requested.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
 
 
 class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
@@ -995,7 +1088,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     - `_lora_enabled()` (method): Returns bool indicating if LoRA is enabled
 
     These are required by `_resolve_lora_request()` and other LoRA methods.
-    See VllmWorkerHandler and OmniHandler for reference implementations.
+    The concrete decode, prefill, and Omni handlers provide examples.
     """
 
     _benchmark_results: Optional[dict] = None
@@ -1148,7 +1241,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             backend,
             self.model_config,
             config.engine_args,
-            self.engine_client.vllm_config,
         )
         encoder = AsyncVisionEncoder(backend)
         encoder.load(config.model)
@@ -1318,24 +1410,49 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        new_dp_size = body.get("new_data_parallel_size")
-        if new_dp_size is None:
+        raw_dp_size = body.get("new_data_parallel_size")
+        if raw_dp_size is None:
             return {
                 "status": "error",
                 "message": "Missing required field: new_data_parallel_size",
             }
-        try:
-            new_dp_size = int(new_dp_size)
-        except (TypeError, ValueError):
+        new_dp_size = _as_exact_int(raw_dp_size)
+        if new_dp_size is None:
             return {
                 "status": "error",
-                "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
+                "message": f"new_data_parallel_size must be an integer, got: {raw_dp_size!r}",
             }
-        if new_dp_size < 2:
+        if new_dp_size < 1:
+            return {
+                "status": "error",
+                "message": f"new_data_parallel_size must be >= 1, got: {new_dp_size}",
+            }
+        parallel_config = self.engine_client.vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        # Elastic EP sizes the EP world as data_parallel_size * tensor_parallel_size
+        # (elastic_execute.py), excluding PCP, and vLLM rejects PCP>1 with DP>1 -- so a
+        # PCP>1 engine only runs at DP=1 where a scale is a no-op. Reject it; default 1
+        # on engines that predate PCP.
+        pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
+        if pcp_size > 1:
             return {
                 "status": "error",
                 "message": (
-                    "new_data_parallel_size must be >= 2 when elastic EP/ePLB is enabled"
+                    "elastic EP scaling is not supported when "
+                    f"prefill_context_parallel_size > 1 (got {pcp_size}); vLLM sizes the "
+                    "EP world as data_parallel_size * tensor_parallel_size and does not "
+                    "support prefill-context parallelism alongside data parallelism"
+                ),
+            }
+        # Reject a target that collapses the EP world (tensor_parallel_size *
+        # data_parallel_size) to a single rank -- EPLB needs more than one EP rank.
+        if tp_size * new_dp_size <= 1:
+            return {
+                "status": "error",
+                "message": (
+                    "tensor_parallel_size * new_data_parallel_size must be > 1 when "
+                    f"elastic EP/ePLB is enabled, but got tensor_parallel_size={tp_size}, "
+                    f"new_data_parallel_size={new_dp_size}"
                 ),
             }
 
@@ -1991,8 +2108,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         - `self._lora_enabled()` (method): Returns bool indicating if LoRA is enabled
 
         Subclasses that forget to define these will get AttributeError at runtime
-        when this method is called. See VllmWorkerHandler (llm_engine.py) and
-        OmniHandler (omni_handler.py) for implementation examples.
+        when this method is called. The concrete decode, prefill, and Omni handlers
+        provide examples.
         """
         return self._lora_state.resolve_request(
             model_name,
@@ -2049,7 +2166,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _register_lora_discovery(self, lora_name: str, lora_id: int) -> None:
         """Publish a loaded LoRA adapter to discovery.
 
-        Default implementation mirrors the legacy BaseWorkerHandler behavior.
+        Default implementation mirrors the BaseWorkerHandler behavior.
         """
         if self.generate_endpoint is None:
             logger.debug(
@@ -2067,12 +2184,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
 
         runtime_config = ModelRuntimeConfig()
-        runtime_config.context_length = self.model_max_len
-        runtime_config.kv_event_publishing_enabled = getattr(
-            self.config, "use_kv_events", False
-        )
-        runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
-        runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
 
         if self.config.disaggregation_mode == DisaggregationMode.PREFILL:
             lora_model_type = ModelType.Prefill
@@ -2088,6 +2199,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_needs_set = []
         if self.config.route_to_encoder:
             lora_needs_set.append(WorkerType.Encode)
+
+        apply_data_parallel_runtime_config(runtime_config, self.dp_range)
+        enable_router_hint_support(
+            runtime_config,
+            self.config.engine_args,
+            lora_worker_type,
+            self.dp_range,
+        )
+        runtime_config.context_length = self.model_max_len
+        publish_vllm_token_budget(runtime_config, self.model_max_len)
+        runtime_config.kv_event_publishing_enabled = getattr(
+            self.config, "use_kv_events", False
+        )
+        runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
+        runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
+
         lora_needs: list[list[WorkerType]] = [lora_needs_set] if lora_needs_set else []
 
         await register_model(
@@ -2770,7 +2897,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
-        # Legacy vLLM handler always emits when vLLM returned a dict.
+        # Emit whenever vLLM returns a dictionary.
         return _shared_logprobs.extract_from_completion_output(
             output,
             num_output_tokens_so_far,
@@ -3035,15 +3162,25 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         request: Dict[str, Any],
         request_id: str,
-    ) -> tuple[EmbedsPrompt | TokensPrompt | None, Dict[str, Any] | None]:
+    ) -> EmbedsPrompt | TokensPrompt | None:
         """Run the in-process CustomEncoder and prepare its engine prompt.
 
-        The CustomEncoder consumes image URLs directly and emits artifacts. Returns
-        ``(prepared_prompt, error)``:
-        - images present: ``(prepared_prompt, None)``,
-        - no image content: ``(None, None)`` — text-only request, nothing
-          to assemble or extract (non-image modalities are rejected above),
-        - failure: ``(None, error_dict)`` for the caller to yield.
+        The CustomEncoder consumes image URLs directly and emits artifacts.
+        Returns the prepared prompt when images are present, or ``None`` for a
+        text-only request with nothing to assemble (non-image modalities are
+        rejected below).
+
+        Raises:
+            InvalidArgument: the request's multimodal payload is malformed in a
+                way checked for directly below. The frontend maps this to HTTP
+                400 and forwards the message verbatim, so both messages are
+                built here and never interpolate foreign text.
+            Exception: whatever the encoder or adapter raised, unchanged. The
+                bindings map the exception type to a ``BackendError``, so a
+                validation fault (``ValueError``/``TypeError``, which is what
+                the adapters raise) still reaches the caller as a 400, while a
+                timeout, CUDA fault, or cancellation keeps its own type and its
+                retry semantics.
         """
         # Internal invariant: callers guard on `self._custom_encoder is not None`
         # before reaching here. Use an explicit raise (not assert, which is
@@ -3066,7 +3203,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"unsupported multimodal data: {unsupported}"
             )
             logger.error("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            raise InvalidArgument(msg)
 
         image_items = mm_map.get(IMAGE_URL_KEY) or []
         image_urls = [
@@ -3084,36 +3221,43 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "'Url'; each item must be a dict with a 'Url' key"
             )
             logger.error("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            raise InvalidArgument(msg)
 
         if not image_urls:
             # No image items at all — and non-image modalities were already
             # rejected above — so there is nothing to assemble → text-only.
-            return None, None
+            return None
 
         token_ids: list[int] = request.get("token_ids") or []
-        # Both encode() and adapter preparation run user/model-specific code, so
-        # keep them inside one guard. A failure becomes a structured request error
-        # instead of escaping the coroutine and tearing down the stream.
         try:
             # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
             # coalesces concurrent calls onto one dedicated actor thread.
-            encodings = await self._custom_encoder.encode(image_urls)
+            artifacts = await self._custom_encoder.encode(image_urls)
             prepared = self._custom_encoder_adapter.prepare_prompt(
                 token_ids,
-                encodings,
+                artifacts,
             )
-        except Exception as exc:
-            msg = f"CustomEncoder failed: {exc}"
-            logger.exception("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+        except Exception:
+            # Log with the traceback here — this is the last frame that knows
+            # which request and which encoder — then re-raise unchanged.
+            #
+            # Deliberately not converted to `InvalidArgument`. The adapters
+            # raise `ValueError`/`TypeError` for genuine input faults, which the
+            # bindings already map to `Backend(InvalidArgument)` → 400 carrying
+            # the message, so the actionable case needs no help. Coercing the
+            # rest would relabel timeouts, CUDA faults, batcher shutdown and
+            # cancellations as client errors, suppressing retries — and since
+            # `encode()` is co-batched, it could blame a caller for a failure
+            # that originated in someone else's request.
+            logger.exception("Request %s: CustomEncoder failed", request_id)
+            raise
 
         logger.debug(
             "Request %s: CustomEncoder prepared prompt for %d image(s)",
             request_id,
-            len(encodings),
+            len(artifacts),
         )
-        return prepared, None
+        return prepared
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
@@ -3151,13 +3295,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # A configured CustomEncoder owns the aggregated image path. Bypass
             # raw-media loading and let its decoder-selected adapter prepare the
             # final engine prompt.
-            custom_prompt, assemble_error = await self._assemble_custom_encoder_prompt(
+            # Failures propagate as exceptions; the bindings map the type to a
+            # typed backend error, so an input fault answers 400 with its
+            # message and an engine fault stays a retryable 5xx.
+            custom_prompt = await self._assemble_custom_encoder_prompt(
                 request,
                 request_id,
             )
-            if assemble_error is not None:
-                yield assemble_error
-                return
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = None
@@ -3224,9 +3368,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         if kv_params is not None:
-            if sampling_params.extra_args is None:
-                sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = kv_params
+            _update_kv_transfer_params(sampling_params, kv_params)
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
             )
@@ -3363,14 +3505,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # the per-request deferred guard so engine_client.abort() never fires in
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard, self._abort_monitor(
-            context, request_id, abort_guard=abort_guard
+        async with (
+            _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard,
+            self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
                 gen = self.engine_client.generate(
@@ -3535,11 +3678,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         kv_protocol: KvConnectorProtocol = make_kv_connector_protocol(
             self.engine_client.vllm_config
         )
-        if sampling_params.extra_args is None:
-            sampling_params.extra_args = {}
-        sampling_params.extra_args[
-            "kv_transfer_params"
-        ] = kv_protocol.prefill_request_kv_transfer_params()
+        _update_kv_transfer_params(
+            sampling_params,
+            kv_protocol.prefill_request_kv_transfer_params(),
+            preserve_router_hint=True,
+        )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
