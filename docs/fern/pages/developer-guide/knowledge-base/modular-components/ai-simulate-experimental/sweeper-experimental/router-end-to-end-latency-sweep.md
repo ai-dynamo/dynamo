@@ -140,7 +140,7 @@ Every distinct config the Vizier sweep evaluated (2k subset, c=32), best mean-e2
 ## Reproduce
 
 ```bash
-python aisimulate/examples/sweeper/tools/run_sweep.py --config path/to/router-sweep.yaml
+python path/to/aisimulate/examples/sweeper/tools/run_sweep.py --config path/to/router-sweep.yaml
 ```
 
 Run the winning router configuration against the full trace with

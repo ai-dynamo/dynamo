@@ -236,7 +236,7 @@ ENV VIRTUAL_ENV=/workspace/.venv
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
+    uv pip install --upgrade pip meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
 
@@ -564,7 +564,6 @@ FROM wheel_builder_base AS runtime_wheel_builder
 COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
-COPY aisimulate/crates/ /opt/dynamo/aisimulate/crates/
 COPY components/ /opt/dynamo/components/
 
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
@@ -602,22 +601,16 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 
 {% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
-# AI Simulate is a separate, architecture-specific Python distribution used by
-# Planner and the framework runtime images. Build it after the Dynamo wheels so
-# Python-only changes do not invalidate the expensive Rust layers above.
-COPY aisimulate/ /opt/dynamo/aisimulate/
+# AI Simulate is released separately as an abi3 wheel. Stage the exact published
+# wheel consumed by ai-dynamo instead of rebuilding it from vendored source.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    cd /opt/dynamo/aisimulate && \
-{% if device == "cuda" %}    maturin build --release \
-        --auditwheel repair \
-        --compatibility manylinux_2_28 \
-        --out /opt/dynamo/dist
-{% else %}    maturin build --release \
-        --auditwheel repair \
-        --out /opt/dynamo/dist
-{% endif %}
+    python -m pip download \
+        --only-binary=:all: \
+        --no-deps \
+        --dest /opt/dynamo/dist \
+        "aisimulate==0.1.0.dev1"
 {% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
@@ -806,7 +799,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
-COPY aisimulate/crates/ /opt/dynamo/aisimulate/crates/
 COPY components/ /opt/dynamo/components/
 
 # Build kvbm wheel (with nixl linkage via auditwheel repair)

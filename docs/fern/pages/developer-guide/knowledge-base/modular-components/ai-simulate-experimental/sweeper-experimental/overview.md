@@ -5,11 +5,6 @@ title: Sweeper
 subtitle: Experimental backend-neutral configuration search
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/overview.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 > [!WARNING]
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning. Its API, configuration schema, search behavior, and output may change without a

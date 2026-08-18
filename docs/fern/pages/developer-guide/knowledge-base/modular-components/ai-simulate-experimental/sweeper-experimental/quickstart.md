@@ -5,19 +5,15 @@ title: Sweeper Quickstart
 subtitle: Run a backend-neutral sweep with an injected replay runtime
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/quickstart.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 > [!WARNING]
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning.
 
-From a source checkout, install AI Simulate and run its neutral example:
+Install AI Simulate, clone its standalone example sources, and run the neutral example:
 
 ```bash
-python -m pip install -e ./aisimulate
+python -m pip install "aisimulate==0.1.0.dev1"
+git clone https://github.com/ai-dynamo/aisimulate.git
 python aisimulate/examples/sweeper/run_sweep.py \
   --config aisimulate/examples/sweeper/sweep.yaml
 ```

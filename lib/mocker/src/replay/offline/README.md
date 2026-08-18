@@ -17,5 +17,5 @@ composition:
 - `extensions/kv_events` converts neutral engine KV observations into the
   event batch consumed by the Dynamo Router policy.
 
-See [`aisimulate-core`](../../../../../aisimulate/crates/core/README.md) for
+See [`aisimulate-core`](https://github.com/ai-dynamo/aisimulate/tree/main/crates/core) for
 the virtual-time runtime and its liveness contract.

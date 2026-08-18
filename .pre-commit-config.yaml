@@ -80,12 +80,6 @@ repos:
 # and give it visiblity into all the local and third_party packages expected.
 - repo: local
   hooks:
-    - id: sync-aisimulate-docs
-      name: Check canonical AI Simulate docs are synced to Fern
-      entry: python3 docs/fern/scripts/sync_aisimulate_docs.py --check
-      language: system
-      always_run: true
-      pass_filenames: false
     - id: sync-site-css
       name: Check CustomFooter SITE_CSS mirrors main.css
       entry: python3 docs/fern/scripts/sync_site_css.py --check

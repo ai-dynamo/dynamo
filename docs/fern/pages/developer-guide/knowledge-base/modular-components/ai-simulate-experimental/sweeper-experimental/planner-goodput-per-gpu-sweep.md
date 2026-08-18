@@ -156,7 +156,7 @@ spread within the `load_180_10` family is noise).
 ## Reproduce
 
 ```bash
-python aisimulate/examples/sweeper/tools/run_sweep.py --config path/to/planner-sweep.yaml
+python path/to/aisimulate/examples/sweeper/tools/run_sweep.py --config path/to/planner-sweep.yaml
 ```
 
 Notes: the planner path needs the `aic-forward-pass` binding; a per-throughput-interval
