@@ -44,6 +44,9 @@ classifiers = [
 ]
 keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
+[project.scripts]
+dynamo-power-gate = "dynamo.power_gate:main"
+
 [project.urls]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 
