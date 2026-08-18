@@ -52,6 +52,23 @@ use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
 /// to take as long as it likes.
 const PREFILL_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long the warmup is polled after its downstream has been asked to stop.
+///
+/// `stop_generating` is only a signal. A downstream that acts on it does so
+/// from inside the response stream — the KV router's `monitor_response_stream`
+/// selects on `context.stopped()` and, when that wins, runs `guard.abort()`
+/// before ending the stream. That code lives in the stream this task is
+/// draining, so it can only run if the stream is polled again after the
+/// signal. Dropping straight after signalling therefore guarantees the very
+/// cleanup the signal was asking for never happens.
+///
+/// So the bail-out paths keep draining for this long before letting go. A
+/// downstream that honours the stop ends its stream well inside the window and
+/// the task finishes early; one that ignores it costs this much extra and is
+/// then dropped exactly as before. Short next to [`PREFILL_TASK_TIMEOUT`],
+/// because by this point the warmup has already lost its race.
+const PREFILL_WIND_DOWN_GRACE: Duration = Duration::from_secs(5);
+
 /// Publication slot for the warmup stream's context.
 ///
 /// [`prefill_task`] fills it before draining so that the bounding wrapper in
@@ -101,8 +118,10 @@ impl OAIChatLikeRequest for SpeculativePrefillRequest {
 /// Once dispatched, the warmup is bounded by [`PREFILL_TASK_TIMEOUT`], and the
 /// task ends at any point when `cancel` — where supplied — is cancelled;
 /// nothing else can stop it, because it runs on a context of its own and no
-/// owner keeps its handle. `request_id` identifies the client request that
-/// produced the warmup, so an abandoned or cancelled one can be traced back.
+/// owner keeps its handle. Either ending asks the downstream to stop and then
+/// drains it for up to [`PREFILL_WIND_DOWN_GRACE`] so that request can actually
+/// be acted on. `request_id` identifies the client request that produced the
+/// warmup, so an abandoned or cancelled one can be traced back.
 ///
 /// When the flag is not set, returns the stream unmodified with zero overhead.
 pub fn maybe_wrap_stream(
@@ -143,16 +162,13 @@ pub fn maybe_wrap_stream(
         // client's generation ends, one way or the other. Charging the wait to
         // the warmup's budget would spend the whole bound on the turn, and any
         // turn longer than the bound would never get a warmup at all.
+        //
+        // Cancellation is polled first, here and below. `biased` polls in
+        // source order, so with the work arm first a terminal chunk that lands
+        // in the same poll as a cancellation would win and dispatch a warmup
+        // into a runtime that is already shutting down.
         let response_text = tokio::select! {
             biased;
-
-            received = rx => {
-                match received {
-                    Ok(response_text) => response_text,
-                    // No terminal chunk: no assistant turn to warm against.
-                    Err(_) => return,
-                }
-            }
 
             () = cancelled(cancel.clone()) => {
                 tracing::debug!(
@@ -161,6 +177,14 @@ pub fn maybe_wrap_stream(
                     "Speculative prefill cancelled by runtime shutdown before dispatch"
                 );
                 return;
+            }
+
+            received = rx => {
+                match received {
+                    Ok(response_text) => response_text,
+                    // No terminal chunk: no assistant turn to warm against.
+                    Err(_) => return,
+                }
             }
         };
 
@@ -178,29 +202,12 @@ pub fn maybe_wrap_stream(
             &context_slot,
         ));
 
-        tokio::select! {
+        // The arms only decide *whether* to wind down; the winding down itself
+        // happens below. Both arms borrow `warmup` — the timeout arm holds it
+        // for as long as that future lives — so draining it further has to wait
+        // until this block has ended and released the borrow.
+        let wind_down = tokio::select! {
             biased;
-
-            outcome = tokio::time::timeout(PREFILL_TASK_TIMEOUT, &mut warmup) => {
-                match outcome {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => tracing::warn!(
-                        request_id = %request_id,
-                        model = %model,
-                        error = %e,
-                        "Speculative prefill failed"
-                    ),
-                    Err(_) => {
-                        tracing::warn!(
-                            request_id = %request_id,
-                            model = %model,
-                            timeout_secs = PREFILL_TASK_TIMEOUT.as_secs(),
-                            "Speculative prefill exceeded its lifetime bound; abandoning warmup"
-                        );
-                        stop_downstream(&context_slot);
-                    }
-                }
-            }
 
             () = cancelled(cancel) => {
                 tracing::debug!(
@@ -208,7 +215,50 @@ pub fn maybe_wrap_stream(
                     model = %model,
                     "Speculative prefill cancelled by runtime shutdown"
                 );
-                stop_downstream(&context_slot);
+                true
+            }
+
+            outcome = tokio::time::timeout(PREFILL_TASK_TIMEOUT, &mut warmup) => {
+                match outcome {
+                    Ok(Ok(())) => false,
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            model = %model,
+                            error = %e,
+                            "Speculative prefill failed"
+                        );
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            model = %model,
+                            timeout_secs = PREFILL_TASK_TIMEOUT.as_secs(),
+                            "Speculative prefill exceeded its lifetime bound; abandoning warmup"
+                        );
+                        true
+                    }
+                }
+            }
+        };
+
+        if wind_down {
+            stop_downstream(&context_slot);
+            // Dropping the non-winning arm released the borrow but not the
+            // future itself: `warmup` was pinned separately and the stream it
+            // holds is still open, so the downstream can still be polled and
+            // still act on the stop it was just sent.
+            if tokio::time::timeout(PREFILL_WIND_DOWN_GRACE, &mut warmup)
+                .await
+                .is_err()
+            {
+                tracing::debug!(
+                    request_id = %request_id,
+                    model = %model,
+                    grace_secs = PREFILL_WIND_DOWN_GRACE.as_secs(),
+                    "Speculative prefill downstream did not wind down; dropping the stream"
+                );
             }
         }
     });
@@ -244,10 +294,12 @@ async fn cancelled(token: Option<CancellationToken>) {
     }
 }
 
-/// Asks the warmup's downstream to wind down before the stream is dropped, so
-/// the KV router's `RequestGuard` still gets a chance at its normal lifecycle.
-/// A downstream that ignores the request is not a problem: the caller drops
-/// the stream regardless, so the task ends either way.
+/// Asks the warmup's downstream to wind down, so the KV router's
+/// `RequestGuard` still gets a chance at its normal lifecycle.
+///
+/// This only raises the flag and wakes whoever is waiting on it. The caller
+/// must then keep polling the warmup — see [`PREFILL_WIND_DOWN_GRACE`] — or
+/// the downstream never gets the chance to act on it.
 fn stop_downstream(slot: &PrefillContextSlot) {
     if let Some(context) = slot.lock().take() {
         context.stop_generating();
@@ -404,6 +456,71 @@ mod tests {
             });
 
             Ok(ResponseStream::new(Box::pin(stalled), ctx))
+        }
+    }
+
+    /// The downstream that makes `stop_generating` worth sending: it behaves
+    /// like the KV router's `monitor_response_stream`, which selects on
+    /// `context.stopped()` and, when that arm wins, runs `guard.abort()` and
+    /// ends the stream. That cleanup lives *inside* the stream, so it only runs
+    /// if the stream is polled after the stop — which is what
+    /// [`PREFILL_WIND_DOWN_GRACE`] exists to allow.
+    #[derive(Debug, Default)]
+    struct WindDownBackend {
+        generate_calls: AtomicUsize,
+        stream_dropped: Arc<AtomicBool>,
+        cleanup_ran: Arc<AtomicBool>,
+        context: Mutex<Option<Arc<dyn AsyncEngineContext>>>,
+    }
+
+    impl WindDownBackend {
+        fn stream_dropped(&self) -> bool {
+            self.stream_dropped.load(Ordering::SeqCst)
+        }
+
+        /// Whether the downstream got far enough to run its own cleanup, the
+        /// way the KV router's `RequestGuard` would.
+        fn cleanup_ran(&self) -> bool {
+            self.cleanup_ran.load(Ordering::SeqCst)
+        }
+
+        fn was_asked_to_stop(&self) -> bool {
+            self.context
+                .lock()
+                .as_ref()
+                .map(|ctx| ctx.is_stopped())
+                .unwrap_or(false)
+        }
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for WindDownBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            self.generate_calls.fetch_add(1, Ordering::SeqCst);
+            let (_request, context) = request.transfer(());
+            let ctx = context.context();
+            *self.context.lock() = Some(ctx.clone());
+
+            let probe = DropProbe(self.stream_dropped.clone());
+            let cleanup = self.cleanup_ran.clone();
+            let watched = ctx.clone();
+            // Yields nothing and stays pending until it is asked to stop, at
+            // which point it runs its cleanup and ends.
+            let winding =
+                futures::stream::unfold(Some((watched, cleanup, probe)), |state| async move {
+                    let (watched, cleanup, probe) = state?;
+                    let _ = &probe;
+                    watched.stopped().await;
+                    cleanup.store(true, Ordering::SeqCst);
+                    None::<(Annotated<BackendOutput>, _)>
+                });
+
+            Ok(ResponseStream::new(Box::pin(winding), ctx))
         }
     }
 
@@ -683,13 +800,127 @@ mod tests {
             backend.was_asked_to_stop(),
             "cancellation should reach the downstream context"
         );
+
+        // This backend ignores the stop, so it is held for the grace window and
+        // then dropped anyway. The bound is on the grace, not on the backend.
+        tokio::time::sleep(PREFILL_WIND_DOWN_GRACE).await;
+        settle().await;
+
         assert!(
             backend.stream_dropped(),
-            "cancellation should release the stalled downstream stream"
+            "a downstream that ignores the stop should still be released once the grace elapses"
         );
         assert_eq!(Arc::strong_count(&backend), 1);
         // Proves the release came from cancellation and not from the timeout.
         assert!(started.elapsed() < PREFILL_TASK_TIMEOUT);
+    }
+
+    /// The wind-down is only worth sending if the downstream can act on it.
+    /// A downstream that watches its context the way the KV router does must
+    /// get to finish its own cleanup, and must do so inside the grace rather
+    /// than being dropped mid-flight.
+    #[tokio::test(start_paused = true)]
+    async fn a_downstream_that_honours_the_stop_completes_its_own_cleanup() {
+        let (formatter, tokenizer) = sample_model_parts();
+        let backend = Arc::new(WindDownBackend::default());
+        let engine: Arc<BackendEngine> = backend.clone();
+        let cancel = CancellationToken::new();
+
+        let request = chat_request(true);
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-wind-down",
+            &engine,
+            &formatter,
+            &tokenizer,
+            Some(&cancel),
+        );
+        drop(engine);
+
+        let items: Vec<_> = wrapped.collect().await;
+        assert_eq!(items.len(), 2);
+
+        settle().await;
+        assert!(!backend.cleanup_ran(), "nothing should wind down yet");
+
+        let cancelled_at = Instant::now();
+        cancel.cancel();
+        settle().await;
+
+        assert!(backend.was_asked_to_stop());
+        assert!(
+            backend.cleanup_ran(),
+            "a downstream watching its context must get to run its cleanup; \
+             signalling and dropping in the same poll would skip it"
+        );
+        assert!(
+            backend.stream_dropped(),
+            "the stream should be released once it has wound down"
+        );
+        // It wound down of its own accord, well inside the grace, rather than
+        // being cut off when the grace expired.
+        assert!(
+            cancelled_at.elapsed() < PREFILL_WIND_DOWN_GRACE,
+            "wind-down should complete inside the grace window"
+        );
+        assert_eq!(Arc::strong_count(&backend), 1);
+    }
+
+    /// A token cancelled before the task ever runs must dispatch nothing.
+    ///
+    /// This pins the precondition, not the arm order. The ordering hazard the
+    /// arms guard against — a terminal chunk and a cancellation becoming ready
+    /// in the *same* poll, where `biased` source order decides the winner — is
+    /// not forceable from a test: whether the detached task observes the two
+    /// wakeups together or one at a time is up to the scheduler, and this test
+    /// passes under either arm order. The reorder above is therefore a
+    /// defensive fix for a real but unforceable race, and this test covers the
+    /// case that can be pinned deterministically.
+    #[tokio::test(start_paused = true)]
+    async fn an_already_cancelled_token_dispatches_nothing() {
+        let (formatter, tokenizer) = sample_model_parts();
+        let backend = Arc::new(StallingBackend::default());
+        let engine: Arc<BackendEngine> = backend.clone();
+
+        let cancel = CancellationToken::new();
+        // Cancelled before the task ever runs, while `upstream()` has its
+        // terminal chunk ready immediately: both arms are ready on first poll.
+        cancel.cancel();
+
+        let request = chat_request(true);
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-already-cancelled",
+            &engine,
+            &formatter,
+            &tokenizer,
+            Some(&cancel),
+        );
+        drop(engine);
+
+        let items: Vec<_> = wrapped.collect().await;
+        assert_eq!(
+            items.len(),
+            2,
+            "the client stream is passed through regardless"
+        );
+
+        settle().await;
+        tokio::time::sleep(PREFILL_TASK_TIMEOUT).await;
+        settle().await;
+
+        assert_eq!(
+            backend.generate_calls(),
+            0,
+            "no warmup may be dispatched once the runtime is already shutting down"
+        );
+        assert_eq!(
+            Arc::strong_count(&backend),
+            1,
+            "the task should have released the engine without dispatching"
+        );
     }
 
     #[tokio::test(start_paused = true)]
