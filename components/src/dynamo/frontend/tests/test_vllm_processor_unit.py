@@ -1493,6 +1493,26 @@ class TestToolCallGuidedDecoding:
         assert guided["json"]["type"] == "array"
         assert guided["json"]["maxItems"] == 1
 
+    def test_named_choice_with_array_parameters_gets_no_max_items(self, tokenizer):
+        array_tool = {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "array", "items": {"type": "string"}},
+            },
+        }
+        request = self._request(
+            tokenizer,
+            tools=[array_tool],
+            tool_choice={"type": "function", "function": {"name": "get_weather"}},
+            parallel_tool_calls=False,
+        )
+        guided = build_tool_call_guided_decoding(request, tool_parser=None)
+
+        assert guided is not None
+        assert guided["json"]["type"] == "array"
+        assert "maxItems" not in guided["json"]
+
     # Parsers that require native tool syntax must not get a forced JSON schema.
     @pytest.mark.parametrize(
         "tool_choice",

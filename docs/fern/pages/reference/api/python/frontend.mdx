@@ -331,7 +331,7 @@ from dynamo.frontend.prepost import StreamingPostProcessor
 StreamingPostProcessor(*, tokenizer: TokenizerLike, request_for_sampling: ChatCompletionRequest, sampling_params: SamplingParams, prompt_token_ids: Sequence[int], tool_parser: ToolParser | None, reasoning_parser_class: type[ReasoningParser] | None, chat_template_kwargs: dict[str, Any], stream_response: bool = True, uses_dynamo_json_tool_call_fallback: bool = False) -> None
 ```
 
-[`components/src/dynamo/frontend/prepost.py#L649`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L649)
+[`components/src/dynamo/frontend/prepost.py#L650`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L650)
 
 **Public methods**
 
@@ -343,7 +343,7 @@ __init__(*, tokenizer: TokenizerLike, request_for_sampling: ChatCompletionReques
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L650)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L651)
 
 <h4 id="api-dynamo-frontend-prepost-streamingpostprocessor-process-output">process_output</h4>
 
@@ -353,7 +353,7 @@ process_output(output: Any) -> dict[str, Any] | None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L1048)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L1049)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-vllm-processor-vllmprocessor" title="VllmProcessor (class)">
@@ -700,7 +700,7 @@ from dynamo.frontend.prepost import preprocess_chat_request
 preprocess_chat_request(request: dict[str, Any] | ChatCompletionRequest, *, tokenizer: TokenizerLike, renderer: _Renderer, tool_parser_class: type[ToolParser] | None, exclude_tools_when_tool_choice_none: bool = True, enable_auto_tool_choice: bool = False, default_chat_template_kwargs: dict[str, Any] | None = None, default_thinking_mode: str | None = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto') -> PreprocessResult
 ```
 
-[`components/src/dynamo/frontend/prepost.py#L529`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L529)
+[`components/src/dynamo/frontend/prepost.py#L530`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L530)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-preprocess-chat-request" title="preprocess_chat_request (function)">
