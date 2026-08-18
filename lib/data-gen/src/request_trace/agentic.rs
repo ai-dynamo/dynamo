@@ -510,6 +510,7 @@ mod tests {
             agent_context: None,
             request: RequestTraceRequestMetrics {
                 request_id: request_id.to_string(),
+                model: Some("model".to_string()),
                 output_tokens: Some(5),
                 request_received_ms: Some(start_ms as u64),
                 total_time_ms: Some((end_ms - start_ms) as f64),

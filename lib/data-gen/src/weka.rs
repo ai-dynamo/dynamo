@@ -1262,9 +1262,13 @@ mod tests {
             .iter()
             .find(|row| row.request_id.ends_with("outer:2"))
             .unwrap();
-        assert!(consumer.dependencies.iter().any(|edge| {
-            edge.request_id == child.request_id && edge.relation == AgenticDependencyRelation::Join
-        }));
+        assert!(
+            consumer.dependencies.iter().any(|edge| {
+                edge.request_id == child.request_id
+                    && edge.relation == AgenticDependencyRelation::Join
+            }),
+            "lowered rows: {rows:#?}"
+        );
         let background = rows
             .iter()
             .find(|row| row.request_id.ends_with("outer:3:inner:0"))
