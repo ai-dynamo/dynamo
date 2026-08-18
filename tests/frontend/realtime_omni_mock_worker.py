@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import uvloop
-from vllm_omni.engine.mm_outputs import MultimodalPayload
+from vllm_omni.outputs.mm_outputs import MultimodalPayload
 
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
@@ -45,9 +45,13 @@ class _MockAsyncOmni:
     """Fake AsyncOmni: drains the streaming audio input, then echoes it back.
 
     Yields a stage-0 text frame (transcript) followed by the accumulated audio
-    as a single multimodal output, matching the fields RealtimeOmniHandler reads
-    off a real ``OmniRequestOutput`` (``stage_id``, ``outputs[].text``, and a
-    ``MultimodalPayload`` whose ``tensors['audio']`` holds the waveform).
+    as a single multimodal output, mirroring the shapes a real
+    ``OmniRequestOutput`` exposes (``stage_id``, ``outputs[].text``, and
+    ``multimodal_output``).
+
+    ``multimodal_output`` is a plain ``dict`` when the step attached no payload
+    and a ``MultimodalPayload`` when it did; the frames below use both so the
+    handler is exercised against either.
     """
 
     default_sampling_params_list: list = []
@@ -61,7 +65,7 @@ class _MockAsyncOmni:
             stage_id=0,
             outputs=[SimpleNamespace(text=MOCK_TRANSCRIPT, token_ids=[1])],
             prompt_token_ids=[0],
-            multimodal_output=MultimodalPayload(),
+            multimodal_output={},
         )
         yield SimpleNamespace(
             stage_id=1,

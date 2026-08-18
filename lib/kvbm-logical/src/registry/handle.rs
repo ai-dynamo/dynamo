@@ -87,7 +87,7 @@ impl Drop for BlockRegistrationHandleInner {
         // during `drop_in_place` the inner allocation is still live (the
         // implicit weak from the strong refcount is released after `Drop`
         // returns). Only remove if the entry still points to us.
-        let map = registry.prefix(&self.seq_hash);
+        let mut map = registry.prefix(&self.seq_hash);
         let should_remove = match map.get(&self.seq_hash) {
             Some(weak_ref) => std::ptr::eq(weak_ref.as_ptr(), self as *const Self),
             None => {

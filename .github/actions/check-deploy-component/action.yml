@@ -24,6 +24,7 @@ runs:
           --target linter \
           --progress=plain \
           --build-context snapshot=../snapshot \
+          --build-context operator=../operator \
           .
 
     - name: Tester
@@ -35,6 +36,8 @@ runs:
           --target tester \
           --progress=plain \
           --build-context snapshot=../snapshot \
+          --build-context operator=../operator \
+          --build-context operator-chart=../helm/charts/platform/components/operator \
           .
 
     - name: Set up Go

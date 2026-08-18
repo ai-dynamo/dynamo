@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Refreshes docs/fern/components/events.generated.ts from the public Dynamo
+# Google Calendar and commits it to main. The push is what publishes: main is
+# in fern-docs.yml's `push:` trigger and events.generated.ts sits under
+# `docs/**`, so the existing sync-and-publish job picks the change up.
+#
+# This used to be a step inside fern-docs.yml, fired by a `schedule:` trigger on
+# that workflow. Regenerating there meant the refreshed file only ever existed
+# inside the runner and was synced straight to docs-website, so main -- the file
+# people read and diff -- silently drifted from what the site served. Committing
+# to main instead keeps one source of truth and gives the calendar a history.
+#
+# Direct push requires ruleset bypass: OPS_BOT_PAT authenticates as dynamo-ops,
+# which must stay on @ai-dynamo/autobots (bypass actor on "Required PR Checks").
+# Commits use `git commit -s` so DCO passes when the bypass is exercised.
+#
+# Runs land at most once a day in practice: the generator's only always-moving
+# field is GENERATED_ON, a Pacific date, so the other three runs are no-ops and
+# exit without committing.
+
+name: Community Events Refresh
+
+on:
+  schedule:
+    # Every six hours. Two of the four land either side of Pacific midnight, so
+    # the date rollover reaches the site within roughly six hours of midnight.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  # Read-only: the commit is pushed with OPS_BOT_PAT, not GITHUB_TOKEN. A
+  # GITHUB_TOKEN push would not trigger fern-docs.yml (GitHub suppresses
+  # workflow-triggered-by-workflow to avoid loops), so the refresh would land on
+  # main and never publish.
+  contents: read
+
+# Serialize: a slow ICS fetch overrunning into the next slot would otherwise
+# race two commits against main.
+concurrency:
+  group: community-events-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Refresh community events
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 1
+          token: ${{ secrets.OPS_BOT_PAT }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '22'
+
+      - name: Regenerate events from the public Google Calendar
+        run: |
+          # Pinned deps from the committed lockfile rather than a floating
+          # `npm install` — reproducible and offline-cache-friendly.
+          npm ci --prefix .github/scripts/events
+          # generate-events.js lives at .github/scripts/ and `require('node-ical')`s,
+          # so point Node at the events node_modules (npm --prefix installs there).
+          NODE_PATH=.github/scripts/events/node_modules \
+            node .github/scripts/generate-events.js
+
+      - name: Commit and push if the calendar moved
+        env:
+          EVENTS: docs/fern/components/events.generated.ts
+        run: |
+          if [ -z "$(git status --porcelain -- "$EVENTS")" ]; then
+            echo "No calendar change; nothing to publish."
+            exit 0
+          fi
+
+          # Match auto-dep-upgrade: commit as dynamo-ops (the PAT that pushes).
+          git config user.name "dynamo-ops"
+          git config user.email "170655669+dynamo-ops@users.noreply.github.com"
+
+          # Keep the generated file aside: the replay below resets the tree to
+          # whatever main has moved to, which would otherwise discard it.
+          generated=$(mktemp)
+          cp "$EVENTS" "$generated"
+
+          # Replay onto current main rather than rebasing. main does move under
+          # us -- any docs PR can touch this file, as the PR introducing this
+          # workflow does -- and a rebase conflict would fail the run red on a
+          # six-hour cron. The file is wholly generated and has no meaningful
+          # merge semantics, so taking our copy is always the right resolution.
+          for attempt in 1 2 3; do
+            git fetch --depth=1 origin main
+            git reset --hard FETCH_HEAD
+
+            cp "$generated" "$EVENTS"
+            if [ -z "$(git status --porcelain -- "$EVENTS")" ]; then
+              echo "Calendar already current on main; nothing to publish."
+              exit 0
+            fi
+
+            # Only ever stage the generated file. npm ci writes node_modules
+            # into .github/scripts/events/ and a stray `git add -A` would
+            # commit it.
+            git add "$EVENTS"
+            # Separate -m flags: a YAML block scalar would carry its own
+            # indentation into the commit body verbatim.
+            git commit -s \
+              -m "docs(fern): refresh community events" \
+              -m "Automated refresh from the public Dynamo Google Calendar." \
+              -m "Generated by .github/workflows/community-events-refresh.yml."
+
+            if git push origin HEAD:main; then
+              echo "Pushed refreshed community events to main."
+              exit 0
+            fi
+
+            echo "Push rejected on attempt ${attempt} (main moved); replaying."
+          done
+
+          echo "::error::Could not push the refreshed calendar after 3 attempts."
+          exit 1

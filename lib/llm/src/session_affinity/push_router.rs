@@ -32,11 +32,20 @@ impl SessionAffinityPushRouter {
         ttl: Option<Duration>,
         direct: bool,
     ) -> Result<Self, Error> {
-        Ok(Self {
+        let affinity = ttl.map(AffinityCoordinator::new).transpose()?;
+        Ok(Self::new_with_coordinator(inner, affinity, direct))
+    }
+
+    pub(crate) fn new_with_coordinator(
+        inner: PushRouter<PreprocessedRequest, LlmResponse>,
+        affinity: Option<AffinityCoordinator>,
+        direct: bool,
+    ) -> Self {
+        Self {
             inner,
-            affinity: ttl.map(AffinityCoordinator::new).transpose()?,
+            affinity,
             direct,
-        })
+        }
     }
 
     fn phase(request: &PreprocessedRequest) -> RequestPhase {
@@ -91,6 +100,11 @@ impl SessionAffinityPushRouter {
 
     pub fn peek_next_worker(&self) -> Option<u64> {
         self.inner.peek_next_worker()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn occupancy_for_test(&self, worker_id: u64) -> u64 {
+        self.inner.occupancy_for_test(worker_id)
     }
 
     async fn acquire_routable(
@@ -249,23 +263,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
         } else {
             None
         };
+        let explicit = self.direct_target(explicit_target(&request, phase)?, phase)?;
         if !self.direct && session_id.is_none() {
-            let ((tracker, target), stream) = self
-                .inner
-                .select_and_dispatch(request, |request, worker_id| {
-                    Ok((
-                        request.tracker.take(),
-                        AffinityTarget {
-                            worker_id,
-                            dp_rank: None,
-                        },
-                    ))
-                })
+            let ((), stream) = self
+                .select_and_dispatch_exact_target(request, explicit, |_, _| Ok(()))
                 .await?;
-            Self::record_target(tracker.as_deref(), target);
             return Ok(stream);
         }
-        let explicit = self.direct_target(explicit_target(&request, phase)?, phase)?;
         let Some(session_id) = session_id else {
             let Some(target) = explicit else {
                 return Err(invalid_argument(format!(

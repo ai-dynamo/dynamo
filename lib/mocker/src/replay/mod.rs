@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod artifacts;
-mod collector;
 mod entrypoints;
 pub(crate) mod offline;
 mod online;
-mod planner_handle;
 mod router_shared;
 mod validate;
 
@@ -16,16 +14,20 @@ use std::sync::Arc;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use dynamo_kv_router::PrefillLoadEstimator;
 
+/// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
+pub use aisimulate_core::ReplayReport as TraceSimulationReport;
+pub(crate) use aisimulate_core::replay::TraceCollector;
+pub use aisimulate_core::replay::{
+    CanonicalReplayCoverage, CanonicalReplayRecord, LifecycleOperation, OfflineRuntimeEvidence,
+    PerRequestRecord, ReplayCaptureOptions, ReplayDeterminism, ReplayTerminalStatus, SlaThresholds,
+    TraceDistributionStats, TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats,
+    TraceRequestCounts, TraceThroughputStats,
+};
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use artifacts::native_g1_parent_chain_artifact;
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
-};
-pub(crate) use collector::TraceCollector;
-#[cfg(test)]
-pub(crate) use collector::TraceRequestStatsSnapshot;
-pub use collector::{
-    PerRequestRecord, ReplayTerminalStatus, SlaThresholds, TraceDistributionStats,
-    TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
-    TraceSimulationReport, TraceThroughputStats,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {
@@ -60,45 +62,69 @@ impl OfflineDisaggReplayConfig {
     }
 }
 
+pub use aisimulate_core::replay::TrafficStats;
+pub use aisimulate_core::replay::{
+    ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
+};
 pub use entrypoints::{
     ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
     generate_trace_worker_artifacts_offline_with_kv_event_visibility,
+    simulate_agentic_trace_live_workload_with_router_mode_and_options,
     simulate_agentic_trace_workload_with_router_mode, simulate_concurrency_file,
     simulate_concurrency_file_disagg_with_router_mode,
     simulate_concurrency_file_disagg_with_router_mode_and_format,
+    simulate_concurrency_file_disagg_with_router_mode_and_format_and_scaling_policy,
     simulate_concurrency_file_with_router_mode,
-    simulate_concurrency_file_with_router_mode_and_format, simulate_concurrency_live_file,
-    simulate_concurrency_live_file_with_router_mode,
-    simulate_concurrency_live_file_with_router_mode_and_format, simulate_concurrency_live_requests,
-    simulate_concurrency_live_requests_with_router_mode, simulate_concurrency_live_workload,
-    simulate_concurrency_live_workload_with_router_mode, simulate_concurrency_requests,
+    simulate_concurrency_file_with_router_mode_and_format,
+    simulate_concurrency_file_with_router_mode_and_format_and_scaling_policy,
+    simulate_concurrency_live_file, simulate_concurrency_live_file_with_router_mode,
+    simulate_concurrency_live_file_with_router_mode_and_format,
+    simulate_concurrency_live_file_with_router_mode_and_format_and_options,
+    simulate_concurrency_live_requests, simulate_concurrency_live_requests_with_router_mode,
+    simulate_concurrency_live_requests_with_router_mode_and_options,
+    simulate_concurrency_live_workload, simulate_concurrency_live_workload_with_router_mode,
+    simulate_concurrency_live_workload_with_router_mode_and_options, simulate_concurrency_requests,
     simulate_concurrency_requests_disagg_with_router_mode,
-    simulate_concurrency_requests_with_router_mode, simulate_concurrency_workload,
-    simulate_concurrency_workload_disagg_with_router_mode,
+    simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy,
+    simulate_concurrency_requests_with_router_mode,
+    simulate_concurrency_requests_with_router_mode_and_scaling_policy,
+    simulate_concurrency_workload, simulate_concurrency_workload_disagg_with_router_mode,
     simulate_concurrency_workload_disagg_with_router_mode_and_options,
+    simulate_concurrency_workload_disagg_with_router_mode_and_options_and_scaling_policy,
     simulate_concurrency_workload_with_router_mode,
     simulate_concurrency_workload_with_router_mode_and_options,
+    simulate_concurrency_workload_with_router_mode_and_options_and_scaling_policy,
+    simulate_loaded_trace_disagg_with_router_mode_and_capture_options,
     simulate_loaded_trace_disagg_with_router_mode_and_options,
+    simulate_loaded_trace_disagg_with_router_mode_and_options_and_scaling_policy,
     simulate_loaded_trace_live_with_router_mode,
-    simulate_loaded_trace_with_router_mode_and_options, simulate_trace_file,
+    simulate_loaded_trace_live_with_router_mode_and_options,
+    simulate_loaded_trace_with_router_mode_and_capture_options,
+    simulate_loaded_trace_with_router_mode_and_options,
+    simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy, simulate_trace_file,
     simulate_trace_file_disagg_with_router_mode,
-    simulate_trace_file_disagg_with_router_mode_and_format, simulate_trace_file_with_router_mode,
-    simulate_trace_file_with_router_mode_and_format, simulate_trace_live_file,
+    simulate_trace_file_disagg_with_router_mode_and_format,
+    simulate_trace_file_disagg_with_router_mode_and_format_and_scaling_policy,
+    simulate_trace_file_with_router_mode, simulate_trace_file_with_router_mode_and_format,
+    simulate_trace_file_with_router_mode_and_format_and_scaling_policy, simulate_trace_live_file,
     simulate_trace_live_file_with_router_mode,
-    simulate_trace_live_file_with_router_mode_and_format, simulate_trace_live_requests,
-    simulate_trace_live_requests_with_router_mode, simulate_trace_live_workload,
-    simulate_trace_live_workload_with_router_mode, simulate_trace_requests,
-    simulate_trace_requests_disagg_with_router_mode, simulate_trace_requests_with_router_mode,
-    simulate_trace_workload, simulate_trace_workload_disagg_with_router_mode,
+    simulate_trace_live_file_with_router_mode_and_format,
+    simulate_trace_live_file_with_router_mode_and_format_and_options, simulate_trace_live_requests,
+    simulate_trace_live_requests_with_router_mode,
+    simulate_trace_live_requests_with_router_mode_and_options, simulate_trace_live_workload,
+    simulate_trace_live_workload_with_router_mode,
+    simulate_trace_live_workload_with_router_mode_and_options, simulate_trace_requests,
+    simulate_trace_requests_disagg_with_router_mode,
+    simulate_trace_requests_disagg_with_router_mode_and_scaling_policy,
+    simulate_trace_requests_with_router_mode,
+    simulate_trace_requests_with_router_mode_and_scaling_policy, simulate_trace_workload,
+    simulate_trace_workload_disagg_with_router_mode,
+    simulate_trace_workload_disagg_with_router_mode_and_options_and_scaling_policy,
     simulate_trace_workload_with_router_mode,
-};
-pub use offline::components::TrafficStats;
-pub use offline::planner_hook::{
-    NoopPlannerHook, PlannerHook, PlannerTickDecision, PlannerTickMetrics,
+    simulate_trace_workload_with_router_mode_and_options_and_scaling_policy,
 };
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;
-pub use planner_handle::PlannerReplayHandle;
 pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(
@@ -146,39 +172,6 @@ pub(crate) fn normalize_trace_requests(
 mod tests {
     use super::*;
     use uuid::Uuid;
-
-    #[test]
-    fn test_replay_itl_uses_per_token_gaps() {
-        let mut collector = TraceCollector::default();
-        let uuid = Uuid::from_u128(11);
-
-        collector.on_arrival(uuid, 0.0, 4, 4);
-        collector.on_admit(uuid, 0.0, 0);
-        collector.on_token(uuid, 10.0);
-        collector.on_token(uuid, 11.0);
-        collector.on_token(uuid, 12.0);
-        collector.on_token(uuid, 110.0);
-
-        let report = collector.finish();
-
-        assert!((report.latency.tpot.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
-        assert!((report.latency.itl.distribution.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
-        assert_eq!(report.latency.itl.distribution.median_ms, 1.0);
-        assert_eq!(report.latency.itl.distribution.p75_ms, 98.0);
-        assert_eq!(report.latency.itl.distribution.p90_ms, 98.0);
-        assert_eq!(report.latency.itl.distribution.p95_ms, 98.0);
-        assert_eq!(report.latency.itl.max_ms, 98.0);
-        assert_eq!(report.latency.ttst.min_ms, 1.0);
-        assert_eq!(report.latency.ttst.max_ms, 1.0);
-        assert_eq!(
-            report.latency.output_token_throughput_per_user.min_ms,
-            1000.0 / 98.0
-        );
-        assert_eq!(
-            report.latency.output_token_throughput_per_user.max_ms,
-            1000.0
-        );
-    }
 
     #[test]
     fn test_normalize_trace_requests_applies_arrival_speedup_ratio() {

@@ -31,11 +31,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gpupkg "github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"k8s.io/utils/ptr"
 )
@@ -45,10 +47,11 @@ func newFakeReconciler(objs ...client.Object) *DynamoGraphDeploymentRequestRecon
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 	return &DynamoGraphDeploymentRequestReconciler{
-		Client:    fakeClient,
-		APIReader: fakeClient,
-		Recorder:  &record.FakeRecorder{},
-		Config:    &configv1alpha1.OperatorConfiguration{},
+		Client:        fakeClient,
+		APIReader:     fakeClient,
+		Recorder:      &events.FakeRecorder{},
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Defaults()},
 	}
 }
 
@@ -77,18 +80,14 @@ func dcgmPod(name, ip string) *corev1.Pod {
 	}
 }
 
-func TestGPUDiscoveryEnabledDefaults(t *testing.T) {
-	assert.True(t, (*DynamoGraphDeploymentRequestReconciler)(nil).gpuDiscoveryEnabled())
-	assert.True(t, (&DynamoGraphDeploymentRequestReconciler{}).gpuDiscoveryEnabled())
+func TestGPUDiscoveryEnabled(t *testing.T) {
+	assert.Panics(t, func() { (*DynamoGraphDeploymentRequestReconciler)(nil).gpuDiscoveryEnabled() })
+	assert.Panics(t, func() { (&DynamoGraphDeploymentRequestReconciler{}).gpuDiscoveryEnabled() })
 	assert.True(t, (&DynamoGraphDeploymentRequestReconciler{
-		Config: &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Defaults()},
 	}).gpuDiscoveryEnabled())
 	assert.False(t, (&DynamoGraphDeploymentRequestReconciler{
-		Config: &configv1alpha1.OperatorConfiguration{
-			GPU: configv1alpha1.GPUConfiguration{
-				DiscoveryEnabled: ptr.To(false),
-			},
-		},
+		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{}},
 	}).gpuDiscoveryEnabled())
 }
 
@@ -135,7 +134,7 @@ func TestEnrichHardwareFromDiscovery_SkipsOptionalMetadataWhenNodeDiscoveryDisab
 	node.Labels[gpupkg.LabelNFDRDMAAvailable] = "true"
 	r := newFakeReconciler(node)
 	r.GPUDiscovery = nil
-	r.Config.GPU.DiscoveryEnabled = ptr.To(false)
+	r.RuntimeConfig.Gate = features.Gates{}
 
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
@@ -385,7 +384,7 @@ func TestCreateProfilingJobPersistsDiscoveredHardware(t *testing.T) {
 	r := &DynamoGraphDeploymentRequestReconciler{
 		Client:            fakeClient,
 		APIReader:         fakeClient,
-		Recorder:          &record.FakeRecorder{},
+		Recorder:          &events.FakeRecorder{},
 		Config:            &configv1alpha1.OperatorConfiguration{},
 		GPUDiscovery:      gpupkg.NewGPUDiscovery(nil),
 		GPUDiscoveryCache: cache,
@@ -452,7 +451,7 @@ func TestCreateProfilingJobWithManualHardwareDoesNotRequireAPIReader(t *testing.
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgdr).Build()
 	r := &DynamoGraphDeploymentRequestReconciler{
 		Client:      fakeClient,
-		Recorder:    &record.FakeRecorder{},
+		Recorder:    &events.FakeRecorder{},
 		Config:      &configv1alpha1.OperatorConfiguration{},
 		RBACManager: &MockRBACManager{},
 	}
@@ -532,7 +531,7 @@ func TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM(t *testing.T) {
 			r := &DynamoGraphDeploymentRequestReconciler{
 				Client:            fakeClient,
 				APIReader:         fakeClient,
-				Recorder:          &record.FakeRecorder{},
+				Recorder:          &events.FakeRecorder{},
 				GPUDiscovery:      gpupkg.NewGPUDiscovery(mockScraper),
 				GPUDiscoveryCache: gpupkg.NewGPUDiscoveryCache(),
 			}

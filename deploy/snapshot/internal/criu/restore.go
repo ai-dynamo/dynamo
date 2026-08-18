@@ -29,56 +29,89 @@ func ExecuteRestore(
 	criuOpts *criurpc.CriuOpts,
 	m *types.CheckpointManifest,
 	checkpointPath string,
+	bundleDir string,
 	log logr.Logger,
-) (int32, error) {
+) (int32, func(), error) {
 	settings := m.CRIUDump.CRIU
 
-	// Open image dir FD
-	imageDir, imageDirFD, err := openPathForCRIU(checkpointPath)
+	// Return the FD closers as cleanup() rather than deferring them here, so the
+	// caller can run them after cuda unlock instead of between the CRIU restore
+	// and unlock. That keeps the window where the restored process runs with CUDA
+	// still locked as short as possible. cleanup is called on the error paths below.
+	var openFiles, inheritedFiles []*os.File
+	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath)
 	if err != nil {
-		return 0, fmt.Errorf("failed to open image directory: %w", err)
+		return 0, nil, fmt.Errorf("failed to prepare CRIU image directory: %w", err)
 	}
-	defer imageDir.Close()
+	var confTmpDir string
+	cleanup := func() {
+		closeFiles(inheritedFiles)
+		closeFiles(openFiles)
+		removeImageDir()
+		if err := os.RemoveAll(confTmpDir); err != nil {
+			log.Error(err, "failed to remove criu config temp dir", "path", confTmpDir)
+		}
+	}
+
+	// Open image dir FD
+	imageDir, imageDirFD, err := openPathForCRIU(imageDirPath)
+	if err != nil {
+		cleanup()
+		return 0, nil, fmt.Errorf("failed to open image directory: %w", err)
+	}
+	openFiles = append(openFiles, imageDir)
 	criuOpts.ImagesDirFd = proto.Int32(imageDirFD)
 
 	// Open work dir FD
 	if settings.WorkDir != "" {
 		if err := os.MkdirAll(settings.WorkDir, 0755); err != nil {
-			return 0, fmt.Errorf("failed to create CRIU work directory: %w", err)
+			cleanup()
+			return 0, nil, fmt.Errorf("failed to create CRIU work directory: %w", err)
 		}
 		workDirFile, workDirFD, err := openPathForCRIU(settings.WorkDir)
 		if err != nil {
-			return 0, fmt.Errorf("failed to open CRIU work directory: %w", err)
+			cleanup()
+			return 0, nil, fmt.Errorf("failed to open CRIU work directory: %w", err)
 		}
-		defer workDirFile.Close()
+		openFiles = append(openFiles, workDirFile)
 		criuOpts.WorkDirFd = proto.Int32(workDirFD)
 	}
 
-	c := criulib.MakeCriu()
-	if _, err := os.Stat(settings.BinaryPath); err != nil {
-		return 0, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
+	overridePath, confTmpDir, err := rewriteCRIULibDir(criuOpts.ConfigFile, settings.WorkDir, bundleDir)
+	if err != nil {
+		cleanup()
+		return 0, nil, err
 	}
-	c.SetCriuPath(settings.BinaryPath)
+	criuOpts.ConfigFile = proto.String(overridePath)
+
+	criuBin, err := bundledCRIUPath(bundleDir)
+	if err != nil {
+		cleanup()
+		return 0, nil, err
+	}
+	c := criulib.MakeCriu()
+	c.SetCriuPath(criuBin)
 
 	netNsFile, err := os.Open(netNsPath)
 	if err != nil {
-		return 0, fmt.Errorf("failed to open net NS at %s: %w", netNsPath, err)
+		cleanup()
+		return 0, nil, fmt.Errorf("failed to open net NS at %s: %w", netNsPath, err)
 	}
-	defer netNsFile.Close()
+	openFiles = append(openFiles, netNsFile)
 	c.AddInheritFd("extNetNs", netNsFile)
 
-	inheritedFiles := registerInheritFDs(c, m.K8s.StdioFDs, log)
-	defer closeFiles(inheritedFiles)
+	inheritedFiles = registerInheritFDs(c, m.K8s.StdioFDs, log)
 
 	notify := &restoreNotify{log: log}
 	log.V(1).Info("Executing go-criu Restore call")
 	if err := c.Restore(criuOpts, notify); err != nil {
 		log.Error(err, "go-criu Restore returned error")
-		logging.LogRestoreErrors(checkpointPath, settings.WorkDir, log)
-		return 0, fmt.Errorf("CRIU restore failed: %w", err)
+		logging.LogRestoreErrors(imageDirPath, settings.WorkDir, log)
+		cleanup()
+		return 0, nil, fmt.Errorf("CRIU restore failed: %w", err)
 	}
 
-	return notify.restoredPID, nil
+	return notify.restoredPID, cleanup, nil
 }
 
 // BuildRestoreOpts assembles CriuOpts for a CRIU restore from the checkpoint manifest.
@@ -105,6 +138,18 @@ func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroup
 	criuOpts.MntnsCompatMode = proto.Bool(settings.MntnsCompatMode)
 	criuOpts.EvasiveDevices = proto.Bool(settings.EvasiveDevices)
 	criuOpts.ForceIrmap = proto.Bool(settings.ForceIrmap)
+
+	// Skip network locking on restore. CRIU only locks the network on this
+	// path via unlock_connection_info (criu/sk-tcp.c) and, under --empty-ns
+	// net, network_lock_internal (criu/cr-restore.c:2176) — neither applies
+	// here: the net namespace is external (see dump.go) and the restore target
+	// is a fresh placeholder netns with no dump-time DROP rules in it. SKIP is
+	// therefore inert, and it keeps criu from forking iptables-restore, which
+	// the injected bundle does not carry.
+	//
+	// Do NOT mirror this into BuildDumpOpts. Dump is where lock_connection
+	// actually protects the C/R window for tcpEstablished connections.
+	criuOpts.NetworkLock = criurpc.CriuNetworkLockMethod_SKIP.Enum()
 
 	if cgroupRoot != "" && shouldSetCgroupRoot(criuOpts.GetManageCgroupsMode()) {
 		criuOpts.CgRoot = []*criurpc.CgroupRoot{
@@ -163,6 +208,77 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*
 
 	log.V(1).Info("Registered inherited stdio pipes", "count", len(openFiles))
 	return openFiles
+}
+
+// rewriteCRIULibDir writes a criu.conf override that redirects the plugin libdir
+// to the injected bundle. The dump-time libdir points to the agent filesystem and
+// is unreachable inside the placeholder namespace; the override replaces it.
+// existingConfigFile is nil when the checkpoint was dumped without a criu.conf;
+// in that case the override is written from an empty base so CRIU always finds
+// its plugins at the injected path.
+// Returns (overridePath, tmpDir, err). tmpDir is non-empty only when workDir was
+// empty and a temporary directory was created; the caller must os.RemoveAll(tmpDir).
+func rewriteCRIULibDir(existingConfigFile *string, workDir, criuBundleDir string) (string, string, error) {
+	var tmpDir string
+	if workDir == "" {
+		// Older checkpoints may not have a WorkDir in their manifest. Fall back
+		// to a temp dir so the libdir override can still be written.
+		tmp, err := os.MkdirTemp("", "criu-restore-conf-*")
+		if err != nil {
+			return "", "", fmt.Errorf("rewriteCRIULibDir: no workDir and failed to create temp dir: %w", err)
+		}
+		workDir = tmp
+		tmpDir = tmp
+	}
+
+	var baseConf string
+	if existingConfigFile != nil {
+		data, err := os.ReadFile(*existingConfigFile)
+		if err != nil {
+			return "", tmpDir, fmt.Errorf("read criu config %s: %w", *existingConfigFile, err)
+		}
+		baseConf = string(data)
+	}
+
+	overridePath := filepath.Join(workDir, "criu-restore.conf")
+	conf := overrideLibDir(baseConf, filepath.Join(criuBundleDir, "criu-plugins"))
+	if err := os.WriteFile(overridePath, []byte(conf), 0644); err != nil {
+		return "", tmpDir, fmt.Errorf("write criu libdir override to %s: %w", overridePath, err)
+	}
+	return overridePath, tmpDir, nil
+}
+
+// bundledCRIUPath returns the path to the criu binary inside bundleDir.
+// BinaryPath in the checkpoint manifest refers to the agent filesystem and is
+// unusable inside the placeholder namespace; criu must always come from the injected bundle.
+func bundledCRIUPath(bundleDir string) (string, error) {
+	path := filepath.Join(bundleDir, "criu")
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("criu binary not found in injected bundle at %s: %w", path, err)
+	}
+	return path, nil
+}
+
+func overrideLibDir(conf, libDir string) string {
+	lines := strings.Split(conf, "\n")
+	replaced := false
+	for i, line := range lines {
+		if isLibDirLine(line) {
+			lines[i] = "libdir " + libDir
+			replaced = true
+		}
+	}
+	if !replaced {
+		lines = append(lines, "libdir "+libDir)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func isLibDirLine(line string) bool {
+	// CRIU's config parser (criu/config.c) accepts both space and tab as the
+	// key/value separator, so match both to avoid a duplicate libdir directive.
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "libdir ") || strings.HasPrefix(trimmed, "libdir\t")
 }
 
 func closeFiles(files []*os.File) {

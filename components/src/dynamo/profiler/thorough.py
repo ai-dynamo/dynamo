@@ -23,7 +23,7 @@ import pandas as pd
 import yaml
 from aiconfigurator.generator.enumerate import enumerate_profiling_configs
 from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_match
-from aiconfigurator.sdk.task import TaskConfig
+from aiconfigurator.sdk.task_v2 import Task
 
 from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
 from dynamo.profiler.rapid import _generate_dgd_from_pick
@@ -38,6 +38,7 @@ from dynamo.profiler.utils.aiperf import (
     get_prefill_ttft,
 )
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.dgd_materialization import (
     DGDMaterializationPurpose,
     materialize_dgd,
@@ -47,6 +48,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
     ModelCacheSpec,
     ProfilingPhase,
 )
+from dynamo.profiler.utils.model_cache_paths import model_cache_path_in_pvc
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_backend_image,
@@ -58,6 +60,14 @@ from dynamo.profiler.utils.profile_decode import get_num_request_range
 from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
 
 logger = logging.getLogger(__name__)
+
+
+def _enable_chunked_prefill_for_trtllm_candidates(
+    prefill_candidates, decode_candidates
+) -> None:
+    """Enable chunked prefill on every TRT-LLM profiling candidate."""
+    for candidate in [*prefill_candidates, *decode_candidates]:
+        candidate.dgd_config = enable_trtllm_chunked_prefill(candidate.dgd_config)
 
 
 def _normalize_candidate_model_identity(
@@ -407,7 +417,10 @@ async def run_thorough(
         total_gpus=total_gpus,
         k8s_pvc_name=model_cache.pvcName,
         k8s_pvc_mount_path=model_cache.pvcMountPath,
-        k8s_model_path_in_pvc=model_cache.pvcModelPath,
+        k8s_model_path_in_pvc=model_cache_path_in_pvc(
+            model_cache.pvcMountPath,
+            model_cache.pvcModelPath,
+        ),
     )
     prefill_candidates, decode_candidates = enumerated[:2]
 
@@ -428,6 +441,11 @@ async def run_thorough(
             tolerations=job_tolerations,
             runtime_backend=backend,
             model_name_or_path=local_or_hf_model,
+        )
+
+    if backend == "trtllm":
+        _enable_chunked_prefill_for_trtllm_candidates(
+            prefill_candidates, decode_candidates
         )
 
     # Overrides may carry stale model arguments, so reassert the DGDR model
@@ -514,11 +532,14 @@ async def run_thorough(
     best_config_df = result.get("best_config_df", pd.DataFrame())
 
     # --- Stage 4: DGD generation ---
-    task = TaskConfig(
+    task = Task(
         serving_mode="disagg",
-        model_path=local_or_hf_model,
-        system_name=system,
-        backend_name=backend,
+        prefill_model_path=local_or_hf_model,
+        decode_model_path=local_or_hf_model,
+        prefill_system_name=system,
+        decode_system_name=system,
+        prefill_backend_name=backend,
+        decode_backend_name=backend,
         total_gpus=total_gpus,
         isl=isl,
         osl=osl,

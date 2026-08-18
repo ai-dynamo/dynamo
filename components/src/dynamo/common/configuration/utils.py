@@ -5,9 +5,40 @@
 
 import argparse
 import os
+import re
 from typing import Any, Callable, Optional, TypeVar, Union
 
 T = TypeVar("T")
+
+
+def parse_bool(value: str) -> bool:
+    """Parse Dynamo's truthy and falsy configuration values."""
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "on", "yes"):
+        return True
+    if normalized in ("", "0", "false", "off", "no"):
+        return False
+    raise argparse.ArgumentTypeError("expected one of: true/false, 1/0, on/off, yes/no")
+
+
+def split_served_model_names(served_model_name: Any) -> list[str]:
+    """Split a ``--served-model-name`` value into individual names.
+
+    Accepts a single string (whitespace- or comma-separated) or a
+    list/tuple of such strings, and returns a flat list of non-empty names
+    in order. The first is the primary served name; any remaining names are
+    aliases. Returns ``[]`` when nothing parses out.
+    """
+    if served_model_name is None:
+        return []
+    if isinstance(served_model_name, (list, tuple)):
+        raw_names = [str(name) for name in served_model_name]
+    else:
+        raw_names = [str(served_model_name)]
+    names: list[str] = []
+    for raw_name in raw_names:
+        names.extend(name for name in re.split(r"[\s,]+", raw_name.strip()) if name)
+    return names
 
 
 def env_or_default(
@@ -77,6 +108,7 @@ def add_argument(
     help: str,
     obsolete_flag: Optional[str] = None,
     arg_type: Optional[Union[type, Callable[..., Any]]] = str,
+    env_value_type: Optional[Union[type, Callable[..., Any]]] = None,
     **kwargs: Any,
 ) -> None:
     """
@@ -93,10 +125,11 @@ def add_argument(
         dest: Optional destination name (defaults to flag_name with dashes replaced by underscores)
         choices: Optional list of valid values for the argument.
         arg_type: Type for the argument (default: str)
+        env_value_type: Optional parser used only for the environment value
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
-    value_type_for_env: Optional[Union[type, Callable[..., Any]]] = None
-    if arg_type is not None and callable(arg_type):
+    value_type_for_env = env_value_type
+    if value_type_for_env is None and arg_type is not None and callable(arg_type):
         value_type_for_env = arg_type
     if isinstance(default, list) and (arg_type is None or arg_type is str):
         value_type_for_env = None
@@ -131,6 +164,7 @@ def add_negatable_bool_argument(
     help: str,
     dest: Optional[str] = None,
     obsolete_flag: Optional[str] = None,
+    env_value_type: Optional[Callable[..., bool]] = None,
 ) -> None:
     """
     Add negatable boolean flag (--foo / --no-foo).
@@ -143,6 +177,7 @@ def add_negatable_bool_argument(
         help: Help text
         dest: Optional destination name for the parsed value
         obsolete_flag: Optional obsolete/legacy flag (for help msg only, must start with '--')
+        env_value_type: Optional strict parser for the environment value
     """
     add_argument(
         parser,
@@ -153,6 +188,7 @@ def add_negatable_bool_argument(
         dest=dest,
         obsolete_flag=obsolete_flag,
         arg_type=None,
+        env_value_type=env_value_type,
         action=argparse.BooleanOptionalAction,
     )
 

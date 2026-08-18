@@ -3,6 +3,8 @@
 
 import base64
 import os
+import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Type
@@ -10,13 +12,22 @@ from typing import Any, Optional, Type
 import pytest
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
-from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
+from tests.serve.conftest import (
+    MULTIMODAL_IMG_URL,
+    MULTIMODAL_VIDEO_H264_URL,
+    MULTIMODAL_VIDEO_H265_URL,
+    get_multimodal_test_image_bytes,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
 from tests.utils.payloads import BasePayload, CachedTokensChatPayload, ChatPayload
 
+# Same triangle clip the http fixtures use (see tests/serve/conftest.py), so the
+# local-file and NVDEC paths describe identical content and can assert the same
+# word. Keeping them different subjects is what let expectations drift from the
+# footage they were written against.
 LOCAL_VIDEO_TEST_PATH = Path(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
+    WORKSPACE_DIR, "lib/llm/tests/data/media/triangle_240p_10.mp4"
 ).resolve()
 LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
@@ -133,6 +144,131 @@ def make_image_payload_cached_tokens(
     )
 
 
+class UuidPassthroughChatPayload(ChatPayload):
+    """Send a URL+UUID cache fill followed by a UUID-only cache hit.
+
+    When ``exercise_embedding_cache`` is true, insert a second URL+UUID fill
+    with a different UUID. Tests can pair this sequence with a one-image GPU
+    encoder cache so the final request must load the first embedding from
+    Dynamo's CPU embedding cache.
+    """
+
+    def __init__(
+        self,
+        *,
+        expected_response: list[str],
+        image_uuid: str = "dynamo-mm-cache-image-1",
+        max_tokens: int = 100,
+        temperature: float = 0.0,
+        timeout: int = 60,
+        exercise_embedding_cache: bool = False,
+    ):
+        self._uuid_image_uuid = image_uuid
+        self._uuid_eviction_image_uuid = (
+            f"{image_uuid}-eviction" if exercise_embedding_cache else None
+        )
+        self._uuid_final_expected_log = (
+            [
+                "Dynamo multimodal embedding cache hit: "
+                f"identifier={re.escape(repr(image_uuid))}"
+            ]
+            if exercise_embedding_cache
+            else []
+        )
+        repeat_count = 3 if exercise_embedding_cache else 2
+        self._uuid_bodies = [
+            self._build_uuid_body(index, max_tokens, temperature)
+            for index in range(repeat_count)
+        ]
+        self._uuid_iterations_requested: set[int] = set()
+        super().__init__(
+            body=self._uuid_bodies[0],
+            expected_response=expected_response,
+            expected_log=[],
+            repeat_count=repeat_count,
+            timeout=timeout,
+        )
+
+    def with_model(self, model):
+        payload = deepcopy(self)
+        for body in payload._uuid_bodies:
+            body["model"] = model
+        payload.body = payload._uuid_bodies[0]
+        payload._uuid_iterations_requested = set()
+        payload.expected_log = []
+        return payload
+
+    def _build_uuid_body(
+        self,
+        request_index: int,
+        max_tokens: int,
+        temperature: float,
+    ) -> dict:
+        eviction_image_uuid = self._uuid_eviction_image_uuid
+        if request_index == 0:
+            image_url = {"url": MULTIMODAL_IMG_URL}
+            image_uuid = self._uuid_image_uuid
+            text = _MULTIMODAL_COLOR_PROMPT
+        elif request_index == 1 and eviction_image_uuid is not None:
+            image_url = {"url": MULTIMODAL_IMG_URL}
+            image_uuid = eviction_image_uuid
+            text = _MULTIMODAL_COLOR_PROMPT
+        else:
+            image_url = None
+            image_uuid = self._uuid_image_uuid
+            text = (
+                "What colors are prominent in the same image? "
+                "Respond only with the colors."
+            )
+
+        return {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": text},
+                        {
+                            "type": "image_url",
+                            "image_url": image_url,
+                            "uuid": image_uuid,
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
+
+    def body_for_iteration(self, iteration: int) -> dict:
+        if not 0 <= iteration < self.repeat_count:
+            raise IndexError(f"UUID payload iteration {iteration} is out of range")
+        self._uuid_iterations_requested.add(iteration)
+        self.expected_log = (
+            list(self._uuid_final_expected_log)
+            if iteration == self.repeat_count - 1
+            else []
+        )
+        return self._uuid_bodies[iteration]
+
+    def final_validation(self) -> None:
+        assert self._uuid_iterations_requested == set(
+            range(self.repeat_count)
+        ), "UUID passthrough payload did not send the expected request sequence"
+
+
+def make_image_payload_uuid_passthrough(
+    expected_response: list[str],
+    *,
+    exercise_embedding_cache: bool = False,
+) -> ChatPayload:
+    """Build the maintained vLLM cached multimodal UUID smoke payload."""
+    return UuidPassthroughChatPayload(
+        expected_response=expected_response,
+        exercise_embedding_cache=exercise_embedding_cache,
+    )
+
+
 class Base64LazyChatPayload(ChatPayload):
     """ChatPayload variant that defers reading the multimodal test PNG until
     the first `.body` access.
@@ -206,7 +342,9 @@ class Base64LazyChatPayload(ChatPayload):
             object.__setattr__(self, "_b64_materialized", True)
 
 
-def make_image_payload_b64(expected_response: list[str]) -> ChatPayload:
+def make_image_payload_b64(
+    expected_response: list[str], *, repeat_count: int = 1
+) -> ChatPayload:
     """Inline-base64 PNG variant of :func:`make_image_payload`.
 
     The image bytes are read lazily on first `.body` access so pytest
@@ -217,7 +355,7 @@ def make_image_payload_b64(expected_response: list[str]) -> ChatPayload:
         expected_response=expected_response,
         max_tokens=100,
         temperature=0.0,
-        repeat_count=1,
+        repeat_count=repeat_count,
     )
 
 
@@ -238,6 +376,30 @@ def make_video_payload(expected_response: list[str]) -> ChatPayload:
     )
 
 
+def _make_http_video_payload(url: str, expected_response: list[str]) -> ChatPayload:
+    return chat_payload(
+        [
+            {"type": "text", "text": "Describe the video in detail"},
+            {"type": "video_url", "video_url": {"url": url}},
+        ],
+        repeat_count=1,
+        expected_response=expected_response,
+        temperature=0.0,
+        max_tokens=100,
+    )
+
+
+def make_h264_video_payload(expected_response: list[str]) -> ChatPayload:
+    """Video payload whose clip is fetched over http so the request exercises the
+    NVDEC hardware-decode path (H.264). file:// video is not hardware-decoded."""
+    return _make_http_video_payload(MULTIMODAL_VIDEO_H264_URL, expected_response)
+
+
+def make_hevc_video_payload(expected_response: list[str]) -> ChatPayload:
+    """H.265/HEVC counterpart of make_h264_video_payload (NVDEC hardware decode)."""
+    return _make_http_video_payload(MULTIMODAL_VIDEO_H265_URL, expected_response)
+
+
 def make_audio_payload(expected_response: list[str]) -> ChatPayload:
     """Standard audio transcription payload using the remote test WAV."""
     return chat_payload(
@@ -255,6 +417,32 @@ def make_audio_payload(expected_response: list[str]) -> ChatPayload:
     )
 
 
+def make_custom_encoder_payload() -> ChatPayload:
+    """Semantic check for the aggregated CustomEncoder path.
+
+    The example HitchhikersVisionEncoder splices the embeddings of "the
+    Ultimate Question of Life, the Universe, and Everything" at the image
+    placeholder, so the assembled prompt must answer "42". The served image
+    content is irrelevant (the encoder ignores the URL). ``expected_log``
+    asserts the encoder loaded in-process at worker startup.
+    """
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "Based on The Hitchhiker's Guide to the Galaxy, The Answer to",
+            },
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_IMG_URL}},
+            {"type": "text", "text": " is?"},
+        ],
+        repeat_count=1,
+        expected_response=["42"],
+        expected_log=["Loaded CustomEncoder", "LinearEmbedsAdapter"],
+        max_tokens=32,
+        temperature=0.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Config dataclasses
 # ---------------------------------------------------------------------------
@@ -266,15 +454,18 @@ class MmCase:
 
     Each :class:`MmCase` produces exactly one ``EngineConfig`` keyed
     ``mm_{topology}_{short_name}[_{suffix}]``. The case carries its own
-    payload (HTTP-URL, base64-inline, video, audio) and any per-case
-    overrides on top of the parent :class:`TopologyConfig`.
+    inference payload (HTTP-URL, base64-inline, video, audio), optional
+    follow-up payloads such as metrics checks, and any per-case overrides
+    on top of the parent :class:`TopologyConfig`.
 
-    ``payload`` is the only required field; everything else either inherits
-    from the parent ``TopologyConfig`` (marks, timeout) or extends it
-    (extra script args, env overlay).
+    ``payload`` is the only required field; follow-up payloads run in order
+    after it. Everything else either inherits from the parent
+    ``TopologyConfig`` (marks, timeout) or extends it (extra script args,
+    env overlay).
     """
 
     payload: BasePayload  # required — fully formed test payload
+    followup_payloads: list[BasePayload] = field(default_factory=list)
     suffix: str = ""  # appended to config key; "" yields the bare topology key
     extra_script_args: list[str] = field(default_factory=list)
     marks: list[Any] = field(default_factory=list)  # if empty, inherit topology marks
@@ -412,7 +603,7 @@ def make_multimodal_configs(
                 script_args=list(base_script_args) + list(case.extra_script_args),
                 marks=marks,
                 delayed_start=topo_cfg.delayed_start,
-                request_payloads=[case.payload],
+                request_payloads=[case.payload, *case.followup_payloads],
                 env={**topo_env, **case.env},
             )
 

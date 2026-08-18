@@ -117,7 +117,7 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_io_kwargs: Option<MediaDecoder>,
 
-    /// When true, logprob token fields are returned as "token_id:<id>" instead
+    /// When true, logprob token fields are returned as "token_id:`<id>`" instead
     /// of decoded text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
@@ -152,6 +152,7 @@ impl NvCreateChatCompletionRequest {
             match mode {
                 OpenAiThinkingMode::Enabled => {
                     args.insert("thinking".to_string(), serde_json::Value::Bool(true));
+                    args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("enabled".to_string()),
@@ -159,6 +160,10 @@ impl NvCreateChatCompletionRequest {
                 }
                 OpenAiThinkingMode::Disabled => {
                     args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+                    args.insert(
+                        "enable_thinking".to_string(),
+                        serde_json::Value::Bool(false),
+                    );
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("disabled".to_string()),
@@ -173,6 +178,8 @@ impl NvCreateChatCompletionRequest {
             }
         }
         if let Some(effort) = reasoning_effort {
+            args.entry("enable_thinking".to_string())
+                .or_insert_with(|| serde_json::Value::Bool(effort.as_str() != Some("none")));
             args.insert("reasoning_effort".to_string(), effort);
         }
 
@@ -385,8 +392,8 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
                 }
                 ResponseFormat::JsonSchema { json_schema } => {
                     // validate_response_format ensures schema is present when type=json_schema
-                    if let Some(schema) = json_schema.schema.clone() {
-                        return Some(schema);
+                    if !json_schema.schema.is_null() {
+                        return Some(json_schema.schema.clone());
                     }
                 }
             }
@@ -529,6 +536,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
         // none for store
@@ -538,7 +546,10 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         // none for logprobs
         validate::validate_top_logprobs(self.inner.top_logprobs)?;
-        // validate::validate_max_tokens(self.inner.max_tokens)?; // warning depricated field
+        // `max_tokens` is deprecated but still accepted as a fallback for
+        // `max_completion_tokens`, so it must be validated too.
+        #[allow(deprecated)]
+        validate::validate_max_tokens(self.inner.max_tokens)?;
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
@@ -578,9 +589,54 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
 mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
-    use crate::protocols::common::{OutputOptionsProvider, StopConditionsProvider};
+    use crate::protocols::common::{
+        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+    };
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
+
+    #[test]
+    fn test_top_k_sentinel_contract() {
+        for (top_k, expected) in [(-1, Some(-1)), (0, Some(-1)), (1, Some(1))] {
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "top_k": top_k
+            }))
+            .expect("Failed to deserialize request");
+
+            ValidateRequest::validate(&request).expect("top_k must be valid");
+            assert_eq!(
+                request
+                    .extract_sampling_options()
+                    .expect("Failed to extract sampling options")
+                    .top_k,
+                expected
+            );
+        }
+
+        let null_request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "top_k": null
+        }))
+        .expect("Failed to deserialize request");
+        assert_eq!(
+            null_request
+                .extract_sampling_options()
+                .expect("Failed to extract sampling options")
+                .top_k,
+            None
+        );
+
+        let invalid_request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "top_k": -2
+        }))
+        .expect("Failed to deserialize request");
+        assert!(ValidateRequest::validate(&invalid_request).is_err());
+    }
 
     #[test]
     fn test_skip_special_tokens_none() {
@@ -804,6 +860,48 @@ mod tests {
             err.to_string()
                 .contains("tool named \"search\" in tool_choice is not present in tools")
         );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_tokens() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 0
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("max_tokens: 0 must be rejected");
+        assert!(err.to_string().contains("Max tokens"));
+    }
+
+    #[test]
+    fn test_validate_accepts_max_tokens_at_upper_bound() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1_048_576
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        assert!(ValidateRequest::validate(&request).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_max_tokens_above_upper_bound() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1_048_577
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request)
+            .expect_err("max_tokens above the upper bound must be rejected");
+        assert!(err.to_string().contains("must not exceed 1048576"));
     }
 
     #[test]
@@ -1090,6 +1188,44 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_tools_rejects_non_object_parameters() {
+        for parameters in [json!("not-an-object"), json!([]), json!(42), json!(true)] {
+            let tools = vec![ChatCompletionTool {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionObject {
+                    name: "broken_tool".to_string(),
+                    description: None,
+                    parameters: Some(parameters),
+                    strict: None,
+                },
+            }];
+
+            let error = validate::validate_tools(&Some(&tools))
+                .expect_err("non-object function parameters must be rejected");
+            assert_eq!(
+                error.to_string(),
+                "Function parameters at index 0 for \"broken_tool\" must be a JSON Schema object"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_tools_accepts_omitted_parameters() {
+        let tools = vec![ChatCompletionTool {
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionObject {
+                name: "parameterless_tool".to_string(),
+                description: None,
+                parameters: None,
+                strict: None,
+            },
+        }];
+
+        validate::validate_tools(&Some(&tools))
+            .expect("omitted function parameters should remain valid");
+    }
+
+    #[test]
     fn test_openai_thinking_payload_normalizes_to_template_args() {
         let json_str = json!({
             "model": "deepseek-ai/DeepSeek-V4-Pro",
@@ -1111,6 +1247,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(true)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(true)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("enabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("max")));
     }
@@ -1161,6 +1298,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
     }
 
@@ -1191,9 +1329,55 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
         assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn test_reasoning_effort_controls_enable_thinking() {
+        for (effort, expected) in [("none", false), ("low", true), ("high", true)] {
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "zai-org/GLM-5.2",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": effort
+            }))
+            .expect("request should deserialize");
+
+            request
+                .normalize_reasoning_template_args()
+                .expect("reasoning effort should normalize");
+
+            let args = request
+                .chat_template_args
+                .as_ref()
+                .expect("chat_template_args should be populated");
+            assert_eq!(args.get("enable_thinking"), Some(&json!(expected)));
+            assert_eq!(args.get("reasoning_effort"), Some(&json!(effort)));
+        }
+    }
+
+    #[test]
+    fn test_explicit_enable_thinking_overrides_reasoning_effort() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "zai-org/GLM-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "none",
+            "chat_template_args": {"enable_thinking": true}
+        }))
+        .expect("request should deserialize");
+
+        request
+            .normalize_reasoning_template_args()
+            .expect("reasoning effort should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("enable_thinking"), Some(&json!(true)));
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
     }
 
     #[test]

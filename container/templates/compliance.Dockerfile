@@ -34,6 +34,13 @@
 #                                if no baseline captured); set by
 #                                _render_context() from `framework`/
 #                                `device_key`.
+#   compliance_ecosystems     -- comma-separated --ecosystem list for the
+#                                licenses stage. planner drops dpkg (distroless,
+#                                ships no builder Debian packages); other targets
+#                                get python,rust,dpkg,native. Set by
+#                                _render_context().
+#   compliance_source_ecosystem_flags -- repeated --ecosystem flags for the
+#                                sources_collect stage; per-target likewise.
 #   framework, target, make_efa -- already in render context; control
 #                                  ecosystem flags + EFA native attribution.
 
@@ -66,6 +73,20 @@ ENV PYTHONPATH=/opt
 # canonical SPDX text). Keyed "<name>-<version>". wheel_builder_base always
 # creates the dir, so this COPY never fails even for wheel-less targets.
 COPY --from=wheel_builder /opt/dynamo/rust-licenses /tmp/rust-licenses
+{% if target == "frontend" %}
+# EPP's Go compliance SBOM + harvested module LICENSE files, read from the build
+# CONTEXT (.epp-sbom/) rather than COPY --from the EPP image. The CI EPP-build
+# step exports them there via `make sbom-export` while the build cache is warm
+# (see deploy/inference-gateway/epp/Dockerfile sbom-export stage). This avoids
+# re-pulling the pushed EPP image — whose runtime layer could be served from a
+# stale cache and miss these files after the BuildKit builder is refreshed. The
+# SBOM is exported once on amd64; EPP's Go module set doesn't vary by GOARCH
+# (linux only), so the amd64 export is authoritative for all frontend arches.
+COPY .epp-sbom/sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
+# Real Go module LICENSE files so the go generator inlines upstream license text
+# instead of canonical SPDX fallback.
+COPY .epp-sbom/sbom-go-licenses /tmp/go-licenses
+{% endif %}
 
 # BASELINE_SBOM_FILE: the per-arch baseline SBOM *stem* (e.g.
 # "cuda@2ab6381d") under /opt/compliance/base_sboms/. We append
@@ -85,9 +106,11 @@ ARG TARGETARCH
 # `--venv ${VIRTUAL_ENV}` is what broke system-Python images.
 RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
     python3 -m compliance.generators \
-    --ecosystem python,rust,dpkg,native \
+    --ecosystem {{ compliance_ecosystems }} \
     ${PKG_ARG} \
-    --rust-licenses-dir /tmp/rust-licenses \
+{% if target == "frontend" %}    --go-sbom /tmp/sbom-go-epp.cdx.json \
+    --go-licenses-dir /tmp/go-licenses \
+{% endif %}    --rust-licenses-dir /tmp/rust-licenses \
     --output-dir /legal \
     --policy /opt/compliance/policy/licenses.toml \
     --native-yaml /opt/compliance/native_packages.yaml \
@@ -99,6 +122,28 @@ RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import 
 RUN python3 -m compliance.policy.validate \
         --policy /opt/compliance/policy/licenses.toml \
         --input /legal/osrb-deps.csv
+
+# Media-codec allowlist gate: scans THIS stage's filesystem (==
+# the shipped image tree, since licenses is FROM pre_runtime) and fails the build
+# if a media-codec library/binary (a third-party libav*, libx264/265, or a stray
+# or imageio-bundled ffmpeg) ships outside our in-tree allowlist or a reasoned
+# exception. Feeds the generated delta SBOM in too, for an ffmpeg-version floor.
+# Files, not just the SBOM, because statically-bundled codec .so's don't appear
+# as components.
+#
+# CUDA only for now. The XPU image is not currently published on NGC, so it does
+# not yet require the codecs to be removed. It would also fail this gate today:
+# the purge the gate depends on sits in the `device == "cuda"` block of
+# vllm_runtime.Dockerfile, so the XPU image still carries its base image's media
+# stack. Enable both together if that changes.
+{% if device == "cuda" %}
+RUN python3 -m compliance.scan_codecs \
+        --root / \
+        --policy /opt/compliance/policy/codec_policy.yaml \
+        --sbom /legal/osrb.cdx.json \
+        --image {{ framework }}-{{ target }} \
+        --fail-on-findings -v
+{% endif %}
 
 
 #######################################
@@ -138,7 +183,7 @@ ARG TARGETARCH
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         {% if framework == "sglang" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
         python3 -m compliance.collect_sources \
-            --ecosystem dpkg --ecosystem rust --ecosystem native \
+            {{ compliance_source_ecosystem_flags }} \
             --output-zip /sources.zip \
             --sources-root /sources \
             --native-source-dir /opt/native-sources \
@@ -147,7 +192,7 @@ RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
             ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
             -v ; \
     else \
-        : > /sources.zip ; \
+        python3 -c "import zipfile; zipfile.ZipFile('/sources.zip','w').close()" ; \
     fi
 
 

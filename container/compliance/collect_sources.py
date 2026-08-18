@@ -46,11 +46,6 @@ sha256 in build-provenance.json for cross-verification.
 Runs in the post-merge / RC / release CI pipelines only — skipped on
 PR builds (storage cost too high per-build, and PR doesn't change
 the source-of-truth a release ships from).
-
-TODO: implement the dpkg diff-and-fetch logic. Skeleton in place so
-the Dockerfile stage and CI integration can be built and tested. Real
-implementation lands when the corresponding Dockerfile stage is wired
-up to expose /var/cache/apt with deb-src configured.
 """
 
 from __future__ import annotations
@@ -69,10 +64,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _enumerate_installed_dpkgs() -> set[str]:
+def _enumerate_installed_dpkgs(root: Path = Path("/")) -> set[str]:
     """Return the set of installed dpkg package names."""
+    cmd = ["dpkg-query", "-W", "-f=${Package}\\n"]
+    if root != Path("/"):
+        cmd.insert(1, f"--admindir={root / 'var/lib/dpkg'}")
     result = subprocess.run(
-        ["dpkg-query", "-W", "-f=${Package}\\n"],
+        cmd,
         check=True,
         capture_output=True,
         text=True,
@@ -198,7 +196,9 @@ def _rewrite_deb822(text: str) -> str:
     return "\n".join(out_lines)
 
 
-def collect_dpkg_sources(baseline_sbom: Path | None, output_dir: Path) -> int:
+def collect_dpkg_sources(
+    baseline_sbom: Path | None, output_dir: Path, dpkg_root: Path = Path("/")
+) -> int:
     """Diff installed dpkg state against the baseline, fetch source for the deltas.
 
     Returns the number of packages whose source was successfully fetched.
@@ -212,11 +212,11 @@ def collect_dpkg_sources(baseline_sbom: Path | None, output_dir: Path) -> int:
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
-        installed = _enumerate_installed_dpkgs()
+        installed = _enumerate_installed_dpkgs(dpkg_root)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         logger.error("dpkg-query failed (is dpkg installed?): %s", exc)
         return 0
-    logger.info("Installed dpkg packages: %d", len(installed))
+    logger.info("Installed dpkg packages under %s: %d", dpkg_root, len(installed))
 
     if baseline_sbom is None:
         delta_names = installed
@@ -272,7 +272,7 @@ def collect_dpkg_sources(baseline_sbom: Path | None, output_dir: Path) -> int:
 # First-party Rust crate prefixes. Crates whose name starts with any of
 # these are NVIDIA-authored — source lives on GitHub, not redistribution
 # of someone else's OSS, so we don't ship it in the OSRB sources archive.
-_FIRST_PARTY_RUST_PREFIXES = ("dynamo-", "kvbm-", "nixl-")
+_FIRST_PARTY_RUST_PREFIXES = ("aisimulate-", "dynamo-", "kvbm-", "nixl-")
 
 
 def _shipped_rust_crates(site_packages_dirs: list[Path]) -> set[tuple[str, str]]:
@@ -320,7 +320,7 @@ def collect_rust_sources(
     Walks installed wheels' embedded SBOMs to discover what shipped,
     then for each (name, version) copies vendor_full/<name>-<version>/
     to output_dir/vendor/<name>-<version>/ EXCEPT for first-party
-    crates (dynamo-*, kvbm-*, nixl-*), which are NVIDIA-authored.
+    crates (aisimulate-*, dynamo-*, kvbm-*, nixl-*), which are NVIDIA-authored.
 
     Cargo.toml + Cargo.lock from the workspace are copied alongside so a
     consumer can reconstruct a buildable vendor tree.
@@ -506,7 +506,7 @@ runtime this archive belongs to).
 | Directory | What's here |
 |---|---|
 | `dpkg/`    | `.dsc` + tarballs for Debian/Ubuntu packages we install on top of the baseline image. Scoped to the delta against the baseline SBOM. NVIDIA-proprietary packages (CUDA repos) have no public source repo and are not included; see "skipped packages" in the build log. |
-| `rust/`    | `cargo vendor` tree filtered to the third-party crates that appear in the installed wheels' embedded SBOMs. Excludes first-party crates (`dynamo-*`, `kvbm-*`, `nixl-*`) — those are NVIDIA-authored and source is public at github.com/ai-dynamo. Includes the workspace `Cargo.toml` + `Cargo.lock` for context. |
+| `rust/`    | `cargo vendor` tree filtered to the third-party crates that appear in the installed wheels' embedded SBOMs. Excludes first-party crates (`aisimulate-*`, `dynamo-*`, `kvbm-*`, `nixl-*`) — those are NVIDIA-authored and source is public at github.com/ai-dynamo. Includes the workspace `Cargo.toml` + `Cargo.lock` for context. |
 | `go/`      | `go mod vendor` tree for the operator / snapshot / EPP binaries. Excludes first-party modules (`github.com/ai-dynamo/...`). |
 | `native/`  | Upstream source tarballs (or git clones) for from-source builds — CRIU, cuda-checkpoint, ucx, libfabric, gdrcopy, ffmpeg, NIXL where applicable. Excludes first-party native helpers (`cuda-checkpoint-helper`). |
 
@@ -606,6 +606,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--dpkg-root",
+        type=Path,
+        default=Path("/"),
+        help=(
+            "Filesystem root whose /var/lib/dpkg database defines the dpkg "
+            "packages to archive source for. Defaults to the current container "
+            "root. Use this when the sources stage installs helper packages "
+            "that are not shipped in the final image."
+        ),
+    )
+    parser.add_argument(
         "--native-source-dir",
         type=Path,
         default=Path("/opt/native-sources"),
@@ -691,7 +702,9 @@ def main(argv: list[str] | None = None) -> int:
 
     counts: dict[str, int] = {}
     if "dpkg" in ecosystems:
-        counts["dpkg"] = collect_dpkg_sources(base_sbom, args.sources_root / "dpkg")
+        counts["dpkg"] = collect_dpkg_sources(
+            base_sbom, args.sources_root / "dpkg", dpkg_root=args.dpkg_root
+        )
     if "rust" in ecosystems:
         if args.rust_site_packages is not None:
             site_dirs = [args.rust_site_packages]

@@ -17,6 +17,7 @@ use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
 use super::rdma::{DataType, RdmaMediaDataDescriptor, get_nixl_agent};
+use super::require_image_url;
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::collections::hash_map::DefaultHasher;
@@ -474,8 +475,10 @@ impl MediaLoader {
             // output (resize, normalisation). When it's set we skip the
             // cache to stay correct; in practice it's None on the common
             // path so the hit rate is unaffected.
-            if media_io_kwargs.is_none() {
-                let key = Self::cache_key(image_part.image_url.url.as_str());
+            if media_io_kwargs.is_none()
+                && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
+            {
+                let key = Self::cache_key(url.as_str());
                 if let Some(hit) = cache.lock().get(&key) {
                     tracing::debug!(url_hash = key, "[mm-cache] hit");
                     return Ok(hit);
@@ -492,7 +495,7 @@ impl MediaLoader {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
-                let url = &image_part.image_url.url;
+                let url = require_image_url(image_part)?;
                 self.media_fetcher
                     .check_if_url_allowed_with_dns(url)
                     .await?;
@@ -515,7 +518,13 @@ impl MediaLoader {
                             anyhow::anyhow!("Model does not support video inputs")
                         })?;
 
-                    let url = &video_part.video_url.url;
+                    let url = video_part
+                        .video_url
+                        .as_ref()
+                        .map(|media| &media.url)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Cannot decode a video content part without a URL")
+                        })?;
                     self.media_fetcher
                         .check_if_url_allowed_with_dns(url)
                         .await?;
@@ -544,8 +553,9 @@ impl MediaLoader {
         if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
             (self.cache.as_ref(), oai_content_part)
             && media_io_kwargs.is_none()
+            && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
         {
-            let key = Self::cache_key(image_part.image_url.url.as_str());
+            let key = Self::cache_key(url.as_str());
             let bytes = descriptor_bytes(&rdma_descriptor);
             cache.lock().put(key, rdma_descriptor.clone());
             tracing::debug!(url_hash = key, bytes, "[mm-cache] insert");
@@ -602,7 +612,10 @@ mod tests {
 
         let image_url = ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
         let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
-            ChatCompletionRequestMessageContentPartImage { image_url },
+            ChatCompletionRequestMessageContentPartImage {
+                image_url: Some(image_url),
+                uuid: None,
+            },
         );
 
         let result = loader
@@ -697,7 +710,10 @@ mod tests {
         let url_string = format!("{}/cache-image.png", server.url());
         let image_url = ImageUrl::from(url_string);
         let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
-            ChatCompletionRequestMessageContentPartImage { image_url },
+            ChatCompletionRequestMessageContentPartImage {
+                image_url: Some(image_url),
+                uuid: None,
+            },
         );
 
         // First call — populates cache.
@@ -802,7 +818,10 @@ mod tests {
         let make_part = |path: &str| {
             let image_url = ImageUrl::from(format!("{}{}", server.url(), path));
             ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                ChatCompletionRequestMessageContentPartImage { image_url },
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: Some(image_url),
+                    uuid: None,
+                },
             )
         };
 

@@ -17,11 +17,14 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import importlib
 import logging
 from collections.abc import Sequence
 
 import uvloop
+from gpu_memory_service.common.vmm import init_vmm
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 from .args import Config, parse_args
@@ -53,11 +56,13 @@ async def serve_configs(configs: Sequence[Config]) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
 
+    init_vmm(configs[0].device_type)
     servers = []
     for config in configs:
         logger.info("Starting GPU Memory Service Server for device %d", config.device)
         logger.info("GMS tag: %s", config.tag)
         logger.info("Socket path: %s", config.socket_path)
+        logger.info("VMM device type: %s", config.device_type.value)
         logger.info(
             "Allocation retry config: interval=%ss timeout=%s",
             config.alloc_retry_interval,
@@ -79,10 +84,18 @@ async def serve_configs(configs: Sequence[Config]) -> None:
     await run_servers(servers)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Entry point for GPU Memory Service server."""
+    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    selector.add_argument("--use-v1", action="store_true")
+    options, remaining = selector.parse_known_args(argv)
+    if options.use_v1:
+        v1_cli = importlib.import_module("gpu_memory_service.v1.cli")
+        v1_cli.main(remaining)
+        return
+
     uvloop.install()
-    asyncio.run(serve_configs(parse_args()))
+    asyncio.run(serve_configs(parse_args(remaining)))
 
 
 if __name__ == "__main__":

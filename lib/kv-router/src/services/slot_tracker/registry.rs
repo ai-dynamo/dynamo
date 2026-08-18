@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::identity::RoutingPartitionId;
 use crate::protocols::{PrefillLoadHint, WorkerId, WorkerWithDpRank};
 use crate::scheduling::PotentialLoad;
 use crate::sequences::topology::{WorkerDpRange, WorkerTopologyError};
@@ -23,25 +24,6 @@ use crate::sequences::{
 use crate::services::common::replica_sync::{
     ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher, setup_scoped_replica_sync,
 };
-
-fn default_routing_group() -> String {
-    "default".to_string()
-}
-
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct TrackerKey {
-    pub model_name: String,
-    pub routing_group: String,
-}
-
-impl TrackerKey {
-    pub fn new(model_name: String, routing_group: Option<String>) -> Self {
-        Self {
-            model_name,
-            routing_group: routing_group.unwrap_or_else(default_routing_group),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkerInfo {
@@ -117,18 +99,13 @@ struct TrackerEntry {
 
 impl TrackerEntry {
     fn new(
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         block_size: u32,
         root_cancel_token: &CancellationToken,
         replica_config: Option<&ReplicaSyncConfig>,
     ) -> Arc<Self> {
         let cancel_token = root_cancel_token.child_token();
-        let scoped_replica_sync = setup_scoped_replica_sync(
-            replica_config,
-            &key.model_name,
-            &key.routing_group,
-            block_size,
-        );
+        let scoped_replica_sync = setup_scoped_replica_sync(replica_config, key, block_size);
         let tracker = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
             scoped_replica_sync.publisher,
             block_size as usize,
@@ -154,7 +131,7 @@ impl TrackerEntry {
 }
 
 pub struct SlotTrackerRegistry {
-    trackers: DashMap<TrackerKey, Arc<TrackerEntry>>,
+    trackers: DashMap<RoutingPartitionId, Arc<TrackerEntry>>,
     root_cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
 }
@@ -181,7 +158,7 @@ impl SlotTrackerRegistry {
 
     pub fn register(
         &self,
-        key: TrackerKey,
+        key: RoutingPartitionId,
         worker_id: WorkerId,
         block_size: u32,
         dp_start: u32,
@@ -227,7 +204,11 @@ impl SlotTrackerRegistry {
         }
     }
 
-    pub fn unregister(&self, key: &TrackerKey, worker_id: WorkerId) -> Result<(), RegistryError> {
+    pub fn unregister(
+        &self,
+        key: &RoutingPartitionId,
+        worker_id: WorkerId,
+    ) -> Result<(), RegistryError> {
         loop {
             let Some(entry) = self
                 .trackers
@@ -296,7 +277,7 @@ impl SlotTrackerRegistry {
 
     pub fn add_request(
         &self,
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         request_id: String,
         worker: WorkerWithDpRank,
         sequence_hashes: Vec<SequenceHash>,
@@ -324,7 +305,7 @@ impl SlotTrackerRegistry {
 
     pub fn mark_prefill_completed(
         &self,
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         request_id: &str,
     ) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
@@ -334,7 +315,7 @@ impl SlotTrackerRegistry {
         Ok(())
     }
 
-    pub fn free(&self, key: &TrackerKey, request_id: &str) -> Result<(), ServiceError> {
+    pub fn free(&self, key: &RoutingPartitionId, request_id: &str) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
         entry
             .tracker
@@ -383,7 +364,7 @@ impl SlotTrackerRegistry {
 
     pub fn potential_loads(
         &self,
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         sequence_hashes: &[SequenceHash],
         new_isl_tokens: usize,
     ) -> Result<Vec<PotentialLoad>, RegistryError> {
@@ -407,15 +388,15 @@ impl SlotTrackerRegistry {
     }
 
     pub(crate) fn dispatch_replica_event(&self, envelope: ScopedReplicaEvent) {
+        let (key, block_size, event) = envelope.into_parts();
         if self
             .replica_config
             .as_ref()
-            .is_some_and(|config| config.is_self_event(&envelope.event))
+            .is_some_and(|config| config.is_self_event(&event))
         {
             return;
         }
 
-        let key = TrackerKey::new(envelope.model_name, Some(envelope.routing_group));
         let Some(entry) = self
             .trackers
             .get(&key)
@@ -428,12 +409,12 @@ impl SlotTrackerRegistry {
             );
             return;
         };
-        if entry.block_size != envelope.block_size {
+        if entry.block_size != block_size {
             tracing::debug!(
                 model_name = %key.model_name,
                 routing_group = %key.routing_group,
                 expected_block_size = entry.block_size,
-                received_block_size = envelope.block_size,
+                received_block_size = block_size,
                 "Dropping replica event with mismatched block size"
             );
             return;
@@ -441,7 +422,7 @@ impl SlotTrackerRegistry {
         let Some(replica_tx) = &entry.replica_tx else {
             return;
         };
-        match replica_tx.try_send(envelope.event) {
+        match replica_tx.try_send(event) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(event)) => {
                 tracing::trace!(
@@ -461,7 +442,7 @@ impl SlotTrackerRegistry {
         }
     }
 
-    fn entry(&self, key: &TrackerKey) -> Result<Arc<TrackerEntry>, RegistryError> {
+    fn entry(&self, key: &RoutingPartitionId) -> Result<Arc<TrackerEntry>, RegistryError> {
         self.trackers
             .get(key)
             .map(|entry| Arc::clone(entry.value()))
@@ -471,7 +452,7 @@ impl SlotTrackerRegistry {
             })
     }
 
-    fn is_attached(&self, key: &TrackerKey, entry: &Arc<TrackerEntry>) -> bool {
+    fn is_attached(&self, key: &RoutingPartitionId, entry: &Arc<TrackerEntry>) -> bool {
         self.trackers
             .get(key)
             .is_some_and(|current| Arc::ptr_eq(current.value(), entry))
@@ -494,7 +475,7 @@ fn validate_block_size(block_size: u32) -> Result<(), RegistryError> {
     Ok(())
 }
 
-fn topology_error(key: &TrackerKey, error: WorkerTopologyError) -> RegistryError {
+fn topology_error(key: &RoutingPartitionId, error: WorkerTopologyError) -> RegistryError {
     match error {
         WorkerTopologyError::InvalidDpSize { .. } => RegistryError::InvalidDpSize,
         WorkerTopologyError::InvalidDpRange {
@@ -514,7 +495,7 @@ fn topology_error(key: &TrackerKey, error: WorkerTopologyError) -> RegistryError
 }
 
 fn matches_filters(
-    key: &TrackerKey,
+    key: &RoutingPartitionId,
     model_name: Option<&str>,
     routing_group: Option<&str>,
 ) -> bool {
@@ -531,8 +512,8 @@ mod tests {
         SlotTrackerRegistry::new(CancellationToken::new())
     }
 
-    fn key(routing_group: &str) -> TrackerKey {
-        TrackerKey::new("model".to_string(), Some(routing_group.to_string()))
+    fn key(routing_group: &str) -> RoutingPartitionId {
+        RoutingPartitionId::new("model", routing_group)
     }
 
     fn replica_event(
@@ -685,9 +666,10 @@ mod tests {
     #[tokio::test]
     async fn replica_dispatch_rejects_self_and_requires_matching_registered_worker() {
         let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        let cancel_token = CancellationToken::new();
         let registry = SlotTrackerRegistry::new_with_replica_sync(
-            CancellationToken::new(),
-            ReplicaSyncConfig::new(7, outbound_tx),
+            cancel_token.clone(),
+            ReplicaSyncConfig::new(7, outbound_tx, cancel_token),
         );
         let key = key("default");
         registry.register(key.clone(), 1, 16, 0, 1).unwrap();
@@ -738,6 +720,46 @@ mod tests {
         registry.register(key("a"), 1, 16, 0, 1).unwrap();
         registry.register(key("b"), 1, 16, 0, 1).unwrap();
         assert_eq!(registry.list_workers(None, None).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn duplicate_add_conflicts_across_workers() {
+        let registry = registry();
+        let key = key("default");
+        registry.register(key.clone(), 1, 16, 0, 1).unwrap();
+        registry.register(key.clone(), 2, 16, 0, 1).unwrap();
+
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let add = |worker| registry.add_request(&key, "req-1".to_string(), worker, vec![1, 2], 8);
+
+        add(worker_a).unwrap();
+        assert!(
+            matches!(
+                add(worker_b),
+                Err(ServiceError::Sequence(
+                    SequenceError::DuplicateRequest { .. }
+                ))
+            ),
+            "a request ID already booked on another worker must conflict"
+        );
+
+        let blocks_on = |worker_id| {
+            registry
+                .list_loads(None, None)
+                .into_iter()
+                .find(|load| load.worker_id == worker_id)
+                .map(|load| load.active_decode_blocks)
+                .unwrap_or(0)
+        };
+        let booked = blocks_on(1);
+        assert!(booked > 0, "the first add must book worker 1");
+
+        assert_eq!(blocks_on(1), booked, "the original booking is unchanged");
+        assert_eq!(blocks_on(2), 0, "the duplicate creates no booking");
+
+        registry.free(&key, "req-1").unwrap();
+        assert_eq!(blocks_on(1), 0);
     }
 
     #[tokio::test]

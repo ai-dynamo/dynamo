@@ -38,7 +38,7 @@ import (
 	runtimejson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/yaml"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -55,6 +55,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
@@ -78,12 +79,6 @@ const (
 	// Annotation keys
 	AnnotationAdditionalResources = "dgdr.nvidia.com/additional-resources"
 	AnnotationGeneratedDGDSpec    = "nvidia.com/generated-dgd-spec"
-
-	// Annotation keys for v1alpha1 round-trip compatibility.
-	// The conversion layer stores v1alpha1 fields that have no v1beta1 spec equivalent
-	// as annotations so the controller can still honour them for converted resources.
-	AnnotationConfigMapRef = "nvidia.com/dgdr-config-map-ref"
-	AnnotationOutputPVC    = "nvidia.com/dgdr-output-pvc"
 
 	// Size limits
 	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
@@ -389,7 +384,7 @@ func isValidProfilingPhase(phase string) bool {
 type DynamoGraphDeploymentRequestReconciler struct {
 	client.Client
 	APIReader               client.Reader
-	Recorder                record.EventRecorder
+	Recorder                events.EventRecorder
 	Config                  *configv1alpha1.OperatorConfiguration
 	RuntimeConfig           *commonController.RuntimeConfig
 	GPUDiscoveryCache       *gpu.GPUDiscoveryCache
@@ -406,15 +401,12 @@ type RBACManager interface {
 }
 
 // GetRecorder implements commonController.Reconciler interface
-func (r *DynamoGraphDeploymentRequestReconciler) GetRecorder() record.EventRecorder {
+func (r *DynamoGraphDeploymentRequestReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }
 
 func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryEnabled() bool {
-	if r == nil || r.Config == nil || r.Config.GPU.DiscoveryEnabled == nil {
-		return true
-	}
-	return *r.Config.GPU.DiscoveryEnabled
+	return r.RuntimeConfig.Gate.Enabled(features.GPUDiscovery)
 }
 
 func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryReader() (client.Reader, bool) {
@@ -470,24 +462,35 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		return ctrl.Result{}, nil
 	}
 
-	// Check for spec changes (immutability enforcement)
-	if dgdr.Status.ObservedGeneration > 0 && dgdr.Status.ObservedGeneration != dgdr.Generation {
-		// Spec changed after initial processing
-		if dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeploying ||
-			dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeployed {
-			logger.Info("Spec change detected in immutable phase",
-				"phase", dgdr.Status.Phase,
-				"observedGeneration", dgdr.Status.ObservedGeneration,
-				"currentGeneration", dgdr.Generation)
+	// Admission permits deferred requests to select a runtime version while
+	// autoApply is disabled and Ready requests to enable autoApply.
+	immutablePhase := dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling ||
+		dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeploying ||
+		dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady ||
+		dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeployed
+	autoApplyDisabled := dgdr.Spec.AutoApply != nil && !*dgdr.Spec.AutoApply
+	deferredRuntimeVersionUpdate := autoApplyDisabled &&
+		(dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling ||
+			dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady)
+	readyAutoApplyActivation := dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady &&
+		(dgdr.Spec.AutoApply == nil || *dgdr.Spec.AutoApply)
 
-			r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonSpecChangeRejected,
-				fmt.Sprintf(MessageSpecChangeRejected, dgdr.Status.Phase))
+	// Reject unexpected generation changes after profiling starts.
+	if dgdr.Status.ObservedGeneration > 0 &&
+		dgdr.Status.ObservedGeneration != dgdr.Generation &&
+		immutablePhase &&
+		!deferredRuntimeVersionUpdate &&
+		!readyAutoApplyActivation {
+		logger.Info("Spec change detected in immutable phase",
+			"phase", dgdr.Status.Phase,
+			"observedGeneration", dgdr.Status.ObservedGeneration,
+			"currentGeneration", dgdr.Generation)
 
-			// Keep the old observedGeneration to continue rejecting changes
-			// No phase transition - stay in current phase with old spec
-			return ctrl.Result{}, nil
-		}
+		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonSpecChangeRejected, "Validate",
+			MessageSpecChangeRejected, dgdr.Status.Phase)
+		return ctrl.Result{}, nil
 	}
+
 	// Phase machine: handle different phases
 	switch dgdr.Status.Phase {
 	case nvidiacomv1beta1.DGDRPhasePending, "":
@@ -520,7 +523,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 
 		// Validate the spec
 		if err := r.validateSpec(ctx, dgdr); err != nil {
-			r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonValidationFailed, err.Error())
+			r.Recorder.Eventf(dgdr, nil, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonValidationFailed, "Validate", "%s", err.Error())
 			return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeValidation, metav1.ConditionFalse, nvidiacomv1beta1.EventReasonValidationFailed, err.Error())
 		}
 
@@ -536,7 +539,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		})
 
 		// Initialize status — next reconcile will discover hardware and create the profiling job.
-		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonInitialized, MessageInitialized)
+		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonInitialized, "Update", MessageInitialized)
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhasePending,
 			nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse,
 			"DiscoveringHardware", MessageDiscoveringHardware)
@@ -547,7 +550,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 	// Create profiling job (online or AIC)
 	waitForObservation, err := r.createProfilingJob(ctx, dgdr)
 	if err != nil {
-		r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonProfilingJobFailed, err.Error())
+		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonProfilingJobFailed, "Create", "%s", err.Error())
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
 	}
 	if waitForObservation {
@@ -557,9 +560,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 
 	// Record event with appropriate message
 	if isOnlineProfiling(dgdr) {
-		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageProfilingJobCreated)
+		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageProfilingJobCreated)
 	} else {
-		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageAICProfilingJobCreated)
+		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageAICProfilingJobCreated)
 	}
 
 	// Update to Profiling phase — use Initializing reason to indicate the profiler is loading.
@@ -668,7 +671,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 	// Note: We watch the Job via Owns(), so we'll be triggered automatically on Job changes
 	completed, err := r.checkProfilingJobStatus(ctx, dgdr)
 	if err != nil {
-		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, err.Error())
+		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeWarning, MessageProfilingCheckFailed, "Get", "%s", err.Error())
 		// Job failed - keep profilingPhase set so users can see where it died.
 		// profilingPhase is already current: set to Initializing on entry,
 		// then updated by updateProfilingSubPhase() above (reads output ConfigMap).
@@ -727,7 +730,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 			Reason:             failureReason,
 			Message:            failureMessage,
 		})
-		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, failureMessage)
+		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeWarning, MessageProfilingCheckFailed, "Get", "%s", failureMessage)
 		if err := r.Status().Update(ctx, dgdr); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -745,7 +748,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 			return ctrl.Result{}, err
 		}
 		dgdr.ClearProfilingPhase()
-		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageGenerationFailed, err.Error())
+		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeWarning, MessageGenerationFailed, "Update", "%s", err.Error())
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
 	}
 	dgdr.ClearProfilingPhase()
@@ -759,7 +762,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 	dgdr.Status.DGDName = dgdName
 	dgdr.Status.ProfilingResults = profilingResults
 
-	r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonSpecGenerated, MessageSpecGenerated)
+	r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonSpecGenerated, "Update", MessageSpecGenerated)
 
 	// Create additional resources (ConfigMaps) immediately after profiling
 	// This ensures that the `planner-profile-data` ConfigMap is available for both auto and manual deployment
@@ -768,8 +771,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 	if err := r.createAdditionalResources(ctx, dgdr, targetNamespace); err != nil {
 		logger.Error(err, "Failed to create additional resources after profiling")
 		// Don't fail the DGDR, just log the error - ConfigMaps can be created manually
-		r.Recorder.Event(dgdr, corev1.EventTypeWarning, "ConfigMapCreationFailed",
-			fmt.Sprintf("Failed to create ConfigMaps from profiling output: %v", err))
+		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeWarning, "ConfigMapCreationFailed", "Create",
+			"Failed to create ConfigMaps from profiling output: %v", err)
 	}
 
 	// If autoApply is enabled, transition to Deploying phase
@@ -786,6 +789,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 func (r *DynamoGraphDeploymentRequestReconciler) handleReadyPhase(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("DGDR is ready", "name", dgdr.Name)
+
+	// Start deployment when autoApply is enabled after manual review.
+	if dgdr.Spec.AutoApply == nil || *dgdr.Spec.AutoApply {
+		logger.Info("AutoApply enabled, transitioning to Deploying phase")
+		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseDeploying, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionTrue, nvidiacomv1beta1.EventReasonSpecGenerated, MessageSpecGenerated)
+	}
 
 	// Nothing to monitor in Ready phase - spec is available for manual application
 	return ctrl.Result{}, nil
@@ -841,8 +850,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 		setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseDeployed)
 
-		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonDeploymentReady,
-			fmt.Sprintf(MessageDeploymentReady, dgd.Name))
+		r.Recorder.Eventf(dgdr, dgd, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonDeploymentReady, "Update",
+			MessageDeploymentReady, dgd.Name)
 
 		condStatus = metav1.ConditionTrue
 		condReason = nvidiacomv1beta1.EventReasonDeploymentReady
@@ -855,7 +864,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 		condMessage = fmt.Sprintf("DGD %s is in %s state", dgd.Name, string(dgd.Status.State))
 
 		for _, errMsg := range r.getDGDPodImagePullErrors(ctx, dgdr.Namespace, dgd.Name) {
-			r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonImagePullFailed, errMsg)
+			r.Recorder.Eventf(dgdr, dgd, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonImagePullFailed, "Get", "%s", errMsg)
 		}
 	}
 
@@ -903,8 +912,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 		setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseDeploying)
 		updateDeploymentInfo(dgdr, dgd)
 
-		r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonDeploymentDegraded,
-			fmt.Sprintf(MessageDeploymentDegraded, dgd.Name, string(dgd.Status.State)))
+		r.Recorder.Eventf(dgdr, dgd, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonDeploymentDegraded, "Update",
+			MessageDeploymentDegraded, dgd.Name, string(dgd.Status.State))
 
 		meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 			Type:    nvidiacomv1beta1.ConditionTypeDeploymentReady,
@@ -931,8 +940,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 
 	dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseFailed
 
-	r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonDeploymentDeleted,
-		fmt.Sprintf(MessageDeploymentDeleted, dgdr.Status.DGDName))
+	r.Recorder.Eventf(dgdr, nil, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonDeploymentDeleted, "Delete",
+		MessageDeploymentDeleted, dgdr.Status.DGDName)
 
 	dgdr.Status.DGDName = ""
 	dgdr.Status.DeploymentInfo = nil
@@ -963,6 +972,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
 	}
+	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
 
 	// Determine DGD name and namespace from generated deployment
 	dgdName := generatedDGD.Name
@@ -1015,7 +1025,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			logger.Info("DGD already exists, waiting for informer observation")
 			return ctrl.Result{}, nil
 		}
-		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageDeploymentCreationFailed, err.Error())
+		r.Recorder.Eventf(dgdr, dgd, corev1.EventTypeWarning, MessageDeploymentCreationFailed, "Create", "%s", err.Error())
 		// Admission webhook denials and other permanent API rejections (400/403/422)
 		// will never succeed on retry — surface them as a terminal failure instead of
 		// looping forever.
@@ -1028,8 +1038,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 		return ctrl.Result{}, err
 	}
 
-	r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonDeploymentCreated,
-		fmt.Sprintf(MessageDeploymentCreated, dgdName))
+	r.Recorder.Eventf(dgdr, dgd, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonDeploymentCreated, "Create",
+		MessageDeploymentCreated, dgdName)
 	logger.Info("DynamoGraphDeployment created successfully", "name", dgdName)
 
 	// Keep the generated-spec marker until a cached read observes the DGD.
@@ -1441,6 +1451,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		if err != nil {
 			return nil, false, err
 		}
+		alphaProfilingConfig, err := restoredAlphaProfilingConfig(dgdr)
+		if err != nil {
+			return nil, false, fmt.Errorf("restore v1alpha1 profiling compatibility fields: %w", err)
+		}
 
 		// Common environment variables
 		profilerEnv := []corev1.EnvVar{
@@ -1489,8 +1503,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			})
 		}
 
-		// v1alpha1 round-trip: mount ConfigMap if referenced via annotation
-		cmRef := configMapRefFromAnnotation(dgdr)
+		// v1alpha1 round-trip: mount a ConfigMap restored from structural
+		// conversion preservation (or the read-only legacy fallback).
+		cmRef := alphaProfilingConfig.ConfigMapRef
 		if cmRef != nil {
 			volumeMounts = append(volumeMounts, corev1.VolumeMount{
 				Name:      VolumeNameProfilingConfig,
@@ -1560,11 +1575,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			}},
 		}
 
-		// Use PVC for profiling output if round-tripped v1alpha1 annotation is present,
-		// otherwise use emptyDir (v1beta1 default).
+		// Use a PVC for profiling output when restored from v1alpha1 conversion
+		// preservation; otherwise use emptyDir (the v1beta1 default).
 		var profilingOutputVolume corev1.Volume
-		if outputPVC := outputPVCFromAnnotation(dgdr); outputPVC != "" {
-			logger.Info("Using PVC for profiling output (from v1alpha1 annotation)", "pvc", outputPVC)
+		if outputPVC := alphaProfilingConfig.OutputPVC; outputPVC != "" {
+			logger.Info("Using PVC for profiling output (from v1alpha1 compatibility fields)", "pvc", outputPVC)
 			profilingOutputVolume = corev1.Volume{
 				Name: VolumeNameProfilingOutput,
 				VolumeSource: corev1.VolumeSource{
@@ -1596,7 +1611,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			})
 		}
 
-		// v1alpha1 round-trip: add ConfigMap volume if referenced via annotation
+		// v1alpha1 round-trip: add the restored ConfigMap volume.
 		if cmRef != nil {
 			cmKey := cmRef.Key
 			if cmKey == "" {
@@ -1864,36 +1879,19 @@ func extractModelCachePVCConfig(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequ
 	return dgdr.Spec.ModelCache.PVCName, mountPath
 }
 
-// configMapKeySelector mirrors v1alpha1.ConfigMapKeySelector for annotation deserialization.
-type configMapKeySelector struct {
-	Name string `json:"name"`
-	Key  string `json:"key,omitempty"`
-}
-
-// configMapRefFromAnnotation reads the ConfigMap reference from the round-trip annotation.
-// Returns nil for native v1beta1 resources (no annotation present).
-func configMapRefFromAnnotation(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) *configMapKeySelector {
-	if dgdr.Annotations == nil {
-		return nil
+// restoredAlphaProfilingConfig converts the hub object back to its served
+// v1alpha1 shape so controller behavior follows the same structural
+// preservation rules as API clients. ConvertFrom also retains a read-only
+// fallback for objects stored with Dynamo 1.0/1.1 annotations.
+func restoredAlphaProfilingConfig(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (dgdv1alpha1.ProfilingConfigSpec, error) {
+	if dgdr == nil {
+		return dgdv1alpha1.ProfilingConfigSpec{}, nil
 	}
-	raw, ok := dgdr.Annotations[AnnotationConfigMapRef]
-	if !ok || raw == "" {
-		return nil
+	alpha := &dgdv1alpha1.DynamoGraphDeploymentRequest{}
+	if err := alpha.ConvertFrom(dgdr); err != nil {
+		return dgdv1alpha1.ProfilingConfigSpec{}, err
 	}
-	var ref configMapKeySelector
-	if err := json.Unmarshal([]byte(raw), &ref); err != nil {
-		return nil
-	}
-	return &ref
-}
-
-// outputPVCFromAnnotation reads the output PVC name from the round-trip annotation.
-// Returns "" for native v1beta1 resources (always emptyDir).
-func outputPVCFromAnnotation(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
-	if dgdr.Annotations == nil {
-		return ""
-	}
-	return dgdr.Annotations[AnnotationOutputPVC]
+	return alpha.Spec.ProfilingConfig, nil
 }
 
 // checkProfilingJobStatus checks if the profiling job has completed
@@ -2072,6 +2070,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to extract DGD from %s: %w", outputFile, err)
 	}
+	applyDGDRRuntimeVersionOverride(dgdr, dgd)
 
 	// Override the profiler-generated name with a DGDR-scoped unique name.
 	// The profiler emits a static topology-derived name (e.g. "vllm-agg") which
@@ -2123,6 +2122,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	}
 	dgdr.ResourceVersion = apply.GetResourceVersion()
 	return profilingResults, dgd.Name, nil
+}
+
+// applyDGDRRuntimeVersionOverride fills missing component overrides without replacing existing values.
+func applyDGDRRuntimeVersionOverride(
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) bool {
+	if dgdr.Spec.RuntimeVersionOverride == "" {
+		return false
+	}
+
+	changed := false
+	for i := range dgd.Spec.Components {
+		if dgd.Spec.Components[i].RuntimeVersionOverride == "" {
+			dgd.Spec.Components[i].RuntimeVersionOverride = dgdr.Spec.RuntimeVersionOverride
+			changed = true
+		}
+	}
+	return changed
 }
 
 // encodeBetaDGDManifest returns JSON/YAML manifest bytes for a beta DGD.

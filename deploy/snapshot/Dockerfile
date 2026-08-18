@@ -3,25 +3,26 @@
 #
 # Unified Dockerfile for snapshot-agent and placeholder images.
 #
-# Build targets:
-#   docker build --platform linux/amd64 --target agent -t snapshot-agent:latest .
-#   docker build --platform linux/amd64 --target placeholder --build-arg BASE_IMAGE=<app-image> -t placeholder:latest .
+# Build targets (the `operator` build context is required — the snapshot module depends on the
+# operator module via `replace => ../operator`):
+#   docker build --platform linux/amd64 --target agent --build-context operator=../operator -t snapshot-agent:latest .
+#   docker build --platform linux/amd64 --target placeholder --build-context operator=../operator --build-arg BASE_IMAGE=<app-image> -t placeholder:latest .
 #
 # Optional targets for CI:
-#   docker build --target linter .   # Run linting
-#   docker build --target tester .   # Run tests
+#   docker build --target linter --build-context operator=../operator .   # Run linting
+#   docker build --target tester --build-context operator=../operator .   # Run tests
 
 # =============================================================================
 # Build Arguments
 # =============================================================================
 ARG DOCKER_PROXY
 ARG GO_VERSION=1.26.3
-# Default to upstream CRIU development branch. Custom forks can override both
+# Default to a pinned upstream CRIU commit. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
-ARG CRIU_REF=criu-dev
+ARG CRIU_REF=b47c692bb3a73ae45ee1c4ab215a8f6869d40efd
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 # For placeholder target only - this default allows agent builds to succeed,
@@ -42,6 +43,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
+
+# The snapshot module depends on the operator module via `replace => ../operator`, so the operator
+# module must sit at /operator (a sibling of /workspace) for `go mod download` and the Go build to
+# resolve it. Provided via the `operator` named build context (see build-deploy-component action).
+COPY --from=operator . /operator/
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -74,6 +80,45 @@ ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
+# Emit a CycloneDX SBOM for snapshot-agent's Go module set. nsrestore's
+# deps are a subset of agent's, so a single SBOM keyed on ./cmd/agent is
+# sufficient. The git-init dance satisfies cyclonedx-gomod's main-module
+# version probe (Docker build context doesn't carry .git). Pinned to
+# keep the SBOM tool itself reproducible.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
+    GOBIN=/usr/local/bin go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0 && \
+    git init -q && \
+    git -c user.email=build@dynamo -c user.name=build add -A && \
+    git -c user.email=build@dynamo -c user.name=build commit -q -m sbom && \
+    cyclonedx-gomod app -licenses -json -main ./cmd/agent -output /sbom-go.cdx.json .
+
+# Compliance: harvest each Go module's real LICENSE files from the module cache
+# so the go NOTICES generator inlines upstream license text instead of canonical
+# SPDX fallback. Preserve the cache's escaped "<module-path>@<version>/" layout —
+# generators/go.py escapes module names the same way to look up. Non-fatal.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    mkdir -p /sbom-go-licenses && cd /go/pkg/mod && \
+    find . -path ./cache -prune -o -type f \
+        \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' \
+           -o -iname 'NOTICE*' -o -iname 'UNLICENSE*' \) -print | \
+    while IFS= read -r lf; do \
+        rel="${lf#./}"; dest="/sbom-go-licenses/$(dirname "$rel")"; \
+        mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+    done; \
+    echo "go license harvest: $(find /sbom-go-licenses -type f 2>/dev/null | wc -l) files"; true
+
+# Compliance source archival: vendor third-party Go modules. Same pattern
+# as operator's builder. First-party (github.com/ai-dynamo/) pruned later
+# in collect_sources.py.
+ARG ENABLE_SOURCE_ARCHIVAL=false
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        go mod vendor -o /tmp/go-vendor ; \
+    else \
+        mkdir -p /tmp/go-vendor ; \
+    fi
+
 # =============================================================================
 # Stage: CUDA checkpoint helper builder
 # =============================================================================
@@ -86,12 +131,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
+COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
     -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64/stubs \
     -lcuda
+
+RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -140,9 +188,12 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
 # =============================================================================
-# Stage: Agent - Final snapshot-agent image
+# Stage: Agent (pre-compliance) - Everything that ships, minus /legal
 # =============================================================================
-FROM ${AGENT_BASE_IMAGE} AS agent
+# Split out so the licenses stage can run dpkg-query against the actual
+# installed package state (CRIU runtime libs included), then the final
+# `agent` stage is a thin downstream that COPYs /legal in.
+FROM ${AGENT_BASE_IMAGE} AS agent_pre
 
 ARG TARGETARCH=amd64
 
@@ -178,23 +229,230 @@ RUN criu --version
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
+COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
+RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
+             /usr/local/sbin/ns-bind-mount
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
-COPY --from=builder /nsrestore /usr/local/bin/nsrestore
+
+# Assemble the injection bundle: bind-mounted read-only into the placeholder's
+# mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
+# The placeholder ships none of this. nsrestore redirects all three lookup
+# mechanisms into the mount: criu's libdir -> criu-plugins/ (criu.overrideLibDir),
+# LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
+RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
+COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
+COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
+COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
+COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
+COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
+
+# Network binaries needed during restore:
+#   ip  — address/route restore (criu/net.c)
+#   tar — used by runtime.ApplyRootfsDiff
+# Network lock is set to SKIP (--network-lock skip) in BuildRestoreOpts, so
+# criu never forks iptables-restore/ip6tables-restore on this path and neither
+# binary needs to be in the bundle. See BuildRestoreOpts for why SKIP is safe
+# for restore specifically.
+# All resolve through PATH inside the namespace.
+RUN set -eu; \
+    cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
+    chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
+             /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
+             /snapshot-binaries/ip /snapshot-binaries/tar
+
+# Shared-library closure of the bundled binaries and plugins.
+#
+# glibc (libc, libm, libpthread, libdl, librt, libresolv) and the loader are
+# deliberately excluded: the kernel reads PT_INTERP before LD_LIBRARY_PATH
+# applies, so the loader always comes from the placeholder, and glibc's loader
+# and libc are version-locked — pairing them across builds breaks at exec.
+# Also excluded: libmvec, libutil, libanl, libnsl, libthread_db — same glibc
+# version-lock; libm matches only when followed by '.' or '-', not libmvec.
+# libcuda/libnvidia are excluded because they are injected by the NVIDIA
+# container runtime and must match the host driver.
+RUN set -eu; \
+    command -v ldd >/dev/null || { echo "ERROR: ldd missing in builder" >&2; exit 1; }; \
+    for f in /snapshot-binaries/* /snapshot-binaries/criu-plugins/*.so; do \
+      [ -f "$f" ] || continue; \
+      ldd "$f" 2>/dev/null | awk '/=> \//{print $3}'; \
+    done | sort -u \
+    | grep -Ev '/(ld-linux|libc|libm|libmvec|libdl|libpthread|librt|libresolv|libutil|libanl|libnsl|libthread_db|libcuda|libnvidia)[.-]' \
+    | xargs -r -I{} cp -Ln {} /snapshot-binaries/lib/
+
+# Post-condition: verify each key binary resolves cleanly against the bundle's
+# lib/. The closure step above uses xargs -r which exits 0 on empty input, so
+# a silent ldd failure leaves lib/ empty; asserting here catches that.
+RUN set -eu; \
+    for f in /snapshot-binaries/criu /snapshot-binaries/ip \
+             /snapshot-binaries/tar /snapshot-binaries/criu-plugins/*.so; do \
+      [ -f "$f" ] || continue; \
+      if LD_LIBRARY_PATH=/snapshot-binaries/lib ldd "$f" 2>&1 | grep -q 'not found'; then \
+        echo "ERROR: unresolved shared libraries in $f:" >&2; \
+        LD_LIBRARY_PATH=/snapshot-binaries/lib ldd "$f" >&2; \
+        exit 1; \
+      fi; \
+    done
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/snapshot
 
 USER root
 
+# =============================================================================
+# Stage: Compliance: licenses
+# =============================================================================
+# Runs in agent_pre's actual filesystem so dpkg-query enumerates the real
+# runtime package set (cuda-dl-base + everything we apt-get installed in
+# agent_pre). cyclonedx-gomod produced /sbom-go.cdx.json upstream in the
+# Go builder; we COPY it in here for the go generator.
+#
+# `compliance` build context is plumbed by .github/actions/build-deploy-component/action.yml
+# as `--build-context compliance=../../container/compliance`.
+FROM agent_pre AS licenses
+
+USER root
+RUN mkdir -p /legal /sboms
+# Freeze the shipped dpkg database and copyright files before installing
+# compliance-only helpers. The final image is FROM agent_pre, so packages
+# installed below must not appear in dpkg NOTICES/OSRB output.
+RUN mkdir -p /runtime-root/var/lib /runtime-root/usr/share \
+    && cp -a /var/lib/dpkg /runtime-root/var/lib/ \
+    && cp -a /usr/share/doc /runtime-root/usr/share/
+# Install python3 + python3-yaml for the compliance tooling only. PyYAML is
+# required for license_overrides.yaml; dpkg scanning reads /runtime-root so
+# these helper packages are not attributed as shipped content.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-yaml \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+COPY --from=compliance . /opt/compliance
+ENV PYTHONPATH=/opt
+COPY --from=builder /sbom-go.cdx.json /tmp/sbom-go.cdx.json
+COPY --from=builder /sbom-go-licenses /tmp/go-licenses
+
+# go + dpkg cover the runtime image's apt + Go module set. native
+# enumerates from-source components (CRIU, cuda-checkpoint,
+# cuda-checkpoint-helper) — these are attributed by the manual
+# `COPY /tmp/criu/COPYING /legal/CRIU/COPYING` lines in agent_pre, which
+# the native generator reads via license_text_path to inline in NOTICES.
+# BASELINE_SBOM_FILE (optional, empty default): the per-arch baseline SBOM
+# *stem* under /opt/compliance/base_sboms/. We append -${TARGETARCH}.cdx.json
+# so the matching-arch floor is subtracted (snapshot ships amd64-only today).
+ARG BASELINE_SBOM_FILE=""
+ARG TARGETARCH
+RUN python3 -m compliance.generators \
+    --ecosystem go,dpkg,native \
+    --go-sbom /tmp/sbom-go.cdx.json \
+    --go-licenses-dir /tmp/go-licenses \
+    --native-yaml /opt/compliance/native_packages.yaml \
+    --native-image snapshot-agent \
+    --output-dir /legal \
+    --policy /opt/compliance/policy/licenses.toml \
+    --dpkg-root /runtime-root \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
+    -v
+# Policy gate on the single unified CSV (its `ecosystem` column scopes each row).
+RUN python3 -m compliance.policy.validate \
+        --policy /opt/compliance/policy/licenses.toml \
+        --input /legal/osrb-deps.csv
+
+
+# =============================================================================
+# Stage: Compliance: artifact (single unified -compliance tree for CI extraction)
+# =============================================================================
+FROM scratch AS compliance_artifact
+COPY --from=licenses /legal/ /
+
+
+# =============================================================================
+# Stage: Compliance: sources
+# =============================================================================
+# Collects source archives for dpkg deltas, third-party Go modules, and
+# preserved native source trees for OSRB submission. Output is a separate
+# sources zip cross-referenced in the OSRB bundle's build-provenance.json;
+# never COPY'd into the runtime.
+FROM agent_pre AS sources_collect
+WORKDIR /
+RUN mkdir -p /sources /opt/compliance /opt/go-vendor /opt/native-sources /runtime-root/var/lib \
+    && cp -a /var/lib/dpkg /runtime-root/var/lib/
+# Python is needed only to run compliance.collect_sources. The dpkg package
+# set comes from /runtime-root, captured before this install.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+COPY --from=compliance . /opt/compliance
+ENV PYTHONPATH=/opt
+COPY --from=builder /tmp/go-vendor/ /opt/go-vendor/
+# Native source trees (CRIU sources + cuda-checkpoint clone) from criu-builder.
+#
+# These COPYs are unconditional (not gated on ENABLE_SOURCE_ARCHIVAL) by
+# design: sources_collect is its own stage that is NEVER COPY'd into the
+# runtime agent image — the runtime only consumes /sources.zip via the
+# `sources_archive` stage. So copying the source trees in here costs nothing
+# in the shipped image. Gating them would risk archive completeness (an ARG
+# flip would silently drop CRIU+cuda-checkpoint from the archive).
+COPY --from=criu-builder /tmp/criu/ /opt/native-sources/criu/
+COPY --from=criu-builder /tmp/cuda-checkpoint/ /opt/native-sources/cuda-checkpoint/
+
+ARG ENABLE_SOURCE_ARCHIVAL=false
+ARG BASELINE_SBOM_FILE=""
+ARG TARGETARCH
+RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        python3 -m compliance.collect_sources \
+            --ecosystem dpkg --ecosystem go --ecosystem native \
+            --output-zip /sources.zip \
+            --sources-root /sources \
+            --dpkg-root /runtime-root \
+            --go-vendor-dir /opt/go-vendor \
+            --native-source-dir /opt/native-sources \
+            ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
+            -v ; \
+    else \
+        : > /sources.zip ; \
+    fi
+
+
+FROM scratch AS sources_archive
+COPY --from=sources_collect /sources.zip /sources.zip
+
+
+# =============================================================================
+# Stage: Agent - Final snapshot-agent image
+# =============================================================================
+FROM agent_pre AS agent
+COPY --from=licenses /legal /legal
+
 ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 
 # =============================================================================
 # Stage: Placeholder - Runtime-compatible restore image (requires BASE_IMAGE arg)
-# This image is a superset of the runtime image: same default execution contract
-# (entrypoint/cmd/user), plus CRIU/cuda-checkpoint tooling for external restore.
+#
+# This is the runtime image with the same default execution contract
+# (entrypoint/cmd), running as root so the agent can restore into it. It ships
+# NO checkpoint/restore tooling: criu, nsrestore, the cuda-checkpoint binaries,
+# their shared libraries, and the criu plugins are all bind-mounted on demand
+# from the agent's /snapshot-binaries bundle at restore time (internal/nsmount).
+# The mount destination is created by the ns-bind-mount helper inside this
+# namespace, so nothing needs pre-provisioning here.
+#
+# Three constraints follow from that and must hold for every BASE_IMAGE:
+#   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE, because the
+#     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 24.04,
+#     glibc 2.39) and loaded ahead of the placeholder's own libraries via
+#     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
+#     restore with "version 'GLIBC_2.38' not found".
+#   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
+#   - The placeholder pod must NOT set readOnlyRootFilesystem: true unless a
+#     writable volume is mounted at /tmp. The agent bind-mounts the binary
+#     bundle into the placeholder's /tmp at restore time; with a read-only
+#     root and nothing mounted at /tmp, creating the mount point fails with
+#     EROFS. An emptyDir at /tmp (either medium) makes it work again, since
+#     volume mounts stay writable independently of the root filesystem.
+#
+# cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
+# When used, the source workload image must have cuda-checkpoint at the same
+# path as it runs from — CRIU restores file-backed mappings by path, not via
+# PATH search — and so must this placeholder image (same BASE_IMAGE).
+#
 # Dynamo backend entrypoints run a restore standby path when the operator
 # injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the
 # snapshot-agent restores into the container.
@@ -208,41 +466,9 @@ ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
 USER root
 
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
+      echo "ERROR: Dynamo Snapshot requires x86_64" >&2; exit 1; \
     fi
 
-# Install minimal runtime dependencies for CRIU restore (nsrestore runs here via nsenter)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libbsd0 \
-    libcap2 \
-    libnet1 \
-    libnl-3-200 \
-    libnl-route-3-200 \
-    libprotobuf-c1 \
-    libgnutls30t64 \
-    libnftables1 \
-    iproute2 \
-    iptables \
-    procps \
-    uuid-runtime \
-    tar \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy CRIU from builder (needed by nsrestore running inside these namespaces)
-COPY --from=criu-builder /criu-install/usr/local /usr/local
-COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
-RUN criu --version && echo "CRIU installed successfully"
-
-# Copy CUDA checkpoint binaries
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
-COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
-
-# Copy nsrestore binary (invoked by DaemonSet via nsenter)
-COPY --from=builder /nsrestore /usr/local/bin/nsrestore
-RUN chmod +x /usr/local/bin/nsrestore
-
-# Create directories
-RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
+# Checkpoint volume mount point. This is a storage concern — no restore tooling
+# is provisioned here; see the stage comment above.
+RUN mkdir -p /checkpoints

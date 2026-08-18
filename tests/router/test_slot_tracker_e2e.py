@@ -292,7 +292,6 @@ def aggregated_mocker(
     predownload_tokenizers,
     discovery_backend,
     request_plane,
-    durable_kv_events,
 ):
     _ = runtime_services_dynamic_ports, predownload_tokenizers
     with MockerProcess(
@@ -300,7 +299,6 @@ def aggregated_mocker(
         mocker_args={
             "speedup_ratio": 10.0,
             "block_size": BLOCK_SIZE,
-            "durable_kv_events": durable_kv_events,
         },
         num_mockers=1,
         store_backend=discovery_backend,
@@ -316,14 +314,12 @@ def disagg_mockers(
     predownload_tokenizers,
     discovery_backend,
     request_plane,
-    durable_kv_events,
 ):
     _ = runtime_services_dynamic_ports, predownload_tokenizers
     namespace = f"slot-tracker-{generate_random_suffix()}"
     mocker_args = {
         "speedup_ratio": 10.0,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
     }
     with launch_disagg_workers(
         request,

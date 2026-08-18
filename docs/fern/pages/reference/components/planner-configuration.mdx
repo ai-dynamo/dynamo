@@ -1,0 +1,662 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Planner Configuration (PlannerConfig)
+subtitle: Field reference for the PlannerConfig JSON/YAML object consumed by the Dynamo Planner service.
+---
+
+`PlannerConfig` is the configuration object for the Dynamo Planner. The Planner service parses it with [Pydantic](https://docs.pydantic.dev/), so every field, type, default, and constraint on this page comes from the [`PlannerConfig` model](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/planner_config.py). For the deployment workflow and scaling-mode concepts, see the [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md); for the autoscaler overview, see the [Planner overview](../../developer-guide/knowledge-base/modular-components/planner/overview.md).
+
+## How the config is loaded
+
+The Planner service loads `PlannerConfig` from a single required `--config` argument — a path to a `.json`, `.yaml`, or `.yml` file, or an inline JSON string. The service auto-detects which, loads it, and validates it against the `PlannerConfig` model. A value that is neither a readable file nor valid JSON fails at startup. How you supply it depends on where you run the Planner.
+
+<Card>
+<Tabs>
+  <Tab title="Kubernetes">
+    Set the object under `spec.features.planner` in a [DynamoGraphDeploymentRequest](../kubernetes-api/dynamo-graph-deployment-request.mdx) (DGDR). DGDR passes it through without field-level validation, mounts it as a `planner-config-*` ConfigMap, and launches the Planner with `--config` pointing at the mounted file. The Planner validates it at startup. Every field below can be set here.
+
+    ```yaml
+    spec:
+      features:
+        planner:
+          mode: disagg
+          backend: vllm
+          # optimization_target defaults to "throughput" — works with no further config
+    ```
+  </Tab>
+  <Tab title="Local">
+    Run the Planner module directly and pass `--config` yourself, as either a file path or an inline JSON string:
+
+    ```bash
+    # From a YAML or JSON file
+    python -m dynamo.planner --config planner_config.yaml
+
+    # Or inline JSON
+    python -m dynamo.planner --config '{"mode": "disagg", "backend": "vllm"}'
+    ```
+  </Tab>
+</Tabs>
+</Card>
+
+<Note>
+  Several Prometheus fields default from environment variables and are excluded when the config is serialized back out. Set them either in the config object or through the environment variable noted on each field. See [Environment variables](#environment-variables).
+</Note>
+
+## Core settings
+
+<ParamField path="mode" type="string" default="disagg">
+  Planner operating mode, matching the deployment topology.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>disagg</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>agg</Badge></span>
+</ParamField>
+
+<ParamField path="backend" type="string" default="vllm">
+  Inference backend the Planner scales.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge> <Badge intent="note" minimal>mocker</Badge></span>
+</ParamField>
+
+<ParamField path="environment" type="string" default="kubernetes">
+  Runtime environment that determines how the Planner applies scaling actions.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>kubernetes</Badge> <Badge intent="note" minimal>virtual</Badge> <Badge intent="note" minimal>global-planner</Badge></span>
+</ParamField>
+
+<ParamField path="namespace" type="string" default="env DYN_NAMESPACE, else dynamo">
+  Dynamo namespace of the deployment the Planner manages. Defaults from `DYN_NAMESPACE`, which the operator injects as `{k8s_namespace}-{dgd_name}`. Excluded from serialized output.
+</ParamField>
+
+<ParamField path="model_name" type="string" default="null">
+  Optional model name override. Auto-detected from the deployment when unset.
+</ParamField>
+
+<ParamField path="global_planner_namespace" type="string" default="null">
+  Namespace where the GlobalPlanner runs. **Required** when `environment` is `global-planner`. See the [Global Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md).
+</ParamField>
+
+<ParamField path="log_dir" type="string" default="null">
+  Optional directory for Planner log output.
+</ParamField>
+
+## Optimization target
+
+<ParamField path="optimization_target" type="string" default="throughput">
+  Scaling strategy. `throughput` and `latency` use static thresholds on queue depth and KV cache utilization — no SLA targets or profiling required. `load` uses user-defined prefill queue-token and decode KV-utilization thresholds. `sla` uses the Planner engine-query layer and AIC core performance model to target specific `ttft_ms` / `itl_ms` values.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>throughput</Badge> <Badge intent="note" minimal>latency</Badge> <Badge intent="note" minimal>load</Badge> <Badge intent="note" minimal>sla</Badge></span>
+</ParamField>
+
+When `optimization_target` is `throughput`, `latency`, or `load`, the Planner forces load-based scaling on and throughput-based scaling off, and it ignores `ttft_ms` / `itl_ms`. The two scaling-mode flags below apply only when `optimization_target` is `sla`.
+
+<ParamField path="enable_throughput_scaling" type="boolean" default="true">
+  Enable predictive, traffic-based scaling. Only honored when `optimization_target` is `sla`.
+</ParamField>
+
+<ParamField path="enable_load_scaling" type="boolean" default="false">
+  Enable reactive, load-based scaling. Only honored when `optimization_target` is `sla`. At least one scaling mode must be enabled.
+</ParamField>
+
+<ParamField path="ttft_ms" type="number" default="500.0">
+  Time To First Token SLA target, in milliseconds. Also accepts the alias `ttft`. Must be greater than 0. Used only under `optimization_target: sla`.
+</ParamField>
+
+<ParamField path="itl_ms" type="number" default="50.0">
+  Inter-Token Latency SLA target, in milliseconds. Also accepts the alias `itl`. Used only under `optimization_target: sla`.
+</ParamField>
+
+## Performance model and pre-deployment sweeping
+
+<ParamField path="pre_deployment_sweeping_mode" type="string" default="rapid">
+  How to generate optional bootstrap performance data. `none` skips bootstrap data; `rapid` uses AIConfigurator to simulate engine performance (~30s); `thorough` measures on real GPUs (several hours).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>none</Badge> <Badge intent="note" minimal>rapid</Badge> <Badge intent="note" minimal>thorough</Badge></span>
+</ParamField>
+
+<ParamField path="profile_results_dir" type="string" default="profiling_results">
+  Directory holding profiler-generated performance data (npz or JSON), used to bootstrap or tune the performance model when the `get_perf_metrics` endpoint is unavailable.
+</ParamField>
+
+<ParamField path="aic_perf_model" type="AICPerfModelSpec" default="null">
+  Native AIConfigurator forward-pass model identity passed directly to the `aiconfigurator-core` wheel, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
+</ParamField>
+
+<Indent>
+  <ParamField path="hf_id" type="string" required={true}>
+    HuggingFace model id, for example `Qwen/Qwen3-32B`.
+  </ParamField>
+  <ParamField path="system" type="string" required={true}>
+    AIC system identifier, for example `h200_sxm`.
+  </ParamField>
+  <ParamField path="backend" type="string" required={true}>
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>trtllm</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+  </ParamField>
+  <ParamField path="backend_version" type="string" default="null">
+    Optional backend version string.
+  </ParamField>
+  <ParamField path="prefill_pick" type="PickedParallelConfig" default="null">
+    Parallelism pick for the prefill engine. Required for `mode` `disagg` or `prefill`. See [PickedParallelConfig](#pickedparallelconfig).
+  </ParamField>
+  <ParamField path="decode_pick" type="PickedParallelConfig" default="null">
+    Parallelism pick for the decode engine. Required for `mode` `disagg`, `decode`, or `agg`. See [PickedParallelConfig](#pickedparallelconfig).
+  </ParamField>
+  <ParamField path="model_arch" type="string" default="null">
+    Optional model architecture override.
+  </ParamField>
+  <ParamField path="weight_dtype" type="string" default="null">
+    Optional weight dtype.
+  </ParamField>
+  <ParamField path="moe_dtype" type="string" default="null">
+    Optional Mixture-of-Experts dtype.
+  </ParamField>
+  <ParamField path="activation_dtype" type="string" default="null">
+    Optional activation dtype.
+  </ParamField>
+  <ParamField path="kv_cache_dtype" type="string" default="null">
+    Optional KV cache dtype.
+  </ParamField>
+</Indent>
+
+<ParamField path="aic_interpolation" type="AICInterpolationSpec" default="null">
+  AIConfigurator interpolation spec. Populated by the profiler in rapid mode and written onto the Planner ConfigMap; you do not normally set this by hand. When present, the Planner runs the AIC sweep in-process at bootstrap to seed the performance model. See [AICInterpolationSpec](#aicinterpolationspec).
+</ParamField>
+
+## GPU budget
+
+<ParamField path="max_gpu_budget" type="integer" default="8">
+  Maximum total GPUs the Planner may allocate across worker types.
+</ParamField>
+
+<ParamField path="min_gpu_budget" type="integer" default="-1">
+  Per-DGD GPU floor enforced by the local Planner. `-1` disables it. When set with `max_gpu_budget` such that `min == max`, the Planner pins the per-DGD total and only redistributes replicas between prefill and decode.
+</ParamField>
+
+<ParamField path="min_endpoint" type="integer" default="1">
+  Minimum engine endpoints (replicas) for aggregated deployments. In disaggregated deployments, this value applies to both prefill and decode unless a role-specific value is set. In prefill-only or decode-only deployments, it supplies the active role when the corresponding role-specific value is unset. Must be nonnegative; use `0` for scale-to-zero compatibility.
+</ParamField>
+
+<ParamField path="prefill_min_endpoint" type="integer" default="null">
+  Minimum prefill endpoints in `disagg` and `prefill` modes. When set, replaces the prefill value supplied by `min_endpoint`. Must be at least `1`.
+</ParamField>
+
+<ParamField path="decode_min_endpoint" type="integer" default="null">
+  Minimum decode endpoints in `disagg` and `decode` modes. When set, replaces the decode value supplied by `min_endpoint`. Must be at least `1`.
+</ParamField>
+
+The Planner does not have per-component maximum endpoint fields. `max_gpu_budget`, the power budget when enabled, Global Planner allocation, and cluster capacity continue to bound scale-up. At startup and for runtime updates, the Planner rejects minimum endpoint combinations that cannot fit the configured GPU or power budget.
+
+<ParamField path="decode_engine_num_gpu" type="integer" default="null">
+  GPUs per decode engine replica. Auto-detected from the deployment when unset.
+</ParamField>
+
+<ParamField path="prefill_engine_num_gpu" type="integer" default="null">
+  GPUs per prefill engine replica. Auto-detected from the deployment when unset.
+</ParamField>
+
+## Throughput-based scaling
+
+<ParamField path="throughput_adjustment_interval_seconds" type="integer" default="180">
+  Seconds between throughput-based scaling decisions. Also accepts the alias `throughput_adjustment_interval`.
+</ParamField>
+
+<ParamField path="throughput_metrics_source" type="string" default="frontend">
+  Prometheus traffic source. `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` from a LocalRouter (use for a pool-local Planner in GlobalPlanner deployments).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>frontend</Badge> <Badge intent="note" minimal>router</Badge></span>
+</ParamField>
+
+## Load-based scaling
+
+<ParamField path="load_adjustment_interval_seconds" type="integer" default="5">
+  Seconds between FPM tuning updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations feed the performance model at this interval. Also accepts the alias `load_adjustment_interval`. Must be greater than 0 and, when both scaling modes are on, shorter than `throughput_adjustment_interval_seconds`.
+</ParamField>
+
+<ParamField path="max_num_fpm_samples" type="integer" default="64">
+  Maximum retained ForwardPassMetrics observations for online tuning and regression fallback.
+</ParamField>
+
+<ParamField path="fpm_sample_bucket_size" type="integer" default="16">
+  Number of buckets for observation retirement. Must be a perfect square.
+</ParamField>
+
+<ParamField path="load_scaling_down_sensitivity" type="integer" default="80">
+  Scale-down sensitivity from 0 to 100 (0 = never scale down, 100 = aggressive).
+</ParamField>
+
+<ParamField path="load_min_observations" type="integer" default="5">
+  Minimum observations before load-based scaling decisions begin (cold-start threshold).
+</ParamField>
+
+<ParamField path="prefill_scale_up_queue_tokens" type="integer" default="null">
+  Prefill queue-token count that triggers scale-up. Required (with the scale-down field) when `optimization_target` is `load` and `mode` includes prefill. Must be greater than 0 and greater than `prefill_scale_down_queue_tokens`.
+</ParamField>
+
+<ParamField path="prefill_scale_down_queue_tokens" type="integer" default="null">
+  Prefill queue-token count that allows scale-down. Required alongside `prefill_scale_up_queue_tokens`.
+</ParamField>
+
+<ParamField path="decode_scale_up_kv_rate" type="number" default="null">
+  Decode KV-utilization percentage (0–100) that triggers scale-up. Required (with the scale-down field) when `optimization_target` is `load` and `mode` includes decode. Must be greater than `decode_scale_down_kv_rate`.
+</ParamField>
+
+<ParamField path="decode_scale_down_kv_rate" type="number" default="null">
+  Decode KV-utilization percentage (0–100) that allows scale-down. Required alongside `decode_scale_up_kv_rate`.
+</ParamField>
+
+<ParamField path="speculative_nextn" type="integer" default="0">
+  Manual fallback speculative-decoding depth. A worker's published `runtime_config.runtime_data.spec_decode.nextn` takes precedence when present. Must be 0 or greater.
+</ParamField>
+
+## Load prediction
+
+<ParamField path="load_predictor" type="string" default="arima">
+  Prediction method for request count, ISL, and OSL.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>constant</Badge> <Badge intent="note" minimal>arima</Badge> <Badge intent="note" minimal>kalman</Badge> <Badge intent="note" minimal>prophet</Badge></span>
+</ParamField>
+
+<ParamField path="load_predictor_log1p" type="boolean" default="false">
+  Apply a log1p transform to predicted request count, ISL, and OSL.
+</ParamField>
+
+<ParamField path="prophet_window_size" type="integer" default="50">
+  Window size (seconds) for the Prophet predictor.
+</ParamField>
+
+<ParamField path="load_predictor_warmup_trace" type="string" default="null">
+  Path to a warmup trace file for bootstrapping predictions.
+</ParamField>
+
+<ParamField path="kalman_q_level" type="number" default="1.0">
+  Kalman process noise for the level component.
+</ParamField>
+
+<ParamField path="kalman_q_trend" type="number" default="0.1">
+  Kalman process noise for the trend component.
+</ParamField>
+
+<ParamField path="kalman_r" type="number" default="10.0">
+  Kalman measurement noise.
+</ParamField>
+
+<ParamField path="kalman_min_points" type="integer" default="5">
+  Minimum data points before Kalman predictions activate.
+</ParamField>
+
+## Prometheus metrics
+
+These fields default from environment variables and are excluded from serialized output. Set them in the config object or through the noted environment variable.
+
+<ParamField path="metric_pulling_prometheus_endpoint" type="string" default="env PROMETHEUS_ENDPOINT">
+  Prometheus endpoint the Planner queries for traffic metrics. Defaults to `PROMETHEUS_ENDPOINT`, else `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090`.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_token" type="string" default="env PROMETHEUS_TOKEN">
+  Optional bearer token sent as `Authorization: Bearer <token>` on every PromQL request. Read once at startup.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_token_file" type="string" default="env PROMETHEUS_TOKEN_FILE">
+  Path to a file containing a bearer token, re-read before every request so rotated tokens are picked up without a restart.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_ssl_verify" type="boolean" default="false">
+  Verify the upstream Prometheus TLS certificate. Defaults from `PROMETHEUS_SSL_VERIFY` (`1`/`true`/`yes` enable it). Pair with a CA bundle for a private CA.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_extra_query_params" type="object" default="env PROMETHEUS_EXTRA_QUERY_PARAMS">
+  Fixed key/value pairs appended as URL query parameters on every PromQL request. Set `PROMETHEUS_EXTRA_QUERY_PARAMS` as a URL query string, for example `namespace=my-ns&tenant=foo`.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_ca_bundle" type="string" default="env PROMETHEUS_CA_BUNDLE">
+  Path to a CA bundle for verifying the upstream Prometheus TLS certificate. When set, the bundle is used for verification regardless of `metric_pulling_prometheus_ssl_verify`. Must point to an existing file.
+</ParamField>
+
+<ParamField path="metric_reporting_prometheus_port" type="integer" default="0">
+  Port on which the Planner exposes its own `dynamo_planner_*` metrics. Defaults from `PLANNER_PROMETHEUS_PORT`. `0` disables.
+</ParamField>
+
+## Advisory mode
+
+<ParamField path="advisory" type="boolean" default="false">
+  Suggestion-only mode. The Planner computes, logs, exports, and reports recommended replica counts without executing scaling actions or changing the deployment. Use it to evaluate a new configuration or validate SLA targets against production traffic.
+</ParamField>
+
+## Diagnostics and reporting
+
+<ParamField path="report_interval_hours" type="number" default="24.0">
+  Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable. Must be a positive finite number or `null`.
+</ParamField>
+
+<ParamField path="report_output_dir" type="string" default="./planner_reports">
+  Directory for HTML diagnostics reports.
+</ParamField>
+
+<ParamField path="report_filename" type="string" default="null">
+  Fixed report filename written under `report_output_dir`. When unset, a timestamped name is used.
+</ParamField>
+
+<ParamField path="report_write_gzip_log" type="boolean" default="true">
+  Write a compressed JSONL diagnostics log (`.log.jsonl.gz`) next to each HTML report.
+</ParamField>
+
+<ParamField path="live_dashboard_port" type="integer" default="8080">
+  Port for the live diagnostics dashboard HTTP server. `0` disables. When enabled, visit `http://host:port/` for a real-time Plotly report.
+</ParamField>
+
+## Runtime configuration
+
+<ParamField path="control_api_port" type="integer" default="9086">
+  Port for the runtime minimum-endpoint API. The server listens only on `127.0.0.1`; `0` disables it. Updates are process-local, are not persisted to the Planner ConfigMap, and take effect on the next planner tick.
+</ParamField>
+
+### Runtime minimum endpoint API
+
+The Planner exposes `GET /v1/min-endpoints` and partial `PATCH /v1/min-endpoints`. The request and response fields depend on the active mode:
+
+| Mode | Runtime fields |
+| --- | --- |
+| `disagg` | `prefill_min_endpoint`, `decode_min_endpoint` |
+| `prefill` | `prefill_min_endpoint` |
+| `decode` | `decode_min_endpoint` |
+| `agg` | `min_endpoint` |
+
+The API has no authentication and is not exposed by a Kubernetes Service. For Kubernetes deployments, port-forward directly to the Planner pod:
+
+```bash
+kubectl port-forward pod/<planner-pod> 9086:9086
+curl http://127.0.0.1:9086/v1/min-endpoints
+curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
+  --header 'Content-Type: application/json' \
+  --data '{"prefill_min_endpoint": 2}'
+```
+
+PATCH is atomic. Malformed JSON, unknown fields, and empty patches return HTTP `400`. `null`, a negative `min_endpoint`, component-specific minimums below `1`, fields that are inactive for the current mode, and minimums that exceed the configured GPU or power budget return HTTP `422` without changing the active configuration.
+
+## Scheduling and plugin pipeline
+
+The Planner runs the builtin plugin pipeline by default. `scheduling` controls pipeline cadence; `plugin_registration` controls how plugins register, authenticate, and communicate. For the pipeline model, see the [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md#scheduling--plugin-pipeline).
+
+<ParamField path="scheduling" type="SchedulingConfig">
+  Plugin-pipeline scheduling. Rejects unknown fields.
+</ParamField>
+
+<Indent>
+  <ParamField path="scale_interval_seconds" type="number" default="gcd of enabled builtin intervals">
+    Base pipeline cadence. The pipeline wakes once per interval; each plugin's `execution_interval_seconds` decides whether it fires. When unset, computed as the gcd of `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`. Must be greater than 0 and evenly divide both adjustment intervals.
+  </ParamField>
+  <ParamField path="tick_max_duration_seconds" type="number" default="30.0">
+    Outer deadline wrapping the full 4-stage pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Must be greater than 0.
+  </ParamField>
+  <ParamField path="external_plugins" type="[]ExternalPluginEntry" default="[]">
+    Static external-plugin registrations applied at startup. Per-entry failures are logged but do not crash the Planner. See [ExternalPluginEntry](#externalpluginentry).
+  </ParamField>
+  <ParamField path="gateway" type="GatewayConfig">
+    gRPC registration gateway for self-registering plugins. Disabled by default.
+  </ParamField>
+  <Indent>
+    <ParamField path="enabled" type="boolean" default="false">
+      Open the gRPC gateway at `listen`. Not needed for static `external_plugins`.
+    </ParamField>
+    <ParamField path="listen" type="string" default="unix:///var/run/dynamo/planner/registry.sock">
+      Bind address. A `unix:` socket path for in-Pod registration, or `host:port` for TCP.
+    </ParamField>
+    <ParamField path="allow_insecure" type="boolean" default="false">
+      Permit binding a plaintext (no-TLS) gateway on a TCP listen. Fails closed by default because the gateway receives plugins' shared-secret tokens. `unix:` listens are always allowed.
+    </ParamField>
+  </Indent>
+</Indent>
+
+<ParamField path="plugin_registration" type="PluginRegistrationConfig">
+  Plugin registry configuration — auth, transport, heartbeat, and in-process plugins. Rejects unknown fields.
+</ParamField>
+
+<Indent>
+  <ParamField path="auth" type="AuthConfig">
+    Registry authentication. In the Planner process, an empty `trusted_sources` activates a legacy compatibility fallback to unauthenticated access and logs a warning. This fallback is **DEV ONLY**; do not rely on it as an intentional configuration. Select `allow_unauthenticated` explicitly for development. Production deployments must configure `static_secret`.
+  </ParamField>
+  <Indent>
+    <ParamField path="trusted_sources" type="[]string" default="[]">
+      Accepted auth sources. Use `['allow_unauthenticated']` for development, or `['static_secret']` with `static_secrets` for production.
+
+      <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>static_secret</Badge> <Badge intent="note" minimal>allow_unauthenticated</Badge></span>
+    </ParamField>
+    <ParamField path="static_secrets" type="object" default="{}">
+      Map of `secret_value` to `subject_label`. Populate from a mounted Kubernetes Secret rather than hard-coding in the ConfigMap.
+    </ParamField>
+  </Indent>
+  <ParamField path="transport" type="TransportConfig">
+    Outbound gRPC transport settings for calling plugins.
+  </ParamField>
+  <Indent>
+    <ParamField path="allow_insecure_grpc" type="boolean" default="false">
+      Allow plaintext `grpc://` plugin endpoints. Required to use any `grpc://` endpoint; mTLS support is not yet shipped.
+    </ParamField>
+    <ParamField path="request_timeout_seconds" type="number" default="5.0">
+      Per-RPC timeout applied to every plugin call. Must be greater than 0.
+    </ParamField>
+    <ParamField path="keepalive_time_ms" type="integer" default="30000">
+      gRPC keepalive time, in milliseconds.
+    </ParamField>
+    <ParamField path="max_message_size_bytes" type="integer" default="10485760">
+      Maximum gRPC message size (10 MB).
+    </ParamField>
+  </Indent>
+  <ParamField path="protocol_version_min" type="string" default="1.0">
+    Minimum accepted plugin protocol version.
+  </ParamField>
+  <ParamField path="protocol_version_max" type="string" default="1.0">
+    Maximum accepted plugin protocol version.
+  </ParamField>
+  <ParamField path="heartbeat_timeout_seconds" type="number" default="15.0">
+    Reserved liveness setting. Heartbeats update registry timestamps, but no monitor currently applies this timeout or evicts plugins automatically.
+  </ParamField>
+  <ParamField path="heartbeat_missed_threshold" type="integer" default="2">
+    Reserved liveness setting. Automatic missed-heartbeat eviction is not currently wired.
+  </ParamField>
+  <ParamField path="in_process_plugins" type="[]InProcessPluginSpec" default="[]">
+    In-process plugins loaded from Python modules at startup. See [InProcessPluginSpec](#inprocesspluginspec).
+  </ParamField>
+  <ParamField path="admin" type="AdminAuthConfig">
+    Admin (ListPlugins) RBAC config. Parsed but currently inert — the gateway default-denies `ListPlugins` regardless of `mode`.
+  </ParamField>
+  <Indent>
+    <ParamField path="mode" type="string" default="allow_all">
+      <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>allow_all</Badge> <Badge intent="note" minimal>k8s_rbac</Badge></span>
+    </ParamField>
+  </Indent>
+</Indent>
+
+## Additional types
+
+Nested object types referenced above, broken out to keep the field lists shallow.
+
+### PickedParallelConfig
+
+A parallelism pick emitted by AIConfigurator. Referenced by `aic_perf_model.prefill_pick` / `decode_pick` and by `AICInterpolationSpec`.
+
+<ParamField path="tp" type="integer" default="1">
+  Tensor-parallel size.
+</ParamField>
+<ParamField path="pp" type="integer" default="1">
+  Pipeline-parallel size.
+</ParamField>
+<ParamField path="dp" type="integer" default="1">
+  Data-parallel (attention-DP) size.
+</ParamField>
+<ParamField path="moe_tp" type="integer" default="1">
+  Mixture-of-Experts tensor-parallel size.
+</ParamField>
+<ParamField path="moe_ep" type="integer" default="1">
+  Mixture-of-Experts expert-parallel size.
+</ParamField>
+
+### AICInterpolationSpec
+
+Everything the Planner needs to reproduce a rapid-mode AIC sweep. Written by the profiler onto the Planner ConfigMap; not normally hand-authored.
+
+<ParamField path="hf_id" type="string" required={true}>
+  HuggingFace model id.
+</ParamField>
+<ParamField path="system" type="string" required={true}>
+  AIC system identifier.
+</ParamField>
+<ParamField path="backend" type="string" required={true}>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>trtllm</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+</ParamField>
+<ParamField path="isl" type="integer" required={true}>
+  Input sequence length for the sweep. Must be greater than 0.
+</ParamField>
+<ParamField path="osl" type="integer" required={true}>
+  Output sequence length for the sweep. Must be greater than 0.
+</ParamField>
+<ParamField path="sweep_max_context_length" type="integer" required={true}>
+  Maximum context length swept. Must be greater than 0.
+</ParamField>
+<ParamField path="prefill_interpolation_granularity" type="integer" required={true}>
+  Number of prefill interpolation points. Must be greater than 0.
+</ParamField>
+<ParamField path="decode_interpolation_granularity" type="integer" required={true}>
+  Number of decode interpolation points. Must be greater than 0.
+</ParamField>
+<ParamField path="prefill_pick" type="PickedParallelConfig" required={true}>
+  Prefill parallelism pick. See [PickedParallelConfig](#pickedparallelconfig).
+</ParamField>
+<ParamField path="decode_pick" type="PickedParallelConfig" required={true}>
+  Decode parallelism pick. See [PickedParallelConfig](#pickedparallelconfig).
+</ParamField>
+
+### ExternalPluginEntry
+
+One static external-plugin registration under `scheduling.external_plugins`. Rejects unknown fields.
+
+<ParamField path="plugin_id" type="string" required={true}>
+  Unique identifier. Must not collide with a builtin plugin id.
+</ParamField>
+<ParamField path="plugin_type" type="string" required={true}>
+  Pipeline stage the plugin participates in.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>predict</Badge> <Badge intent="note" minimal>propose</Badge> <Badge intent="note" minimal>reconcile</Badge> <Badge intent="note" minimal>constrain</Badge></span>
+</ParamField>
+<ParamField path="priority" type="integer" required={true}>
+  Stage priority. Smaller number is more authoritative.
+</ParamField>
+<ParamField path="endpoint" type="string" required={true}>
+  Wire endpoint. Must start with `grpc://host:port`; `inproc://` is rejected here.
+</ParamField>
+<ParamField path="auth_token" type="string" default="">
+  Bearer token validated by the registry. Populate from a mounted Secret.
+</ParamField>
+<ParamField path="protocol_version" type="string" default="1.0">
+  Plugin protocol version. Must fall within the registry's supported range.
+</ParamField>
+<ParamField path="version" type="string" default="v1">
+  Plugin's own version string, surfaced in ListPlugins.
+</ParamField>
+<ParamField path="execution_interval_seconds" type="number" default="0.0">
+  `0.0` runs every tick; a positive value throttles to every N seconds. Must be 0 or greater.
+</ParamField>
+<ParamField path="hold_policy" type="string" default="HOLD_LAST">
+  Behavior when throttled. `HOLD_LAST` reuses the cached result; `ACCEPT_WHEN_IDLE` treats the plugin as no-opinion when not due. Accepts the name (case-insensitive) or its integer value.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>HOLD_LAST</Badge> <Badge intent="note" minimal>ACCEPT_WHEN_IDLE</Badge></span>
+</ParamField>
+<ParamField path="needs" type="[]string" default="[]">
+  Capability list consumed by the type-aware merge.
+</ParamField>
+<ParamField path="requires_produced_fields" type="[]string" default="[]">
+  Dot-paths into the pipeline context (for example `predictions`, `observations.traffic`) that must be set for the plugin to fire on a tick. Empty means no gating.
+</ParamField>
+<ParamField path="observation_window_seconds" type="number" default="0.0">
+  Aggregation window for windowed observation types in `needs`. `0.0` uses `scale_interval` freshness; a positive value aggregates over the last N seconds and must be an integer multiple of `scale_interval_seconds`.
+</ParamField>
+
+### InProcessPluginSpec
+
+One in-process plugin under `plugin_registration.in_process_plugins`. Rejects unknown fields.
+
+<ParamField path="module" type="string" required={true}>
+  Python module path containing the plugin class.
+</ParamField>
+<ParamField path="class" type="string" required={true}>
+  Plugin class name within `module`.
+</ParamField>
+<ParamField path="plugin_id" type="string" required={true}>
+  Unique plugin identifier.
+</ParamField>
+<ParamField path="plugin_type" type="string" required={true}>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>predict</Badge> <Badge intent="note" minimal>propose</Badge> <Badge intent="note" minimal>reconcile</Badge> <Badge intent="note" minimal>constrain</Badge></span>
+</ParamField>
+<ParamField path="priority" type="integer" required={true}>
+  Stage priority. Smaller number is more authoritative.
+</ParamField>
+<ParamField path="execution_interval_seconds" type="number" default="0.0">
+  `0.0` runs every tick; a positive value throttles to every N seconds.
+</ParamField>
+<ParamField path="hold_policy" type="string" default="ACCEPT_WHEN_IDLE">
+  Behavior when throttled.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ACCEPT_WHEN_IDLE</Badge> <Badge intent="note" minimal>HOLD_LAST</Badge></span>
+</ParamField>
+<ParamField path="needs" type="[]string" default="[]">
+  Capability list consumed by the type-aware merge.
+</ParamField>
+<ParamField path="requires_produced_fields" type="[]string" default="[]">
+  Dot-paths into the pipeline context that must be set for the plugin to fire on a tick.
+</ParamField>
+<ParamField path="observation_window_seconds" type="number" default="0.0">
+  Aggregation window for windowed observation types in `needs`. Must be `0.0` or a positive integer multiple of `scale_interval_seconds`.
+</ParamField>
+<ParamField path="kwargs" type="object" default="{}">
+  Keyword arguments passed to the plugin class constructor.
+</ParamField>
+
+## Environment variables
+
+The Planner reads these environment variables. The Prometheus and namespace variables set the defaults for the config fields noted above; the rest control runtime behavior for specific environments.
+
+| Variable | Effect | Default |
+|---|---|---|
+| `DYN_NAMESPACE` | Default for `namespace`. Operator injects `{k8s_namespace}-{dgd_name}`. | `dynamo` |
+| `PROMETHEUS_ENDPOINT` | Default for `metric_pulling_prometheus_endpoint`. | in-cluster URL |
+| `PROMETHEUS_TOKEN` | Default for `metric_pulling_prometheus_token`. | unset |
+| `PROMETHEUS_TOKEN_FILE` | Default for `metric_pulling_prometheus_token_file`. | unset |
+| `PROMETHEUS_SSL_VERIFY` | Default for `metric_pulling_prometheus_ssl_verify` (`1`/`true`/`yes`). | `false` |
+| `PROMETHEUS_EXTRA_QUERY_PARAMS` | Default for `metric_pulling_prometheus_extra_query_params` (URL query string). | unset |
+| `PROMETHEUS_CA_BUNDLE` | Default for `metric_pulling_prometheus_ca_bundle`. | unset |
+| `PLANNER_PROMETHEUS_PORT` | Default for `metric_reporting_prometheus_port`. | `0` |
+| `DYN_PARENT_DGD_K8S_NAME` | Parent DGD name for the GlobalPlanner connector (`environment: global-planner`). | required |
+| `POD_NAMESPACE` | Kubernetes namespace for the GlobalPlanner connector. | required |
+| `SCALING_CHECK_INTERVAL` | Poll interval (seconds) for the virtual environment connector (`environment: virtual`). | `10` |
+| `SCALING_MAX_WAIT_TIME` | Maximum wait (seconds) for a scaling action in the virtual environment. | `1800` |
+| `DYNAMO_PLANNER_TEST` | Test-only. Must be `1` to allow the virtual clock. Not for production. | unset |
+
+## Validation rules
+
+The Planner enforces these cross-field rules at startup and rejects a config that violates any of them:
+
+- `ttft_ms` must be greater than 0.
+- `report_interval_hours` must be a positive finite number or `null`.
+- `fpm_sample_bucket_size` must be a perfect square.
+- `global_planner_namespace` is required when `environment` is `global-planner`.
+- Under `optimization_target: load`, prefill modes require `prefill_scale_up_queue_tokens` > `prefill_scale_down_queue_tokens`, and decode modes require `decode_scale_up_kv_rate` > `decode_scale_down_kv_rate`.
+- At least one scaling mode must be enabled. Under any `optimization_target` other than `sla`, the Planner forces load scaling on and throughput scaling off and ignores `ttft_ms` / `itl_ms`.
+- When `aic_perf_model` is set, `prefill_pick` is required for `mode` `disagg`/`prefill` and `decode_pick` for `mode` `disagg`/`decode`/`agg`.
+- `scheduling.scale_interval_seconds` must evenly divide `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`.
+- When both scaling modes are enabled, `load_adjustment_interval_seconds` must be shorter than `throughput_adjustment_interval_seconds`.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Planner Guide" icon="book" href="../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md">
+    Deployment workflow, scaling modes, and profiler integration.
+  </Card>
+  <Card title="Planner Overview" icon="circle-info" href="../../developer-guide/knowledge-base/modular-components/planner/overview.md">
+    Why LLM inference needs a different autoscaler.
+  </Card>
+  <Card title="DGDR Reference" icon="diagram-project" href="../kubernetes-api/dynamo-graph-deployment-request.mdx">
+    The custom resource whose `spec.features.planner` carries this config.
+  </Card>
+  <Card title="Environment Variables" icon="terminal" href="../observability/environment-variables.mdx">
+    Observability environment variables shared across Dynamo processes.
+  </Card>
+</CardGroup>

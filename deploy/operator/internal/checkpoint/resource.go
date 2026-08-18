@@ -58,7 +58,7 @@ func CheckpointID(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
 
 func FindCheckpointByCheckpointID(
 	ctx context.Context,
-	c client.Client,
+	c client.Reader,
 	namespace string,
 	checkpointID string,
 	excludeName string,
@@ -124,7 +124,7 @@ func FindCheckpointByCheckpointID(
 
 func FindCheckpointByIdentityHash(
 	ctx context.Context,
-	c client.Client,
+	c client.Reader,
 	namespace string,
 	hash string,
 	excludeName string,
@@ -144,9 +144,6 @@ func CreateOrGetAutoCheckpoint(
 	gpuMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec,
 	owner client.Object,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
-	if err := ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gpuMemoryService); err != nil {
-		return nil, err
-	}
 	if targetContainerName == "" {
 		targetContainerName = commonconsts.MainContainerName
 	}

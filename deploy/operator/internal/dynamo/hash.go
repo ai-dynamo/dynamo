@@ -25,9 +25,13 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 )
 
 const dgdWorkerHashPlaceholderValue = "worker-hash-placeholder"
+
+// Preserve hashes for runtimes released before version hashing.
+var minimumHashedRuntimeVersion = runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}
 
 // ComputeLegacyAlphaDGDWorkersSpecHash returns the v1alpha1 worker hash that a
 // pre-v1beta1 controller would compute for the DGD's current spec. Conversion
@@ -60,9 +64,10 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 	}
 
 	type workerTemplate struct {
-		Labels      map[string]string                     `json:"labels,omitempty"`
-		Annotations map[string]string                     `json:"annotations,omitempty"`
-		Spec        v1beta1.DynamoComponentDeploymentSpec `json:"spec"`
+		Labels         map[string]string                     `json:"labels,omitempty"`
+		Annotations    map[string]string                     `json:"annotations,omitempty"`
+		RuntimeVersion string                                `json:"runtimeVersion,omitempty"`
+		Spec           v1beta1.DynamoComponentDeploymentSpec `json:"spec"`
 	}
 
 	workerDCDs := make(map[string]workerTemplate, len(dcds))
@@ -76,9 +81,10 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 				return "", fmt.Errorf("duplicate generated worker DCD component name %q", componentName)
 			}
 			workerDCDs[componentName] = workerTemplate{
-				Labels:      GetDCDKubeLabels(dcd),
-				Annotations: GetDCDKubeAnnotations(dcd),
-				Spec:        workerHashSpec(dcd),
+				Labels:         GetDCDKubeLabels(dcd),
+				Annotations:    GetDCDKubeAnnotations(dcd),
+				RuntimeVersion: resolvedRuntimeVersionForHash(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+				Spec:           workerHashSpec(dcd),
 			}
 		}
 	}
@@ -101,5 +107,50 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	spec.MinAvailable = nil
 	spec.ScalingAdapter = nil
 
+	// Hash the resolved version separately so equivalent image-derived and
+	// explicit versions produce the same worker hash.
+	spec.RuntimeVersionOverride = ""
+
 	return *spec
+}
+
+// resolvedRuntimeVersionForHash returns the canonical runtime version included
+// in the v2 worker hash. The hash identifies a worker generation: changing it
+// creates a new generation and triggers a managed rollout. The hash should
+// change exactly when a downstream rendered workload PodSpec changes.
+// Computing that directly would require refactoring this path to construct the
+// full component set and render the final Deployment or Grove PodSpec.
+//
+// An alternative considered was resolving the runtime version, evaluating all
+// runtime feature gates, and hashing those decisions. That would be more
+// precise: upgrading from 1.5.0 to 1.6.0 would preserve the hash when both
+// versions enable the same gates and render the same PodSpec. Hashing the
+// canonical resolved version is simpler and also makes equivalent image-derived
+// and explicit versions hash identically.
+//
+// Runtime versions should normally change together with the image, which already
+// changes the hash. This value matters primarily when runtimeVersionOverride is
+// corrected without changing the image. If that correction changes downstream
+// version-gated rendering, the worker hash changes and triggers the required
+// rollout.
+//
+// Versions before 1.5.0 are omitted. runtimeVersionOverride was introduced in
+// 1.4.0, but runtime-version feature-gated rendering begins in 1.5.0. Hashing
+// 1.4.x versions would change existing worker hashes, triggering a rollout even
+// though their rendered PodSpecs remain unchanged.
+func resolvedRuntimeVersionForHash(component *v1beta1.DynamoComponentDeploymentSharedSpec) string {
+	if component == nil {
+		return ""
+	}
+
+	image := ""
+	if main := GetMainContainer(component); main != nil {
+		image = main.Image
+	}
+	version, err := runtimeversion.Resolve(image, component.RuntimeVersionOverride)
+	if err != nil || version.Compare(minimumHashedRuntimeVersion) < 0 {
+		return ""
+	}
+
+	return version.String()
 }

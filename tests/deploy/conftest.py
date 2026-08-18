@@ -10,11 +10,12 @@ against Kubernetes deployments. This currently only covers deployments in the ex
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import AsyncIterator, Dict, List, Optional
 
 import pytest
 
-from tests.utils.managed_deployment import DeploymentSpec, _get_workspace_dir
+from tests.deploy.dgd_utils import DeploymentSpec, _get_workspace_dir
+from tests.deploy.dgdr_utils import DGDRTestConfig, ManagedDGDR
 
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
@@ -50,8 +51,64 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--checkpoint-backend",
         type=str,
         default="vllm",
-        choices=("vllm", "sglang"),
+        choices=("vllm", "sglang", "trtllm"),
         help="DynamoCheckpoint backend to test.",
+    )
+    parser.addoption(
+        "--model-cache-pvc",
+        type=str,
+        default="",
+        help="Name of a pre-existing PVC to mount as a shared model cache on "
+        "worker pods (sets HF_HOME). Empty (default) downloads from HuggingFace.",
+    )
+    parser.addoption(
+        "--model-cache-mount",
+        type=str,
+        default="/models",
+        help="Mount path for the model cache PVC (used with --model-cache-pvc).",
+    )
+    parser.addoption(
+        "--dgdr-model",
+        default="Qwen/Qwen3-0.6B",
+        help="Default model for DynamoGraphDeploymentRequest tests.",
+    )
+    parser.addoption(
+        "--dgdr-no-mocker",
+        action="store_true",
+        help="Use real inference workers instead of GPU-free mocker workers.",
+    )
+    parser.addoption(
+        "--dgdr-profiling-timeout",
+        type=int,
+        default=3600,
+        help="Seconds to wait for DGDR profiling.",
+    )
+    parser.addoption(
+        "--dgdr-deploy-timeout",
+        type=int,
+        default=600,
+        help="Seconds to wait for an auto-applied DGD.",
+    )
+    parser.addoption(
+        "--dgdr-name-prefix",
+        default="",
+        help="Short prefix for resources created by DGDR tests.",
+    )
+    parser.addoption(
+        "--dgdr-pvc-model-path",
+        default="",
+        help="Model snapshot path inside --model-cache-pvc.",
+    )
+    parser.addoption(
+        "--dgdr-total-gpus",
+        type=int,
+        default=0,
+        help="Override hardware.totalGpus for real-GPU DGDR tests.",
+    )
+    parser.addoption(
+        "--dgdr-hf-token-secret",
+        default="",
+        help="Secret containing the profiler's HF_TOKEN value.",
     )
 
 
@@ -176,6 +233,19 @@ def _build_test_matrix(targets: List[DeploymentTarget]) -> Dict[str, List[str]]:
 # Discover all targets and build matrix at module load time for test collection
 ALL_DEPLOYMENT_TARGETS = _collect_all_targets()
 DEPLOY_TEST_MATRIX = _build_test_matrix(ALL_DEPLOYMENT_TARGETS)
+_deploy_test_failed_key: pytest.StashKey[bool] = pytest.StashKey()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
+    """Expose the call outcome to resource-owning deploy fixtures."""
+
+    outcome = yield
+    if call.when in ("setup", "call"):
+        item.stash[_deploy_test_failed_key] = (
+            item.stash.get(_deploy_test_failed_key, False)
+            or outcome.get_result().failed
+        )
 
 
 def _filter_targets(
@@ -278,6 +348,45 @@ def namespace(request: pytest.FixtureRequest) -> str:
 
 
 @pytest.fixture
+async def dgdr_manager(
+    request: pytest.FixtureRequest, image: Optional[str], namespace: str
+) -> AsyncIterator[ManagedDGDR]:
+    """Provide one isolated DGDR manager and clean every created child resource."""
+
+    if not namespace:
+        pytest.skip("--namespace is required for DGDR tests")
+    if not image:
+        pytest.skip("--image is required for DGDR tests")
+
+    manager = ManagedDGDR(
+        DGDRTestConfig(
+            namespace=namespace,
+            image=image,
+            model=request.config.getoption("--dgdr-model"),
+            backend=request.config.getoption("--framework") or "vllm",
+            mocker=not request.config.getoption("--dgdr-no-mocker"),
+            profiling_timeout=request.config.getoption("--dgdr-profiling-timeout"),
+            deploy_timeout=request.config.getoption("--dgdr-deploy-timeout"),
+            name_prefix=request.config.getoption("--dgdr-name-prefix"),
+            pvc_name=request.config.getoption("--model-cache-pvc"),
+            pvc_model_path=request.config.getoption("--dgdr-pvc-model-path"),
+            pvc_mount_path=request.config.getoption("--model-cache-mount"),
+            total_gpus=request.config.getoption("--dgdr-total-gpus"),
+            hf_token_secret=request.config.getoption("--dgdr-hf-token-secret"),
+        )
+    )
+    await manager.init()
+    try:
+        yield manager
+    finally:
+        failed = request.node.stash.get(_deploy_test_failed_key, False)
+        try:
+            await manager.cleanup(failed=failed)
+        finally:
+            await manager.close()
+
+
+@pytest.fixture
 def skip_service_restart(request: pytest.FixtureRequest) -> bool:
     """Whether to skip restarting NATS and etcd services.
 
@@ -323,6 +432,7 @@ def deployment_spec(
     deployment_yaml: Path,
     image: Optional[str],
     namespace: str,
+    request,
 ) -> DeploymentSpec:
     """Create DeploymentSpec from YAML with optional image override.
 
@@ -330,6 +440,7 @@ def deployment_spec(
         deployment_yaml: Path to the deployment YAML file
         image: Optional container image override
         namespace: Kubernetes namespace for deployment
+        request: Pytest request object (for --model-cache-* options)
 
     Returns:
         Configured DeploymentSpec ready for deployment
@@ -342,5 +453,13 @@ def deployment_spec(
     # Override image if provided
     if image:
         spec.set_image(image)
+
+    # Mount the shared model cache onto workers when a PVC is provided (CI on
+    # clusters that provision it); otherwise workers download from HuggingFace.
+    model_cache_pvc = request.config.getoption("--model-cache-pvc")
+    if model_cache_pvc:
+        spec.mount_model_cache_pvc(
+            model_cache_pvc, request.config.getoption("--model-cache-mount")
+        )
 
     return spec

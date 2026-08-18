@@ -100,7 +100,7 @@ struct StoreRouteDecision {
     skip_backend: bool,
 }
 
-/// Branch-sharded wrapper over N [`AsyncShardHandle`] shard backends.
+/// Branch-sharded wrapper over N `AsyncShardHandle` shard backends.
 ///
 /// For the common in-process case use `BranchShardedIndexer<ThreadPoolIndexer<T>>`
 /// (constructed via [`BranchShardedIndexer::new`]).  For the multi-process
@@ -679,7 +679,9 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             }
             let shard_event = RouterEvent {
                 worker_id: event.worker_id,
+                state_source: event.state_source,
                 storage_tier: event.storage_tier,
+                residency_domain: event.residency_domain.clone(),
                 event: KvCacheEvent {
                     event_id: event.event.event_id,
                     dp_rank: event.event.dp_rank,
@@ -698,7 +700,9 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             for shard in &self.shards {
                 let broadcast_event = RouterEvent {
                     worker_id: event.worker_id,
+                    state_source: event.state_source,
                     storage_tier: event.storage_tier,
+                    residency_domain: event.residency_domain.clone(),
                     event: KvCacheEvent {
                         event_id: event.event.event_id,
                         dp_rank: event.event.dp_rank,
@@ -822,10 +826,10 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
             KvCacheEventData::Stored(_) => self.apply_stored(event).await,
             KvCacheEventData::Removed(_) => self.apply_removed(event).await,
             KvCacheEventData::Cleared => {
-                let worker_id = event.worker_id;
-                for worker in self.tracked_workers_for_worker_id(worker_id) {
-                    self.remove_worker_entries(worker);
-                }
+                self.remove_worker_entries(WorkerWithDpRank::new(
+                    event.worker_id,
+                    event.event.dp_rank,
+                ));
                 for shard in &self.shards {
                     shard.as_ref().apply_event(event.clone()).await;
                 }
@@ -1079,8 +1083,8 @@ mod tests {
         )
     }
 
-    fn clear_event(worker_id: u64) -> RouterEvent {
-        router_event(worker_id, 0, 0, KvCacheEventData::Cleared)
+    fn clear_event(worker_id: u64, dp_rank: u32) -> RouterEvent {
+        router_event(worker_id, 0, dp_rank, KvCacheEventData::Cleared)
     }
 
     fn child(parent: &Arc<RoutingNode>, key: u64) -> Arc<RoutingNode> {
@@ -1587,7 +1591,7 @@ mod tests {
         assert!(has_anchor_for_worker(&index, dp0));
         assert!(has_anchor_for_worker(&index, dp1));
 
-        index.apply_event(clear_event(7)).await;
+        index.remove_worker(7).await;
         assert!(index.tracked_workers_for_worker_id(7).is_empty());
         assert!(!has_anchor_for_worker(&index, dp0));
         assert!(!has_anchor_for_worker(&index, dp1));
@@ -1614,9 +1618,14 @@ mod tests {
         assert!(!has_anchor_for_worker(&index, dp0));
         assert!(has_anchor_for_worker(&index, dp1));
 
-        index.apply_event(clear_event(0)).await;
+        index.apply_event(clear_event(0, 0)).await;
         assert!(!has_anchor_for_worker(&index, dp0));
-        assert!(!has_anchor_for_worker(&index, dp1));
+        assert!(has_anchor_for_worker(&index, dp1));
+        let sibling_scores = index
+            .find_matches(local_hashes(&[1, 2, 5, 6]))
+            .await
+            .unwrap();
+        assert_eq!(score(&sibling_scores, dp1), Some(4));
 
         index
             .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3, 4]))

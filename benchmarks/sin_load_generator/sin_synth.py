@@ -20,7 +20,7 @@ import math
 import random
 
 import numpy as np
-from aiperf.dataset.synthesis import RollingHasher
+from prefix_data_generator.hasher import RollingHasher
 from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO)

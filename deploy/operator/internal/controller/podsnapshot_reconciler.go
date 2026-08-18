@@ -29,18 +29,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -71,7 +74,7 @@ type PodSnapshotReconciler struct {
 	client.Client
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
-	Recorder      record.EventRecorder
+	Recorder      events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -103,6 +106,14 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// only on the path that has not yet created one.
 	if boundName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, ""); boundName != "" {
 		return sr.mirrorBoundContent(ctx, snap, boundName)
+	}
+	if !sr.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		const message = "checkpoint functionality is disabled in the operator configuration"
+		if !sr.markPending(snap, "CheckpointDisabled", message) {
+			return ctrl.Result{}, nil
+		}
+		sr.Recorder.Eventf(snap, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", message)
+		return ctrl.Result{}, sr.Status().Update(ctx, snap)
 	}
 	return sr.captureFromSourcePod(ctx, snap)
 }
@@ -230,7 +241,7 @@ func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, s
 			}
 			return existing, nil
 		}
-		sr.Recorder.Event(snap, corev1.EventTypeWarning, "SnapshotContentCreateFailed", err.Error())
+		sr.Recorder.Eventf(snap, content, corev1.EventTypeWarning, "SnapshotContentCreateFailed", "Create", "%s", err.Error())
 		return nil, fmt.Errorf("create PodSnapshotContent %q: %w", contentName, err)
 	}
 	return content, nil
@@ -256,7 +267,7 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *nvidiacomv1alpha1
 				UID:       snap.UID,
 			},
 			Source: nvidiacomv1alpha1.PodSnapshotContentSource{
-				PodRef:   nvidiacomv1alpha1.PodReference{Name: pod.Name, UID: pod.UID},
+				PodRef:   nvidiacomv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: snap.Spec.Source.PodRef.Containers},
 				NodeName: pod.Spec.NodeName,
 			},
 		},
@@ -335,7 +346,7 @@ func (sr *PodSnapshotReconciler) markPending(snap *nvidiacomv1alpha1.PodSnapshot
 // failPodSnapshot marks the PodSnapshot Failed terminally (Failed=True, Ready=False) and records
 // an event.
 func (sr *PodSnapshotReconciler) failPodSnapshot(ctx context.Context, snap *nvidiacomv1alpha1.PodSnapshot, reason string, cause error) (ctrl.Result, error) {
-	sr.Recorder.Event(snap, corev1.EventTypeWarning, reason, cause.Error())
+	sr.Recorder.Eventf(snap, nil, corev1.EventTypeWarning, reason, "Update", "%s", cause.Error())
 	sr.markFailed(snap, reason, cause.Error())
 	if err := sr.Status().Update(ctx, snap); err != nil {
 		return ctrl.Result{}, fmt.Errorf("mark snapshot failed: %w", err)
@@ -388,16 +399,32 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *nvidiac
 }
 
 // SetupWithManager wires the controller: it owns Snapshots and watches SnapshotContents,
-// mapping a PodSnapshotContent back to its bound PodSnapshot via spec.snapshotRef.
+// mapping a PodSnapshotContent back to its bound PodSnapshot via spec.snapshotRef. The namespace
+// filter is applied per source: the cluster-scoped PodSnapshotContent watch must be filtered by the
+// bound PodSnapshot's namespace, not its own (always empty) one, or restricted mode drops every
+// content event before the mapper runs.
 func (sr *PodSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1alpha1.PodSnapshot{}).
+		For(&nvidiacomv1alpha1.PodSnapshot{},
+			builder.WithPredicates(commonController.EphemeralDeploymentEventFilter(sr.Config, sr.RuntimeConfig))).
 		Watches(
 			&nvidiacomv1alpha1.PodSnapshotContent{},
 			handler.EnqueueRequestsFromMapFunc(podSnapshotContentToPodSnapshot),
+			builder.WithPredicates(podSnapshotContentEventFilter(sr.Config, sr.RuntimeConfig)),
 		).
-		WithEventFilter(commonController.EphemeralDeploymentEventFilter(sr.Config, sr.RuntimeConfig)).
 		Complete(sr)
+}
+
+// podSnapshotContentEventFilter admits PodSnapshotContent events by the namespace of the bound
+// PodSnapshot (spec.podSnapshotRef.namespace).
+func podSnapshotContentEventFilter(config *configv1alpha1.OperatorConfiguration, runtimeConfig *commonController.RuntimeConfig) predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(o client.Object) bool {
+		content, ok := o.(*nvidiacomv1alpha1.PodSnapshotContent)
+		if !ok {
+			return false
+		}
+		return commonController.NamespaceAllowed(config, runtimeConfig, o, content.Spec.PodSnapshotRef.Namespace)
+	})
 }
 
 // podSnapshotContentToPodSnapshot maps a PodSnapshotContent (including a delete-event tombstone) back

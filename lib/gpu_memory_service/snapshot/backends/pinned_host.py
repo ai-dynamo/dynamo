@@ -10,7 +10,7 @@ import logging
 import os
 from typing import Any, List, Sequence, Tuple
 
-from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.vmm import VMMDevice
 
 PINNED_COPY_CHUNK_SIZE = 64 * 1024 * 1024
 
@@ -42,9 +42,15 @@ def _free_aligned_buffer(view: memoryview, ptr: int) -> None:
 
 
 class PinnedCopySlot:
-    """One reusable pinned host buffer and CUDA stream."""
+    """One reusable pinned host buffer and copy stream.
 
-    def __init__(self, size: int = PINNED_COPY_CHUNK_SIZE) -> None:
+    Args:
+        vmm: VMMDevice instance for device operations.
+        size: Size of the pinned buffer in bytes.
+    """
+
+    def __init__(self, vmm: VMMDevice, size: int = PINNED_COPY_CHUNK_SIZE) -> None:
+        self._vmm = vmm
         size = int(size)
         self.view, self._raw, self.ptr = _allocate_aligned_buffer(size)
         self.stream = None
@@ -52,29 +58,29 @@ class PinnedCopySlot:
         self._registered = False
         self._closed = False
         try:
-            self.stream = cuda_utils.cuda_stream_create_nonblocking()
-            cuda_utils.cuda_host_register(self.ptr, size)
+            self.stream = self._vmm.stream_create_nonblocking()
+            self._vmm.host_register(self.ptr, size)
             self._registered = True
         except Exception:
             try:
                 if self.stream is not None:
-                    cuda_utils.cuda_stream_destroy(self.stream)
+                    self._vmm.stream_destroy(self.stream)
             finally:
                 _free_aligned_buffer(self.view, self.ptr)
             raise
 
     def copy_to_device_async(self, dst_ptr: int, size: int) -> None:
-        cuda_utils.cuda_memcpy_h2d_async(dst_ptr, self.ptr, size, self.stream)
+        self._vmm.memcpy_h2d_async(dst_ptr, self.ptr, size, self.stream)
         self.busy = True
 
     def copy_from_device_async(self, src_ptr: int, size: int) -> None:
-        cuda_utils.cuda_memcpy_d2h_async(self.ptr, src_ptr, size, self.stream)
+        self._vmm.memcpy_d2h_async(self.ptr, src_ptr, size, self.stream)
         self.busy = True
 
     def wait(self) -> None:
         if not self.busy:
             return
-        cuda_utils.cuda_stream_synchronize(self.stream)
+        self._vmm.stream_synchronize(self.stream)
         self.busy = False
 
     def close(self) -> None:
@@ -87,7 +93,7 @@ class PinnedCopySlot:
             error = exc
         try:
             if self._registered:
-                cuda_utils.cuda_host_unregister(self.ptr)
+                self._vmm.host_unregister(self.ptr)
                 self._registered = False
         except Exception as exc:  # noqa: BLE001
             if error is None:
@@ -98,13 +104,13 @@ class PinnedCopySlot:
                 )
         try:
             if self.stream is not None:
-                cuda_utils.cuda_stream_destroy(self.stream)
+                self._vmm.stream_destroy(self.stream)
                 self.stream = None
         except Exception as exc:  # noqa: BLE001
             if error is None:
                 error = exc
             else:
-                _LOGGER.warning("failed to destroy CUDA copy stream", exc_info=True)
+                _LOGGER.warning("failed to destroy copy stream", exc_info=True)
         try:
             _free_aligned_buffer(self.view, self.ptr)
             self._closed = True
@@ -117,11 +123,11 @@ class PinnedCopySlot:
             raise error
 
 
-def make_pinned_copy_slots(count: int) -> List[PinnedCopySlot]:
+def make_pinned_copy_slots(vmm: VMMDevice, count: int) -> List[PinnedCopySlot]:
     slots: List[PinnedCopySlot] = []
     try:
         for _ in range(count):
-            slots.append(PinnedCopySlot())
+            slots.append(PinnedCopySlot(vmm))
     except Exception:
         for slot in slots:
             try:

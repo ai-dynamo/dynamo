@@ -13,6 +13,12 @@ import (
 const (
 	CheckpointSourceLabel = "nvidia.com/snapshot-is-checkpoint-source"
 
+	// CaptureEligibleLabel is the gate-applied promotion label. The operator stamps
+	// CheckpointSourceLabel on the checkpoint Job pod at creation; the node agent's pre-bind gate adds
+	// CaptureEligibleLabel only after the source pod passes validation. The source-pod capture
+	// informer keys on CaptureEligibleLabel so only gate-validated pods drive the capture path.
+	CaptureEligibleLabel = "nvidia.com/snapshot-capture-eligible"
+
 	// Restore pods carry CheckpointIDLabel without CheckpointSourceLabel.
 	CheckpointIDLabel  = "nvidia.com/snapshot-checkpoint-id"
 	RestoreTargetLabel = "nvidia.com/snapshot-is-restore-target"
@@ -25,8 +31,6 @@ const (
 
 	// Required comma-separated checkpoint/restore target container list.
 	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
-
-	CheckpointStatusAnnotation = "nvidia.com/snapshot-checkpoint-status"
 
 	// Full keys are nvidia.com/snapshot-restore-status.<containerName>.
 	RestoreStatusAnnotationPrefix = "nvidia.com/snapshot-restore-status."
@@ -41,16 +45,21 @@ const (
 	CheckpointStorageTypeAnnotation     = "nvidia.com/snapshot-storage-type"
 	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
 	CheckpointVolumeName                = "checkpoint-storage"
+	CUDAJobFileName                     = "cuda-checkpoint-job"
+	CUDAJobFilePath                     = SnapshotControlMountPath + "/" + CUDAJobFileName
 	DefaultCheckpointArtifactVersion    = "1"
 	DefaultCheckpointJobTTLSeconds      = int32(300)
 	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
 	StorageTypePVC                      = "pvc"
 
-	CheckpointStatusCompleted = "completed"
-	CheckpointStatusFailed    = "failed"
-	RestoreStatusInProgress   = "in_progress"
-	RestoreStatusCompleted    = "completed"
-	RestoreStatusFailed       = "failed"
+	RestoreStatusInProgress = "in_progress"
+	RestoreStatusCompleted  = "completed"
+	RestoreStatusFailed     = "failed"
+
+	linkerdInjectAnnotation      = "linkerd.io/inject"
+	linkerdInjectDisabled        = "disabled"
+	istioSidecarInjectAnnotation = "sidecar.istio.io/inject"
+	istioSidecarInjectDisabled   = "false"
 )
 
 type Storage struct {
@@ -192,7 +201,6 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
-	delete(annotations, CheckpointStatusAnnotation)
 	clearRestoreStatusKeys(annotations)
 
 	if !enabled {

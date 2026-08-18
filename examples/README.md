@@ -19,44 +19,50 @@ limitations under the License.
 
 This directory contains practical examples demonstrating how to deploy and use Dynamo for distributed LLM inference. Each example includes setup instructions, configuration files, and explanations to help you understand different deployment patterns and use cases.
 
-> **Want to see a specific example?**
-> Open a [GitHub issue](https://github.com/ai-dynamo/dynamo/issues) to request an example you'd like to see, or [open a pull request](https://github.com/ai-dynamo/dynamo/pulls) if you'd like to contribute your own!
+> [!IMPORTANT]
+> All DynamoGraphDeployment manifests use `nvidia.com/v1beta1`. Other custom resources that do not
+> have a `v1beta1` API, such as `DynamoModel`, continue to use their supported version.
+> To migrate an existing `v1alpha1` manifest, follow the
+> [API version converter instructions](../deploy/utils/README.md).
+
+**Want to see a specific example?**
+Open a [GitHub issue](https://github.com/ai-dynamo/dynamo/issues) to request an example you'd like to see, or [open a pull request](https://github.com/ai-dynamo/dynamo/pulls) if you'd like to contribute your own!
 
 ## Basics & Tutorials
 
 Learn fundamental Dynamo concepts through these introductory examples:
 
 - **[Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart)** - Simple local Dynamo setup across supported backends
-- **[Disaggregated Serving](/docs/features/disaggregated-serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
-- **[Multi-node TensorRT-LLM](/docs/backends/trtllm/multinode/trtllm-multinode-examples.md)** - Distributed inference across multiple nodes and GPUs
+- **[Disaggregated Serving](../docs/fern/pages/kubernetes/disaggregated-serving/overview.md)** - Prefill/decode separation for enhanced performance and scalability
+- **[Multi-node TensorRT-LLM](../docs/fern/pages/developer-guide/additional-resources/tensorrt-llm-details/multinode-examples.md)** - Distributed inference across multiple nodes and GPUs
 
 ## Framework Support
 
 These examples show how Dynamo broadly works using major inference engines.
 
-If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Examples Backends](/examples/backends/) directory:
-- **[vLLM](/examples/backends/vllm/)** – vLLM-specific deployment and configuration
-- **[SGLang](/examples/backends/sglang/)** – SGLang integration examples and workflows
-- **[TensorRT-LLM](/examples/backends/trtllm/)** – TensorRT-LLM workflows and optimizations
+If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Examples Backends](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends) directory:
+- **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm)** – vLLM-specific deployment and configuration
+- **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang)** – SGLang integration examples and workflows
+- **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm)** – TensorRT-LLM workflows and optimizations
 
 ## Deployment Examples
 
 Platform-specific manifests and templates for production environments. Deployment guides live under `docs/kubernetes/cloud-providers/`; each examples folder links to its guide.
 
-- **[Amazon EKS](/examples/deployments/EKS/)** - Manifests and templates ([deployment guide](/docs/kubernetes/cloud-providers/eks/eks.md))
-- **[Azure AKS](/examples/deployments/AKS/)** - Helm values ([deployment guide](/docs/kubernetes/cloud-providers/aks/aks.md))
-- **[Amazon ECS](/examples/deployments/ECS/)** - Task definitions ([deployment guide](/docs/kubernetes/cloud-providers/ecs/ecs.md))
-- **[Google GKE](/examples/deployments/GKE/)** - DGD manifests ([deployment guide](/docs/kubernetes/cloud-providers/gke/gke.md))
+- **[Amazon EKS](deployments/EKS/README.md)** - Manifests and templates ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx))
+- **[Azure AKS](deployments/AKS/README.md)** - Helm values ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx))
+- **[Amazon ECS](deployments/ECS/README.md)** - Task definitions ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx))
+- **[Google GKE](deployments/GKE/README.md)** - DGD manifests ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx))
 
 ## Runtime Examples
 
 Low-level runtime examples for developers using Python<>Rust bindings:
 
-- **[Hello World](/examples/custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
+- **[Hello World](custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
 
 ## Getting Started
 
-1. **Choose your deployment pattern**: Start with the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) for a simple local deployment, or explore [Disaggregated Serving](/docs/features/disaggregated-serving/README.md) for advanced architectures.
+1. **Choose your deployment pattern**: Start with the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) for a simple local deployment, or explore [Disaggregated Serving](../docs/fern/pages/kubernetes/disaggregated-serving/overview.md) for advanced architectures.
 
 2. **Set up prerequisites**: Most examples require etcd and NATS services. You can start them using:
    ```bash
@@ -82,4 +88,4 @@ If you're running Kubernetes/cloud deployment examples (EKS, AKS, GKE), you'll a
 | **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
 | **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
 
-See the [Kubernetes Installation Guide](/docs/kubernetes/installation-guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.
+See the [Kubernetes Installation Guide](../docs/fern/pages/kubernetes/installation/install-dynamo.md#prerequisites) for detailed setup instructions and pre-deployment checks.
