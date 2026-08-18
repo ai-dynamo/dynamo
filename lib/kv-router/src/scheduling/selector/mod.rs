@@ -12,9 +12,10 @@ pub use default::DefaultWorkerSelector;
 use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 pub use policy::{
     CacheFreeCandidateTable, CacheFreePolicyDecision, CacheFreeRequestContext,
-    CacheFreeWorkerSelectionPolicy, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate,
-    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput,
-    WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionRequirements,
+    CacheFreeWorkerPicker, CacheFreeWorkerSelectionPolicy, ScoredWorkerCandidate, WorkerCacheInput,
+    WorkerCandidate, WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
+    WorkerRoutingInput, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionRequirements,
 };
 
 use default::{pick_default_worker, selection_weights};

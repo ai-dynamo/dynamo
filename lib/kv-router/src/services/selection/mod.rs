@@ -18,18 +18,18 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use super::policy_registry::{
+    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
+    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
+    WorkerSelectionPolicyRegistryError,
+};
 pub use crate::WorkerSelectionPolicyFactory;
 pub use crate::services::common::replica_sync::ReplicaPeerError;
 pub use core::{SelectionCore, SelectionServiceConfig};
 pub use error::SelectionError;
 pub use input::PromptRequest;
 pub use pending::SelectionCacheConfig;
-pub use policy_registry::{
-    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
-    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
-};
 pub use server::{AppState, run_server, run_server_with_service};
 pub use service::{SelectionService, SelectionServiceBuilder};
 pub use types::{

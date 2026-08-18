@@ -22,7 +22,6 @@ use crate::Endpoint;
 use clap::Parser;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::TrackingHashAlgorithm;
-#[cfg(feature = "custom-policy")]
 use dynamo_kv_router::WorkerSelectionPolicy;
 use dynamo_kv_router::WorkerSelectionPolicyFactory;
 #[cfg(feature = "select-service")]
@@ -46,13 +45,7 @@ use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
 use llm_rs::kv_router::KvPushRouter;
-#[cfg(not(feature = "custom-policy"))]
-type RsKvPushRouter = KvPushRouter;
-#[cfg(feature = "custom-policy")]
 type RsKvPushRouter = KvPushRouter<WorkerSelectionPolicy>;
-#[cfg(not(feature = "custom-policy"))]
-type RsKvRouter = llm_rs::kv_router::KvRouter;
-#[cfg(feature = "custom-policy")]
 type RsKvRouter = llm_rs::kv_router::KvRouter<WorkerSelectionPolicy>;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
@@ -1639,7 +1632,7 @@ fn infer_metric_worker_type(
 }
 
 /// Keep the advertised role for existing router metadata and require the same explicit role for
-/// custom-policy dispatch. Legacy cards are ambiguous between decode and aggregated workers.
+/// linked-policy dispatch. Legacy cards are ambiguous between decode and aggregated workers.
 fn advertised_and_policy_worker_roles(
     card: &llm_rs::model_card::ModelDeploymentCard,
 ) -> (
@@ -1684,7 +1677,7 @@ mod metric_worker_type_tests {
 }
 
 /// Create a KV router from an endpoint using the ModelManager for registration.
-/// Custom policies use the discovered model card's typed worker role for selection.
+/// Linked policies use the discovered model card's typed worker role for selection.
 async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
@@ -1787,25 +1780,6 @@ async fn create_kv_router_from_endpoint(
             }
         }
     };
-    #[cfg(not(feature = "custom-policy"))]
-    let _ = (policy_model_name, policy_worker_role);
-
-    #[cfg(not(feature = "custom-policy"))]
-    let kv_router = model_manager
-        .kv_chooser_for_with_worker_role(
-            &endpoint.inner,
-            block_size as u32,
-            kv_router_config,
-            prefill_load_estimator,
-            worker_role,
-            metric_worker_type,
-            model_name,
-            enable_eagle,
-        )
-        .await
-        .map_err(to_pyerr)?;
-
-    #[cfg(feature = "custom-policy")]
     let kv_router = {
         let effective_config = kv_router_config.clone().unwrap_or_default();
         let selector = worker_selection_policy_factory.map_or_else(

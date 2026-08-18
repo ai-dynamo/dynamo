@@ -77,10 +77,10 @@ pub use scheduling::{
 };
 pub use selector::{
     CacheFreeCandidateTable, CacheFreePolicyDecision, CacheFreeRequestContext,
-    CacheFreeWorkerSelectionPolicy, DefaultWorkerSelector, ScoredWorkerCandidate, WorkerCacheInput,
-    WorkerCandidate, WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
-    WorkerRoutingInput, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelector,
+    CacheFreeWorkerPicker, CacheFreeWorkerSelectionPolicy, DefaultWorkerSelector,
+    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
+    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelector,
 };
 pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
 pub use worker_type::WorkerType;

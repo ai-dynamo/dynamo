@@ -8,13 +8,15 @@
 //! but never needs to replace these stock policies.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dynamo_kv_router::{
     KvRouterConfig,
     scheduling::WorkerSelectionPolicyError,
     selector::{
-        WorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-        WorkerSelectionContext, WorkerSelectionPolicy,
+        CacheFreeCandidateTable, CacheFreePolicyDecision, CacheFreeRequestContext,
+        CacheFreeWorkerPicker, WorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker,
+        WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionRequirements,
     },
     services::policy_registry::{
         WorkerSelectionPolicyProvider, WorkerSelectionPolicyRegistry,
@@ -22,7 +24,7 @@ use dynamo_kv_router::{
     },
 };
 
-/// Register the worker-selection policies shipped in every Dynamo artifact.
+/// Register the stock policy types linked by Dynamo's Python router extension.
 ///
 /// Each resolved policy instance creates one picker for its routing partition, so mutable state
 /// such as the round-robin cursor is not shared between models or worker roles.
@@ -78,6 +80,96 @@ fn worker_selection_policy(
             last_round_robin_worker: None,
         }),
     )
+    .with_cache_free_picker(Box::new(FirstPartyCacheFreePicker::new(policy)))
+}
+
+/// Direct cache-free implementation for the first-party simple policies.
+///
+/// This intentionally bypasses generic filter/score/pick materialization: round-robin and random
+/// select an index directly, P2C reads only its two sampled load counters, and least-loaded uses
+/// the host-maintained minimum. None of these algorithms may walk the candidate table.
+struct FirstPartyCacheFreePicker {
+    policy: FirstPartyRoutingPolicy,
+    round_robin_cursor: AtomicU64,
+}
+
+impl FirstPartyCacheFreePicker {
+    const fn new(policy: FirstPartyRoutingPolicy) -> Self {
+        Self {
+            policy,
+            round_robin_cursor: AtomicU64::new(0),
+        }
+    }
+
+    const fn requirements_for(policy: FirstPartyRoutingPolicy) -> WorkerSelectionRequirements {
+        match policy {
+            FirstPartyRoutingPolicy::RoundRobin | FirstPartyRoutingPolicy::Random => {
+                WorkerSelectionRequirements::STATIC
+            }
+            FirstPartyRoutingPolicy::PowerOfTwoChoices | FirstPartyRoutingPolicy::LeastLoaded => {
+                WorkerSelectionRequirements::ACTIVE_REQUEST_LOAD
+            }
+        }
+    }
+
+    fn checked_index(
+        index: Option<usize>,
+        candidate_count: usize,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        index
+            .filter(|&index| index < candidate_count)
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible workers"))
+    }
+}
+
+impl CacheFreeWorkerPicker for FirstPartyCacheFreePicker {
+    fn requirements(&self) -> WorkerSelectionRequirements {
+        Self::requirements_for(self.policy)
+    }
+
+    fn select(
+        &self,
+        request: &CacheFreeRequestContext<'_>,
+        candidate_table: &dyn CacheFreeCandidateTable,
+    ) -> Result<CacheFreePolicyDecision, WorkerSelectionPolicyError> {
+        let candidate_count = candidate_table.len();
+        if candidate_count == 0 {
+            return Err(WorkerSelectionPolicyError::failed("no eligible workers"));
+        }
+
+        let index = match self.policy {
+            FirstPartyRoutingPolicy::RoundRobin => {
+                let cursor = if request.is_advisory() {
+                    self.round_robin_cursor.load(Ordering::Relaxed)
+                } else {
+                    self.round_robin_cursor.fetch_add(1, Ordering::Relaxed)
+                };
+                cursor as usize % candidate_count
+            }
+            FirstPartyRoutingPolicy::Random => fastrand::usize(..candidate_count),
+            FirstPartyRoutingPolicy::PowerOfTwoChoices => {
+                let first = fastrand::usize(..candidate_count);
+                if candidate_count == 1 {
+                    first
+                } else {
+                    let second =
+                        (first + 1 + fastrand::usize(..candidate_count - 1)) % candidate_count;
+                    if candidate_table.active_requests(first)
+                        <= candidate_table.active_requests(second)
+                    {
+                        first
+                    } else {
+                        second
+                    }
+                }
+            }
+            FirstPartyRoutingPolicy::LeastLoaded => {
+                Self::checked_index(candidate_table.least_loaded_index(), candidate_count)?
+            }
+        };
+
+        Ok(CacheFreePolicyDecision::unfiltered(index))
+    }
 }
 
 struct FirstPartyWorkerScorer {
@@ -201,12 +293,13 @@ impl WorkerPicker for FirstPartyWorkerPicker {
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use dynamo_kv_router::{
         protocols::{WorkerConfigLike, WorkerWithDpRank},
         scheduling::{OverlapSignals, ScheduleMode, SchedulingRequest},
-        selector::WorkerSelector,
+        selector::{CacheFreeCandidateTable, CacheFreeRequestContext, WorkerSelector},
     };
 
     #[derive(Default)]
@@ -263,6 +356,65 @@ mod tests {
             worker_loads: Default::default(),
             resp_tx: None,
         }
+    }
+
+    struct CountingCacheFreeRows {
+        rows: Vec<(WorkerWithDpRank, usize)>,
+        least_loaded_index: Option<usize>,
+        worker_reads: AtomicUsize,
+        active_request_reads: AtomicUsize,
+        least_loaded_reads: AtomicUsize,
+    }
+
+    impl CountingCacheFreeRows {
+        fn with_workers(count: usize, least_loaded_index: Option<usize>) -> Self {
+            Self {
+                rows: (0..count)
+                    .map(|index| (WorkerWithDpRank::from_worker_id(index as u64), index))
+                    .collect(),
+                least_loaded_index,
+                worker_reads: AtomicUsize::new(0),
+                active_request_reads: AtomicUsize::new(0),
+                least_loaded_reads: AtomicUsize::new(0),
+            }
+        }
+
+        fn reads(&self) -> (usize, usize, usize) {
+            (
+                self.worker_reads.load(Ordering::Relaxed),
+                self.active_request_reads.load(Ordering::Relaxed),
+                self.least_loaded_reads.load(Ordering::Relaxed),
+            )
+        }
+    }
+
+    impl CacheFreeCandidateTable for CountingCacheFreeRows {
+        fn len(&self) -> usize {
+            self.rows.len()
+        }
+
+        fn worker(&self, index: usize) -> WorkerWithDpRank {
+            self.worker_reads.fetch_add(1, Ordering::Relaxed);
+            self.rows[index].0
+        }
+
+        fn active_requests(&self, index: usize) -> usize {
+            self.active_request_reads.fetch_add(1, Ordering::Relaxed);
+            self.rows[index].1
+        }
+
+        fn least_loaded_index(&self) -> Option<usize> {
+            self.least_loaded_reads.fetch_add(1, Ordering::Relaxed);
+            self.least_loaded_index
+        }
+    }
+
+    fn cache_free_policy(
+        policy: FirstPartyRoutingPolicy,
+    ) -> dynamo_kv_router::CacheFreeWorkerSelectionPolicy {
+        worker_selection_policy(KvRouterConfig::default(), "decode", policy)
+            .into_cache_free()
+            .unwrap()
     }
 
     #[test]
@@ -340,5 +492,32 @@ mod tests {
         assert!(!static_policy.requirements().needs_active_request_load());
         assert!(!load_aware_policy.requirements().needs_cache_index());
         assert!(load_aware_policy.requirements().needs_active_request_load());
+    }
+
+    #[test]
+    fn cache_free_simple_policies_do_not_scan_large_worker_sets() {
+        const WORKERS: usize = 1024;
+        let request = CacheFreeRequestContext::new("request", 16, false);
+
+        let rows = CountingCacheFreeRows::with_workers(WORKERS, Some(739));
+        let round_robin = cache_free_policy(FirstPartyRoutingPolicy::RoundRobin);
+        assert_eq!(round_robin.select(&request, &rows).unwrap().index, 0);
+        assert_eq!(round_robin.select(&request, &rows).unwrap().index, 1);
+        assert_eq!(rows.reads(), (0, 0, 0));
+
+        let rows = CountingCacheFreeRows::with_workers(WORKERS, Some(739));
+        let random = cache_free_policy(FirstPartyRoutingPolicy::Random);
+        assert!(random.select(&request, &rows).unwrap().index < WORKERS);
+        assert_eq!(rows.reads(), (0, 0, 0));
+
+        let rows = CountingCacheFreeRows::with_workers(WORKERS, Some(739));
+        let p2c = cache_free_policy(FirstPartyRoutingPolicy::PowerOfTwoChoices);
+        assert!(p2c.select(&request, &rows).unwrap().index < WORKERS);
+        assert_eq!(rows.reads(), (0, 2, 0));
+
+        let rows = CountingCacheFreeRows::with_workers(WORKERS, Some(739));
+        let least_loaded = cache_free_policy(FirstPartyRoutingPolicy::LeastLoaded);
+        assert_eq!(least_loaded.select(&request, &rows).unwrap().index, 739);
+        assert_eq!(rows.reads(), (0, 0, 1));
     }
 }
