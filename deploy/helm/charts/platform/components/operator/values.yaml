@@ -150,6 +150,12 @@ metricsService:
   # true=always create both (use for helm template / GitOps workflows),
   # false=never create either
   enabled: null
+  # -- Labels for the operator ServiceMonitor. Label-selecting Prometheus installs
+  # only discover monitors carrying their release label; the default matches the
+  # release name used by deploy/observability/setup-monitoring.sh. Override when your
+  # Prometheus release is named differently, e.g. {release: kube-prometheus-stack}.
+  labels:
+    release: prometheus
   ports:
   - name: metrics
     port: 8080
