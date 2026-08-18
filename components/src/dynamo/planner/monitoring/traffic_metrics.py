@@ -424,7 +424,9 @@ class PrometheusAPIClient:
             model_name,
         )
 
-    def get_avg_kv_hit_rate(self, interval: str, model_name: str) -> Optional[float]:
+    def get_avg_kv_hit_rate(
+        self, interval: str, model_name: str, namespace: Optional[str] = None
+    ) -> Optional[float]:
         """Average predicted KV cache hit rate (0.0-1.0) from the router.
 
         The histogram lives on the router component, but it can be exposed on
@@ -444,21 +446,38 @@ class PrometheusAPIClient:
             f"{prometheus_names.name_prefix.COMPONENT}_"
             f"{prometheus_names.router.KV_HIT_RATE}"
         )
+        # Which namespace labels these series depends on which router publishes
+        # them, and the planner is not told which one the deployment has. An
+        # embedded KV router builds its metrics from the worker Component, so
+        # they carry the worker suffix the operator injects. A standalone
+        # LocalRouter registers under the base namespace and never receives that
+        # suffix. Try the worker namespace first, then the base one, so both
+        # topologies resolve without changing what the runtime emits.
+        candidates = []
+        if namespace:
+            candidates.append(namespace)
+        if self.dynamo_namespace not in candidates:
+            candidates.append(self.dynamo_namespace)
+
         try:
-            ns = self.dynamo_namespace.replace("-", "_")
-            ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
-            query = (
-                f"sum(increase({full_metric_name}_sum{{{ns_filter}}}[{interval}])) / "
-                f"sum(increase({full_metric_name}_count{{{ns_filter}}}[{interval}]))"
-            )
-            result = self.prom.custom_query(query=query)
-            if not result:
-                logger.info(
-                    f"No prometheus data for {full_metric_name}, returning None"
+            for candidate in candidates:
+                ns = candidate.replace("-", "_")
+                ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
+                query = (
+                    f"sum(increase({full_metric_name}_sum{{{ns_filter}}}[{interval}])) / "
+                    f"sum(increase({full_metric_name}_count{{{ns_filter}}}[{interval}]))"
                 )
-                return None
-            value = float(result[0]["value"][1])
-            return None if math.isnan(value) else value
+                result = self.prom.custom_query(query=query)
+                if not result:
+                    # No series under this namespace. Try the next candidate.
+                    continue
+                value = float(result[0]["value"][1])
+                # NaN means the series exist and the window was idle. That is an
+                # answer, so stop here: falling through would read a different
+                # router's traffic.
+                return None if math.isnan(value) else value
+            logger.info(f"No prometheus data for {full_metric_name}, returning None")
+            return None
         except Exception as e:
             logger.warning(f"Error getting avg kv hit rate: {e}")
             return None

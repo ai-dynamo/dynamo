@@ -584,6 +584,59 @@ class TestPrometheusAPIClientRouterSource:
         expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}"
         assert expected_metric in call_args
 
+    def test_kv_hit_rate_queries_the_worker_namespace_first(self):
+        """An embedded KV router builds its metrics from the worker Component,
+        so its series carry the operator's worker suffix. Querying only the base
+        namespace matched nothing and the planner silently lost the discount."""
+        client = PrometheusAPIClient(
+            "http://localhost:9090", "myns", metrics_source="frontend"
+        )
+        client.prom = MagicMock()
+        client.prom.custom_query.return_value = [{"value": [0, "0.35"]}]
+
+        result = client.get_avg_kv_hit_rate("60s", "mymodel", namespace="myns-c76086f3")
+
+        assert result == 0.35
+        assert client.prom.custom_query.call_count == 1
+        assert 'dynamo_namespace="myns_c76086f3"' in str(
+            client.prom.custom_query.call_args
+        )
+
+    def test_kv_hit_rate_falls_back_to_the_base_namespace_when_empty(self):
+        """A standalone LocalRouter registers under the base namespace and never
+        receives the worker suffix, so an empty first result must fall through
+        rather than be reported as no data."""
+        client = PrometheusAPIClient(
+            "http://localhost:9090", "myns", metrics_source="frontend"
+        )
+        client.prom = MagicMock()
+        client.prom.custom_query.side_effect = [[], [{"value": [0, "0.42"]}]]
+
+        result = client.get_avg_kv_hit_rate("60s", "mymodel", namespace="myns-c76086f3")
+
+        assert result == 0.42
+        assert client.prom.custom_query.call_count == 2
+        queries = [str(call) for call in client.prom.custom_query.call_args_list]
+        assert 'dynamo_namespace="myns_c76086f3"' in queries[0]
+        assert 'dynamo_namespace="myns"' in queries[1]
+
+    def test_kv_hit_rate_does_not_fall_back_on_nan(self):
+        """NaN means the series exist and the window was idle. Falling through
+        there would report a different router's traffic as this one's."""
+        client = PrometheusAPIClient(
+            "http://localhost:9090", "myns", metrics_source="frontend"
+        )
+        client.prom = MagicMock()
+        client.prom.custom_query.side_effect = [
+            [{"value": [0, "NaN"]}],
+            [{"value": [0, "0.99"]}],
+        ]
+
+        result = client.get_avg_kv_hit_rate("60s", "mymodel", namespace="myns-c76086f3")
+
+        assert result is None
+        assert client.prom.custom_query.call_count == 1
+
     def test_get_avg_request_count_uses_router_requests_started_total(
         self, router_client
     ):
