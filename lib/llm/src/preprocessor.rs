@@ -3304,7 +3304,44 @@ impl OpenAIPreprocessor {
                 Box::pin(stream)
             };
 
-        Ok(transformed_stream)
+        Ok(Self::apply_tool_call_response_policy(
+            transformed_stream,
+            tool_call_parsing_enabled,
+        ))
+    }
+
+    /// Enforce the request's tool-call policy after model-specific parsing.
+    ///
+    /// Kimi K3 must keep its jail active even when the request does not permit
+    /// tools because the same parser unwraps ordinary XTML response channels.
+    /// The jail can still emit structured tool-call deltas while doing that
+    /// decoding, so parser activation alone is not an output-policy boundary.
+    /// Apply the policy to the shared stream before the HTTP streaming and
+    /// non-streaming paths diverge.
+    fn apply_tool_call_response_policy<S>(
+        stream: S,
+        tool_call_parsing_enabled: bool,
+    ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static>>
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        if tool_call_parsing_enabled {
+            return Box::pin(stream);
+        }
+
+        Box::pin(stream.map(|mut response| {
+            if let Some(data) = response.data.as_mut() {
+                for choice in &mut data.inner.choices {
+                    choice.delta.tool_calls = None;
+                    if choice.finish_reason
+                        == Some(dynamo_protocols::types::FinishReason::ToolCalls)
+                    {
+                        choice.finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
+                    }
+                }
+            }
+            response
+        }))
     }
 
     /// Ensure the first emitted delta for each choice carries the assistant role.
@@ -5364,7 +5401,7 @@ mod tests {
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
-        Role,
+        FinishReason, Role,
     };
 
     fn chat_stream_chunk(
@@ -5423,6 +5460,144 @@ mod tests {
         assert_eq!(
             roles,
             vec![Some(Role::Assistant), Some(Role::Assistant), None, None,]
+        );
+    }
+
+    fn kimi_k3_reasoning_chunk(reasoning: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, Some(Role::Assistant));
+        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some(reasoning.to_string());
+        chunk
+    }
+
+    fn terminal_chat_stream_chunk() -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, None);
+        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.finish_reason = Some(FinishReason::Stop);
+        chunk
+    }
+
+    async fn apply_kimi_k3_no_tools(
+        leaked_reasoning: &str,
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "test"}]
+        }))
+        .unwrap();
+        let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(&request);
+        assert!(!tool_call_parsing_enabled, "request has no tools");
+
+        let jailed = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("kimi_k3".to_string()),
+            request.inner.tool_choice.clone(),
+            None,
+            false,
+            stream::iter(vec![
+                kimi_k3_reasoning_chunk(leaked_reasoning),
+                terminal_chat_stream_chunk(),
+            ]),
+        );
+
+        OpenAIPreprocessor::apply_tool_call_response_policy(jailed, tool_call_parsing_enabled)
+            .collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_no_tools_preserves_decoded_content_and_reasoning() {
+        let responses = apply_kimi_k3_no_tools(concat!(
+            "The user requested an exact integer.",
+            "<|open|>response<|sep|>",
+            "323",
+            "<|close|>response<|sep|>",
+            "<|close|>message<|sep|>",
+            "<|end_of_msg|>"
+        ))
+        .await;
+
+        let choices: Vec<_> = responses
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .collect();
+        let content: String = choices
+            .iter()
+            .filter_map(|choice| match &choice.delta.content {
+                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let reasoning: String = choices
+            .iter()
+            .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+            .collect();
+
+        assert_eq!(content, "323");
+        assert_eq!(reasoning, "The user requested an exact integer.");
+        assert!(!content.contains("<|"));
+        assert!(!reasoning.contains("<|"));
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_no_tools_suppresses_structured_calls_for_stream_and_batch() {
+        let responses = apply_kimi_k3_no_tools(concat!(
+            "Use the calculator.",
+            "<|open|>tools<|sep|>",
+            "<|open|>call tool=\"calc\" index=\"1\"<|sep|>",
+            "<|open|>argument key=\"x\" type=\"number\"<|sep|>323",
+            "<|close|>argument<|sep|>",
+            "<|close|>call<|sep|>",
+            "<|close|>tools<|sep|>",
+            "<|close|>message<|sep|>",
+            "<|end_of_msg|>"
+        ))
+        .await;
+
+        let choices: Vec<_> = responses
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .collect();
+        assert!(
+            choices
+                .iter()
+                .all(|choice| choice.delta.tool_calls.is_none()),
+            "streaming output must not expose parser-produced tool calls"
+        );
+        assert!(
+            choices
+                .iter()
+                .all(|choice| choice.finish_reason != Some(FinishReason::ToolCalls))
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.finish_reason == Some(FinishReason::Stop))
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                .collect::<String>(),
+            "Use the calculator."
+        );
+
+        let response =
+            crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+                stream::iter(responses),
+                crate::protocols::openai::ParsingOptions::new(None, None),
+            )
+            .await
+            .unwrap();
+        let choice = &response.inner.choices[0];
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("Use the calculator.")
         );
     }
 
