@@ -75,8 +75,11 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 COPY --from=dynamo .cargo/ .cargo/
 COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 
-# Copy all workspace crates (libdynamo_llm depends transitively on many)
+# Copy all workspace crates. Cargo resolves every workspace member before it
+# builds libdynamo_llm, including the AISimulate crates.
 COPY --from=dynamo lib/ lib/
+COPY --from=dynamo aisimulate/crates/ aisimulate/crates/
+COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom-policy-example/
 
 # ext-proc is also a workspace member (referenced from the root Cargo.toml),
 # so cargo needs its manifest on disk to resolve the workspace even when we

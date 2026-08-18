@@ -41,7 +41,7 @@ class TestEncodeToVideoBytes:
         iio.get_writer = MagicMock(return_value=writer)
         return iio, writer
 
-    def test_mp4_selects_h264_nvenc_codec(self):
+    def test_mp4_selects_vp9_codec(self):
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
         iio = self._mock_iio_v3()
@@ -56,7 +56,8 @@ class TestEncodeToVideoBytes:
 
             iio.imwrite.assert_called_once()
             _, kwargs = iio.imwrite.call_args
-            assert kwargs.get("codec") == "h264_nvenc"
+            # Royalty-free: mp4 output uses VP9, not h264_nvenc.
+            assert kwargs.get("codec") == "libvpx-vp9"
             assert kwargs.get("fps") == 8
 
     def test_webm_selects_libvpx_vp9_codec(self):
@@ -154,3 +155,58 @@ class TestEncodeToVideoBytes:
 
             assert writer.append_data.call_count == 4
             writer.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# frames_to_numpy
+# ---------------------------------------------------------------------------
+
+
+class TestFramesToNumpy:
+    """Tests for frames_to_numpy() — must accept both PIL and numpy frames."""
+
+    def test_numpy_float_frames_scale_to_uint8(self):
+        """Regression: diffusion pipelines emit float [0, 1] numpy frames.
+
+        The PIL-only implementation crashed with "'numpy.ndarray' object has no
+        attribute 'convert'" on the Wan2.1 T2V serve path.
+        """
+        from dynamo.common.utils.video_utils import frames_to_numpy
+
+        frames = [np.full((4, 4, 3), 0.5, dtype=np.float32) for _ in range(3)]
+        out = frames_to_numpy(frames)
+
+        assert out.shape == (3, 4, 4, 3)
+        assert out.dtype == np.uint8
+        # 0.5 * 255 -> 128 (rounded)
+        assert np.all(out == 128)
+
+    def test_numpy_uint8_frames_pass_through(self):
+        from dynamo.common.utils.video_utils import frames_to_numpy
+
+        frames = [np.full((4, 4, 3), 200, dtype=np.uint8) for _ in range(2)]
+        out = frames_to_numpy(frames)
+
+        assert out.shape == (2, 4, 4, 3)
+        assert out.dtype == np.uint8
+        assert np.all(out == 200)
+
+    def test_pil_frames_still_supported(self):
+        from PIL import Image
+
+        from dynamo.common.utils.video_utils import frames_to_numpy
+
+        frames = [
+            Image.fromarray(np.full((4, 4, 3), 77, dtype=np.uint8)) for _ in range(2)
+        ]
+        out = frames_to_numpy(frames)
+
+        assert out.shape == (2, 4, 4, 3)
+        assert out.dtype == np.uint8
+        assert np.all(out == 77)
+
+    def test_empty_raises(self):
+        from dynamo.common.utils.video_utils import frames_to_numpy
+
+        with pytest.raises(ValueError, match="No images provided"):
+            frames_to_numpy([])

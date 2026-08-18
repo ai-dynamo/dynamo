@@ -6,15 +6,14 @@
 ``VisionEncoderBackend`` is the **single surface an encoder author implements**.
 It is a pure policy + compute backend: no threads, no futures, no event loop.
 Dynamo owns all the *driving* — the dedicated actor thread, cross-request
-coalescing, the embeds splice, and the lifecycle — via ``ThreadedMicroBatcher``
+coalescing, engine adaptation, and the lifecycle — via ``ThreadedMicroBatcher``
 (the generic cross-request batcher) and ``AsyncVisionEncoder`` (the async
 request-API glue). This module defines only the contract those drivers call.
 
 The encoder runs in the **same process** as the aggregated vLLM worker (no
-separate encode worker, no NIXL transfer): it turns image inputs into the
-visual-token embeddings for each image, and Dynamo splices those embeds into a
-mixed ``EmbedsPrompt`` at the placeholder positions (see
-``adapter.linear.build_mixed_embeds``) for a text-only LM.
+separate encode worker, no NIXL transfer): it turns image inputs into ordered,
+producer-defined artifacts. The resolved downstream decoder selects an adapter
+that validates those artifacts and constructs the final engine prompt.
 
 Division of labour (author vs. Dynamo):
 
@@ -32,20 +31,16 @@ Division of labour (author vs. Dynamo):
   there is no preprocess phase — ``preprocess`` is never called and raws go
   straight to ``forward_batch``. A mismatch (overridden ``preprocess`` with
   ``preprocess_concurrency`` left at ``0``) fails fast at startup.
-- ``forward_batch(items, target_bucket=None) -> list[torch.Tensor]`` — **actor
+- ``forward_batch(items, target_bucket=None) -> list[ArtifactT]`` — **actor
   thread, serialized.** ``items`` are a cost-bounded batch (summed ``cost`` within
   the budget). Fence (stream event + sync) and **copy outputs to CPU** before
-  returning, so results are safe to consume from another thread and splice
-  directly. Returns one ``(n_visual_tokens, lm_hidden_dim)`` **CPU** tensor per
-  item, in input order. ``target_bucket`` is reserved for CUDA-graph batching,
-  once supported (the ladder rung to pad to); it is ``None`` until then.
+  returning, so results are safe to consume from another thread. Returns one
+  artifact per item, in input order. ``target_bucket`` is reserved for CUDA-graph
+  batching, once supported (the ladder rung to pad to); it is ``None`` until then.
 - ``close()`` — actor thread, on teardown. Release any thread-affine resources.
 
 Attributes read **once at setup** (never per-request):
 
-- ``image_token_id`` — the token id marking image positions in the prompt;
-  **hardcode it for your model** (e.g. ``151655`` for Qwen3-VL's ``<|image_pad|>``).
-  Dynamo uses it to locate each image span for the splice.
 - ``max_batch_cost`` — the scalar dispatch ceiling the batcher packs up to; a
   *chosen* budget (a token budget when ``cost`` is a token count). ``None`` (the
   default) ⇒ **pass-through**: no cap (the author owns sizing).
@@ -59,6 +54,39 @@ Attributes read **once at setup** (never per-request):
 Batching is **one-dimensional**: Dynamo packs by scalar ``cost`` up to
 ``max_batch_cost`` and never inspects item shape — the author owns any
 shape/padding concerns inside ``forward_batch``.
+
+Raising errors
+--------------
+
+An exception raised anywhere in this contract reaches the HTTP client, and its
+**type** — not its message — decides how:
+
+- ``ValueError`` / ``TypeError`` ⇒ the caller's input is at fault. Dynamo maps
+  these to ``Backend(InvalidArgument)``, answering **HTTP 400 with the message
+  forwarded to the client verbatim**.
+- **any other type** (``RuntimeError``, ``TimeoutError``, ``torch`` errors, …)
+  ⇒ the engine is at fault. The caller gets a sanitized 5xx and the message
+  survives in the server log only.
+
+Pick the type deliberately. Reporting an out-of-memory or a driver fault as
+``ValueError`` tells the caller its request was malformed and suppresses the
+retry that would have succeeded; reporting a genuinely bad image as
+``RuntimeError`` costs the caller the one message that would let them fix it.
+
+.. warning::
+   **A ``ValueError``/``TypeError`` message is published to the client.** Do not
+   interpolate file paths, tracebacks, tensor dumps, model or weight
+   identifiers, or any other server-internal state into one. Describe the fault
+   in terms of the request ("image 2 is 1-D; expected a 2-D embedding"), and
+   keep the diagnosis in a log line. Non-validation exception types are
+   sanitized before they leave the process, so they may say anything.
+
+Note the blast radius differs by method. A ``preprocess`` failure is scoped to
+the one image that caused it, but ``forward_batch`` runs a batch coalesced
+across *concurrent, unrelated requests*, and an exception there is delivered to
+**every request in that batch**. A per-item fault therefore belongs in
+``preprocess`` — raised from ``forward_batch`` it would tell unrelated callers
+their requests were invalid.
 """
 
 from __future__ import annotations
@@ -67,10 +95,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Generic, List, Optional, Sequence, TypeVar
 
-import torch
-
 RawT = TypeVar("RawT")  # raw input the author preprocesses (e.g. an image URL)
 ItemT = TypeVar("ItemT")  # opaque payload preprocess() hands to forward_batch()
+ArtifactT = TypeVar("ArtifactT")  # opaque result consumed by a decoder adapter
 
 
 @dataclass(frozen=True)
@@ -93,22 +120,16 @@ class Preprocessed(Generic[ItemT]):
     cost: int = 1
 
 
-class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
+class VisionEncoderBackend(ABC, Generic[RawT, ItemT, ArtifactT]):
     """Author-written, in-process vision encoder contract.
 
     A pure policy + compute backend — no threads, no futures. Dynamo drives it
     on a dedicated actor thread (``ThreadedMicroBatcher``) and exposes the async
     request API (``AsyncVisionEncoder``). Subclasses implement ``build`` and
-    ``forward_batch`` and set ``image_token_id``; ``preprocess`` (default identity
-    passthrough), ``max_batch_cost``, ``buckets``, and ``preprocess_concurrency``
-    are overridden only as needed.
+    ``forward_batch``; ``preprocess`` (default identity passthrough),
+    ``max_batch_cost``, ``buckets``, and ``preprocess_concurrency`` are overridden
+    only as needed. Artifact interpretation belongs to the selected adapter.
     """
-
-    #: Image placeholder token id — **hardcode it for your model** (e.g. ``151655``
-    #: for Qwen3-VL's ``<|image_pad|>``; resolve it from your tokenizer offline if
-    #: unsure). Dynamo uses it to locate each image span for the splice. Declared
-    #: without a default so a backend that forgets to set it fails fast at startup.
-    image_token_id: int
 
     #: Scalar dispatch ceiling: the batcher packs items up to this summed ``cost``
     #: per ``forward_batch`` call. ``None`` (the default) ⇒ **pass-through**: no cap
@@ -152,20 +173,41 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
         Raise to reject a bad input — it fails only that image, before submit.
         With ``preprocess_concurrency == 0`` this method is **never called**;
         overriding it without raising the concurrency fails fast at startup.
+
+        This is the right place to reject a malformed image: the failure is
+        scoped to the one raw that caused it, so a ``ValueError``/``TypeError``
+        here reaches exactly the caller who sent it, as an HTTP 400 carrying the
+        message. Keep that message free of server-internal detail (see
+        *Raising errors* in the module docstring).
         """
         return Preprocessed(item=raw)  # type: ignore[arg-type]  # ItemT == RawT
 
     @abstractmethod
     def forward_batch(
         self, items: List[ItemT], target_bucket: Optional[int] = None
-    ) -> List[torch.Tensor]:
-        """Encode one cost-bounded batch (actor thread); one tensor per item, in order.
+    ) -> List[ArtifactT]:
+        """Encode one cost-bounded batch; one artifact per item, in input order.
+
+        Artifacts are opaque, producer-defined values. Dynamo preserves their
+        order and passes them unchanged to the selected adapter, which owns the
+        concrete artifact contract and validation.
 
         Fence (stream event + sync) and **copy outputs to CPU** before returning,
-        so results are safe to consume from another thread and splice directly.
-        Return one ``(n_visual_tokens, lm_hidden_dim)`` **CPU** tensor per item, in
-        input order. ``target_bucket`` is reserved for CUDA-graph batching, once
-        supported (the ladder rung to pad to), and is ``None`` until then.
+        so results are safe to consume from another thread. ``target_bucket`` is
+        reserved for CUDA-graph batching, once supported (the ladder rung to pad
+        to), and is ``None`` until then.
+
+        Raises:
+            Exception: fails **every request in the batch**, not just the item
+                that caused it — ``items`` is coalesced across concurrent,
+                unrelated requests, and the exception is delivered to all of
+                them. So prefer a non-validation type here (the engine, not any
+                one caller, is what failed), and push per-item rejection up into
+                ``preprocess`` where it is scoped to a single image. A
+                ``ValueError``/``TypeError`` raised here answers HTTP 400 with
+                its message forwarded verbatim to callers who may have sent
+                perfectly valid input. See *Raising errors* in the module
+                docstring.
         """
         ...
 

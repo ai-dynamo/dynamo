@@ -37,11 +37,11 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   <div className="dynamo-recipe-browser-header">
     <div>
       <p className="dynamo-recipe-eyebrow">Recipe catalog</p>
-      <h3>15 model families</h3>
+      <h3>17 model families</h3>
       <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>42</strong>
+      <strong>84</strong>
       <span>Deployable configurations</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
@@ -104,6 +104,15 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <p className="dynamo-model-summary">Multi-target vLLM matrix covering B200 and H200 for chat and agentic traffic, with Eagle3 MLA speculation and KV-aware routing.</p>
     <div className="dynamo-model-tags"><span>vLLM</span><span>4x B200 / 8x H200</span><span>Chat + agentic</span></div>
   <a className="dynamo-card-link" href="kimi-k2-6.mdx" aria-label="Open the Kimi-K2.6 recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm trtllm" data-hardware="h100 h200 b200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
+      <div><h3>Nemotron-3.5-Lightning</h3><p>NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">30B hybrid Mamba/Attention/MoE recipe matrix for H100, H200, B200, and GB200, with vLLM MTP/DFlash/DSpark targets, DSpark KV-routing aggregate variants on H100/H200/B200, and experimental TensorRT-LLM MTP/no-spec aggregates.</p>
+    <div className="dynamo-model-tags"><span>vLLM + TRT-LLM</span><span>1-4x GPU</span><span>Agentic · 262K context</span></div>
+  <a className="dynamo-card-link" href="nemotron-3-5-lightning.mdx" aria-label="Open the Nemotron-3.5-Lightning recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
@@ -176,6 +185,15 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <p className="dynamo-model-summary">Disaggregated vLLM serving with KV-aware routing on 16x H200, for multi-turn conversational traffic with prefix reuse.</p>
     <div className="dynamo-model-tags"><span>vLLM</span><span>16x H200</span><span>Multi-turn conversation</span><span>Related benchmark</span></div>
   <a className="dynamo-card-link" href="qwen3-32b.mdx" aria-label="Open the Qwen3-32B recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div><h3>Qwen3.5-122B-A10B</h3><p>Qwen</p></div>
+    </div>
+    <p className="dynamo-model-summary">vLLM recipes for long-context agentic traffic on B200 NVFP4 and H200 FP8, aggregated or disaggregated 1P2D, with KV-aware routing and MTP speculation on H200 aggregated.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>2-4x B200/H200</span><span>Agentic trace replay</span></div>
+  <a className="dynamo-card-link" href="qwen3-5-122b.mdx" aria-label="Open the Qwen3.5-122B-A10B recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="trtllm" data-hardware="b200 h100 h200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation">
     <div className="dynamo-model-card-top">

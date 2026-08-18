@@ -4,9 +4,8 @@
 """Unit tests for the custom encoder backend contract.
 
 Pin the author-facing contract surface: the ``Preprocessed`` carrier (item +
-scalar cost, no bucket_key), the hardcoded ``image_token_id`` attribute, the
-no-device ``build`` signature, and that the ABC cannot be instantiated without
-the required methods.
+scalar cost, no bucket_key), generic forward artifacts, the no-device ``build``
+signature, and that the ABC cannot be instantiated without the required methods.
 """
 
 import pytest
@@ -27,7 +26,7 @@ pytestmark = [
 
 
 class _MinimalBackend(VisionEncoderBackend):
-    """Smallest concrete backend — hardcodes the image token id."""
+    """Smallest concrete backend with an explicit preprocess phase."""
 
     image_token_id = 151655
 
@@ -97,5 +96,4 @@ def test_default_attrs_and_close_noop():
     assert e.buckets is None
     assert e.max_batch_cost is None
     assert e.preprocess_concurrency == 0
-    assert e.image_token_id == 151655
     assert e.close() is None

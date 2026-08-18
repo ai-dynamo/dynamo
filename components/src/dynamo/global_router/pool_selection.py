@@ -7,8 +7,8 @@ Configuration loading and pool selection logic for the Global Router.
 Supports two modes:
 - "disagg" (default): Separate prefill and decode pools with independent
   grid-based selection strategies mapping (ISL, TTFT) -> prefill pool
-  and (context_length, ITL) -> decode pool.
-- "agg": Unified pools handling both prefill and decode (chunked prefill),
+  and (request token count, ITL) -> decode pool.
+- "agg": Unified pools handling both prefill and decode,
   with grid-based selection mapping (TTFT, ITL) -> agg pool, optionally
   extended to (ISL, TTFT, ITL) -> agg pool.
 
@@ -198,7 +198,7 @@ class PrefillPoolSelectionStrategy:
 
 @dataclass
 class DecodePoolSelectionStrategy:
-    """Strategy for selecting decode pools based on context length and ITL target."""
+    """Strategy for selecting decode pools based on a token-count bucket and ITL target."""
 
     itl_min_ms: float
     itl_max_ms: float
@@ -231,7 +231,7 @@ class DecodePoolSelectionStrategy:
         Select decode pool based on context length, ITL target, and optional priority.
 
         Args:
-            context_length: Total context length (prompt + generated tokens so far)
+            context_length: Request token count supplied by the global router
             itl_target_ms: Target inter-token latency in ms. If None, uses middle of range.
             priority: Request priority from agent hints. If set and a priority
                 override rule matches, the override takes precedence over the grid.

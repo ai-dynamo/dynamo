@@ -78,6 +78,34 @@ pub mod openai {
             ServerStreamingEngine<NvCreateEmbeddingRequest, Annotated<NvCreateEmbeddingResponse>>;
     }
 
+    pub mod classify {
+        use super::*;
+
+        pub use protocols::openai::classify::{NvCreateClassifyRequest, NvCreateClassifyResponse};
+
+        /// A [`UnaryEngine`] implementation for the `/classify` API
+        pub type OpenAIClassifyUnaryEngine =
+            UnaryEngine<NvCreateClassifyRequest, NvCreateClassifyResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the `/classify` API
+        pub type OpenAIClassifyStreamingEngine =
+            ServerStreamingEngine<NvCreateClassifyRequest, Annotated<NvCreateClassifyResponse>>;
+    }
+
+    pub mod pooling {
+        use super::*;
+
+        pub use protocols::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
+
+        /// A [`UnaryEngine`] implementation for the `/pooling` API
+        pub type OpenAIPoolingUnaryEngine =
+            UnaryEngine<NvCreatePoolingRequest, NvCreatePoolingResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the `/pooling` API
+        pub type OpenAIPoolingStreamingEngine =
+            ServerStreamingEngine<NvCreatePoolingRequest, Annotated<NvCreatePoolingResponse>>;
+    }
+
     pub mod images {
         use super::*;
 

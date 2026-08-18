@@ -2,32 +2,49 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: AI Simulate (Experimental)
-subtitle: Experimental simulation and configuration-search tools for Dynamo deployments
+subtitle: Backend-neutral simulation and configuration-search tools
 ---
 
 > [!WARNING]
 > **Experimental.** AI Simulate is intended for evaluation and feedback, not production capacity
 > planning. Its Python APIs, configuration schemas, search results, and deployment output may
-> change without a standard deprecation period. It provides no SLA, accuracy, or
-> configuration-optimality guarantees.
+> change without a standard deprecation period.
 
-AI Simulate is a standalone Python distribution in the Dynamo repository. It contains simulation
-and configuration-search tools that use Dynamo models and replay without making those tools part
-of the stable `ai-dynamo` Python API.
+AI Simulate is a standalone Python distribution. It provides inference-engine forward-pass
+simulation, deployment simulation, and search without depending on `ai-dynamo`.
 
-## Spica
+For an engine-only single replay run, use `python -m aisimulate.replay`. For a replay with Dynamo
+Router, Planner, or online adapters, use `python -m dynamo.replay`. Both commands share their base
+replay configuration; Dynamo extends it with adapter options. The selected runtime validates each
+`--*-engine-args` JSON payload, so runtime-specific fields can differ. For configuration search, call
+`Sweeper(runner_factory=...).run(config)` or start from an example under
+[`aisimulate/examples/sweeper`](https://github.com/ai-dynamo/dynamo/tree/main/aisimulate/examples/sweeper).
 
-[Spica](spica-experimental/overview.md) is AI Simulate's first package. It searches engine, router, Planner, and
-parallelism settings with a black-box optimizer, accepts pinned G2 host-offload settings, and
-conditionally searches router cache-hit weights. It evaluates candidates with Dynamo Replay and
-supports scalar and Pareto-front objectives.
+## Sweeper
 
-Spica requires the matching Dynamo runtime from the same source revision. Follow the
-[Spica development setup](spica-experimental/overview.md#develop), then invoke the package module:
+[Sweeper](sweeper-experimental/overview.md) searches backend deployment settings against an injected replay runner.
+Its core owns backend search, candidate orchestration, scoring, and the versioned `ReplaySpec`
+contract.
+
+Optional adapters extend the search without adding a Dynamo dependency to AI Simulate. The
+`ai-dynamo` wheel registers the `dynamo.planner` and `dynamo.router` adapters. Selecting either
+adapter imports its Dynamo implementation and adds a versioned runtime hook to the replay
+specification.
+
+KVBM search settings are deprecated and are not supported by the AI Simulate engine and replay
+path. They have no adapter migration.
+
+## Install
+
+The `dynamo-planner` image builds and installs AI Simulate and Dynamo from the same source revision.
+The AI Simulate wheel remains inside the image and is not published as a standalone release
+artifact.
+
+For source development, install AI Simulate, Dynamo, and the Planner dependencies from the
+repository root:
 
 ```bash
-python -m aisimulate.spica --config examples/aisimulate/spica/configs/smart_sweep.yaml
+uv pip install -e ./aisimulate
+uv pip install --no-deps -e .
+uv pip install -r container/deps/requirements.planner.txt
 ```
-
-The `dynamo-planner` container builds and installs this distribution. AI Simulate is not included
-in the `ai-dynamo` wheel and does not add an `ai-dynamo[spica]` extra or a console script.

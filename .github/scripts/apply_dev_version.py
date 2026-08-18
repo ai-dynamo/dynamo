@@ -13,6 +13,7 @@ argument -- a suffix like '.dev20260423' -- and rewrites, in place:
 
 Empty suffix is a no-op, so safe to run unconditionally in every workflow.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -50,8 +51,9 @@ SUBCRATE_CARGO_TARGETS = [
 # the `name = { version = "..." }` inline-table form which this regex skips.
 VERSION_LINE_RE = re.compile(r'^(\s*version\s*=\s*")([^"]+)(")\s*$', re.MULTILINE)
 
-# Root pyproject cross-ref to the runtime wheel.
-PY_RUNTIME_PIN_RE = re.compile(r'("ai-dynamo-runtime==)([^"]+)(")')
+# Root pyproject cross-ref to the separately built runtime wheel. AISimulate is
+# intentionally fixed until its nightly wheel is staged and published.
+PY_ROOT_PIN_RE = re.compile(r'("ai-dynamo-runtime==)([0-9A-Za-z.!+_-]+)([^"]*")')
 
 
 def pep440(suffix: str, base: str) -> str:
@@ -82,20 +84,25 @@ def rewrite_pyproject(path: Path, suffix: str, is_root: bool) -> None:
     current = VERSION_LINE_RE.search(text)
     if current is None:
         raise RuntimeError(f"no [project].version in {path}")
-    if current.group(2).endswith(_pep440_tail(suffix)):
-        return  # already stamped -- idempotent no-op
+    tail = _pep440_tail(suffix)
 
     def _bump(m: re.Match) -> str:
+        if m.group(2).endswith(tail):
+            return m.group(0)
         return f"{m.group(1)}{pep440(suffix, m.group(2))}{m.group(3)}"
 
     text, n = VERSION_LINE_RE.subn(_bump, text, count=1)
     assert n == 1  # guaranteed by the search above
 
     if is_root:
-        text = PY_RUNTIME_PIN_RE.sub(
-            lambda m: f"{m.group(1)}{pep440(suffix, m.group(2))}{m.group(3)}",
-            text,
-        )
+
+        def _bump_pin(m: re.Match) -> str:
+            base = m.group(2)
+            if base.endswith(tail):
+                return m.group(0)
+            return f"{m.group(1)}{pep440(suffix, base)}{m.group(3)}"
+
+        text = PY_ROOT_PIN_RE.sub(_bump_pin, text)
     path.write_text(text)
 
 

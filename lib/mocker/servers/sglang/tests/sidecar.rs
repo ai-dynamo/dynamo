@@ -80,13 +80,13 @@ async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> SglangSidecarEngin
         "dynamo-sglang-sidecar".to_string(),
         "--sglang-endpoint".to_string(),
         endpoint.to_string(),
-        "--sglang-connections".to_string(),
+        "--grpc-connections".to_string(),
         "1".to_string(),
-        "--connect-timeout-secs".to_string(),
+        "--grpc-connect-attempt-timeout-secs".to_string(),
         "1".to_string(),
-        "--health-poll-interval-secs".to_string(),
+        "--grpc-retry-interval-secs".to_string(),
         "1".to_string(),
-        "--health-deadline-secs".to_string(),
+        "--grpc-startup-deadline-secs".to_string(),
         "5".to_string(),
     ];
     if mode.is_prefill() {

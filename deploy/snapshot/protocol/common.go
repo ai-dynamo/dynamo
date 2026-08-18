@@ -32,8 +32,6 @@ const (
 	// Required comma-separated checkpoint/restore target container list.
 	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
 
-	CheckpointStatusAnnotation = "nvidia.com/snapshot-checkpoint-status"
-
 	// Full keys are nvidia.com/snapshot-restore-status.<containerName>.
 	RestoreStatusAnnotationPrefix = "nvidia.com/snapshot-restore-status."
 
@@ -47,16 +45,16 @@ const (
 	CheckpointStorageTypeAnnotation     = "nvidia.com/snapshot-storage-type"
 	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
 	CheckpointVolumeName                = "checkpoint-storage"
+	CUDAJobFileName                     = "cuda-checkpoint-job"
+	CUDAJobFilePath                     = SnapshotControlMountPath + "/" + CUDAJobFileName
 	DefaultCheckpointArtifactVersion    = "1"
 	DefaultCheckpointJobTTLSeconds      = int32(300)
 	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
 	StorageTypePVC                      = "pvc"
 
-	CheckpointStatusCompleted = "completed"
-	CheckpointStatusFailed    = "failed"
-	RestoreStatusInProgress   = "in_progress"
-	RestoreStatusCompleted    = "completed"
-	RestoreStatusFailed       = "failed"
+	RestoreStatusInProgress = "in_progress"
+	RestoreStatusCompleted  = "completed"
+	RestoreStatusFailed     = "failed"
 
 	linkerdInjectAnnotation      = "linkerd.io/inject"
 	linkerdInjectDisabled        = "disabled"
@@ -203,7 +201,6 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
-	delete(annotations, CheckpointStatusAnnotation)
 	clearRestoreStatusKeys(annotations)
 
 	if !enabled {

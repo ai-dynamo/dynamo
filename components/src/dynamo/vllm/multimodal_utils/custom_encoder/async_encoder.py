@@ -5,7 +5,7 @@
 
 ``AsyncVisionEncoder`` is the **Dynamo-owned** layer the worker talks to. It
 turns the author's synchronous, thread-affine backend into an awaitable
-``encode(raws) -> list[tensor]`` by:
+``encode(raws) -> list[artifact]`` by:
 
 - running ``backend.preprocess`` **off the event loop** on a bounded
   ``ThreadPoolExecutor`` (CPU-heavy fetch / resize / patchify must not serialize
@@ -21,9 +21,8 @@ turns the author's synchronous, thread-affine backend into an awaitable
 
 The backend's ``build`` runs on the batcher's actor thread (so a CUDA graph it
 captures is replayed on the same thread) and its ``close`` runs there at
-teardown. ``load`` fails fast: it re-raises a build error and resolves the image
-placeholder id once, so a misconfigured encoder errors at startup, not on the
-first request.
+teardown. ``load`` re-raises build errors so a misconfigured encoder fails at
+startup, not on the first request.
 """
 
 from __future__ import annotations
@@ -32,9 +31,8 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Generic, List
 
-import torch
-
 from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
+    ArtifactT,
     ItemT,
     Preprocessed,
     RawT,
@@ -43,7 +41,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
 from dynamo.vllm.multimodal_utils.custom_encoder.batcher import ThreadedMicroBatcher
 
 
-class AsyncVisionEncoder(Generic[RawT, ItemT]):
+class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
     """Drive a ``VisionEncoderBackend`` from the worker's async request path.
 
     The worker calls ``load`` once at startup and ``await``s ``encode`` per
@@ -66,7 +64,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
 
     def __init__(
         self,
-        backend: VisionEncoderBackend[RawT, ItemT],
+        backend: VisionEncoderBackend[RawT, ItemT, ArtifactT],
         *,
         preprocess_concurrency: int | None = None,
         name: str = "vision-encoder",
@@ -98,7 +96,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         self._backend = backend
         self._preprocess_concurrency = conc
         self._name = name
-        self._batcher: ThreadedMicroBatcher | None = None
+        self._batcher: ThreadedMicroBatcher[ItemT, ArtifactT] | None = None
         self._pool: ThreadPoolExecutor | None = None
 
     # ---- lifecycle ---------------------------------------------------------
@@ -106,10 +104,8 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
     def load(self, model_id: str) -> None:
         """Start the actor thread (running ``backend.build`` on it) and fail fast.
 
-        Re-raises any build error, then ``validate``s the placeholder id so a
-        misconfigured encoder errors at startup instead of on the first request.
-        Single-shot: a second ``load()`` raises rather than orphaning the first
-        batcher's (non-daemon) worker thread and model.
+        Re-raises any build error. Single-shot: a second ``load()`` raises rather
+        than orphaning the first batcher's (non-daemon) worker thread and model.
         """
         if self._batcher is not None:
             raise RuntimeError("AsyncVisionEncoder.load() called twice")
@@ -136,36 +132,21 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
                 else None
             )
             self._batcher.start()  # runs backend.build() on the actor thread
-            self.validate()
         except BaseException:
             self.shutdown()
             raise
 
-    def validate(self) -> None:
-        """Fail-fast check run by ``load`` after ``build``: the author hardcoded a
-        usable ``image_token_id``."""
-        tid = getattr(self._backend, "image_token_id", None)
-        if not isinstance(tid, int) or isinstance(tid, bool):
-            raise ValueError(
-                "VisionEncoderBackend.image_token_id must be a hardcoded int (the "
-                f"image placeholder token id); got {tid!r}"
-            )
-
-    def get_image_placeholder_token_id(self) -> int:
-        """The token id marking image positions (the backend's hardcoded value)."""
-        return self._backend.image_token_id
-
     # ---- request path ------------------------------------------------------
 
-    async def encode(self, raws: List[RawT]) -> List[torch.Tensor]:
+    async def encode(self, raws: List[RawT]) -> List[ArtifactT]:
         """Optionally preprocess (off-loop, with a request-atomicity barrier) then
         batched-encode.
 
         With no preprocess pool (``preprocess_concurrency == 0``) raws go straight
         to the batcher (the backend folds any prep into ``forward_batch``). Returns
-        one ``(n_visual_tokens, lm_hidden_dim)`` tensor per raw input, in order.
-        Raises if any image's preprocess fails (submitting nothing) or if the
-        batched forward fails.
+        one backend-defined artifact per raw input, in order. Raises if any
+        image's preprocess fails (submitting nothing) or if the batched forward
+        fails.
         """
         if self._batcher is None:
             raise RuntimeError("AsyncVisionEncoder.encode() called before load()")
@@ -192,7 +173,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
                 raise result
         # No exception above ⇒ every settled entry is a Preprocessed. Alias the
         # list gather() already returned rather than copying it.
-        preprocessed: List[Preprocessed] = settled  # type: ignore[assignment]
+        preprocessed: List[Preprocessed[ItemT]] = settled  # type: ignore[assignment]
         items = [p.item for p in preprocessed]
         costs = [p.cost for p in preprocessed]
         return await self._batcher.submit(items, costs)

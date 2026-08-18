@@ -27,17 +27,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _child_command(device: int, device_type: str) -> list[str]:
+def _child_command(device: int, device_type: str, use_v1: bool = False) -> list[str]:
     """Command for one child process serving every production tag on one GPU."""
-    return [
-        sys.executable,
-        "-m",
-        "gpu_memory_service",
-        "--device",
-        str(device),
-        "--device-type",
-        device_type,
-    ]
+    command = [sys.executable, "-m", "gpu_memory_service"]
+    if use_v1:
+        command.append("--use-v1")
+    command.extend(["--device", str(device)])
+    if not use_v1:
+        command.extend(["--device-type", device_type])
+    return command
 
 
 def _terminate_all(processes: list[subprocess.Popen]) -> None:
@@ -58,9 +56,15 @@ def _supervise(processes: list[subprocess.Popen]) -> int:
     return 0
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="GPU Memory Service supervisor (one server per (device, tag))."
+        description="GPU Memory Service supervisor (one server per (device, tag)).",
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--use-v1",
+        action="store_true",
+        help="Launch the CUDA-only V1 server for both rank-local domains.",
     )
     parser.add_argument(
         "--device-type",
@@ -69,7 +73,9 @@ def main() -> None:
         choices=[d.value for d in VMMDeviceType],
         help="VMM device type forwarded to server (default: cuda).",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.use_v1 and args.device_type != VMMDeviceType.CUDA.value:
+        parser.error("--use-v1 only supports --device-type=cuda")
 
     init_vmm(VMMDeviceType.from_str(args.device_type))
     vmm = get_vmm()
@@ -77,11 +83,13 @@ def main() -> None:
     devices = vmm.list_devices()
     processes = []
     for device in devices:
-        proc = subprocess.Popen(_child_command(device, args.device_type))
+        proc = subprocess.Popen(
+            _child_command(device, args.device_type, use_v1=args.use_v1)
+        )
         logger.info(
-            "Started GMS device=%d device_type=%s pid=%d",
+            "Started GMS%s device=%d pid=%d",
+            " V1" if args.use_v1 else "",
             device,
-            args.device_type,
             proc.pid,
         )
         processes.append(proc)

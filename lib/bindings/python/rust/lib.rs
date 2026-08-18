@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::local_model::{LocalModel, register_model_card};
+use dynamo_llm::local_model::{
+    LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
+};
 use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
+#[cfg(feature = "custom-policy")]
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
@@ -24,7 +28,6 @@ use tokio::sync::Mutex;
 use tracing::Instrument;
 
 use dynamo_runtime::config;
-use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
@@ -35,6 +38,9 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+#[cfg(feature = "custom-policy")]
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -81,11 +87,23 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
+mod push_egress;
 mod python_payload;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
     ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
+
+/// Ingress for the push egress path (handlers that declare `response_sender`).
+///
+/// Requests still decode into a Python object (the handler wants one), but
+/// responses are owned Rust values by the time they reach the channel, so the
+/// response encoder never needs the GIL. See `push_egress.rs`.
+type PythonPushEgressIngress = Ingress<
+    SingleIn<python_payload::PythonPayload>,
+    ManyOut<push_egress::PushFrame>,
     python_payload::PythonIngressPayloadAdapter,
 >;
 
@@ -96,6 +114,9 @@ type PythonBidirectionalIngress = Ingress<
 >;
 
 static INIT: OnceCell<()> = OnceCell::new();
+
+#[cfg(feature = "custom-policy")]
+static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
@@ -151,17 +172,9 @@ fn create_request_context(
     }
 }
 
-/// A Python module implemented in Rust. The name of this function must match
-/// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
-/// import the module.
-#[pymodule]
-fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
-        eprintln!(
-            "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
-        );
-    } else if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
+fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // OTLP export no longer requires a pre-existing runtime, so initialize at import.
+    if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
         rs::logging::init();
     }
 
@@ -172,6 +185,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
+    m.add_function(wrap_pyfunction!(update_model_taints, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
@@ -183,11 +197,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
-    m.add(
-        "MOCKER_KVBM_OFFLOAD_ENABLED",
-        cfg!(feature = "mocker-kvbm-offload"),
-    )?;
-
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<Endpoint>()?;
@@ -238,6 +247,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
+    m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
+    m.add_class::<llm::kv_state_agent::KvStateAttachmentOwner>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
@@ -247,6 +258,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
+    push_egress::add_to_module(m)?;
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
     backend::add_to_module(m)?;
@@ -254,6 +266,100 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
 
     Ok(())
+}
+
+pub(crate) fn worker_selection_policy_factory(
+    config: &KvRouterConfig,
+) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+    #[cfg(feature = "custom-policy")]
+    {
+        Ok(WORKER_SELECTION_POLICY_REGISTRY
+            .get()
+            .map(|registry| registry.resolve(config))
+            .transpose()?
+            .flatten())
+    }
+
+    #[cfg(not(feature = "custom-policy"))]
+    {
+        if let Some(instance) = config.selected_worker_selection_policy_instance()? {
+            anyhow::bail!(
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+            );
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "select-service")]
+pub(crate) fn warn_if_standalone_ignores_stage_policies(
+    config: &KvRouterConfig,
+) -> anyhow::Result<()> {
+    if config.has_explicit_stage_worker_selection_policy()? {
+        tracing::warn!(
+            "prefill, decode, and encode worker-selection policies are ignored by aggregated standalone selection hosts"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "select-service")]
+/// Resolve only the aggregated policy used by standalone selection hosts.
+pub(crate) fn standalone_worker_selection_policy_factory(
+    config: &KvRouterConfig,
+) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+    warn_if_standalone_ignores_stage_policies(config)?;
+
+    #[cfg(feature = "custom-policy")]
+    {
+        Ok(WORKER_SELECTION_POLICY_REGISTRY
+            .get()
+            .map(|registry| {
+                registry.resolve_for_worker_type(config, dynamo_kv_router::WorkerType::Aggregated)
+            })
+            .transpose()?
+            .flatten())
+    }
+
+    #[cfg(not(feature = "custom-policy"))]
+    {
+        if let Some(instance) = config.selected_worker_selection_policy_instance_for(
+            dynamo_kv_router::WorkerType::Aggregated,
+        )? {
+            anyhow::bail!(
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+            );
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "custom-policy")]
+fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let mut registry = WorkerSelectionPolicyRegistry::default();
+    dynamo_worker_selection_policy_catalog::register(&mut registry)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+
+    WORKER_SELECTION_POLICY_REGISTRY
+        .set(registry)
+        .map_err(|_| {
+            PyRuntimeError::new_err("worker-selection policy registry already installed")
+        })?;
+    register_core(m)
+}
+
+/// The extension-module entrypoint for a custom policy image.
+#[cfg(feature = "custom-policy")]
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_core_with_custom_worker_selection_policy(m)
+}
+
+/// The stock extension-module entrypoint.
+#[cfg(not(feature = "custom-policy"))]
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_core(m)
 }
 
 pub fn to_pyerr<E>(err: E) -> PyErr
@@ -309,6 +415,21 @@ fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 
 #[pyfunction(name = "run_select_service")]
 #[pyo3(signature = (argv=None))]
+#[cfg(feature = "select-service")]
+fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || {
+        llm::kv::run_select_service_cli_with_worker_selection_policy_factory(
+            argv,
+            standalone_worker_selection_policy_factory,
+        )
+    })
+    .map_err(standalone_to_pyerr)
+}
+
+#[pyfunction(name = "run_select_service")]
+#[pyo3(signature = (argv=None))]
+#[cfg(not(feature = "select-service"))]
 fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_select_service_cli(argv))
@@ -696,6 +817,21 @@ fn unregister_model<'p>(
     })
 }
 
+/// Replace the caller-managed taints on this worker's registered model.
+#[pyfunction]
+#[pyo3(signature = (endpoint, taints))]
+fn update_model_taints<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    taints: std::collections::HashSet<String>,
+) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        update_model_taints_rs(&endpoint.inner, taints)
+            .await
+            .map_err(to_pyerr)
+    })
+}
+
 /// Download a model from Hugging Face, returning its local path
 /// Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
 #[pyfunction]
@@ -901,9 +1037,29 @@ impl ModelType {
     const Realtime: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Realtime,
     };
+    #[classattr]
+    const Classify: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Classify,
+    };
+    #[classattr]
+    const Pooling: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Pooling,
+    };
 
     fn supports_chat(&self) -> bool {
         self.inner.supports_chat()
+    }
+
+    fn supports_embedding(&self) -> bool {
+        self.inner.supports_embedding()
+    }
+
+    fn supports_classify(&self) -> bool {
+        self.inner.supports_classify()
+    }
+
+    fn supports_pooling(&self) -> bool {
+        self.inner.supports_pooling()
     }
 
     fn __or__(&self, other: &Self) -> Self {
@@ -1035,14 +1191,6 @@ impl DistributedRuntime {
                 Ok(worker.runtime().clone())
             })
             .map_err(to_pyerr)?;
-
-        // Initialize logging in context where tokio runtime is available
-        // otel exporter requires it
-        if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
-            runtime.secondary().block_on(async {
-                rs::logging::init();
-            });
-        }
 
         let nats_enabled = request_plane.is_nats()
             || matches!(
@@ -1257,16 +1405,70 @@ impl Endpoint {
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let engine = Arc::new(engine::PythonAsyncEngine::new(
-            generator,
-            self.event_loop.clone(),
-        )?);
-        let network_engine = Arc::new(engine.network_engine());
-        let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
-            network_engine,
-            python_payload::PythonIngressPayloadAdapter,
-        )
-        .map_err(to_pyerr)?;
+        // Push egress: the handler pushes each response into a Rust channel via
+        // its `response_sender` argument, instead of Rust pulling `__anext__`
+        // off its generator on a tokio thread once per response. Selected per
+        // handler, purely by signature -- a handler must declare a
+        // `response_sender` parameter, which in practice means the TRT-LLM
+        // workers' `@push_egress_capable` decorator. NOT `context`, which every
+        // handler accepts and would therefore make this check always true,
+        // rendering the pull path unreachable. Anything else stays on pull.
+        let use_push_egress = push_egress::handler_supports_push(&generator);
+
+        // An endpoint has two doors, and this branch answers for both: the
+        // ingress that serves network requests, and the engine registered in
+        // the local (in-process) registry.
+        //
+        // Push endpoints need BOTH. The local registry — used by in-process
+        // callers and by the canary health check
+        // (`lib/runtime/src/health_check.rs`) — takes a `SingleIn`/`ManyOut`
+        // engine, which has nowhere to put a per-request sender. A pull engine
+        // over the SAME handler supplies one: called without a
+        // `response_sender`, `@push_egress_capable` hands back the handler's
+        // own async generator, so that door is ordinary pull egress.
+        // Registering it also keeps the endpoint in
+        // `SystemHealth::health_check_targets` — without which health status
+        // ignores endpoint readiness entirely and falls through to the
+        // process-wide `system_health`, a permanent 503 for a worker that never
+        // sets it (see `system_health.rs` tests).
+        //
+        // Both outcomes are logged: push mode is chosen by signature
+        // inspection, which can silently answer "no", and without the pull line
+        // the only symptom would be the absence of the push line.
+        let endpoint_name = self.inner.name().to_string();
+        let (ingress, local_engine): (
+            Arc<dyn rs::pipeline::network::PushWorkHandler>,
+            Option<Arc<engine::PythonAsyncEngine>>,
+        ) = if use_push_egress {
+            tracing::info!(endpoint = %endpoint_name, "serving endpoint with push egress");
+            // Same handler object, two engines: a refcount bump, not a copy.
+            let local = Arc::new(engine::PythonAsyncEngine::new(
+                generator.clone_ref(py),
+                self.event_loop.clone(),
+            )?);
+            let ingress = PythonPushEgressIngress::for_engine_with_adapter(
+                Arc::new(push_egress::PythonPushEngine::new(
+                    generator,
+                    self.event_loop.clone(),
+                )),
+                python_payload::PythonIngressPayloadAdapter,
+            )
+            .map_err(to_pyerr)?;
+            (ingress, Some(local))
+        } else {
+            tracing::debug!(endpoint = %endpoint_name, "serving endpoint with pull egress");
+            let engine = Arc::new(engine::PythonAsyncEngine::new(
+                generator,
+                self.event_loop.clone(),
+            )?);
+            let network_engine = Arc::new(engine.network_engine());
+            let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
+                network_engine,
+                python_payload::PythonIngressPayloadAdapter,
+            )
+            .map_err(to_pyerr)?;
+            (ingress, Some(engine))
+        };
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -1294,12 +1496,17 @@ impl Endpoint {
             .metrics_labels(metrics_labels)
             .handler(ingress);
 
+        // Applies to both paths. `start_with_registration` bails if a payload is
+        // set while canary is enabled and no local engine is registered; the
+        // push branch above registers one precisely so this stays valid.
         if let Some(payload) = health_payload_json {
             builder = builder.health_check_payload(payload);
         }
 
         // Register the engine in the local endpoint registry for in-process calls
-        builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
+        if let Some(engine) = local_engine {
+            builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
+        }
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1512,9 +1719,12 @@ impl Client {
             let error_key = key.clone();
             let error_value = value.clone();
             let wait = async move {
-                let mut rx = llm_rs::discovery::runtime_config_watch(&endpoint)
-                    .await
-                    .map_err(to_pyerr)?;
+                let mut rx = llm_rs::discovery::runtime_config_watch(
+                    &endpoint,
+                    endpoint.drt().primary_token(),
+                )
+                .await
+                .map_err(to_pyerr)?;
 
                 loop {
                     let matches: Vec<u64> = rx

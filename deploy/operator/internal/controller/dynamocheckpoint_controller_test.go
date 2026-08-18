@@ -28,6 +28,7 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +42,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -89,7 +90,7 @@ func makeCheckpointReconciler(s *runtime.Scheme, objs ...client.Object) *Checkpo
 		Client:        fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(&nvidiacomv1alpha1.DynamoCheckpoint{}).Build(),
 		Config:        checkpointTestConfig(),
 		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 	}
 }
 
@@ -101,6 +102,7 @@ func makeTestCheckpoint(phase nvidiacomv1alpha1.DynamoCheckpointPhase) *nvidiaco
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
 			Identity: checkpointTestIdentity,
 			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
+				TargetContainerName: "main",
 				PodTemplateSpec: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						SecurityContext: &corev1.PodSecurityContext{
@@ -128,6 +130,16 @@ func requireCheckpointContainer(t *testing.T, containers []corev1.Container, nam
 	}
 	t.Fatalf("container %q not found", name)
 	return nil
+}
+
+func requireStableLaunchJobWrapper(t *testing.T, container *corev1.Container, original []string) {
+	// Verify the complete stable launch-job wrapper.
+	assert.Equal(t, []string{"cuda-checkpoint"}, container.Command)
+	require.GreaterOrEqual(t, len(container.Args), 6)
+	assert.Equal(t, []string{"--launch-job", "/bin/sh", "-c"}, container.Args[:3])
+	assert.Equal(t, "dynamo-cuda-checkpoint", container.Args[4])
+	assert.Equal(t, snapshotprotocol.CUDAJobFilePath, container.Args[5])
+	assert.Equal(t, original, container.Args[6:])
 }
 
 func findCheckpointContainer(containers []corev1.Container, name string) *corev1.Container {
@@ -249,6 +261,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Command)
 
 	// Multi-GPU: wrapping decision uses target-container GPU resources.
+	t.Log("Wrap the target command for a resource-limit multi-GPU workload")
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
@@ -256,8 +269,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 	job, err = buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
-	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
+	requireStableLaunchJobWrapper(t, &job.Spec.Template.Spec.Containers[0], []string{"python3", "-m", "dynamo.vllm"})
 }
 
 func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
@@ -287,9 +299,9 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 
+	t.Log("Wrap only the target container in a multi-container checkpoint job")
 	main := &job.Spec.Template.Spec.Containers[0]
-	assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
-	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
+	requireStableLaunchJobWrapper(t, main, []string{"python3", "-m", "dynamo.vllm"})
 	require.NotNil(t, main.ReadinessProbe)
 	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-snapshot"}, main.ReadinessProbe.Exec.Command)
 	assert.Nil(t, main.LivenessProbe)
@@ -418,10 +430,10 @@ func TestBuildCheckpointJobDRAResourceClaimsForCudaCheckpoint(t *testing.T) {
 			}
 			require.NoError(t, err)
 
+			t.Log("Verify the DRA launch-job wrapping decision")
 			main := &job.Spec.Template.Spec.Containers[0]
 			if tt.wantWrap {
-				assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
-				assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
+				requireStableLaunchJobWrapper(t, main, []string{"python3", "-m", "dynamo.vllm"})
 			} else {
 				assert.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, main.Command)
 				assert.Empty(t, main.Args)
@@ -452,7 +464,8 @@ func TestBuildCheckpointJobUsesTargetContainerName(t *testing.T) {
 	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 
-	assert.Equal(t, "worker", job.Spec.Template.Annotations[snapshotprotocol.TargetContainersAnnotation])
+	// The target is passed via CheckpointJobOptions.TargetContainer (not stamped as an annotation);
+	// its effect is asserted below: the "worker" container is shaped, "main" is left untouched.
 	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
 	target := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "worker")
 
@@ -468,6 +481,21 @@ func TestBuildCheckpointJobUsesTargetContainerName(t *testing.T) {
 	assert.Contains(t, target.Env, corev1.EnvVar{Name: snapshotprotocol.SnapshotControlDirEnv, Value: snapshotprotocol.SnapshotControlMountPath})
 	assert.Contains(t, target.Env, corev1.EnvVar{Name: "USER_ENV", Value: "1"})
 	assert.Contains(t, target.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.SnapshotControlVolumeName, MountPath: snapshotprotocol.SnapshotControlMountPath, SubPath: "worker"})
+
+	// The capture Job no longer stamps the target-containers annotation; the target flows via
+	// CheckpointJobOptions.TargetContainer and PodReference.Containers instead.
+	assert.NotContains(t, job.Spec.Template.Annotations, snapshotprotocol.TargetContainersAnnotation)
+}
+
+func TestBuildCheckpointJob_EmptyTargetErrors(t *testing.T) {
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.Job.TargetContainerName = ""
+
+	r := makeCheckpointReconciler(s, ckpt)
+	_, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "targetContainerName")
 }
 
 func TestBuildCheckpointJobPreservesPreparedEnvAndSharedMemory(t *testing.T) {
@@ -520,7 +548,7 @@ func TestCheckpointReconciler_handlePendingFailsUnpreparedGMSCheckpoint(t *testi
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
-	r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
+	r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
 	result, err := r.handlePending(context.Background(), ckpt)
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -570,10 +598,29 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
 	})
 
-	t.Run("GMS snapshot fails when gate is disabled", func(t *testing.T) {
+	t.Run("prepared GMS checkpoint is accepted under the checkpoint gate", func(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
-		ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}
-		r := makeCheckpointReconciler(s, ckpt)
+		ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+			Enabled: true,
+			Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+		}
+		claimTemplateName := "checkpoint-gpu"
+		require.NoError(t, dra.ApplyClaim(&ckpt.Spec.Job.PodTemplateSpec.Spec, claimTemplateName))
+		gms.EnsureServerSidecar(
+			&ckpt.Spec.Job.PodTemplateSpec.Spec,
+			&ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0],
+		)
+		claimTemplate, toDelete, err := dra.GenerateResourceClaimTemplate(
+			ctx,
+			nil,
+			claimTemplateName,
+			testNamespace,
+			1,
+			"",
+		)
+		require.NoError(t, err)
+		require.False(t, toDelete)
+		r := makeCheckpointReconciler(s, ckpt, claimTemplate)
 
 		result, err := r.Reconcile(ctx, ctrl.Request{
 			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
@@ -583,12 +630,13 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
-		assert.Contains(t, updated.Status.Message, "GMS + Snapshot is temporarily disabled")
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
+		assert.Empty(t, updated.Status.Message)
 
 		jobs := &batchv1.JobList{}
 		require.NoError(t, r.List(ctx, jobs, client.InNamespace(testNamespace)))
-		assert.Empty(t, jobs.Items)
+		require.Len(t, jobs.Items, 1)
+		assert.Equal(t, updated.Status.JobName, jobs.Items[0].Name)
 	})
 
 	t.Run("Pending checkpoint is paused when checkpoint gate is disabled", func(t *testing.T) {
@@ -1166,7 +1214,8 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 	t.Run("deleted job with Ready snapshot transitions to Failed", func(t *testing.T) {
 		// Ready is only set while the Job is live; an externally deleted Job must not promote Ready.
 		ckpt := makeCreatingCkpt(testHash, "job-deleted")
-		snap := buildPodSnapshot(ckpt, testHash, podNamed("worker-x"))
+		snap, buildErr := buildPodSnapshot(ckpt, testHash, podNamed("worker-x"))
+		require.NoError(t, buildErr)
 		setCheckpointOwner(ckpt, snap)
 		snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-x")
 		meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
@@ -1188,7 +1237,8 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 
 	t.Run("deleted job with Failed snapshot transitions to Failed", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, "job-deleted")
-		snap := buildPodSnapshot(ckpt, testHash, podNamed("worker-x"))
+		snap, buildErr := buildPodSnapshot(ckpt, testHash, podNamed("worker-x"))
+		require.NoError(t, buildErr)
 		setCheckpointOwner(ckpt, snap)
 		meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
 			Type: "Failed", Status: metav1.ConditionTrue, Reason: "CheckpointFailed", Message: "agent boom",
@@ -1209,7 +1259,8 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 
 	t.Run("deleted job with non-terminal snapshot stays Creating", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, "job-deleted")
-		snap := buildPodSnapshot(ckpt, testHash, podNamed("worker-x"))
+		snap, buildErr := buildPodSnapshot(ckpt, testHash, podNamed("worker-x"))
+		require.NoError(t, buildErr)
 		setCheckpointOwner(ckpt, snap)
 		// Capture still in flight (or content terminal but the mirror not landed yet): wait for the
 		// Owns(&PodSnapshot) watch, don't fail on the missing Job.

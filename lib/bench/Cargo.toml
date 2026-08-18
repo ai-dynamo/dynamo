@@ -81,7 +81,6 @@ test-support = [
   "dep:tracing",
   "dep:uuid",
 ]
-mocker-kvbm-offload = ["offline-replay", "dynamo-mocker/kvbm-offload"]
 profile = ["offline-replay", "dynamo-mocker/profile"]
 replay-bench = ["offline-replay", "dynamo-mocker/replay-bench"]
 

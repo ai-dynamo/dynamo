@@ -166,6 +166,14 @@ def test_linear_adapter_requires_prompt_embeds_flag():
         )
 
 
+def test_linear_adapter_requires_image_token_id():
+    backend = _Backend()
+    backend.image_token_id = None
+
+    with pytest.raises(ValueError, match="image_token_id"):
+        create_custom_encoder_adapter(backend, _model_config(), _engine_args())
+
+
 def test_linear_adapter_rejects_multimodal_decoder():
     with pytest.raises(ValueError, match="multimodal decoder"):
         create_custom_encoder_adapter(
