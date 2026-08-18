@@ -1308,6 +1308,7 @@ fn effective_router_config<'a>(
         .kv_router_config
         .router_decode_policy
         .clone();
+    effective.session_affinity_ttl_secs = frontend_config.session_affinity_ttl_secs;
     effective.session_affinity_mode = frontend_config.session_affinity_mode;
     Cow::Owned(effective)
 }
@@ -1995,6 +1996,7 @@ mod tests {
         let mut frontend = RouterConfig::default();
         frontend.kv_router_config.router_prefill_policy = Some("frontend-prefill".to_string());
         frontend.kv_router_config.router_decode_policy = Some("frontend-decode".to_string());
+        frontend.session_affinity_ttl_secs = Some(600);
         frontend.session_affinity_mode = SessionAffinityMode::Soft;
 
         let mut worker = RouterConfig::default();
@@ -2015,6 +2017,7 @@ mod tests {
             effective.kv_router_config.router_decode_policy.as_deref(),
             Some("frontend-decode")
         );
+        assert_eq!(effective.session_affinity_ttl_secs, Some(600));
         assert_eq!(effective.session_affinity_mode, SessionAffinityMode::Soft);
         assert!(worker.kv_router_config.router_prefill_policy.is_none());
         assert!(worker.kv_router_config.router_decode_policy.is_none());
