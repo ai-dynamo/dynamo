@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -30,7 +29,6 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/events"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -135,53 +133,15 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	rendered *grovePodCliqueSetRender,
 ) (*grovev1alpha1.PodCliqueSet, error) {
-	if rendered.existing == nil {
-		if err := ctrl.SetControllerReference(dgd, rendered.desired, r.syncer.Scheme()); err != nil {
-			return nil, fmt.Errorf("set Grove PodCliqueSet owner reference: %w", err)
-		}
-		hash, err := commoncontroller.GetSpecHash(rendered.desired)
-		if err != nil {
-			return nil, fmt.Errorf("hash Grove PodCliqueSet spec: %w", err)
-		}
-		annotations := rendered.desired.GetAnnotations()
-		if annotations == nil {
-			annotations = make(map[string]string)
-		}
-		annotations[commoncontroller.NvidiaAnnotationHashKey] = hash
-		annotations[commoncontroller.NvidiaAnnotationGenerationKey] = "1"
-		rendered.desired.SetAnnotations(annotations)
-		if err := r.syncer.Create(ctx, rendered.desired); err != nil {
-			return nil, fmt.Errorf("create Grove PodCliqueSet: %w", err)
-		}
-		return rendered.desired, nil
-	}
-
-	change, err := commoncontroller.GetSpecChangeResult(rendered.existing, rendered.desired)
+	_, synced, err := commoncontroller.SyncObservedResource(
+		ctx,
+		&r.syncer,
+		dgd,
+		rendered.existing,
+		rendered.desired,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("compare Grove PodCliqueSet spec: %w", err)
-	}
-	if !change.NeedsUpdate {
-		return rendered.existing, nil
-	}
-	if change.NewHash == nil {
-		return nil, fmt.Errorf("Grove PodCliqueSet update has no desired spec hash")
-	}
-
-	synced := rendered.existing.DeepCopy()
-	if change.SpecNeedsUpdate {
-		if err := commoncontroller.CopySpec(rendered.desired, synced); err != nil {
-			return nil, fmt.Errorf("copy Grove PodCliqueSet spec: %w", err)
-		}
-	}
-	annotations := synced.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-	annotations[commoncontroller.NvidiaAnnotationHashKey] = *change.NewHash
-	annotations[commoncontroller.NvidiaAnnotationGenerationKey] = strconv.FormatInt(change.NewGeneration, 10)
-	synced.SetAnnotations(annotations)
-	if err := r.syncer.Update(ctx, synced); err != nil {
-		return nil, fmt.Errorf("update Grove PodCliqueSet: %w", err)
+		return nil, fmt.Errorf("sync Grove PodCliqueSet: %w", err)
 	}
 	return synced, nil
 }
