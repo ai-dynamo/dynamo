@@ -11,7 +11,7 @@ pub(crate) struct ActiveRequestsScorer;
 
 impl WorkerScorer for ActiveRequestsScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::LOAD
+        WorkerInputs::ACTIVE_REQUEST_LOAD
     }
 
     fn score(

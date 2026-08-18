@@ -11,9 +11,10 @@ pub use default::DefaultWorkerSelector;
 
 use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 pub use policy::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionRequirements,
+    CacheFreeCandidateTable, CacheFreePolicyDecision, CacheFreeRequestContext,
+    CacheFreeWorkerSelectionPolicy, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate,
+    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput,
+    WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionRequirements,
 };
 
 use default::{pick_default_worker, selection_weights};
@@ -94,7 +95,6 @@ impl<'a> WorkerSelectionInput<'a> {
             has_tier_overlap_blocks,
             use_default_cache_fallbacks: inputs.contains(WorkerInputs::DEFAULT_POLICY_CACHE),
             context: WorkerSelectionContext {
-                request,
                 request_id: request.mode.request_id().unwrap_or("-"),
                 request_blocks: request.request_blocks(block_size),
                 block_size,
@@ -105,6 +105,11 @@ impl<'a> WorkerSelectionInput<'a> {
                     .router_config_override
                     .as_ref()
                     .and_then(|config| config.router_temperature),
+                session_context: request.session_context.as_ref(),
+                expected_output_tokens: request.expected_output_tokens,
+                priority_jump: request.priority_jump,
+                strict_priority: request.strict_priority,
+                advisory: !request.mode.is_tracked(),
             },
         }
     }
@@ -122,7 +127,7 @@ impl<'a> WorkerSelectionInput<'a> {
         } else {
             0
         };
-        let worker_load = if inputs.contains(WorkerInputs::LOAD) {
+        let worker_load = if inputs.needs_worker_load() {
             self.request.worker_loads.get(&worker).copied()
         } else {
             None
@@ -181,7 +186,7 @@ impl<'a> WorkerSelectionInput<'a> {
         } else {
             WorkerCacheInput::default()
         };
-        let load = if inputs.contains(WorkerInputs::LOAD) {
+        let load = if inputs.needs_worker_load() {
             let raw_prefill_tokens = if self.request.track_prefill_tokens {
                 match worker_load {
                     Some(load) => {
@@ -200,9 +205,18 @@ impl<'a> WorkerSelectionInput<'a> {
             } as f64;
             let worker_load = worker_load.unwrap_or_default();
             WorkerLoadInput {
-                raw_prefill_blocks: raw_prefill_tokens / self.context.block_size as f64,
-                active_prefill_tokens: worker_load.active_prefill_tokens,
-                decode_cost_blocks: worker_load.potential_decode_blocks() as f64,
+                raw_prefill_blocks: inputs
+                    .contains(WorkerInputs::LOAD)
+                    .then(|| raw_prefill_tokens / self.context.block_size as f64)
+                    .unwrap_or(0.0),
+                active_prefill_tokens: inputs
+                    .contains(WorkerInputs::LOAD)
+                    .then_some(worker_load.active_prefill_tokens)
+                    .unwrap_or(0),
+                decode_cost_blocks: inputs
+                    .contains(WorkerInputs::LOAD)
+                    .then(|| worker_load.potential_decode_blocks() as f64)
+                    .unwrap_or(0.0),
                 active_requests: worker_load.active_requests,
             }
         } else {
@@ -398,8 +412,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         || cache_inputs.len() == candidates.len()
                 );
                 debug_assert!(
-                    !picker_inputs.contains(WorkerInputs::LOAD)
-                        || load_inputs.len() == candidates.len()
+                    !picker_inputs.needs_worker_load() || load_inputs.len() == candidates.len()
                 );
                 debug_assert!(
                     !picker_inputs.contains(WorkerInputs::ROUTING)
@@ -411,7 +424,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .contains(WorkerInputs::CACHE)
                         .then_some(cache_inputs.as_slice()),
                     load: picker_inputs
-                        .contains(WorkerInputs::LOAD)
+                        .needs_worker_load()
                         .then_some(load_inputs.as_slice()),
                     routing: picker_inputs
                         .contains(WorkerInputs::ROUTING)

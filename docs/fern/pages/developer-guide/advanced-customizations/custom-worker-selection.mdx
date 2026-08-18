@@ -320,6 +320,7 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
 | `router_temperature_override()` | Optional per-request router temperature override |
+| `is_advisory()` | Whether this is a read-only selection; stateful pickers must not advance state |
 
 ### Session Context
 
@@ -357,11 +358,18 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
+| `ACTIVE_REQUEST_LOAD` | `active_requests()` | Frontend-local active-request count, without KV or scheduler projections |
 | `ROUTING` | `preferred_taint_multiplier()` | Optional cost multiplier from preferred routing constraints |
 
 The cache accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
 A filter or scorer reads requested groups through `WorkerCandidate::cache()`, `load()`, or `routing()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every group that it reads.
+
+## Cache-Free Hosts
+
+`WorkerSelectionPolicy::into_cache_free()` adapts a custom policy for a host that has discovery and frontend-local request accounting, but does not construct a KV indexer, scheduler, or slot tracker. The host exposes worker identity plus `ACTIVE_REQUEST_LOAD` through a borrowed `CacheFreeCandidateTable`; it rejects policies that request `CACHE`, `ROUTING`, or full `LOAD` projections at construction.
+
+The adapter serializes picker-local state, while its host must keep a committed selection and active-request admission atomic. Advisory requests call the same picker with `is_advisory() == true`, so a stateful picker must leave cursors and other committed state unchanged. This host contract is for first-party routing integration; linked policy instances still use KV routing until that integration is enabled.
 
 ## Link the Policy Into Dynamo
 
@@ -461,6 +469,8 @@ Standalone EPP supplies `WorkerType::Aggregated` because it selects from one ful
 - Return a valid picker row.
 - Treat candidate order as unspecified.
 - Request only the signal groups that the component reads.
+- Use `ACTIVE_REQUEST_LOAD`, rather than `LOAD`, when active-request count is the only load value the policy reads.
+- Do not mutate picker-local state when `context.is_advisory()` is true.
 - Keep blocking I/O and panics out of `keep`, `score`, and `pick`.
 - Keep policy state local to the factory-created policy unless cross-partition sharing is a deliberate requirement.
 - Build the policy against the same Dynamo revision as the frontend or EPP.

@@ -13,7 +13,7 @@ pub(crate) struct ActiveRequestsScorer;
 impl WorkerScorer for ActiveRequestsScorer {
     /// Requests load inputs for the active-request count.
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::LOAD
+        WorkerInputs::ACTIVE_REQUEST_LOAD
     }
 
     /// Returns the active-request count as a lower-is-better cost.

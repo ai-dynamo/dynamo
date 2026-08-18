@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::BitOr;
+
+use parking_lot::Mutex;
 
 use super::{
     DefaultWorkerPicker, LogitWeights, WorkerSelectionInput, WorkerSelector,
@@ -18,7 +20,6 @@ use crate::scheduling::types::{
 
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
-    pub(super) request: &'a SchedulingRequest,
     pub(super) request_id: &'a str,
     pub(super) request_blocks: u64,
     pub(super) block_size: u32,
@@ -26,6 +27,11 @@ pub struct WorkerSelectionContext<'a> {
     pub(super) weights: LogitWeights,
     pub(super) min_active_prefill_tokens: usize,
     pub(super) router_temperature_override: Option<f64>,
+    pub(super) session_context: Option<&'a SessionContext>,
+    pub(super) expected_output_tokens: Option<u32>,
+    pub(super) priority_jump: f64,
+    pub(super) strict_priority: u32,
+    pub(super) advisory: bool,
 }
 
 /// One eligible worker and the optional inputs requested by a filter or scorer.
@@ -57,7 +63,13 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request routing-constraint inputs.
     pub const ROUTING: Self = Self(1 << 2);
-    pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0);
+    /// The frontend-local active-request count for a worker.
+    ///
+    /// Unlike [`Self::LOAD`], this excludes KV-block and prefill-token projections, so a
+    /// cache-free host can materialize it from its own request lifetime accounting.
+    pub const ACTIVE_REQUEST_LOAD: Self = Self(1 << 5);
+    pub(super) const ALL: Self =
+        Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0 | Self::ACTIVE_REQUEST_LOAD.0);
     pub(super) const MIN_ACTIVE_PREFILL_TOKENS: Self = Self(1 << 3);
     pub(super) const DEFAULT_POLICY_CACHE: Self = Self(1 << 4);
 
@@ -67,6 +79,10 @@ impl WorkerInputs {
 
     pub(super) fn without(self, other: Self) -> Self {
         Self(self.0 & !other.0)
+    }
+
+    pub(super) const fn needs_worker_load(self) -> bool {
+        self.contains(Self::LOAD) || self.contains(Self::ACTIVE_REQUEST_LOAD)
     }
 }
 
@@ -124,7 +140,7 @@ impl WorkerInputs {
     const fn requirements(self) -> WorkerSelectionRequirements {
         WorkerSelectionRequirements {
             needs_cache_index: self.contains(Self::CACHE),
-            needs_active_request_load: self.contains(Self::LOAD),
+            needs_active_request_load: self.needs_worker_load(),
         }
     }
 }
@@ -217,7 +233,7 @@ impl WorkerSelectionContext<'_> {
     /// policy-local state. Stateful pickers use this to keep previews from
     /// advancing a round-robin cursor or otherwise committing a decision.
     pub fn is_advisory(&self) -> bool {
-        !self.request.mode.is_tracked()
+        self.advisory
     }
 
     /// Return the incoming prompt size in KV blocks.
@@ -237,22 +253,22 @@ impl WorkerSelectionContext<'_> {
 
     /// Return the session metadata available to worker selection.
     pub fn session_context(&self) -> Option<&SessionContext> {
-        self.request.session_context.as_ref()
+        self.session_context
     }
 
     /// Return the expected output length, if the request supplies one.
     pub fn expected_output_tokens(&self) -> Option<u32> {
-        self.request.expected_output_tokens
+        self.expected_output_tokens
     }
 
     /// Return the request's scheduler priority boost.
     pub fn priority_jump(&self) -> f64 {
-        self.request.priority_jump
+        self.priority_jump
     }
 
     /// Return the request's strict integer priority.
     pub fn strict_priority(&self) -> u32 {
-        self.request.strict_priority
+        self.strict_priority
     }
 
     /// Return the request-level router temperature override, if present.
@@ -276,9 +292,7 @@ impl WorkerCandidate {
 
     /// Return active-load inputs when the component requested [`WorkerInputs::LOAD`].
     pub fn load(&self) -> Option<&WorkerLoadInput> {
-        self.inputs
-            .contains(WorkerInputs::LOAD)
-            .then_some(&self.load)
+        self.inputs.needs_worker_load().then_some(&self.load)
     }
 
     /// Return routing inputs when the component requested [`WorkerInputs::ROUTING`].
@@ -302,8 +316,14 @@ impl WorkerCandidate {
             } else {
                 WorkerCacheInput::default()
             },
-            load: if inputs.contains(WorkerInputs::LOAD) {
-                if self.inputs.contains(WorkerInputs::LOAD) {
+            load: if inputs.needs_worker_load() {
+                if inputs.contains(WorkerInputs::LOAD) {
+                    if self.inputs.contains(WorkerInputs::LOAD) {
+                        self.load
+                    } else {
+                        additional.load
+                    }
+                } else if self.inputs.needs_worker_load() {
                     self.load
                 } else {
                     additional.load
@@ -440,6 +460,91 @@ pub struct WorkerSelectionPolicy {
     state: WorkerSelectionPolicyState,
 }
 
+/// Request metadata made available to cache-free policy selection.
+///
+/// A cache-free host has no KV block size, cache index, or scheduler load projections. It
+/// therefore reports prompt tokens as one-token blocks and exposes only the request metadata
+/// already available at the frontend routing boundary.
+pub struct CacheFreeRequestContext<'a> {
+    request_id: &'a str,
+    request_tokens: usize,
+    session_context: Option<&'a SessionContext>,
+    expected_output_tokens: Option<u32>,
+    priority_jump: f64,
+    strict_priority: u32,
+    advisory: bool,
+}
+
+impl<'a> CacheFreeRequestContext<'a> {
+    pub fn new(request_id: &'a str, request_tokens: usize, advisory: bool) -> Self {
+        Self {
+            request_id,
+            request_tokens,
+            session_context: None,
+            expected_output_tokens: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            advisory,
+        }
+    }
+
+    pub fn with_session_context(mut self, session_context: Option<&'a SessionContext>) -> Self {
+        self.session_context = session_context;
+        self
+    }
+
+    pub fn with_expected_output_tokens(mut self, expected_output_tokens: Option<u32>) -> Self {
+        self.expected_output_tokens = expected_output_tokens;
+        self
+    }
+
+    pub fn with_priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
+        self.priority_jump = priority_jump;
+        self.strict_priority = strict_priority;
+        self
+    }
+}
+
+/// Borrowed, host-owned candidate table for cache-free selection.
+///
+/// The host has already applied discovery, namespace, health, and admission eligibility before
+/// exposing rows here. A cache-free policy may read worker identity and the frontend-local active
+/// request count only; it cannot request KV cache, taint, or scheduler projection inputs.
+pub trait CacheFreeCandidateTable {
+    fn len(&self) -> usize;
+
+    fn worker(&self, index: usize) -> WorkerWithDpRank;
+
+    fn active_requests(&self, index: usize) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// One cache-free policy decision and, when filters narrowed the candidate table, the set that
+/// transport fallback must remain within.
+#[derive(Debug)]
+pub struct CacheFreePolicyDecision {
+    pub index: usize,
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+}
+
+/// Thread-safe host adapter for custom filters, scorers, and pickers that do not require KV
+/// routing state.
+///
+/// The mutex serializes policy-local state such as a round-robin cursor. The routing host must
+/// hold its own discovery/admission lock around a committed call so observing active request
+/// counts and reserving the selected worker stay atomic.
+pub struct CacheFreeWorkerSelectionPolicy {
+    state: Mutex<CacheFreeWorkerSelectionState>,
+}
+
+struct CacheFreeWorkerSelectionState {
+    policy: CustomWorkerSelectionState,
+    source_indices: Vec<usize>,
+}
+
 impl WorkerSelectionPolicy {
     /// Build a custom policy with no filters.
     ///
@@ -505,6 +610,40 @@ impl WorkerSelectionPolicy {
         }
     }
 
+    /// Consume a custom policy and adapt it for a cache-free routing host.
+    ///
+    /// The adapter accepts only policies that request worker identity or
+    /// [`WorkerInputs::ACTIVE_REQUEST_LOAD`]. Cache, taint, and full scheduler-load inputs are
+    /// deliberately rejected before the host begins routing, which keeps indexer and slot-tracker
+    /// construction out of the cache-free path.
+    pub fn into_cache_free(
+        self,
+    ) -> Result<CacheFreeWorkerSelectionPolicy, WorkerSelectionPolicyError> {
+        match self.state {
+            WorkerSelectionPolicyState::Custom(state) => {
+                let required_inputs = {
+                    let state = state.borrow();
+                    state.filter_inputs | state.scorer_picker_inputs
+                };
+                if required_inputs.without(WorkerInputs::ACTIVE_REQUEST_LOAD) != WorkerInputs::NONE
+                {
+                    return Err(WorkerSelectionPolicyError::failed(
+                        "cache-free routing supports only worker identity and active-request load inputs",
+                    ));
+                }
+                Ok(CacheFreeWorkerSelectionPolicy {
+                    state: Mutex::new(CacheFreeWorkerSelectionState {
+                        policy: state.into_inner(),
+                        source_indices: Vec::new(),
+                    }),
+                })
+            }
+            WorkerSelectionPolicyState::Default(_) => Err(WorkerSelectionPolicyError::failed(
+                "only custom filter/scorer/picker policies can be adapted to cache-free routing",
+            )),
+        }
+    }
+
     #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
     pub(crate) fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
         let picker = DefaultWorkerPicker::new(kv_router_config.router_temperature);
@@ -513,6 +652,138 @@ impl WorkerSelectionPolicy {
             worker_label,
             state: WorkerSelectionPolicyState::Default(picker),
         }
+    }
+}
+
+impl CacheFreeWorkerSelectionPolicy {
+    /// Run the custom policy against a borrowed table of host-eligible workers.
+    pub fn select<C: CacheFreeCandidateTable + ?Sized>(
+        &self,
+        request: &CacheFreeRequestContext<'_>,
+        candidate_table: &C,
+    ) -> Result<CacheFreePolicyDecision, WorkerSelectionPolicyError> {
+        let mut state = self.state.lock();
+        let CacheFreeWorkerSelectionState {
+            policy,
+            source_indices,
+        } = &mut *state;
+        let CustomWorkerSelectionState {
+            filters,
+            scorers,
+            filter_inputs,
+            scorer_picker_inputs,
+            picker_inputs,
+            picker,
+            unscored_candidates,
+            candidates,
+            load_inputs,
+            ..
+        } = policy;
+
+        unscored_candidates.clear();
+        candidates.clear();
+        source_indices.clear();
+        load_inputs.clear();
+
+        let context = WorkerSelectionContext {
+            request_id: request.request_id,
+            request_blocks: request.request_tokens as u64,
+            block_size: 1,
+            track_prefill_tokens: false,
+            weights: LogitWeights {
+                overlap_score_credit: 0.0,
+                overlap_score_credit_decay: 0.0,
+                prefill_load_scale: 0.0,
+                shared_cache_multiplier: 0.0,
+            },
+            min_active_prefill_tokens: 0,
+            router_temperature_override: None,
+            session_context: request.session_context,
+            expected_output_tokens: request.expected_output_tokens,
+            priority_jump: request.priority_jump,
+            strict_priority: request.strict_priority,
+            advisory: request.advisory,
+        };
+
+        for index in 0..candidate_table.len() {
+            let candidate_for = |inputs| WorkerCandidate {
+                worker: candidate_table.worker(index),
+                inputs,
+                cache: WorkerCacheInput::default(),
+                load: WorkerLoadInput {
+                    active_requests: candidate_table.active_requests(index),
+                    ..Default::default()
+                },
+                routing: WorkerRoutingInput::default(),
+            };
+            let filter_candidate = candidate_for(*filter_inputs);
+            let mut keep = true;
+            for filter in filters.iter_mut() {
+                if !filter.keep(&context, &filter_candidate)? {
+                    keep = false;
+                    break;
+                }
+            }
+            if !keep {
+                continue;
+            }
+            unscored_candidates.push(candidate_for(*scorer_picker_inputs));
+            source_indices.push(index);
+        }
+
+        for candidate in unscored_candidates.iter() {
+            let mut cost = 0.0;
+            for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
+                let contribution = scorer.score(&context, candidate)?;
+                cost += contribution;
+                if !contribution.is_finite() || !cost.is_finite() {
+                    return Err(WorkerSelectionPolicyError::NonFiniteCost {
+                        scorer_index,
+                        row: candidates.len(),
+                    });
+                }
+            }
+            candidates.push(ScoredWorkerCandidate {
+                worker: candidate.worker,
+                cost,
+            });
+            if picker_inputs.needs_worker_load() {
+                load_inputs.push(candidate.load);
+            }
+        }
+
+        if candidates.is_empty() {
+            let message = if candidate_table.is_empty() {
+                "no eligible workers"
+            } else {
+                "all eligible workers were rejected by policy filters"
+            };
+            return Err(WorkerSelectionPolicyError::failed(message));
+        }
+        let input = WorkerInputView {
+            candidates,
+            cache: None,
+            load: picker_inputs
+                .needs_worker_load()
+                .then_some(load_inputs.as_slice()),
+            routing: None,
+        };
+        let row = picker.pick(&context, input)?;
+        let index = source_indices.get(row).copied().ok_or(
+            WorkerSelectionPolicyError::InvalidPickerRow {
+                row,
+                candidate_count: candidates.len(),
+            },
+        )?;
+        Ok(CacheFreePolicyDecision {
+            index,
+            allowed_worker_ids: (!filters.is_empty()).then(|| {
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.worker.worker_id)
+                    .collect()
+            }),
+        })
     }
 }
 
@@ -547,7 +818,7 @@ fn push_scored_candidate(
     if picker_inputs.contains(WorkerInputs::CACHE) {
         cache_inputs.push(candidate.cache);
     }
-    if picker_inputs.contains(WorkerInputs::LOAD) {
+    if picker_inputs.needs_worker_load() {
         load_inputs.push(candidate.load);
     }
     if picker_inputs.contains(WorkerInputs::ROUTING) {
@@ -732,7 +1003,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use rustc_hash::FxHashMap;
 
@@ -1089,5 +1360,287 @@ mod tests {
             panic!("expected custom policy state");
         };
         assert!(state.borrow().unscored_candidates.is_empty());
+    }
+
+    #[test]
+    fn active_request_load_composes_with_full_scheduler_load() {
+        struct KeepWithActiveRequestLoad;
+
+        impl WorkerFilter for KeepWithActiveRequestLoad {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::ACTIVE_REQUEST_LOAD
+            }
+
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: &WorkerCandidate,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                Ok(candidate
+                    .load()
+                    .expect("active-request load was requested")
+                    .active_requests()
+                    == 4)
+            }
+        }
+
+        struct FullLoadScorer;
+
+        impl WorkerScorer for FullLoadScorer {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::LOAD
+            }
+
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: &WorkerCandidate,
+            ) -> Result<f64, WorkerSelectionPolicyError> {
+                let load = candidate.load().expect("full load was requested");
+                assert_eq!(load.active_prefill_tokens(), 9);
+                assert_eq!(load.decode_cost_blocks(), 7.0);
+                Ok(0.0)
+            }
+        }
+
+        let worker = WorkerWithDpRank::from_worker_id(7);
+        let workers = HashMap::from([(7, TaintedWorkerConfig::default())]);
+        let mut request = base_request(16);
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_prefill_tokens: 9,
+                active_decode_blocks: 7,
+                active_requests: 4,
+                ..Default::default()
+            },
+        );
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "decode",
+            vec![Box::new(KeepWithActiveRequestLoad)],
+            vec![Box::new(FullLoadScorer)],
+            Box::new(LowestCostPicker),
+        );
+
+        assert_eq!(
+            policy
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap()
+                .worker,
+            worker
+        );
+    }
+
+    struct CacheFreeRows(Vec<(WorkerWithDpRank, usize)>);
+
+    impl CacheFreeCandidateTable for CacheFreeRows {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        fn worker(&self, index: usize) -> WorkerWithDpRank {
+            self.0[index].0
+        }
+
+        fn active_requests(&self, index: usize) -> usize {
+            self.0[index].1
+        }
+    }
+
+    struct LowestActiveRequestScorer;
+
+    impl WorkerScorer for LowestActiveRequestScorer {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::ACTIVE_REQUEST_LOAD
+        }
+
+        fn score(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            candidate: &WorkerCandidate,
+        ) -> Result<f64, WorkerSelectionPolicyError> {
+            Ok(candidate
+                .load()
+                .expect("active-request load was requested")
+                .active_requests() as f64)
+        }
+    }
+
+    struct LowestCostPicker;
+
+    impl WorkerPicker for LowestCostPicker {
+        fn pick(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            input
+                .candidates()
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| left.cost().total_cmp(&right.cost()))
+                .map(|(row, _)| row)
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible workers"))
+        }
+    }
+
+    #[test]
+    fn cache_free_adapter_uses_active_request_load_without_kv_inputs() {
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "decode",
+            vec![Box::new(LowestActiveRequestScorer)],
+            Box::new(LowestCostPicker),
+        )
+        .into_cache_free()
+        .unwrap();
+        let rows = CacheFreeRows(vec![
+            (WorkerWithDpRank::from_worker_id(41), 9),
+            (WorkerWithDpRank::from_worker_id(42), 2),
+            (WorkerWithDpRank::from_worker_id(43), 6),
+        ]);
+
+        let selected = policy
+            .select(&CacheFreeRequestContext::new("request", 32, false), &rows)
+            .unwrap();
+        assert_eq!(selected.index, 1);
+        assert!(selected.allowed_worker_ids.is_none());
+    }
+
+    #[test]
+    fn cache_free_adapter_returns_filtered_fallback_set() {
+        struct RejectWorker(WorkerId);
+
+        impl WorkerFilter for RejectWorker {
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: &WorkerCandidate,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                Ok(candidate.worker().worker_id != self.0)
+            }
+        }
+
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "decode",
+            vec![Box::new(RejectWorker(41))],
+            Vec::new(),
+            Box::new(LowestCostPicker),
+        )
+        .into_cache_free()
+        .unwrap();
+        let rows = CacheFreeRows(vec![
+            (WorkerWithDpRank::from_worker_id(41), 0),
+            (WorkerWithDpRank::from_worker_id(42), 0),
+        ]);
+
+        let selected = policy
+            .select(&CacheFreeRequestContext::new("request", 32, false), &rows)
+            .unwrap();
+        assert_eq!(selected.index, 1);
+        assert_eq!(selected.allowed_worker_ids, Some(HashSet::from([42])));
+    }
+
+    #[test]
+    fn cache_free_adapter_serializes_state_and_keeps_advisory_selection_read_only() {
+        struct StatefulPicker {
+            next: usize,
+        }
+
+        impl WorkerPicker for StatefulPicker {
+            fn pick(
+                &mut self,
+                context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let row = self.next % input.candidates().len();
+                if !context.is_advisory() {
+                    self.next += 1;
+                }
+                Ok(row)
+            }
+        }
+
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<CacheFreeWorkerSelectionPolicy>();
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "decode",
+            Vec::new(),
+            Box::new(StatefulPicker { next: 0 }),
+        )
+        .into_cache_free()
+        .unwrap();
+        let rows = CacheFreeRows(vec![
+            (WorkerWithDpRank::from_worker_id(7), 0),
+            (WorkerWithDpRank::from_worker_id(8), 0),
+        ]);
+        let advisory = CacheFreeRequestContext::new("query", 8, true);
+        let committed = CacheFreeRequestContext::new("request", 8, false);
+
+        assert_eq!(policy.select(&advisory, &rows).unwrap().index, 0);
+        assert_eq!(policy.select(&advisory, &rows).unwrap().index, 0);
+        assert_eq!(policy.select(&committed, &rows).unwrap().index, 0);
+        assert_eq!(policy.select(&committed, &rows).unwrap().index, 1);
+    }
+
+    #[test]
+    fn cache_free_adapter_rejects_kv_and_full_load_inputs() {
+        struct CachePicker;
+
+        impl WorkerPicker for CachePicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CACHE
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                _input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(0)
+            }
+        }
+
+        struct FullLoadScorer;
+
+        impl WorkerScorer for FullLoadScorer {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::LOAD
+            }
+
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                _candidate: &WorkerCandidate,
+            ) -> Result<f64, WorkerSelectionPolicyError> {
+                Ok(0.0)
+            }
+        }
+
+        let cache_error = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "decode",
+            Vec::new(),
+            Box::new(CachePicker),
+        )
+        .into_cache_free()
+        .err()
+        .expect("cache inputs must be rejected");
+        assert!(cache_error.to_string().contains("active-request load"));
+
+        let full_load_error = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "decode",
+            vec![Box::new(FullLoadScorer)],
+            Box::new(LowestCostPicker),
+        )
+        .into_cache_free()
+        .err()
+        .expect("full load inputs must be rejected");
+        assert!(full_load_error.to_string().contains("active-request load"));
     }
 }

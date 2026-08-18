@@ -91,7 +91,7 @@ impl WorkerScorer for FirstPartyWorkerScorer {
                 WorkerInputs::NONE
             }
             FirstPartyRoutingPolicy::PowerOfTwoChoices | FirstPartyRoutingPolicy::LeastLoaded => {
-                WorkerInputs::LOAD
+                WorkerInputs::ACTIVE_REQUEST_LOAD
             }
         }
     }
