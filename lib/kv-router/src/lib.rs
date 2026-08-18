@@ -21,6 +21,7 @@ pub mod router_hint;
 pub mod scheduling;
 pub mod sequences;
 pub mod services;
+pub mod session_prefix_index;
 pub mod tracking_hash;
 pub mod worker_type;
 pub mod zmq_wire;
@@ -79,6 +80,9 @@ pub use selector::{
     DefaultWorkerSelector, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter,
     WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelector,
+};
+pub use session_prefix_index::{
+    LogicalNode, NodeId, SessionId, SessionPrefixIndexError, SessionPrefixIndexer,
 };
 pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
 pub use worker_type::WorkerType;

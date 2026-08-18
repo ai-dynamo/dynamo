@@ -190,6 +190,51 @@ def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
     assert kwargs["decode_active_request_weight"] == 64.0
 
 
+def test_session_prefix_index_is_opt_in_and_reaches_the_binding() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    default_kwargs = KvRouterConfigBase.from_cli_args(
+        parser.parse_args([])
+    ).kv_router_kwargs()
+    assert default_kwargs["enable_session_prefix_index"] is False
+
+    enabled_kwargs = KvRouterConfigBase.from_cli_args(
+        parser.parse_args(["--enable-session-prefix-index"])
+    ).kv_router_kwargs()
+    assert enabled_kwargs["enable_session_prefix_index"] is True
+
+    disabled_kwargs = KvRouterConfigBase.from_cli_args(
+        parser.parse_args(["--no-enable-session-prefix-index"])
+    ).kv_router_kwargs()
+    assert disabled_kwargs["enable_session_prefix_index"] is False
+
+    # The kwargs dict is unpacked straight into the Rust binding, so a name that
+    # does not match the pyo3 signature fails here rather than at serve time.
+    from dynamo._core import KvRouterConfig
+
+    KvRouterConfig(**enabled_kwargs)
+
+
+def test_session_prefix_index_environment_flows_to_binding_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The env var is consumed when the flag is registered, so it has to be set
+    # before the group builds its arguments.
+    monkeypatch.setenv("DYN_ENABLE_SESSION_PREFIX_INDEX", "true")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    kwargs = KvRouterConfigBase.from_cli_args(parser.parse_args([])).kv_router_kwargs()
+    assert kwargs["enable_session_prefix_index"] is True
+
+    # An explicit flag still wins over the environment.
+    overridden = KvRouterConfigBase.from_cli_args(
+        parser.parse_args(["--no-enable-session-prefix-index"])
+    ).kv_router_kwargs()
+    assert overridden["enable_session_prefix_index"] is False
+
+
 def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)

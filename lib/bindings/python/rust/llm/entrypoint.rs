@@ -241,7 +241,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, enable_session_prefix_index=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -262,6 +262,7 @@ impl KvRouterConfig {
         router_queue_policy: &str,
         use_remote_indexer: bool,
         serve_indexer: bool,
+        enable_session_prefix_index: bool,
         shared_cache_multiplier: f64,
         shared_cache_type: &str,
         router_predicted_ttl_secs: Option<f64>,
@@ -327,6 +328,7 @@ impl KvRouterConfig {
             router_queue_policy: router_queue_policy.parse().map_err(PyValueError::new_err)?,
             use_remote_indexer,
             serve_indexer,
+            enable_session_prefix_index,
             shared_cache_multiplier,
             shared_cache_type: shared_cache_type.parse().map_err(PyValueError::new_err)?,
             conditional_disagg_enabled,
