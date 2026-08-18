@@ -86,18 +86,26 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 
 	logger.Info("validate update", "name", newObj.Name, "namespace", newObj.Namespace)
 
-	// Skip validation if the resource is being deleted (to allow finalizer removal)
-	if !newObj.DeletionTimestamp.IsZero() {
-		logger.Info("skipping validation for resource being deleted", "name", newObj.Name)
-		return nil, nil
-	}
-
 	// Create validator with manager for API group detection and perform validation.
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
 	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
-	warnings, err := validator.Validate(ctx, newObj, runtimeVersionSourceDisabled)
-	if err != nil {
-		return warnings, err
+
+	// A finalizer can hold an object terminating for an arbitrary period, so
+	// admission still has to protect durable controller-owned metadata during
+	// that window. Only the current-state validation is skipped: an object whose
+	// unchanged legacy spec no longer satisfies today's admission rules must
+	// stay deletable, and rejecting it here would leave it impossible to
+	// finalize. The update rules below still run, so finalizer-only updates pass
+	// while metadata mutations do not.
+	var warnings admission.Warnings
+	if !newObj.DeletionTimestamp.IsZero() {
+		logger.Info("validating update on terminating resource", "name", newObj.Name)
+	} else {
+		stateWarnings, err := validator.Validate(ctx, newObj, runtimeVersionSourceDisabled)
+		if err != nil {
+			return stateWarnings, err
+		}
+		warnings = stateWarnings
 	}
 
 	// Get user info from admission request context for identity-based validation

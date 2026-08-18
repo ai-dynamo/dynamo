@@ -198,11 +198,11 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 
 	// Restrict the durable workload provider to programs implemented by the controller.
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]; exists &&
-		value != consts.WorkloadProviderComponent && value != consts.WorkloadProviderGrove {
+		!isSupportedWorkloadProvider(value) {
 		allErrs = append(allErrs, field.NotSupported(
 			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
 			value,
-			[]string{consts.WorkloadProviderComponent, consts.WorkloadProviderGrove},
+			supportedWorkloadProviders(),
 		))
 	}
 
@@ -555,6 +555,18 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
 		allErrs = append(allErrs, field.Forbidden(
 			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
 			"may only be materialized by the Dynamo operator",
+		))
+	}
+
+	// A provider being set or changed must name a program the controller
+	// implements. The create-side metadata rules do not run while an object is
+	// terminating, so this has to hold on the update path as well.
+	if newProviderExists && (!oldProviderExists || newProvider != oldProvider) &&
+		!isSupportedWorkloadProvider(newProvider) {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			newProvider,
+			supportedWorkloadProviders(),
 		))
 	}
 
