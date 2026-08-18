@@ -484,11 +484,20 @@ the first EPP follows the normal worker-event and optional replay bootstrap path
 are temporarily unreachable, recovery retries with backoff and retries immediately when peer membership
 changes.
 
+If recovery remains `NOT_SERVING`, check that the peer Service resolves the named ports and that each
+ready peer's `selection-http` address is reachable from the EPP Pod. Recovery intentionally retries
+without an attempt limit: serving with an empty or stale index is less safe than remaining out of
+service. Alert on a prolonged `NOT_SERVING` period and inspect EndpointSlices, NetworkPolicies, and
+the `/dump` port before restarting replicas.
+
 The `agg.yaml` example uses a rolling-update strategy with `maxUnavailable: 0` and `maxSurge: 100%`.
 During the first upgrade from an EPP image without `selection-http`, this lets two new Pods start
 together and recover from each other's already-bound dump endpoints. The surge can temporarily double
 the EPP Pod count, so make sure the cluster has capacity for it. Later rollouts recover from an existing
-ready replica.
+ready replica. The example assumes the Service's EndpointSlices expose a consistent pair of named
+ports during rollout; do not mix an image that lacks `selection-http` into the same peer Service without
+first applying the new manifest and planning the transition. If a mixed-version EndpointSlice omits the
+port, the new EPP remains out of service until the peer set is upgraded and the ports converge.
 
 Recovery restores KV-index placement only. It does not restore active reservations or provide an atomic
 snapshot-plus-live-event handoff. Replica lifecycle synchronization and worker replay continue to converge
