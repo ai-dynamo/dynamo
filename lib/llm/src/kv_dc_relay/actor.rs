@@ -1797,7 +1797,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(20), faults.recv())
                 .await
                 .is_err(),
-            "a pre-commit capacity omission must not enter lifecycle fault handling"
+            "a capacity omission commits exact state and must not enter lifecycle fault handling"
         );
 
         handle

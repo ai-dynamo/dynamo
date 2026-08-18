@@ -520,13 +520,14 @@ mod tests {
         Ok(file)
     }
 
-    fn source_external(dp_rank: u32, hash: u64) -> ExternalSequenceBlockHash {
-        // Real engines assign per-process ids, so the fixture derives source-local externals.
+    fn source_external(worker: u64, dp_rank: u32, hash: u64) -> ExternalSequenceBlockHash {
+        // Real engines assign per-process ids, so the fixture derives externals that differ
+        // per worker and per rank; only the canonical domain may deduplicate across sources.
         const EXTERNAL_MASK: u64 = 0x5A4E_D00D_7711_0202;
-        ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK ^ ((dp_rank as u64) << 48))
+        ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK ^ (worker << 32) ^ ((dp_rank as u64) << 48))
     }
 
-    fn stored(event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
+    fn stored(worker: u64, event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
         KvCacheEvent {
             event_id,
             dp_rank,
@@ -536,7 +537,7 @@ mod tests {
                 blocks: hashes
                     .iter()
                     .map(|hash| KvCacheStoredBlockData {
-                        block_hash: source_external(dp_rank, *hash),
+                        block_hash: source_external(worker, dp_rank, *hash),
                         tokens_hash: LocalBlockHash(*hash),
                         mm_extra_info: None,
                     })
@@ -545,14 +546,14 @@ mod tests {
         }
     }
 
-    fn removed(event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
+    fn removed(worker: u64, event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
         KvCacheEvent {
             event_id,
             dp_rank,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: hashes
                     .iter()
-                    .map(|hash| source_external(dp_rank, *hash))
+                    .map(|hash| source_external(worker, dp_rank, *hash))
                     .collect(),
             }),
         }
@@ -687,17 +688,19 @@ mod tests {
                 trace_distinct_hash_upper_bound: 2,
             }],
         };
+        // Both workers store the same canonical [10, 20] prefix under worker-local external
+        // ids; external counting would report a peak of 5, canonical counting reports 3.
         let artifacts = vec![
             ReplayWorkerArtifacts {
                 kv_events: vec![
-                    timed(1, stored(1, 0, &[10, 20])),
-                    timed(3, removed(2, 0, &[10, 20])),
+                    timed(1, stored(0, 1, 0, &[10, 20])),
+                    timed(3, removed(0, 2, 0, &[10, 20])),
                 ],
                 ..Default::default()
             },
             ReplayWorkerArtifacts {
                 kv_events: vec![
-                    timed(2, stored(1, 0, &[20, 30])),
+                    timed(2, stored(1, 1, 0, &[10, 20, 30])),
                     timed(
                         4,
                         KvCacheEvent {
