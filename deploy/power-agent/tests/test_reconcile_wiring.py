@@ -115,7 +115,10 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
                 agent._reconcile_gpu(2, {"pod-uid-1": "350"})
 
         actuator.apply_cap.assert_called_once_with(
-            2, 350, expected_uuid=actuator.get_uuid.return_value
+            2,
+            350,
+            expected_uuid=actuator.get_uuid.return_value,
+            policy_outcome="annotated",
         )
         # No module-level _apply_cap, no raw NVML write.
         # (We can't easily assert _apply_cap wasn't called because it's
@@ -138,7 +141,10 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
                 agent._reconcile_gpu(0, {"pod-uid-1": None})
 
         actuator.apply_cap.assert_called_once_with(
-            0, 450, expected_uuid=actuator.get_uuid.return_value
+            0,
+            450,
+            expected_uuid=actuator.get_uuid.return_value,
+            policy_outcome="safe_default_missing_or_invalid",
         )
 
     def test_identity_captured_before_pid_snapshot_and_threaded_to_apply_cap(self):
@@ -172,7 +178,12 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
         # Identity read strictly precedes the PID snapshot.
         self.assertEqual(call_order[:2], ["get_uuid", "list_running_pids"])
         # …and that same identity is threaded into the cap write.
-        actuator.apply_cap.assert_called_once_with(0, 350, expected_uuid="GPU-A-uuid")
+        actuator.apply_cap.assert_called_once_with(
+            0,
+            350,
+            expected_uuid="GPU-A-uuid",
+            policy_outcome="annotated",
+        )
 
     def test_unreadable_identity_skips_reconcile_fail_closed(self):
         """If the anchoring identity cannot be read, we can
@@ -274,8 +285,8 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
                 side_effect=lambda pid: "pod-tp3",
             ):
                 with patch(
-                    "power_agent._resolve_cap_for_gpu",
-                    return_value=400,
+                    "power_agent._resolve_cap_decision",
+                    return_value=(400, "annotated"),
                 ) as resolver:
                     agent._reconcile_gpu(0, {"pod-tp3": "400"})
 
@@ -290,7 +301,10 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
         )
         self.assertEqual(pod_annotations[0], ("pod-tp3", "400"))
         actuator.apply_cap.assert_called_once_with(
-            0, 400, expected_uuid=actuator.get_uuid.return_value
+            0,
+            400,
+            expected_uuid=actuator.get_uuid.return_value,
+            policy_outcome="annotated",
         )
 
     def test_one_pod_multi_pid_does_not_bump_multi_pod_counter(self):
@@ -318,7 +332,10 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
         self.assertEqual(agent.metrics.multi_pod_agree, 0)
         self.assertEqual(agent.metrics.multi_pod_conflict, 0)
         actuator.apply_cap.assert_called_once_with(
-            0, 350, expected_uuid=actuator.get_uuid.return_value
+            0,
+            350,
+            expected_uuid=actuator.get_uuid.return_value,
+            policy_outcome="annotated",
         )
 
     def test_two_pods_with_multiple_pids_each_counts_as_two(self):
@@ -344,7 +361,10 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
         # Genuine multi-pod-agree → counter ticks once (not twice).
         self.assertEqual(agent.metrics.multi_pod_agree, 1)
         actuator.apply_cap.assert_called_once_with(
-            0, 400, expected_uuid=actuator.get_uuid.return_value
+            0,
+            400,
+            expected_uuid=actuator.get_uuid.return_value,
+            policy_outcome="annotated",
         )
 
     def test_two_disagreeing_pods_each_multi_pid_still_resolves_to_safe_default(
@@ -370,7 +390,10 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
                 agent._reconcile_gpu(0, {"pod-A": "300", "pod-B": "600"})
 
         actuator.apply_cap.assert_called_once_with(
-            0, 500, expected_uuid=actuator.get_uuid.return_value
+            0,
+            500,
+            expected_uuid=actuator.get_uuid.return_value,
+            policy_outcome="safe_default_conflict",
         )
         self.assertEqual(agent.metrics.multi_pod_conflict, 1)
         # Critical: conflict tick ONCE, not once-per-PID.
@@ -505,7 +528,10 @@ class TestReconcileGpuPolicyResolution(unittest.TestCase):
                 agent._reconcile_gpu(0, {"pod-A": "400", "pod-B": "400"})
 
         actuator.apply_cap.assert_called_once_with(
-            0, 400, expected_uuid=actuator.get_uuid.return_value
+            0,
+            400,
+            expected_uuid=actuator.get_uuid.return_value,
+            policy_outcome="annotated",
         )
 
     def test_two_pods_disagree_uses_safe_default(self):
@@ -522,7 +548,10 @@ class TestReconcileGpuPolicyResolution(unittest.TestCase):
                 agent._reconcile_gpu(0, {"pod-A": "300", "pod-B": "600"})
 
         actuator.apply_cap.assert_called_once_with(
-            0, 500, expected_uuid=actuator.get_uuid.return_value
+            0,
+            500,
+            expected_uuid=actuator.get_uuid.return_value,
+            policy_outcome="safe_default_conflict",
         )
 
 

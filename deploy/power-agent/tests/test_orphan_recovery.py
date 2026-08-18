@@ -78,14 +78,21 @@ class _OrphanTestBase(unittest.TestCase):
         power_agent._pending_acquisition.clear()
         self._persist_patch = patch("power_agent._persist_managed_gpus")
         self._persist_patch.start()
-        # Startup recovery reads durable state via `_read_managed_gpus_state`,
-        # which returns (uuids, conclusive). Pre-seed via the global directly so
-        # the per-test load returns our set with a CONCLUSIVE read (the default;
-        # inconclusive-read behaviour is covered by TestInconclusiveLoad).
+        # Startup recovery reads the v2 ownership document. These Phase 1
+        # regression tests model their UUIDs as static records by default.
         self._conclusive = True
         self._load_patch = patch(
-            "power_agent._read_managed_gpus_state",
-            side_effect=lambda: (set(self._managed_uuids), self._conclusive),
+            "power_agent._read_managed_state",
+            side_effect=lambda: (
+                {
+                    "version": power_agent.managed_state.STATE_VERSION,
+                    "managed": {
+                        gpu_uuid: power_agent.managed_state.static_ownership_record()
+                        for gpu_uuid in self._managed_uuids
+                    },
+                },
+                self._conclusive,
+            ),
         )
         self._load_patch.start()
         self._managed_uuids: set[str] = set()
@@ -101,6 +108,37 @@ class _OrphanTestBase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # UUID-gating
 # ---------------------------------------------------------------------------
+
+
+class TestTransactionalRetention(_OrphanTestBase):
+    def test_transactional_record_survives_agent_replacement(self):
+        record = {
+            "controlMode": power_agent.managed_state.TRANSACTIONAL_CONTROL_MODE,
+            "dgdUID": "dgd-1",
+            "component": "prefill",
+            "podUID": "pod-1",
+            "allocationID": "pod-1/main/GPU-a",
+            "targetWatts": 350,
+        }
+        power_agent._read_managed_state.side_effect = None
+        power_agent._read_managed_state.return_value = (
+            {
+                "version": power_agent.managed_state.STATE_VERSION,
+                "managed": {"GPU-a": record},
+            },
+            True,
+        )
+        actuator = _make_actuator(
+            uuids={0: "GPU-a"},
+            current_w={0: 350},
+            default_w={0: 700},
+        )
+
+        _restore_orphaned_gpus_on_startup(actuator)
+
+        actuator.scan_uuid_index_map.assert_not_called()
+        actuator.restore_default_by_uuid.assert_not_called()
+        self.assertIn("GPU-a", power_agent._previously_managed)
 
 
 class TestUuidGating(_OrphanTestBase):

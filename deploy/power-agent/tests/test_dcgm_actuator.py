@@ -1166,7 +1166,13 @@ class TestApplyCap(unittest.TestCase):
         power_agent._previously_managed.clear()
 
     def _seed_constraints_and_uuid(
-        self, modules, handle, min_w=100, max_w=700, uuid=b"GPU-x"
+        self,
+        modules,
+        handle,
+        min_w=100,
+        max_w=700,
+        uuid=b"GPU-x",
+        current_w=700,
     ):
         """Wire constraints + UUID via GetGpuAttributes (single API).
 
@@ -1180,7 +1186,7 @@ class TestApplyCap(unittest.TestCase):
         """
         discovery = handle.GetSystem.return_value.discovery
         discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
-            uuid, min_w=min_w, max_w=max_w
+            uuid, min_w=min_w, max_w=max_w, current_w=current_w
         )
 
     def test_apply_cap_requires_metrics(self):
@@ -1192,14 +1198,18 @@ class TestApplyCap(unittest.TestCase):
     def test_apply_cap_happy_path_within_constraints(self):
         metrics = MagicMock()
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
-        self._seed_constraints_and_uuid(modules, handle)
+        self._seed_constraints_and_uuid(modules, handle, current_w=300)
 
         with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
             "power_agent._persist_managed_gpus"
         ):
             result = actuator.apply_cap(0, 300)
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.target_watts, 300)
+        self.assertEqual(result.write_outcome, "succeeded")
+        self.assertEqual(result.readback_outcome, "succeeded")
+        self.assertEqual(result.enforced_cap_watts, 300)
+        self.assertEqual(result.gpu_uuid, "GPU-x")
         # A DcgmGroup was created and the GPU added to it.
         modules["pydcgm"].DcgmGroup.assert_called_once()
         group = modules["pydcgm"].DcgmGroup.return_value
@@ -1210,12 +1220,58 @@ class TestApplyCap(unittest.TestCase):
         self.assertEqual(cfg.mPowerLimit.val, 300)
         # State tracking parity with the NVML path.
         self.assertIn(0, power_agent._managed_gpu_indices)
-        metrics.applied_limit_watts.labels.assert_called_with(gpu="0")
-        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(300)
+        metrics.configured_cap_watts.labels.assert_called_with(gpu="0")
+        metrics.configured_cap_watts.labels.return_value.set.assert_called_with(300)
         metrics.apply_failures_total.inc.assert_not_called()
         # The capped UUID is recorded in the ownership set the SIGTERM sweep
         # restricts to.
         self.assertEqual(actuator.managed_uuids(), {"GPU-x"})
+
+    def test_apply_cap_readback_failure_has_no_enforced_value(self):
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        self._seed_constraints_and_uuid(modules, handle)
+
+        with patch.object(
+            actuator, "_current_w_with_uuid", side_effect=RuntimeError("readback")
+        ), patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            result = actuator.apply_cap(0, 300)
+
+        self.assertEqual(result.write_outcome, "succeeded")
+        self.assertEqual(result.readback_outcome, "failed")
+        self.assertIsNone(result.enforced_cap_watts)
+
+    def test_apply_cap_readback_uuid_change_has_no_enforced_value(self):
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        self._seed_constraints_and_uuid(modules, handle, uuid="GPU-A")
+
+        with patch.object(
+            actuator, "_current_w_with_uuid", return_value=(300, "GPU-B")
+        ), patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
+
+        self.assertEqual(result.write_outcome, "succeeded")
+        self.assertEqual(result.readback_outcome, "failed")
+        self.assertIsNone(result.enforced_cap_watts)
+
+    def test_apply_cap_carries_policy_outcome(self):
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        self._seed_constraints_and_uuid(modules, handle, current_w=300)
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            result = actuator.apply_cap(
+                0, 300, policy_outcome="safe_default_missing_or_invalid"
+            )
+
+        self.assertEqual(result.policy_outcome, "safe_default_missing_or_invalid")
 
     def test_recap_after_reenumeration_keeps_displaced_uuid_owned(self):
         """The core of sttts's leak: the index-keyed `_managed_uuid_by_idx`
@@ -1277,7 +1333,7 @@ class TestApplyCap(unittest.TestCase):
                 result = actuator.apply_cap(0, 300)
 
         # Effective watts still returned (per the Actuator Protocol), but NO cap write.
-        self.assertEqual(result, 300)
+        self.assertEqual(result.target_watts, 300)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         # Nothing tracked as managed — we refused to write, so there is no
@@ -1315,7 +1371,7 @@ class TestApplyCap(unittest.TestCase):
 
         # Effective watts still returned (Actuator Protocol), but NO write and
         # NO tracking of any kind.
-        self.assertEqual(result, 300)
+        self.assertEqual(result.target_watts, 300)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertEqual(actuator.managed_uuids(), set())
@@ -1368,7 +1424,7 @@ class TestApplyCap(unittest.TestCase):
         # GPU-B; the constraints-provenance check sees GPU-B -> mismatch ->
         # refuse. Effective watts still returned per the Protocol; no Set, no
         # tracking.
-        self.assertEqual(result, 300)
+        self.assertEqual(result.target_watts, 300)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertEqual(actuator.managed_uuids(), set())
@@ -1396,7 +1452,7 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.target_watts, 300)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertEqual(actuator.managed_uuids(), set())
@@ -1452,7 +1508,7 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.target_watts, 300)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_called_once()
         metrics.apply_failures_total.inc.assert_not_called()
         self.assertEqual(actuator.managed_uuids(), {"GPU-A"})
@@ -1482,7 +1538,7 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.target_watts, 300)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertEqual(actuator.managed_uuids(), set())
@@ -1516,7 +1572,7 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300)
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.target_watts, 300)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertNotIn(0, power_agent._managed_gpu_indices)
@@ -1548,7 +1604,7 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300)
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.target_watts, 300)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_called_once()
         # Bookkeeping recorded the transaction-verified GPU-A, not the
         # re-enumerated GPU-B a post-Set get_uuid re-read would have returned.
@@ -1565,7 +1621,7 @@ class TestApplyCap(unittest.TestCase):
         ):
             result = actuator.apply_cap(0, 900)
 
-        self.assertEqual(result, 700)
+        self.assertEqual(result.target_watts, 700)
         cfg = modules["pydcgm"].DcgmGroup.return_value.config.Set.call_args.args[0]
         self.assertEqual(cfg.mPowerLimit.val, 700)
         metrics.cap_clamped_total.labels.assert_called_with(direction="max")
@@ -1580,7 +1636,7 @@ class TestApplyCap(unittest.TestCase):
         ):
             result = actuator.apply_cap(0, 50)
 
-        self.assertEqual(result, 100)
+        self.assertEqual(result.target_watts, 100)
         metrics.cap_clamped_total.labels.assert_called_with(direction="min")
 
     def test_apply_cap_never_calls_enforce(self):
@@ -1619,7 +1675,7 @@ class TestApplyCap(unittest.TestCase):
 
         # Returns the *requested* (effective) watts even on failure
         # because downstream callers / Prometheus need a number.
-        self.assertEqual(result, 300)
+        self.assertEqual(result.target_watts, 300)
         metrics.apply_failures_total.inc.assert_called_once()
         # GPU is NOT recorded as managed — we don't track an unsuccessful
         # write, otherwise restore-on-shutdown would touch GPUs we never
@@ -1660,9 +1716,9 @@ class TestApplyCap(unittest.TestCase):
         # hide the regression behind normal cap-failure alerting.
         metrics.apply_failures_total.inc.assert_not_called()
         # No managed-state bookkeeping ran (we never reached the
-        # success path), and no applied_limit_watts gauge tick.
+        # success path), and no configured_cap_watts gauge tick.
         self.assertNotIn(0, power_agent._managed_gpu_indices)
-        metrics.applied_limit_watts.labels.assert_not_called()
+        metrics.configured_cap_watts.labels.assert_not_called()
 
     def test_apply_cap_blanks_workload_power_profiles(self):
         """Every workload-profile slot MUST be set to DCGM_INT32_BLANK.
@@ -1905,7 +1961,7 @@ class TestRestoreDefault(unittest.TestCase):
         # via apply_cap's success-path bookkeeping; the current path skips
         # bookkeeping because _apply_cap_inner raises before it runs.
         self.assertNotIn(0, power_agent._managed_gpu_indices)
-        metrics.applied_limit_watts.labels.assert_not_called()
+        metrics.configured_cap_watts.labels.assert_not_called()
 
     def test_restore_default_returns_false_on_midwrite_reenumeration(self):
         """A reconnect BETWEEN index resolution and the Set re-enumerates the
@@ -2555,7 +2611,7 @@ class TestScanUuidIndexMap(unittest.TestCase):
 
 class TestRestoreUpdatesAppliedGauge(unittest.TestCase):
     """Stale-gauge guard: a restore to factory default
-    writes with record_ownership=False, but the applied-limit gauge tracks what
+    writes with record_ownership=False, but the configured-cap gauge tracks what
     is LIVE on the GPU, so it must still tick — otherwise Prometheus keeps
     reporting the released cap forever."""
 
@@ -2581,8 +2637,8 @@ class TestRestoreUpdatesAppliedGauge(unittest.TestCase):
         ):
             actuator.restore_default(0)
 
-        metrics.applied_limit_watts.labels.assert_called_with(gpu="0")
-        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(410)
+        metrics.configured_cap_watts.labels.assert_called_with(gpu="0")
+        metrics.configured_cap_watts.labels.return_value.set.assert_called_with(410)
 
     def test_restore_default_by_uuid_already_at_default_syncs_gauge(self):
         """When `restore_default_by_uuid` finds the GPU already at default it
@@ -2602,8 +2658,8 @@ class TestRestoreUpdatesAppliedGauge(unittest.TestCase):
 
         self.assertIsNone(result)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
-        metrics.applied_limit_watts.labels.assert_called_with(gpu="0")
-        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(700)
+        metrics.configured_cap_watts.labels.assert_called_with(gpu="0")
+        metrics.configured_cap_watts.labels.return_value.set.assert_called_with(700)
 
 
 if __name__ == "__main__":

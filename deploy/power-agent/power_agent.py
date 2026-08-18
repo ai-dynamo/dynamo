@@ -2,16 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Power Agent DaemonSet — Phase 1 implementation.
+"""Power Agent DaemonSet for static and transactional GPU power control.
 
-Runs as a privileged DaemonSet (hostPID: true) on each GPU node. Every 15s:
-  1. Lists pods on this node via the K8s API.
-  2. For each physical GPU: nvmlDeviceGetComputeRunningProcesses() → PID list
-     (PID discovery always uses NVML, under both actuator modes).
-  3. For each PID: reads /proc/{pid}/cgroup → extracts pod UID.
-  4. Looks up the pod's dynamo.nvidia.com/gpu-power-limit annotation.
-  5. Writes the cap through the selected actuator — NVML
-     (nvmlDeviceSetPowerManagementLimit) or DCGM (dcgmConfigSet).
+Runs as a privileged DaemonSet (hostPID: true) on each GPU node. It keeps a
+node-local Pod cache with one LIST followed by WATCH, resolves transactional
+main-container allocations through kubelet PodResources before CUDA starts,
+and publishes exact readback evidence on the Pod. The Phase 1 static path keeps
+its PID/cgroup attribution and writes through the selected NVML or DCGM
+actuator.
 
 Scope is opt-in: the agent only ever caps a GPU whose pod carries the
 dynamo.nvidia.com/gpu-power-limit annotation. That annotation is DGD-owned —
@@ -26,24 +24,61 @@ released back to default so it does not strand on the new tenant. See
 ``_build_uid_to_annotation`` and ``_release_managed_gpu``.
 
 Graceful shutdown: the SIGTERM/SIGINT handler only sets a shutdown flag; the
-reconcile loop (``run()``) then restores default TGP on all managed GPUs via
-``_shutdown_cleanup`` before exit — heavy NVML/DCGM work never runs inside the
-signal handler. A cap is also restored mid-run by ``_release_managed_gpu`` when
-a previously-capped GPU is handed to a non-managed tenant.
+reconcile loop (``run()``) then applies the durable per-GPU ownership policy via
+``_shutdown_cleanup`` — static caps restore to default, while transactional caps
+remain live across Agent replacement. Heavy NVML/DCGM work never runs inside
+the signal handler. A cap is also restored mid-run by ``_release_managed_gpu``
+when a previously-capped GPU is handed to a non-managed tenant.
 Cold-start orphan recovery: UUID-gated (persisted to /var/lib/dynamo-power-agent/).
 """
 
 import argparse
-import json
 import logging
 import os
 import re
 import signal
+import stat
 import threading
+import time
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 import managed_state
-from actuator import Actuator, DcgmActuator, NvmlActuator, _GpuIdentityMismatch
+from actuator import (
+    Actuator,
+    ApplyResult,
+    DcgmActuator,
+    NvmlActuator,
+    PolicyOutcome,
+    _GpuIdentityMismatch,
+)
+
+# The chart's developer Pod intentionally mounts only the Phase 1 static
+# modules. Keep those deployments importable while making any Pod that carries
+# even one reserved transaction variable fail closed (held out of PID/static
+# reconciliation) until the full image supplies the transaction modules.
+MAIN_CONTAINER_NAME = "main"
+POWER_GATE_ENV_NAMES = frozenset(
+    {
+        "DYNAMO_POWER_DGD_UID",
+        "DYNAMO_POWER_COMPONENT",
+        "DYNAMO_POWER_EXPECTED_GPU_COUNT",
+        "DYNAMO_POWER_IN_GATE_BOUND_WATTS_PER_GPU",
+    }
+)
+try:
+    import podresources_identity
+    from pod_report import PodReportPatcher, build_report, power_gate_context_from_pod
+
+    _TRANSACTIONAL_MODULES_AVAILABLE = True
+except ModuleNotFoundError as e:
+    if e.name not in {"podresources_identity", "pod_report"}:
+        raise
+    podresources_identity = None  # type: ignore
+    PodReportPatcher = None  # type: ignore
+    build_report = None  # type: ignore
+    power_gate_context_from_pod = None  # type: ignore
+    _TRANSACTIONAL_MODULES_AVAILABLE = False
 
 # Kubernetes and NVML — imported lazily with clear error messages
 try:
@@ -54,10 +89,14 @@ except ImportError:
 try:
     from kubernetes import client as k8s_client
     from kubernetes import config as k8s_config
+    from kubernetes import watch as k8s_watch
+    from kubernetes.client.exceptions import ApiException
     from kubernetes.config.config_exception import ConfigException
 except ImportError:
     k8s_client = None  # type: ignore
     k8s_config = None  # type: ignore
+    k8s_watch = None  # type: ignore
+    ApiException = Exception  # type: ignore
     ConfigException = Exception  # type: ignore
 
 try:
@@ -109,6 +148,10 @@ RECONCILE_INTERVAL_S = 15
 # meaningful cleanup headroom inside the default 60s pod grace period.
 K8S_LIST_SERVER_TIMEOUT_S = 20
 K8S_LIST_CLIENT_TIMEOUT_S = 25
+K8S_WATCH_SERVER_TIMEOUT_S = RECONCILE_INTERVAL_S
+K8S_WATCH_CLIENT_TIMEOUT_S = RECONCILE_INTERVAL_S + 10
+K8S_WATCH_BACKOFF_INITIAL_S = 1
+K8S_WATCH_BACKOFF_MAX_S = 15
 # Sourced from `managed_state` so every launch path (and the actuator's
 # separate `import power_agent` module copy) agrees on one location.
 _MANAGED_STATE_PATH = managed_state.MANAGED_STATE_PATH
@@ -125,6 +168,8 @@ _SYSTEMD_RE = re.compile(
 _CGROUPFS_RE = re.compile(
     r"/kubepods(?:/burstable|/besteffort)?/pod([a-fA-F0-9-]+)(?:/|$)"
 )
+_NVIDIA_DEVICE_RE = re.compile(r"^nvidia[0-9]+$")
+_CONTAINER_ID_RE = re.compile(r"^[a-fA-F0-9]{12,64}$")
 
 
 def _extract_pod_uid_from_cgroup(pid: int) -> Optional[str]:
@@ -151,6 +196,106 @@ def _extract_pod_uid_from_cgroup(pid: int) -> Optional[str]:
     return None  # non-K8s process — skip
 
 
+def _extract_container_id_from_cgroup(pid: int) -> Optional[str]:
+    """Return the CRI container ID encoded in a process cgroup path."""
+    try:
+        with open(f"/proc/{pid}/cgroup") as cgroup_file:
+            lines = cgroup_file.read().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        segment = line.rsplit("/", 1)[-1]
+        if segment.endswith(".scope"):
+            segment = segment[: -len(".scope")]
+        for prefix in ("cri-containerd-", "crio-", "docker-"):
+            if segment.startswith(prefix):
+                segment = segment[len(prefix) :]
+                break
+        if _CONTAINER_ID_RE.fullmatch(segment):
+            return segment.lower()
+    return None
+
+
+def _main_container_runtime_id(pod) -> Optional[str]:
+    """Return kubelet's runtime ID for the named main container."""
+    statuses = getattr(getattr(pod, "status", None), "container_statuses", None) or []
+    for container_status in statuses:
+        if getattr(container_status, "name", "") != MAIN_CONTAINER_NAME:
+            continue
+        runtime_id = getattr(container_status, "container_id", "") or ""
+        candidate = runtime_id.split("://", 1)[-1].lower()
+        if _CONTAINER_ID_RE.fullmatch(candidate):
+            return candidate
+    return None
+
+
+def _pod_runtime_gpu_uuids(
+    pod_uid: str, container_id: str
+) -> Optional[tuple[str, ...]]:
+    """Bind a current Pod UID to its actually mounted physical GPU devices.
+
+    PodResources v1 omits Pod UID, so namespace/name/container alone cannot
+    distinguish a stale row from a same-name replacement. The gate process is
+    already running before backend import and shares the main container's mount
+    namespace. Bind that current UID (from cgroup) to its /dev/nvidiaN device
+    minors, then map those immutable minors to physical UUIDs through NVML.
+    Only processes whose cgroup carries kubelet's exact ``main`` container ID
+    are eligible; a GPU sidecar cannot satisfy the proof. Exactly one nonempty
+    device set must be visible; ambiguity or any probe failure is fail-closed.
+    """
+    try:
+        minor_to_uuid: dict[int, str] = {}
+        for gpu_idx in range(pynvml.nvmlDeviceGetCount()):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+            minor = int(pynvml.nvmlDeviceGetMinorNumber(handle))
+            gpu_uuid = _nvml_uuid(handle)
+            if minor in minor_to_uuid and minor_to_uuid[minor] != gpu_uuid:
+                return None
+            minor_to_uuid[minor] = gpu_uuid
+        processes = list(os.scandir("/proc"))
+    except (OSError, ValueError, pynvml.NVMLError):
+        return None
+
+    visible_sets: set[tuple[str, ...]] = set()
+    for process in processes:
+        if not process.name.isdigit():
+            continue
+        pid = int(process.name)
+        if _extract_pod_uid_from_cgroup(pid) != pod_uid:
+            continue
+        process_container_id = _extract_container_id_from_cgroup(pid)
+        if process_container_id is None or not (
+            process_container_id == container_id
+            or process_container_id.startswith(container_id)
+            or container_id.startswith(process_container_id)
+        ):
+            continue
+        device_dir = f"/proc/{pid}/root/dev"
+        try:
+            device_names = os.listdir(device_dir)
+        except OSError:
+            continue
+        visible: set[str] = set()
+        for name in device_names:
+            if not _NVIDIA_DEVICE_RE.fullmatch(name):
+                continue
+            try:
+                device = os.stat(os.path.join(device_dir, name), follow_symlinks=False)
+            except OSError:
+                return None
+            if not stat.S_ISCHR(device.st_mode):
+                return None
+            gpu_uuid = minor_to_uuid.get(os.minor(device.st_rdev))
+            if gpu_uuid is None:
+                return None
+            visible.add(gpu_uuid)
+        if visible:
+            visible_sets.add(tuple(sorted(visible)))
+    if len(visible_sets) != 1:
+        return None
+    return next(iter(visible_sets))
+
+
 # ---------------------------------------------------------------------------
 # Persistent managed-GPU state (UUID-gated orphan recovery)
 # ---------------------------------------------------------------------------
@@ -165,17 +310,17 @@ def _extract_pod_uid_from_cgroup(pid: int) -> Optional[str]:
 _previously_managed: set[str] = managed_state.previously_managed
 
 
-def _read_managed_gpus_state() -> tuple[set[str], bool]:
-    """Load the persisted managed-UUID set AND whether the read was conclusive.
+def _read_managed_state() -> tuple[dict, bool]:
+    """Load the v2 ownership document AND whether the read was conclusive.
 
-    Returns ``(uuids, conclusive)``:
+    Returns ``(state, conclusive)``:
 
       * ``conclusive=True``  — the file was read and parsed cleanly, INCLUDING a
-        legitimately empty / absent-file first-boot state. ``uuids`` is
+        legitimately empty / absent-file first-boot state. ``state`` is
         authoritative and the caller may safely rewrite the file.
       * ``conclusive=False`` — the read or parse FAILED (I/O / permission error,
-        corrupt JSON, or a structurally-invalid root / ``managed_uuids`` field).
-        The true on-disk state is UNKNOWN, so ``uuids`` is empty and the caller
+        corrupt JSON, or a structurally-invalid ownership document). The true
+        on-disk state is UNKNOWN, so the returned state is empty and the caller
         MUST NOT rewrite the file (rewriting empty would ERASE state a transient
         failure merely hid) and MUST skip orphan recovery this boot.
 
@@ -188,18 +333,12 @@ def _read_managed_gpus_state() -> tuple[set[str], bool]:
         inconclusive so the caller skips recovery + leaves the file untouched.
       * Non-dict JSON root — a top-level list / int / string / null would have
         crashed `.get(...)`; inconclusive (do not clobber a hand-editable file).
-      * Non-list `managed_uuids` — a misshapen value would have crashed
-        `set(...)`; inconclusive.
-      * Non-string entries — bytes / ints / None inside an otherwise valid list
-        are dropped at the boundary; this is still a CONCLUSIVE read of a
-        mostly-valid file (the kept subset is authoritative).
+      * Invalid v2 records are inconclusive. Legacy v1 UUID-only files migrate
+        to static v2 records, dropping non-string entries with a warning.
     """
     try:
-        with open(_MANAGED_STATE_PATH) as f:
-            raw = json.load(f)
-    except FileNotFoundError:
-        return set(), True  # first boot — conclusively empty
-    except (OSError, json.JSONDecodeError) as e:
+        state = managed_state.load_managed_state(_MANAGED_STATE_PATH)
+    except (OSError, managed_state.ManagedStateError) as e:
         logger.warning(
             "Failed to read managed-GPU state at %s (%s: %s); read is "
             "INCONCLUSIVE — skipping orphan recovery and leaving the file "
@@ -208,51 +347,20 @@ def _read_managed_gpus_state() -> tuple[set[str], bool]:
             type(e).__name__,
             e,
         )
-        return set(), False
+        return managed_state.empty_managed_state(), False
+    return state, True
 
-    if not isinstance(raw, dict):
-        logger.warning(
-            "Managed-GPU state at %s has unexpected root type %s "
-            "(expected object); read is INCONCLUSIVE — leaving the file "
-            "untouched this startup.",
-            _MANAGED_STATE_PATH,
-            type(raw).__name__,
-        )
-        return set(), False
 
-    uuids = raw.get("managed_uuids", [])
-    if not isinstance(uuids, list):
-        logger.warning(
-            "Managed-GPU state at %s has unexpected managed_uuids type "
-            "%s (expected list); read is INCONCLUSIVE — leaving the file "
-            "untouched this startup.",
-            _MANAGED_STATE_PATH,
-            type(uuids).__name__,
-        )
-        return set(), False
-
-    # Count invalid entries directly rather than from len(set) vs
-    # len(list): the set comprehension deduplicates,
-    # so duplicate-but-valid UUIDs would inflate the false-positive
-    # "non-string entries" count. E.g. uuids=["a","a","b"] would
-    # wrongly log "1 non-string entry" when there are zero.
-    invalid_count = sum(1 for u in uuids if not isinstance(u, str))
-    valid = {u for u in uuids if isinstance(u, str)}
-    if invalid_count:
-        logger.warning(
-            "Managed-GPU state at %s contained %d non-string entries; "
-            "dropping them. Kept %d valid UUID(s).",
-            _MANAGED_STATE_PATH,
-            invalid_count,
-            len(valid),
-        )
-    return valid, True
+def _read_managed_gpus_state() -> tuple[set[str], bool]:
+    """Compatibility view of the durable v2 document as a UUID set."""
+    state, conclusive = _read_managed_state()
+    return set(state["managed"]), conclusive
 
 
 def _load_previously_managed_gpus() -> set[str]:
     """Back-compat wrapper returning ONLY the UUID set (drops the conclusive
     flag). Kept for callers/tests that just need the parsed set; startup orphan
-    recovery uses `_read_managed_gpus_state` directly so it can honour read
+    recovery uses `_read_managed_state` directly so it can honour read
     conclusiveness (skip recovery + avoid an empty-state rewrite on a failed
     read)."""
     uuids, _ = _read_managed_gpus_state()
@@ -260,11 +368,42 @@ def _load_previously_managed_gpus() -> set[str]:
 
 
 def _persist_managed_gpus(uuids: set[str]) -> None:
-    os.makedirs(os.path.dirname(_MANAGED_STATE_PATH), exist_ok=True)
-    tmp = _MANAGED_STATE_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump({"managed_uuids": sorted(uuids)}, f)
-    os.replace(tmp, _MANAGED_STATE_PATH)  # atomic rename
+    """Persist the Phase 1 UUID view without erasing v2 ownership metadata."""
+    try:
+        state = managed_state.load_managed_state(_MANAGED_STATE_PATH)
+    except FileNotFoundError:
+        state = managed_state.empty_managed_state()
+    managed = state["managed"]
+    next_managed = {}
+    for gpu_uuid in sorted(uuids):
+        existing = managed.get(gpu_uuid)
+        pending_transaction = _pending_transactional_acquisition.get(gpu_uuid)
+        if pending_transaction is None:
+            next_managed[gpu_uuid] = existing or managed_state.static_ownership_record()
+            continue
+
+        # A successful transactional hardware write must never be materialized
+        # as static merely because its first durable ADD failed. Whole-file
+        # static persists occur in the same mixed-mode reconcile, so carry the
+        # full queued record through them. Never use that repair path to
+        # overwrite a durable record owned by another DGD.
+        if (
+            existing is not None
+            and existing["controlMode"] == managed_state.TRANSACTIONAL_CONTROL_MODE
+            and existing["dgdUID"] != pending_transaction["dgdUID"]
+        ):
+            next_managed[gpu_uuid] = existing
+        else:
+            next_managed[gpu_uuid] = pending_transaction
+    managed_state.save_managed_state(
+        {"version": managed_state.STATE_VERSION, "managed": next_managed},
+        _MANAGED_STATE_PATH,
+    )
+
+
+def _persist_managed_state() -> None:
+    """Flush the shared ownership set while preserving v2 record bodies."""
+    _persist_managed_gpus(_previously_managed)
 
 
 def _nvml_uuid(handle) -> str:
@@ -294,9 +433,12 @@ def _nvml_uuid(handle) -> str:
 # actuator's canonical `import power_agent` copy, while reconcile flushes the
 # entrypoint's `__main__` copy. A module-local queue would split and never flush.
 _pending_acquisition: set[str] = managed_state.pending_acquisition
+_pending_transactional_acquisition: dict[
+    str, dict
+] = managed_state.pending_transactional_acquisition
 
 
-def _record_managed_gpu_by_uuid(uuid: str) -> None:
+def _record_managed_gpu_by_uuid(uuid: str, ownership: Optional[dict] = None) -> None:
     """Library-agnostic UUID persistence helper.
 
     Called by both actuator paths after a successful cap write. The UUID
@@ -314,13 +456,23 @@ def _record_managed_gpu_by_uuid(uuid: str) -> None:
     membership guard below would suppress every future persist attempt for this
     UUID, and an ungraceful exit would strand the cap with no recovery record.
     """
-    if uuid in _previously_managed:
+    if uuid in _previously_managed and ownership is None:
         return
+    # A fresh successful acquisition supersedes a deferred durable retirement;
+    # otherwise that old retry could later prune the newly live cap.
+    _pending_retirement.discard(uuid)
     _previously_managed.add(uuid)
     try:
-        _persist_managed_gpus(_previously_managed)
+        if ownership is None:
+            _persist_managed_gpus(_previously_managed)
+        else:
+            managed_state.enroll_managed_gpu(uuid, ownership, _MANAGED_STATE_PATH)
+            _pending_transactional_acquisition.pop(uuid, None)
     except Exception as e:
-        _pending_acquisition.add(uuid)
+        if ownership is None:
+            _pending_acquisition.add(uuid)
+        else:
+            _pending_transactional_acquisition[uuid] = dict(ownership)
         logger.warning(
             "Recorded managed GPU UUID %s in memory but persisting the durable "
             "set failed; the cap is live and the durable record will be retried "
@@ -346,7 +498,7 @@ def _flush_pending_acquisitions() -> None:
     live cap. Called at the top of every reconcile cycle so it flushes
     independently of Kubernetes API health, mirroring
     `_flush_pending_retirements`."""
-    if not _pending_acquisition:
+    if not _pending_acquisition and not _pending_transactional_acquisition:
         return
     try:
         _persist_managed_gpus(_previously_managed)
@@ -354,15 +506,44 @@ def _flush_pending_acquisitions() -> None:
         logger.warning(
             "Deferred acquisition persistence retry failed (%d pending); will "
             "retry next cycle: %s",
-            len(_pending_acquisition),
+            len(_pending_acquisition) + len(_pending_transactional_acquisition),
             e,
         )
         return
+
+    flushed = len(_pending_acquisition)
+    _pending_acquisition.clear()
+    if not _pending_transactional_acquisition:
+        logger.info(
+            "Flushed %d deferred cap acquisition(s) to durable state.",
+            flushed,
+        )
+        return
+
+    try:
+        durable = managed_state.load_managed_state(_MANAGED_STATE_PATH)
+    except Exception as e:
+        logger.warning(
+            "Deferred transactional acquisition persistence verification "
+            "failed; will retry next cycle: %s",
+            e,
+        )
+        return
+
+    for gpu_uuid, ownership in list(_pending_transactional_acquisition.items()):
+        if durable["managed"].get(gpu_uuid) == ownership:
+            _pending_transactional_acquisition.pop(gpu_uuid, None)
+            flushed += 1
+        else:
+            logger.warning(
+                "Deferred transactional acquisition for UUID %s was not "
+                "durably installed; retaining it for retry",
+                gpu_uuid,
+            )
     logger.info(
         "Flushed %d deferred cap acquisition(s) to durable state.",
-        len(_pending_acquisition),
+        flushed,
     )
-    _pending_acquisition.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -384,9 +565,9 @@ class _NoopMetric:
 class PowerAgentMetrics:
     def __init__(self, prometheus_port: int = 0) -> None:
         if _PROMETHEUS_AVAILABLE and prometheus_port > 0:
-            self.applied_limit_watts = Gauge(
-                "dynamo_power_agent_applied_limit_watts",
-                "Last applied/observed power limit per GPU index (watts), "
+            self.configured_cap_watts = Gauge(
+                "dynamo_power_agent_configured_cap_watts",
+                "Last configured power cap per GPU index (watts), "
                 "updated on every apply and re-synced to the live value on "
                 "restore / no-write paths. NOTE: series are labeled by the "
                 "actuator's GPU index. On the DCGM actuator a hostengine "
@@ -394,6 +575,12 @@ class PowerAgentMetrics:
                 "updated but the old index series is NOT deleted and lingers "
                 "until the process restarts. NVML indices are process-stable, "
                 "so this caveat does not apply to the default actuator.",
+                labelnames=("gpu",),
+            )
+            self.power_draw_watts = Gauge(
+                "dynamo_power_agent_power_draw_watts",
+                "Optional measured GPU power draw in watts. This telemetry "
+                "never establishes cap enforcement.",
                 labelnames=("gpu",),
             )
             self.multi_pod_gpu_total = Counter(
@@ -440,7 +627,8 @@ class PowerAgentMetrics:
                 logger.warning("Failed to start Prometheus server: %s", e)
         else:
             noop = _NoopMetric()
-            self.applied_limit_watts = noop
+            self.configured_cap_watts = noop
+            self.power_draw_watts = noop
             self.multi_pod_gpu_total = noop
             self.apply_failures_total = noop
             self.safe_default_applied_total = noop
@@ -486,6 +674,7 @@ def _clamp_to_constraints(
 # Alias to `managed_state` (see `_previously_managed` above for why). Mutate in
 # place only; shutdown cleanup and the actuator must see the same set.
 _managed_gpu_indices: set[int] = managed_state.managed_gpu_indices
+_managed_gpu_uuid_by_index: dict[int, str] = managed_state.managed_gpu_uuid_by_index
 
 # UUIDs whose runtime release COMPLETED in memory (hardware restored to default,
 # actuator + index ownership retired, `_previously_managed` pruned) but whose
@@ -499,15 +688,26 @@ _pending_retirement: set[str] = set()
 
 
 def _apply_cap(
-    handle, gpu_idx: int, requested_w: int, metrics: PowerAgentMetrics
-) -> None:
-    """Apply NVML power cap. All writes go through here."""
-    effective_w = _clamp_to_constraints(handle, requested_w, gpu_idx, metrics)
+    handle,
+    gpu_idx: int,
+    requested_w: int,
+    metrics: PowerAgentMetrics,
+    *,
+    effective_w: Optional[int] = None,
+    managed_uuid: Optional[str] = None,
+    ownership: Optional[dict] = None,
+) -> bool:
+    """Apply an NVML cap and report whether the hardware write succeeded.
+
+    Direct callers may leave ``effective_w`` unset to retain the original
+    clamp-before-write behavior. ``NvmlActuator`` supplies the target it
+    already clamped against its captured live range so the clamp metric is
+    emitted exactly once.
+    """
+    if effective_w is None:
+        effective_w = _clamp_to_constraints(handle, requested_w, gpu_idx, metrics)
     try:
         pynvml.nvmlDeviceSetPowerManagementLimit(handle, effective_w * 1000)
-        _managed_gpu_indices.add(gpu_idx)
-        _record_managed_gpu_uuid(handle)
-        metrics.applied_limit_watts.labels(gpu=str(gpu_idx)).set(effective_w)
     except pynvml.NVMLError as e:
         logger.error(
             "nvmlDeviceSetPowerManagementLimit GPU %d → %d W failed: %s",
@@ -516,6 +716,22 @@ def _apply_cap(
             e,
         )
         metrics.apply_failures_total.inc()
+        return False
+
+    # The hardware write has succeeded. Keep its outcome separate from all
+    # post-write bookkeeping so a later UUID/persistence error can never be
+    # misreported as a failed write. NvmlActuator supplies the UUID it already
+    # validated before the write; legacy direct callers retain the old lookup.
+    _managed_gpu_indices.add(gpu_idx)
+    if managed_uuid is None:
+        managed_uuid = _nvml_uuid(handle)
+    _managed_gpu_uuid_by_index[gpu_idx] = managed_uuid
+    if ownership is None:
+        _record_managed_gpu_by_uuid(managed_uuid)
+    else:
+        _record_managed_gpu_by_uuid(managed_uuid, ownership=ownership)
+    metrics.configured_cap_watts.labels(gpu=str(gpu_idx)).set(effective_w)
+    return True
 
 
 def _retire_actuator_ownership(actuator: Actuator, uuid: str) -> None:
@@ -562,7 +778,23 @@ def _commit_release(actuator: Actuator, gpu_idx: int, release_uuid: str) -> None
          reconciles it (idempotent when the GPU is at/above default).
     """
     _retire_actuator_ownership(actuator, release_uuid)
-    _managed_gpu_indices.discard(gpu_idx)
+    release_indices = {
+        idx
+        for idx, owned_uuid in _managed_gpu_uuid_by_index.items()
+        if owned_uuid == release_uuid and idx in _managed_gpu_indices
+    }
+    if gpu_idx >= 0:
+        release_indices.add(gpu_idx)
+    for release_idx in release_indices:
+        _managed_gpu_indices.discard(release_idx)
+        if _managed_gpu_uuid_by_index.get(release_idx) == release_uuid:
+            _managed_gpu_uuid_by_index.pop(release_idx, None)
+    # Release cancels every not-yet-durable acquisition for this physical GPU.
+    # Clearing before the membership guard is load-bearing: a failed initial
+    # transactional ADD may be queued even if another path already removed the
+    # UUID from the in-memory ownership mirror.
+    _pending_acquisition.discard(release_uuid)
+    _pending_transactional_acquisition.pop(release_uuid, None)
     if release_uuid not in _previously_managed:
         return
     _previously_managed.discard(release_uuid)
@@ -873,8 +1105,11 @@ def _handle_sigterm(signum, frame):
     _shutdown.set()
 
 
-def _shutdown_cleanup(actuator: Actuator) -> None:
-    """Restore default TGP on every managed GPU, then shut the actuator down.
+def _shutdown_cleanup(
+    actuator: Actuator,
+    control_mode: Optional[str] = None,
+) -> None:
+    """Apply the control-mode shutdown policy, then stop the actuator.
 
     Called once from `run()`'s `finally` after the reconcile loop exits — NOT
     from the signal handler — so it never races an in-flight cap write. The
@@ -882,17 +1117,88 @@ def _shutdown_cleanup(actuator: Actuator) -> None:
     why there is no None/raw-NVML fallback: cleanup can only run after
     `PowerAgent.__init__` bound and initialised an actuator.
 
-    Dispatches through the actuator so a `dcgm` deployment restores via
+    Normal production calls leave ``control_mode`` unset and classify each UUID
+    from its durable v2 ownership record, allowing static and transactional
+    workloads on the same node. The explicit argument is a bounded homogeneous
+    override used by compatibility callers and tests.
+
+    Static restores dispatch through the actuator so a `dcgm` deployment uses
     `dcgmConfigSet(default)`, keeping the hostengine's target-config record in
     sync with the driver-level cap (a raw-NVML write would desync them and let
     DCGM re-apply the stale cap after the next GPU reset/reinit).
     """
+    if control_mode == managed_state.TRANSACTIONAL_CONTROL_MODE:
+        try:
+            _persist_managed_state()
+        except Exception as e:
+            logger.warning(
+                "Failed to refresh transactional managed-GPU ownership at "
+                "shutdown; retaining live caps and existing durable state: %s",
+                e,
+            )
+        try:
+            actuator.shutdown()
+        except Exception:
+            logger.exception(
+                "Actuator shutdown raised; proceeding with agent exit anyway."
+            )
+        return
+    if control_mode not in {None, managed_state.STATIC_CONTROL_MODE}:
+        raise ValueError(f"unknown power control mode {control_mode!r}")
+
+    transactional_uuids: set[str] = set()
+    if control_mode is None:
+        durable_state, conclusive = _read_managed_state()
+        if not conclusive:
+            logger.warning(
+                "Managed ownership is inconclusive at shutdown; retaining all "
+                "live caps rather than risk restoring a transactional GPU."
+            )
+            try:
+                actuator.shutdown()
+            except Exception:
+                logger.exception(
+                    "Actuator shutdown raised; proceeding with agent exit anyway."
+                )
+            return
+        transactional_uuids = {
+            gpu_uuid
+            for gpu_uuid, record in durable_state["managed"].items()
+            if record["controlMode"] == managed_state.TRANSACTIONAL_CONTROL_MODE
+        }
+        # A transactional hardware write can succeed while its first durable
+        # ADD fails. The full queued record is still authoritative in this
+        # process; treating that UUID as static during SIGTERM would undo the
+        # live replica fence in the exact I7 durability-failure window.
+        transactional_uuids.update(_pending_transactional_acquisition)
+
     for gpu_idx in list(_managed_gpu_indices):
         # Capture the UUID of each GPU we restore so we can prune it from
         # `_previously_managed`; otherwise the next startup's orphan recovery
         # would "restore" a GPU we no longer own, clobbering another workflow's
         # cap (different DGD, manual `nvidia-smi -pl`, vendor default).
         restored_uuid: Optional[str] = None
+        if transactional_uuids:
+            try:
+                if hasattr(type(actuator), "managed_uuid_for_idx"):
+                    restored_uuid = getattr(actuator, "managed_uuid_for_idx")(gpu_idx)
+                else:
+                    restored_uuid = actuator.get_uuid(gpu_idx)
+            except Exception as e:
+                logger.warning(
+                    "Could not classify managed GPU %d during mixed-mode "
+                    "shutdown; retaining its cap: %s",
+                    gpu_idx,
+                    e,
+                )
+                continue
+            if restored_uuid in transactional_uuids:
+                logger.info(
+                    "Retaining transactional cap for GPU %d UUID %s at shutdown.",
+                    gpu_idx,
+                    restored_uuid,
+                )
+                continue
         try:
             restore_result = actuator.restore_default(gpu_idx)
             if restore_result is False:
@@ -912,10 +1218,13 @@ def _shutdown_cleanup(actuator: Actuator) -> None:
                 actuator.name,
             )
             try:
-                if hasattr(type(actuator), "managed_uuid_for_idx"):
-                    restored_uuid = getattr(actuator, "managed_uuid_for_idx")(gpu_idx)
-                else:
-                    restored_uuid = actuator.get_uuid(gpu_idx)
+                if restored_uuid is None:
+                    if hasattr(type(actuator), "managed_uuid_for_idx"):
+                        restored_uuid = getattr(actuator, "managed_uuid_for_idx")(
+                            gpu_idx
+                        )
+                    else:
+                        restored_uuid = actuator.get_uuid(gpu_idx)
             except Exception as e:
                 # Benign: the GPU is already at default, so a stale entry just
                 # makes the next startup see current_w >= default_w and skip.
@@ -963,6 +1272,8 @@ def _shutdown_cleanup(actuator: Actuator) -> None:
         type(actuator), "restore_default_by_uuid"
     ):
         for uuid in getattr(actuator, "managed_uuids")():
+            if uuid in transactional_uuids:
+                continue
             try:
                 sweep_result = getattr(actuator, "restore_default_by_uuid")(uuid)
             except Exception as e:
@@ -1008,7 +1319,11 @@ def _shutdown_cleanup(actuator: Actuator) -> None:
 
 
 def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
-    """Restore default TGP only on GPUs this agent previously capped AND that are now idle.
+    """Recover static orphan caps while retaining transactional ownership.
+
+    Static records restore default TGP only when the GPU is now idle.
+    Transactional records remain capped across Agent replacement and are left
+    for ordinary reconciliation to refresh with new enforcement evidence.
 
     Runs through the actuator surface rather than inline NVML: on the
     DCGM path, orphan recovery must write through `nvidia-dcgm`
@@ -1037,7 +1352,8 @@ def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
     # Reload IN PLACE — never rebind `_previously_managed`, or the alias to
     # `managed_state.previously_managed` (shared with the actuator's module
     # copy) would split and re-introduce the dual-copy bug.
-    reloaded, conclusive = _read_managed_gpus_state()
+    durable_state, conclusive = _read_managed_state()
+    reloaded = set(durable_state["managed"])
     _previously_managed.clear()
     _previously_managed.update(reloaded)
     if not conclusive:
@@ -1053,7 +1369,21 @@ def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
         )
         return
 
-    persisted_snapshot = set(_previously_managed)
+    transactional_uuids = {
+        gpu_uuid
+        for gpu_uuid, record in durable_state["managed"].items()
+        if record["controlMode"] == managed_state.TRANSACTIONAL_CONTROL_MODE
+    }
+    if transactional_uuids:
+        logger.info(
+            "Retaining %d transactionally owned GPU cap(s) across Agent "
+            "replacement; enforcement will be refreshed by reconciliation.",
+            len(transactional_uuids),
+        )
+
+    persisted_snapshot = set(_previously_managed) - transactional_uuids
+    if not persisted_snapshot:
+        return
     # UUIDs this pass removed from `_previously_managed` (restored or pruned).
     # Queued for the reconcile-loop retirement flush if the final persist fails,
     # so a pruned record can't linger on disk indefinitely.
@@ -1164,12 +1494,12 @@ def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_cap_for_gpu(
+def _resolve_cap_decision(
     gpu_idx: int,
     pod_annotations: list[tuple[str, Optional[str]]],
     safe_default_watts: int,
     metrics: PowerAgentMetrics,
-) -> int:
+) -> tuple[int, PolicyOutcome]:
     """Determine the NVML cap to apply for a GPU given the pod annotations on it.
 
     Policy:
@@ -1227,7 +1557,7 @@ def _resolve_cap_for_gpu(
             # metric's contract is "cap NOT live"; policy-fallback is
             # tracked by safe_default_applied_total.
             metrics.safe_default_applied_total.inc()
-            return safe_default_watts
+            return safe_default_watts, "safe_default_conflict"
         logger.warning(
             "GPU %d: %d pods all agree on cap %d W (multi-pod-per-GPU is unsupported topology).",
             gpu_idx,
@@ -1235,7 +1565,7 @@ def _resolve_cap_for_gpu(
             parsed[0],
         )
         metrics.multi_pod_gpu_total.labels(disposition="agree").inc()
-        return parsed[0]
+        return parsed[0], "annotated"
 
     # Single pod from here. Either parsed has exactly one entry (happy
     # path) or it's empty (pod's annotation is missing or non-int).
@@ -1253,8 +1583,21 @@ def _resolve_cap_for_gpu(
                 safe_default_watts,
             )
         metrics.safe_default_applied_total.inc()
-        return safe_default_watts
-    return parsed[0]
+        return safe_default_watts, "safe_default_missing_or_invalid"
+    return parsed[0], "annotated"
+
+
+def _resolve_cap_for_gpu(
+    gpu_idx: int,
+    pod_annotations: list[tuple[str, Optional[str]]],
+    safe_default_watts: int,
+    metrics: PowerAgentMetrics,
+) -> int:
+    """Compatibility wrapper returning only the policy-selected wattage."""
+    watts, _ = _resolve_cap_decision(
+        gpu_idx, pod_annotations, safe_default_watts, metrics
+    )
+    return watts
 
 
 # ---------------------------------------------------------------------------
@@ -1262,7 +1605,25 @@ def _resolve_cap_for_gpu(
 # ---------------------------------------------------------------------------
 
 
+class _PodWatchResourceVersionExpired(RuntimeError):
+    """The apiserver can no longer resume the Pod watch resourceVersion."""
+
+
+@dataclass(frozen=True)
+class _TransactionalPod:
+    pod: object
+    context: object
+    allocation: object
+    allocation_id: str
+    requested_watts: Optional[str]
+
+
 class PowerAgent:
+    # Compatibility/default for explicit shutdown-policy callers. Production
+    # cleanup derives control mode per owned GPU from durable v2 records so a
+    # node may safely host both static and transactional workloads.
+    control_mode = managed_state.STATIC_CONTROL_MODE
+
     def __init__(
         self,
         safe_default_watts: int,
@@ -1271,6 +1632,7 @@ class PowerAgent:
         prometheus_port: int = 0,
         actuator: Optional[Actuator] = None,
         actuator_factory: Optional[Callable[["PowerAgentMetrics"], Actuator]] = None,
+        pod_resources_client=None,
     ) -> None:
         self.safe_default_watts = safe_default_watts
         self.node_name = node_name or os.environ.get("NODE_NAME", "")
@@ -1318,6 +1680,21 @@ class PowerAgent:
         except ConfigException:
             k8s_config.load_kube_config()
         self._core_v1 = _build_k8s_core_v1()
+        if _TRANSACTIONAL_MODULES_AVAILABLE:
+            self._pod_resources = (
+                pod_resources_client
+                if pod_resources_client is not None
+                else podresources_identity.PodResourcesClient()
+            )
+            self._report_patcher = PodReportPatcher(self._core_v1)
+        else:
+            self._pod_resources = None
+            self._report_patcher = None
+        self._pod_cache: dict[tuple[str, str], object] = {}
+        self._pod_cache_initialized = False
+        self._pod_resource_version = ""
+        self._pod_replacement_barriers: set[tuple[str, str]] = set()
+        self._pod_uids_before_relist: dict[tuple[str, str], str] = {}
 
     def _list_pods_on_node(self) -> Optional[list]:
         """List all pods scheduled on this node.
@@ -1334,31 +1711,19 @@ class PowerAgent:
         freeze each GPU at its last-known-good cap) off this ``None`` — so do
         NOT collapse the failure path back to ``[]``.
         """
+        self._ensure_pod_cache_state()
+        if self._pod_cache_initialized:
+            return list(self._pod_cache.values())
+
         try:
             field_selector = (
                 f"spec.nodeName={self.node_name}" if self.node_name else None
             )
-            # TODO(#9682 follow-up): this polls a full pod LIST per agent every
-            # RECONCILE_INTERVAL_S. Even with the node field-selector that is one
-            # apiserver request per node per cycle, so aggregate request rate
-            # grows linearly with cluster size (~N/interval LISTs/s fleet-wide:
-            # ~66/s at 1000 nodes, ~330/s at 5000). It will not surface in tests
-            # or small clusters, only at production scale. The real fix is a
-            # watch/informer-backed local pod cache (one initial LIST + a
-            # streamed watch per node, as kubelet does) so steady-state cost is
-            # N idle watch connections instead of N LISTs every cycle. Tracked
-            # for a follow-up PR; see PR #9682 @sttts review.
-            #
-            # Interim mitigation: resource_version="0" lets the apiserver serve
-            # the LIST from its watch cache instead of reading through to etcd,
-            # which relieves etcd pressure (it does NOT change the request-rate
-            # shape). The tradeoff is "Any" list consistency: the result may be
-            # slightly stale and is not a quorum-consistent "most recent" read
-            # (https://kubernetes.io/docs/reference/using-api/api-concepts/#semantics-for-list-and-watch).
-            # That is acceptable for this MVP because reconcile is periodic, live
-            # GPU ownership is still checked from host PIDs each cycle, and a
-            # stale pod view delays convergence rather than changing the
-            # failure-path contract.
+            # This LIST seeds the node-local cache on startup and after a 410.
+            # Steady state resumes WATCH from the returned resourceVersion, so
+            # reconcile never polls a full Pod LIST on its normal cadence.
+            # resource_version="0" allows the seed/relist to use the apiserver
+            # watch cache; WATCH then provides ordered changes from its exact RV.
             # Bound the LIST on BOTH sides so a stuck/throttled apiserver
             # substantially limits the delay before graceful shutdown cleanup:
             #   * timeout_seconds — apiserver-side LIST deadline;
@@ -1383,12 +1748,139 @@ class PowerAgent:
                     timeout_seconds=K8S_LIST_SERVER_TIMEOUT_S,
                     _request_timeout=K8S_LIST_CLIENT_TIMEOUT_S,
                 )
-            return result.items
+            next_cache = {self._pod_cache_key(pod): pod for pod in result.items}
+            prior_uids = getattr(self, "_pod_uids_before_relist", {})
+            for key, pod in next_cache.items():
+                prior_uid = prior_uids.get(key)
+                next_uid = getattr(getattr(pod, "metadata", None), "uid", "")
+                if prior_uid and next_uid and prior_uid != next_uid:
+                    self._pod_replacement_barriers.add(key)
+            self._pod_uids_before_relist = {}
+            self._pod_cache = next_cache
+            resource_version = getattr(
+                getattr(result, "metadata", None), "resource_version", ""
+            )
+            self._pod_resource_version = (
+                resource_version if isinstance(resource_version, str) else ""
+            )
+            self._pod_cache_initialized = True
+            return list(self._pod_cache.values())
         except Exception as e:
             # Explicit failure result — see the contract in the docstring.
             # Returning None (not []) is what keeps the reconcile fail-safe.
             logger.warning("Failed to list pods on node: %s", e)
             return None
+
+    @staticmethod
+    def _pod_cache_key(pod) -> tuple[str, str]:
+        metadata = pod.metadata
+        return (metadata.namespace or "", metadata.name or "")
+
+    def _ensure_pod_cache_state(self) -> None:
+        """Initialize cache fields for tests and compatibility constructors."""
+        if not hasattr(self, "_pod_cache"):
+            self._pod_cache = {}
+        if not hasattr(self, "_pod_cache_initialized"):
+            self._pod_cache_initialized = False
+        if not hasattr(self, "_pod_resource_version"):
+            self._pod_resource_version = ""
+        if not hasattr(self, "_pod_replacement_barriers"):
+            self._pod_replacement_barriers = set()
+        if not hasattr(self, "_pod_uids_before_relist"):
+            self._pod_uids_before_relist = {}
+
+    @staticmethod
+    def _watch_error_code(obj) -> Optional[int]:
+        code = obj.get("code") if isinstance(obj, dict) else getattr(obj, "code", None)
+        try:
+            return int(code) if code is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _watch_pods_once(self) -> float:
+        """Resume one bounded Pod watch from the last resourceVersion."""
+        self._ensure_pod_cache_state()
+        if not self._pod_cache_initialized:
+            return 0.0
+        if k8s_watch is None:
+            raise RuntimeError("kubernetes watch support is required")
+
+        field_selector = f"spec.nodeName={self.node_name}" if self.node_name else None
+        kwargs = {
+            "field_selector": field_selector,
+            "resource_version": self._pod_resource_version or None,
+            "allow_watch_bookmarks": True,
+            "timeout_seconds": K8S_WATCH_SERVER_TIMEOUT_S,
+            "_request_timeout": K8S_WATCH_CLIENT_TIMEOUT_S,
+        }
+        list_method = self._core_v1.list_pod_for_all_namespaces
+        if self.k8s_namespace:
+            list_method = self._core_v1.list_namespaced_pod
+            kwargs["namespace"] = self.k8s_namespace
+
+        watcher = k8s_watch.Watch()
+        started = time.monotonic()
+        try:
+            for event in watcher.stream(list_method, **kwargs):
+                if _shutdown.is_set():
+                    watcher.stop()
+                    break
+                event_type = str(event.get("type", "")).upper()
+                obj = event.get("object")
+                if event_type == "ERROR":
+                    if self._watch_error_code(obj) == 410:
+                        raise _PodWatchResourceVersionExpired(
+                            f"Pod watch resourceVersion {self._pod_resource_version!r} expired"
+                        )
+                    raise RuntimeError(f"Pod watch returned ERROR event: {obj!r}")
+                if obj is None:
+                    continue
+
+                resource_version = getattr(
+                    getattr(obj, "metadata", None), "resource_version", ""
+                )
+                if isinstance(resource_version, str) and resource_version:
+                    self._pod_resource_version = resource_version
+                if event_type == "BOOKMARK":
+                    continue
+                key = self._pod_cache_key(obj)
+                if event_type in {"ADDED", "MODIFIED"}:
+                    previous = self._pod_cache.get(key)
+                    previous_uid = getattr(
+                        getattr(previous, "metadata", None), "uid", ""
+                    )
+                    next_uid = getattr(getattr(obj, "metadata", None), "uid", "")
+                    if previous_uid and next_uid and previous_uid != next_uid:
+                        self._pod_replacement_barriers.add(key)
+                    self._pod_cache[key] = obj
+                elif event_type == "DELETED":
+                    # PodResources v1 omits Pod UID. Require an observed
+                    # absence before a same-name future Pod can reuse this
+                    # namespace/name/container mapping; otherwise a stale
+                    # kubelet singleton could be rebound to the new UID.
+                    self._pod_replacement_barriers.add(key)
+                    self._pod_cache.pop(key, None)
+                else:
+                    continue
+                self.reconcile_once()
+        except ApiException as e:
+            if getattr(e, "status", None) == 410:
+                raise _PodWatchResourceVersionExpired(
+                    f"Pod watch resourceVersion {self._pod_resource_version!r} expired"
+                ) from e
+            raise
+        finally:
+            watcher.stop()
+        return time.monotonic() - started
+
+    def _invalidate_pod_cache_for_relist(self) -> None:
+        self._pod_uids_before_relist = {
+            key: getattr(getattr(pod, "metadata", None), "uid", "")
+            for key, pod in self._pod_cache.items()
+        }
+        self._pod_cache.clear()
+        self._pod_cache_initialized = False
+        self._pod_resource_version = ""
 
     def _build_uid_to_annotation(self, pods: list) -> dict[str, Optional[str]]:
         """Map pod UID → power-limit annotation value, for opted-in pods only.
@@ -1420,6 +1912,406 @@ class PowerAgent:
             if POWER_ANNOTATION_KEY in annotations:
                 result[pod.metadata.uid] = annotations[POWER_ANNOTATION_KEY]
         return result
+
+    def _transactional_pods(
+        self, pods: list
+    ) -> tuple[list[_TransactionalPod], set[str]]:
+        """Resolve injected Pods to their exact main-container GPU UUID sets."""
+        if not _TRANSACTIONAL_MODULES_AVAILABLE:
+            held_uids: set[str] = set()
+            for pod in pods:
+                for container in (
+                    getattr(getattr(pod, "spec", None), "containers", []) or []
+                ):
+                    if getattr(container, "name", "") != MAIN_CONTAINER_NAME:
+                        continue
+                    if any(
+                        getattr(item, "name", "") in POWER_GATE_ENV_NAMES
+                        for item in (getattr(container, "env", None) or [])
+                    ):
+                        uid = getattr(getattr(pod, "metadata", None), "uid", "")
+                        if uid:
+                            held_uids.add(uid)
+                        logger.error(
+                            "Transactional Power Agent modules are unavailable; "
+                            "holding Pod %s/%s out of static reconciliation",
+                            getattr(pod.metadata, "namespace", ""),
+                            getattr(pod.metadata, "name", ""),
+                        )
+            return [], held_uids
+
+        contexts: list[tuple[object, object]] = []
+        held_uids: set[str] = set()
+        for pod in pods:
+            uid = getattr(getattr(pod, "metadata", None), "uid", "")
+            try:
+                context = power_gate_context_from_pod(pod)
+            except ValueError as e:
+                if uid:
+                    held_uids.add(uid)
+                logger.error(
+                    "Rejecting malformed transactional Pod context for %s/%s: %s",
+                    getattr(pod.metadata, "namespace", ""),
+                    getattr(pod.metadata, "name", ""),
+                    e,
+                )
+                continue
+            if context is None:
+                continue
+            if uid:
+                held_uids.add(uid)
+            contexts.append((pod, context))
+        self._ensure_pod_cache_state()
+        if not contexts and not self._pod_replacement_barriers:
+            return [], held_uids
+
+        try:
+            response = self._pod_resources.list()
+        except Exception as e:
+            logger.error(
+                "Kubelet PodResources LIST failed; retaining existing "
+                "transactional caps and withholding reports: %s",
+                e,
+            )
+            return [], held_uids
+
+        podresources_keys = {
+            (getattr(resource, "namespace", ""), getattr(resource, "name", ""))
+            for resource in getattr(response, "pod_resources", [])
+        }
+        cleared_barriers = {
+            key
+            for key in self._pod_replacement_barriers
+            if key not in podresources_keys
+        }
+        self._pod_replacement_barriers.difference_update(cleared_barriers)
+
+        resolved: list[_TransactionalPod] = []
+        for pod, context in contexts:
+            metadata = pod.metadata
+            key = (metadata.namespace or "", metadata.name or "")
+            try:
+                allocation = podresources_identity.find_pod_gpu_allocation(
+                    response,
+                    metadata.namespace,
+                    metadata.name,
+                    MAIN_CONTAINER_NAME,
+                )
+                if allocation is None:
+                    raise ValueError("main-container GPU allocation is not available")
+                if len(allocation.gpu_uuids) != context.expected_gpu_count:
+                    raise ValueError(
+                        "PodResources GPU count does not match injected expectation"
+                    )
+                identity = podresources_identity.allocation_id(
+                    metadata.uid,
+                    allocation.container_name,
+                    allocation.gpu_uuids,
+                )
+            except ValueError as e:
+                logger.error(
+                    "Withholding transactional report for %s/%s: %s",
+                    metadata.namespace,
+                    metadata.name,
+                    e,
+                )
+                continue
+
+            main_container_id = _main_container_runtime_id(pod)
+            runtime_gpu_uuids = (
+                _pod_runtime_gpu_uuids(metadata.uid, main_container_id)
+                if main_container_id is not None
+                else None
+            )
+            if runtime_gpu_uuids != allocation.gpu_uuids:
+                self._pod_replacement_barriers.add(key)
+                logger.warning(
+                    "Withholding transactional report for %s/%s: PodResources "
+                    "UUIDs %s do not exactly match the GPU device set %s bound "
+                    "to the current Pod UID's runtime",
+                    metadata.namespace,
+                    metadata.name,
+                    allocation.gpu_uuids,
+                    runtime_gpu_uuids,
+                )
+                continue
+            self._pod_replacement_barriers.discard(key)
+            annotations = metadata.annotations or {}
+            resolved.append(
+                _TransactionalPod(
+                    pod=pod,
+                    context=context,
+                    allocation=allocation,
+                    allocation_id=identity,
+                    requested_watts=annotations.get(POWER_ANNOTATION_KEY),
+                )
+            )
+        return resolved, held_uids
+
+    @staticmethod
+    def _transactional_ownership(state: _TransactionalPod, target_watts: int) -> dict:
+        return {
+            "controlMode": managed_state.TRANSACTIONAL_CONTROL_MODE,
+            "dgdUID": state.context.dgd_uid,
+            "component": state.context.component,
+            "podUID": state.pod.metadata.uid,
+            "allocationID": state.allocation_id,
+            "targetWatts": target_watts,
+        }
+
+    @staticmethod
+    def _transactional_enrollment_authorized(gpu_uuid: str, dgd_uid: str) -> bool:
+        pending = _pending_transactional_acquisition.get(gpu_uuid)
+        if pending is not None and pending["dgdUID"] != dgd_uid:
+            return False
+        durable, conclusive = _read_managed_state()
+        return conclusive and managed_state.authorize_enrollment(
+            durable, gpu_uuid, dgd_uid
+        )
+
+    def _prepare_transactional_enrollment(
+        self,
+        gpu_uuid: str,
+        gpu_idx: int,
+        dgd_uid: str,
+        live_pod_uids: set[str],
+    ) -> bool:
+        """Authorize enrollment, explicitly retiring an absent prior owner.
+
+        A different DGD can never overwrite an existing record. Reuse is
+        allowed only after the old owning Pod is absent from the complete live
+        Pod cache and an identity-bound restore conclusively retires its cap.
+        """
+        if self._transactional_enrollment_authorized(gpu_uuid, dgd_uid):
+            return True
+
+        durable, conclusive = _read_managed_state()
+        if not conclusive:
+            return False
+        durable_owner = durable["managed"].get(gpu_uuid)
+        pending_owner = _pending_transactional_acquisition.get(gpu_uuid)
+        owners = [owner for owner in (durable_owner, pending_owner) if owner]
+        if not owners:
+            return False
+        if any(
+            owner["controlMode"] == managed_state.TRANSACTIONAL_CONTROL_MODE
+            and owner["podUID"] in live_pod_uids
+            for owner in owners
+        ):
+            return False
+
+        # Conflicting durable and pending owners are inconclusive. Preserve
+        # both software and hardware state for operator intervention.
+        owner_dgds = {
+            owner["dgdUID"]
+            for owner in owners
+            if owner["controlMode"] == managed_state.TRANSACTIONAL_CONTROL_MODE
+        }
+        if len(owner_dgds) > 1:
+            return False
+
+        try:
+            restored = self._actuator.restore_default_by_uuid(gpu_uuid)
+        except Exception as e:
+            logger.warning(
+                "Could not release absent prior owner of UUID %s: %s",
+                gpu_uuid,
+                e,
+            )
+            return False
+        if restored is False:
+            return False
+        # The durable record itself is authoritative ownership even if an
+        # earlier in-memory mirror was lost. Seed the mirror so commit_release
+        # always prunes the explicitly released owner from disk.
+        _previously_managed.add(gpu_uuid)
+        _commit_release(self._actuator, gpu_idx, gpu_uuid)
+        return self._transactional_enrollment_authorized(gpu_uuid, dgd_uid)
+
+    @staticmethod
+    def _transactional_ownership_is_durable(gpu_uuid: str, expected: dict) -> bool:
+        durable, conclusive = _read_managed_state()
+        return conclusive and durable["managed"].get(gpu_uuid) == expected
+
+    def _reconcile_transactional_pods(
+        self,
+        states: list[_TransactionalPod],
+        live_pod_uids: Optional[set[str]] = None,
+    ) -> None:
+        """Apply by PodResources UUID and publish only allocation-complete reports."""
+        if live_pod_uids is None:
+            live_pod_uids = {state.pod.metadata.uid for state in states}
+        by_uuid: dict[str, list[_TransactionalPod]] = {}
+        current_allocations_by_uid: dict[str, set[str]] = {}
+        for state in states:
+            current_allocations_by_uid.setdefault(state.pod.metadata.uid, set()).update(
+                state.allocation.gpu_uuids
+            )
+            for gpu_uuid in state.allocation.gpu_uuids:
+                by_uuid.setdefault(gpu_uuid, []).append(state)
+
+        uuid_to_idx: dict[str, int] = {}
+        duplicate_uuids: set[str] = set()
+        for gpu_idx in range(self.device_count):
+            try:
+                gpu_uuid = self._actuator.get_uuid(gpu_idx)
+            except Exception as e:
+                logger.warning(
+                    "Could not resolve actuator GPU %d while applying "
+                    "transactional allocations: %s",
+                    gpu_idx,
+                    e,
+                )
+                continue
+            if gpu_uuid in uuid_to_idx:
+                logger.error("Actuator returned duplicate GPU UUID %s", gpu_uuid)
+                duplicate_uuids.add(gpu_uuid)
+                continue
+            uuid_to_idx[gpu_uuid] = gpu_idx
+        for gpu_uuid in duplicate_uuids:
+            uuid_to_idx.pop(gpu_uuid, None)
+
+        # Transactional ownership ends when its Pod UID disappears, even if
+        # the GPU is idle and there is no replacement allocation to drive the
+        # normal per-GPU PID path. This is the deletion/de-enrollment half of
+        # I7: Agent replacement retains live owners; Pod/DGD deletion restores
+        # and durably retires them.
+        durable, conclusive = _read_managed_state()
+        if conclusive:
+            owners_by_uuid: dict[str, list[dict]] = {}
+            for gpu_uuid, record in durable["managed"].items():
+                if record["controlMode"] == managed_state.TRANSACTIONAL_CONTROL_MODE:
+                    owners_by_uuid.setdefault(gpu_uuid, []).append(record)
+            for gpu_uuid, record in _pending_transactional_acquisition.items():
+                owners_by_uuid.setdefault(gpu_uuid, []).append(record)
+            for gpu_uuid, owners in owners_by_uuid.items():
+
+                def owner_is_current(owner: dict) -> bool:
+                    pod_uid = owner["podUID"]
+                    if pod_uid not in live_pod_uids:
+                        return False
+                    allocation = current_allocations_by_uid.get(pod_uid)
+                    # Missing/inconclusive PodResources evidence retains the
+                    # cap. A positive current allocation for the same Pod UID
+                    # retires only UUIDs that are no longer members.
+                    return allocation is None or gpu_uuid in allocation
+
+                if any(owner_is_current(owner) for owner in owners):
+                    continue
+                try:
+                    restored = self._actuator.restore_default_by_uuid(gpu_uuid)
+                except Exception as e:
+                    logger.warning(
+                        "Could not restore deleted transactional owner of UUID "
+                        "%s; retaining ownership for retry: %s",
+                        gpu_uuid,
+                        e,
+                    )
+                    continue
+                if restored is False:
+                    logger.warning(
+                        "Deleted transactional owner of UUID %s could not be "
+                        "conclusively restored; retaining ownership for retry",
+                        gpu_uuid,
+                    )
+                    continue
+                _previously_managed.add(gpu_uuid)
+                _commit_release(
+                    self._actuator,
+                    uuid_to_idx.get(gpu_uuid, -1),
+                    gpu_uuid,
+                )
+
+        if not states:
+            return
+
+        results_by_uid: dict[str, list[ApplyResult]] = {}
+        for gpu_uuid, assignments in by_uuid.items():
+            gpu_idx = uuid_to_idx.get(gpu_uuid)
+            if gpu_idx is None:
+                logger.error(
+                    "PodResources assigned UUID %s is not visible to the actuator; "
+                    "withholding its allocation report",
+                    gpu_uuid,
+                )
+                continue
+            if len(assignments) > 1:
+                logger.error(
+                    "PodResources assigned GPU UUID %s to %d transactional Pods; "
+                    "applying safe default and reporting an unsupported conflict",
+                    gpu_uuid,
+                    len(assignments),
+                )
+                self.metrics.multi_pod_gpu_total.labels(disposition="conflict").inc()
+                self.metrics.safe_default_applied_total.inc()
+                cap_w = self.safe_default_watts
+                policy_outcome: PolicyOutcome = "safe_default_conflict"
+                ownership = None
+            else:
+                state = assignments[0]
+                cap_w, policy_outcome = _resolve_cap_decision(
+                    gpu_idx,
+                    [(state.pod.metadata.uid, state.requested_watts)],
+                    self.safe_default_watts,
+                    self.metrics,
+                )
+                ownership = self._transactional_ownership(state, cap_w)
+                if not self._prepare_transactional_enrollment(
+                    gpu_uuid,
+                    gpu_idx,
+                    state.context.dgd_uid,
+                    live_pod_uids,
+                ):
+                    logger.error(
+                        "GPU UUID %s is owned by another enrollment or durable "
+                        "state is inconclusive; refusing transactional cap write",
+                        gpu_uuid,
+                    )
+                    continue
+
+            result = self._actuator.apply_cap(
+                gpu_idx,
+                cap_w,
+                expected_uuid=gpu_uuid,
+                policy_outcome=policy_outcome,
+                ownership=ownership,
+            )
+            if ownership is not None and result.write_outcome == "succeeded":
+                durable_ownership = dict(ownership)
+                durable_ownership["targetWatts"] = result.target_watts
+                if not self._transactional_ownership_is_durable(
+                    gpu_uuid, durable_ownership
+                ):
+                    logger.error(
+                        "Cap write for UUID %s succeeded but transactional "
+                        "ownership is not durable; withholding the report",
+                        gpu_uuid,
+                    )
+                    continue
+            for state in assignments:
+                results_by_uid.setdefault(state.pod.metadata.uid, []).append(result)
+
+        for state in states:
+            try:
+                report = build_report(
+                    context=state.context,
+                    pod_uid=state.pod.metadata.uid,
+                    node_name=self.node_name,
+                    allocation_id=state.allocation_id,
+                    allocation_gpu_uuids=state.allocation.gpu_uuids,
+                    results=results_by_uid.get(state.pod.metadata.uid, []),
+                )
+                updated, patched = self._report_patcher.publish(state.pod, report)
+            except Exception as e:
+                logger.error(
+                    "Failed to publish transactional report for %s/%s: %s",
+                    state.pod.metadata.namespace,
+                    state.pod.metadata.name,
+                    e,
+                )
+                continue
+            if patched and updated is not None:
+                self._pod_cache[self._pod_cache_key(updated)] = updated
 
     def reconcile_once(self) -> None:
         """Run one reconcile cycle: list pods, map PIDs→UIDs, apply caps.
@@ -1467,8 +2359,6 @@ class PowerAgent:
                 "over 5m."
             )
             return
-        uid_to_annotation = self._build_uid_to_annotation(pods)
-
         # Re-snapshot the device count every cycle rather than trusting the
         # value cached at startup. A DCGM hostengine reconnect rebuilds the
         # discovered-GPU set, so the count can change at runtime: if it GREW,
@@ -1484,6 +2374,17 @@ class PowerAgent:
                 self.device_count,
                 e,
             )
+
+        transactional, held_uids = self._transactional_pods(pods)
+        live_pod_uids = {
+            getattr(getattr(pod, "metadata", None), "uid", "") for pod in pods
+        }
+        live_pod_uids.discard("")
+        self._reconcile_transactional_pods(transactional, live_pod_uids)
+        uid_to_annotation = self._build_uid_to_annotation(pods)
+        for uid in held_uids:
+            uid_to_annotation.pop(uid, None)
+        self._transactional_held_uids = held_uids
 
         for gpu_idx in range(self.device_count):
             # Stop enforcing the moment shutdown is requested: cleanup runs from
@@ -1508,6 +2409,7 @@ class PowerAgent:
         self,
         gpu_idx: int,
         uid_to_annotation: dict[str, Optional[str]],
+        held_uids: Optional[set[str]] = None,
     ) -> None:
         """Apply the policy-resolved cap for one GPU via the active actuator.
 
@@ -1607,10 +2509,15 @@ class PowerAgent:
         # `len(pod_annotations) > 1` was true), incorrectly applying
         # safe_default + bumping multi_pod_gpu_total. Per PR #9682
         # CodeRabbit review (power_agent.py:636).
+        held_uids = held_uids or getattr(self, "_transactional_held_uids", set())
         seen_uids: set[str] = set()
         pod_annotations: list[tuple[str, Optional[str]]] = []
         for pid in pids:
             uid = _extract_pod_uid_from_cgroup(pid)
+            if uid in held_uids:
+                # PodResources owns transactional attribution. Never fall back
+                # to PID/static release while its exact allocation is missing.
+                return
             if uid is None:
                 continue  # non-K8s process — skip
             if uid in seen_uids:
@@ -1638,14 +2545,19 @@ class PowerAgent:
             _release_managed_gpu(self._actuator, gpu_idx, expected_uuid=expected_uuid)
             return
 
-        cap_w = _resolve_cap_for_gpu(
+        cap_w, policy_outcome = _resolve_cap_decision(
             gpu_idx, pod_annotations, self.safe_default_watts, self.metrics
         )
         # Pass the pre-snapshot identity so the actuator re-verifies it is
         # still the GPU on this index before writing; a re-enumeration
         # anywhere across attribution → resolve → write is detected and the
         # write skipped.
-        self._actuator.apply_cap(gpu_idx, cap_w, expected_uuid=expected_uuid)
+        self._actuator.apply_cap(
+            gpu_idx,
+            cap_w,
+            expected_uuid=expected_uuid,
+            policy_outcome=policy_outcome,
+        )
 
     def run(self) -> None:
         """Main reconcile loop. Blocks until SIGTERM, then cleans up once.
@@ -1664,14 +2576,49 @@ class PowerAgent:
             RECONCILE_INTERVAL_S,
         )
 
+        watch_backoff_s = K8S_WATCH_BACKOFF_INITIAL_S
         try:
             while not _shutdown.is_set():
                 try:
                     self.reconcile_once()
                 except Exception as e:
                     logger.exception("Unexpected error in reconcile loop: %s", e)
-                _shutdown.wait(timeout=RECONCILE_INTERVAL_S)
+                if _shutdown.is_set():
+                    break
+                if not self._pod_cache_initialized:
+                    _shutdown.wait(timeout=watch_backoff_s)
+                    watch_backoff_s = min(watch_backoff_s * 2, K8S_WATCH_BACKOFF_MAX_S)
+                    continue
+                try:
+                    watch_duration_s = self._watch_pods_once()
+                    if watch_duration_s < 1:
+                        _shutdown.wait(timeout=watch_backoff_s)
+                        watch_backoff_s = min(
+                            watch_backoff_s * 2, K8S_WATCH_BACKOFF_MAX_S
+                        )
+                    else:
+                        watch_backoff_s = K8S_WATCH_BACKOFF_INITIAL_S
+                except _PodWatchResourceVersionExpired as e:
+                    logger.warning("%s; relisting Pods after bounded backoff", e)
+                    self._invalidate_pod_cache_for_relist()
+                    _shutdown.wait(timeout=watch_backoff_s)
+                    watch_backoff_s = min(watch_backoff_s * 2, K8S_WATCH_BACKOFF_MAX_S)
+                except Exception as e:
+                    logger.warning(
+                        "Pod watch disconnected at resourceVersion %r: %s; "
+                        "resuming after %ds",
+                        self._pod_resource_version,
+                        e,
+                        watch_backoff_s,
+                    )
+                    _shutdown.wait(timeout=watch_backoff_s)
+                    watch_backoff_s = min(watch_backoff_s * 2, K8S_WATCH_BACKOFF_MAX_S)
         finally:
+            try:
+                if self._pod_resources is not None:
+                    self._pod_resources.close()
+            except Exception:
+                logger.exception("Failed to close the PodResources client cleanly")
             _shutdown_cleanup(self._actuator)
 
         logger.info("Power Agent shut down.")

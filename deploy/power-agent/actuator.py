@@ -40,11 +40,53 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Callable, Optional, Protocol, TypeVar, runtime_checkable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Optional,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 logger = logging.getLogger("power_agent.actuator")
 
 T = TypeVar("T")
+
+PolicyOutcome = Literal[
+    "annotated",
+    "safe_default_missing_or_invalid",
+    "safe_default_conflict",
+]
+WriteOutcome = Literal["succeeded", "failed", "skipped_identity_mismatch"]
+ReadbackOutcome = Literal["succeeded", "failed", "not_attempted"]
+ActuatorName = Literal["nvml", "dcgm"]
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    """Identity-bound evidence for one attempted GPU power-cap apply."""
+
+    gpu_uuid: str
+    requested_watts: int
+    target_watts: int
+    constraint_min_watts: int
+    constraint_max_watts: int
+    policy_outcome: PolicyOutcome
+    write_outcome: WriteOutcome
+    readback_outcome: ReadbackOutcome
+    enforced_cap_watts: Optional[int]
+    actuator: ActuatorName
+    observed_at: datetime
+    power_draw_w: Optional[int] = None
+
+
+def _observed_now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 # Smallest numeric DCGM blank sentinel. All numeric DCGM blank / not-found /
 # not-supported sentinels are far above any real GPU power limit, so reject the
@@ -140,9 +182,14 @@ class Actuator(Protocol):
         ...
 
     def apply_cap(
-        self, gpu_idx: int, watts: int, expected_uuid: Optional[str] = None
-    ) -> int:
-        """Write a per-GPU power cap. Returns the effective post-clamp value.
+        self,
+        gpu_idx: int,
+        watts: int,
+        expected_uuid: Optional[str] = None,
+        policy_outcome: PolicyOutcome = "annotated",
+        ownership: Optional[dict[str, Any]] = None,
+    ) -> ApplyResult:
+        """Write a per-GPU power cap and return identity-bound evidence.
 
         `expected_uuid` is the GPU identity the caller anchored the policy
         decision to (the reconcile loop captures it BEFORE the PID snapshot
@@ -157,25 +204,10 @@ class Actuator(Protocol):
         not re-enumerate, so it accepts the argument for Protocol uniformity
         without needing it.
 
-        Return-value contract:
-
-            The returned int is the **effective post-clamp value** —
-            `max(min_w, min(watts, max_w))` against the SKU constraints —
-            regardless of whether the underlying write to NVML / DCGM
-            succeeded. This matches both implementations' actual behaviour
-            (NvmlActuator returns effective_w even on NVMLError; DcgmActuator
-            returns effective_w even on DCGMError). The reason: callers
-            (`PowerAgent._reconcile_gpu`, Prometheus exporters, log
-            aggregators) need a non-Optional value to record what the agent
-            *intended* to apply; success/failure is reported separately via
-            `metrics.apply_failures_total`. Earlier doc wording said "actually
-            applied" which suggested a contract this method does not hold —
-            corrected here.
-
-        A failed write does NOT raise from `apply_cap` itself; the actuator
-        logs the failure and increments `apply_failures_total`. Callers that
-        need to detect failure should observe the metric, not the return
-        value.
+        `enforced_cap_watts` is populated only after a successful write and an
+        immediate cap readback whose UUID still matches the anchored identity.
+        Measured power draw is separate optional telemetry and never establishes
+        enforcement.
         """
         ...
 
@@ -252,7 +284,7 @@ class NvmlActuator:
     Construction
     ------------
     `apply_cap` and `restore_default` need a metrics object to record
-    clamping events, apply failures, and the applied-limit gauge.
+    clamping events, apply failures, and the configured-cap gauge.
     `PowerAgent` constructs the actuator with its own metrics
     (`NvmlActuator(self.metrics)`); tests that only exercise queries
     (`device_count`, `get_uuid`, etc.) can construct with no args.
@@ -368,7 +400,7 @@ class NvmlActuator:
         min_mw, max_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
         return min_mw // 1000, max_mw // 1000
 
-    def current_w(self, gpu_idx: int) -> int:
+    def current_w(self, gpu_idx: int, *, handle=None) -> int:
         """Return the cap currently applied (mW from NVML, returned in W).
 
         Mirrors the inline `pynvml.nvmlDeviceGetPowerManagementLimit`
@@ -380,7 +412,8 @@ class NvmlActuator:
         """
         import pynvml
 
-        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+        if handle is None:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
         return pynvml.nvmlDeviceGetPowerManagementLimit(handle) // 1000
 
     def default_w(self, gpu_idx: int) -> int:
@@ -397,30 +430,14 @@ class NvmlActuator:
         return pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle) // 1000
 
     def apply_cap(
-        self, gpu_idx: int, watts: int, expected_uuid: Optional[str] = None
-    ) -> int:
-        """Apply a power cap to GPU `gpu_idx`, returning the effective watts.
-
-        Delegates to `power_agent._apply_cap`, which contains the
-        clamping, managed-state tracking, metrics updates, and
-        NVMLError handling exercised by `test_apply_cap.py`.
-        `_apply_cap` returns `None` (predates the Protocol), so we
-        re-derive the post-clamp effective_w from constraints here
-        WITHOUT calling `_clamp_to_constraints` again — a previous
-        version did, which double-logged the clamp warning and
-        double-incremented `cap_clamped_total` for any out-of-range
-        request. Constraint reads
-        are pure (no side effects), so reading min/max here and
-        clamping locally is equivalent to peeking at what `_apply_cap`
-        will produce.
-
-        `expected_uuid` is accepted for Protocol uniformity but not used:
-        NVML binds the device handle by index for the process lifetime and
-        has no reconnect/re-enumeration model like DCGM's hostengine, so there
-        is no in-process window in which the index could move onto a different
-        physical GPU between the caller's identity capture and this write. The
-        DCGM re-enumeration guard lives in `DcgmActuator.apply_cap`.
-        """
+        self,
+        gpu_idx: int,
+        watts: int,
+        expected_uuid: Optional[str] = None,
+        policy_outcome: PolicyOutcome = "annotated",
+        ownership: Optional[dict[str, Any]] = None,
+    ) -> ApplyResult:
+        """Apply a cap through NVML and return UUID-bound readback evidence."""
         if self._metrics is None:
             raise RuntimeError(
                 "NvmlActuator.apply_cap requires a metrics object; "
@@ -431,19 +448,150 @@ class NvmlActuator:
         import pynvml
 
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
-        # _apply_cap runs the SINGLE clamp (with its log + metric side-
-        # effects). We only need the post-clamp number to return.
-        power_agent._apply_cap(handle, gpu_idx, watts, self._metrics)
+        try:
+            observed_uuid = power_agent._nvml_uuid(handle)
+        except Exception as e:
+            logger.error("NVML UUID read failed for GPU %d: %s", gpu_idx, e)
+            self._metrics.apply_failures_total.inc()
+            return ApplyResult(
+                gpu_uuid=expected_uuid or "",
+                requested_watts=watts,
+                target_watts=watts,
+                constraint_min_watts=0,
+                constraint_max_watts=0,
+                policy_outcome=policy_outcome,
+                write_outcome="failed",
+                readback_outcome="not_attempted",
+                enforced_cap_watts=None,
+                actuator="nvml",
+                observed_at=_observed_now(),
+            )
+
+        anchor_uuid = expected_uuid or observed_uuid
+        if observed_uuid != anchor_uuid:
+            logger.error(
+                "Skipping NVML cap write for GPU %d: index UUID %s does not "
+                "match anchored UUID %s",
+                gpu_idx,
+                observed_uuid,
+                anchor_uuid,
+            )
+            self._metrics.apply_failures_total.inc()
+            return ApplyResult(
+                gpu_uuid=anchor_uuid,
+                requested_watts=watts,
+                target_watts=watts,
+                constraint_min_watts=0,
+                constraint_max_watts=0,
+                policy_outcome=policy_outcome,
+                write_outcome="skipped_identity_mismatch",
+                readback_outcome="not_attempted",
+                enforced_cap_watts=None,
+                actuator="nvml",
+                observed_at=_observed_now(),
+            )
+
         try:
             min_mw, max_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
             min_w, max_w = min_mw // 1000, max_mw // 1000
-            return max(min_w, min(watts, max_w))
-        except pynvml.NVMLError:
-            # If constraints read fails, fall back to the requested
-            # value — _apply_cap's own _clamp_to_constraints has the
-            # same fallback (`return requested_w`), so the two paths
-            # remain consistent.
-            return watts
+        except pynvml.NVMLError as e:
+            logger.error("NVML constraint read failed for GPU %d: %s", gpu_idx, e)
+            self._metrics.apply_failures_total.inc()
+            return ApplyResult(
+                gpu_uuid=anchor_uuid,
+                requested_watts=watts,
+                target_watts=watts,
+                constraint_min_watts=0,
+                constraint_max_watts=0,
+                policy_outcome=policy_outcome,
+                write_outcome="failed",
+                readback_outcome="not_attempted",
+                enforced_cap_watts=None,
+                actuator="nvml",
+                observed_at=_observed_now(),
+            )
+
+        target_w = max(min_w, min(watts, max_w))
+        if watts < min_w:
+            self._metrics.cap_clamped_total.labels(direction="min").inc()
+        elif watts > max_w:
+            self._metrics.cap_clamped_total.labels(direction="max").inc()
+
+        ownership_to_record = None
+        if ownership is not None:
+            ownership_to_record = dict(ownership)
+            ownership_to_record["targetWatts"] = target_w
+        write_succeeded = power_agent._apply_cap(
+            handle,
+            gpu_idx,
+            watts,
+            self._metrics,
+            effective_w=target_w,
+            managed_uuid=anchor_uuid,
+            ownership=ownership_to_record,
+        )
+        if not write_succeeded:
+            return ApplyResult(
+                gpu_uuid=anchor_uuid,
+                requested_watts=watts,
+                target_watts=target_w,
+                constraint_min_watts=min_w,
+                constraint_max_watts=max_w,
+                policy_outcome=policy_outcome,
+                write_outcome="failed",
+                readback_outcome="not_attempted",
+                enforced_cap_watts=None,
+                actuator="nvml",
+                observed_at=_observed_now(),
+            )
+
+        try:
+            readback_uuid_before = power_agent._nvml_uuid(handle)
+            # Reuse the same NVML handle whose UUID brackets the read. Resolving
+            # another handle from gpu_idx here can observe a different GPU after
+            # index re-enumeration and mispublish its cap for anchor_uuid.
+            enforced_w = self.current_w(gpu_idx, handle=handle)
+            readback_uuid_after = power_agent._nvml_uuid(handle)
+            if (
+                readback_uuid_before != anchor_uuid
+                or readback_uuid_after != anchor_uuid
+            ):
+                raise _GpuIdentityMismatch(
+                    "NVML UUID changed across post-write cap readback"
+                )
+        except Exception as e:
+            logger.error(
+                "NVML cap readback failed identity validation for GPU %d: %s",
+                gpu_idx,
+                e,
+            )
+            return ApplyResult(
+                gpu_uuid=anchor_uuid,
+                requested_watts=watts,
+                target_watts=target_w,
+                constraint_min_watts=min_w,
+                constraint_max_watts=max_w,
+                policy_outcome=policy_outcome,
+                write_outcome="succeeded",
+                readback_outcome="failed",
+                enforced_cap_watts=None,
+                actuator="nvml",
+                observed_at=_observed_now(),
+            )
+
+        return ApplyResult(
+            gpu_uuid=anchor_uuid,
+            requested_watts=watts,
+            target_watts=target_w,
+            constraint_min_watts=min_w,
+            constraint_max_watts=max_w,
+            policy_outcome=policy_outcome,
+            write_outcome="succeeded",
+            readback_outcome="succeeded",
+            enforced_cap_watts=enforced_w,
+            actuator="nvml",
+            observed_at=_observed_now(),
+        )
 
     def restore_default(self, gpu_idx: int) -> Optional[bool]:
         """Restore the factory-default TGP via NVML.
@@ -459,12 +607,12 @@ class NvmlActuator:
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
         default_mw = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
         pynvml.nvmlDeviceSetPowerManagementLimit(handle, default_mw)
-        # Keep the applied-limit gauge in sync with what is now LIVE on the GPU
+        # Keep the configured-cap gauge in sync with what is now LIVE on the GPU
         # (the factory default) — apply ticks it via `power_agent._apply_cap`, so
         # a restore must too or Prometheus keeps reporting the released cap
         # .
         if self._metrics is not None:
-            self._metrics.applied_limit_watts.labels(gpu=str(gpu_idx)).set(
+            self._metrics.configured_cap_watts.labels(gpu=str(gpu_idx)).set(
                 default_mw // 1000
             )
         return True
@@ -507,7 +655,7 @@ class NvmlActuator:
         # sync the gauge to the LIVE value so a GPU restored to default
         # externally stops reporting our old cap.
         if self._metrics is not None:
-            self._metrics.applied_limit_watts.labels(gpu=str(match_idx)).set(current)
+            self._metrics.configured_cap_watts.labels(gpu=str(match_idx)).set(current)
         return None
 
 
@@ -525,8 +673,9 @@ class DcgmActuator:
     So that reset/reinit auto-reapply — the single resilience property
     DCGM buys over NVML — is in effect after every successful Set; there
     is no tick-driven re-enforce loop in DCGM. It does **not** make the
-    cap survive Power Agent restart (the agent restores default at shutdown
-    regardless).
+    cap survive a restart by itself. Static ownership restores default at
+    shutdown; transactional ownership deliberately retains the live cap and
+    reloads durable UUID-bound ownership in the replacement Agent.
 
     The Power Agent deliberately issues ONLY `dcgmConfigSet`, never the
     `dcgmConfigEnforce` manual re-assert. Per the API docs `dcgmConfigEnforce`
@@ -1125,8 +1274,17 @@ class DcgmActuator:
         Reads `powerLimits.curPowerLimit`. Used by orphan-recovery
         to skip writes that would no-op.
         """
-        return self._coerce_power_limit_watts(
-            self._power_limits(gpu_idx).curPowerLimit, "curPowerLimit", gpu_idx
+        current_w, _ = self._current_w_with_uuid(gpu_idx)
+        return current_w
+
+    def _current_w_with_uuid(self, gpu_idx: int) -> tuple[int, str]:
+        """Read the current cap and owning UUID from one attributes snapshot."""
+        power_limits, gpu_uuid = self._power_limits_with_uuid(gpu_idx)
+        return (
+            self._coerce_power_limit_watts(
+                power_limits.curPowerLimit, "curPowerLimit", gpu_idx
+            ),
+            gpu_uuid,
         )
 
     def default_w(self, gpu_idx: int) -> int:
@@ -1202,9 +1360,14 @@ class DcgmActuator:
     # ------------------------------------------------------------------
 
     def apply_cap(
-        self, gpu_idx: int, watts: int, expected_uuid: Optional[str] = None
-    ) -> int:
-        """Write a per-GPU cap via `dcgmConfigSet`; return the effective watts.
+        self,
+        gpu_idx: int,
+        watts: int,
+        expected_uuid: Optional[str] = None,
+        policy_outcome: PolicyOutcome = "annotated",
+        ownership: Optional[dict[str, Any]] = None,
+    ) -> ApplyResult:
+        """Write a per-GPU cap via `dcgmConfigSet` and return typed evidence.
 
         Mirrors `power_agent._apply_cap`'s clamp + metrics + state-track
         contract on the DCGM side. DCGMError other than
@@ -1296,7 +1459,19 @@ class DcgmActuator:
                 e,
             )
             self._metrics.apply_failures_total.inc()
-            return watts
+            return ApplyResult(
+                gpu_uuid=expected_uuid or "",
+                requested_watts=watts,
+                target_watts=watts,
+                constraint_min_watts=0,
+                constraint_max_watts=0,
+                policy_outcome=policy_outcome,
+                write_outcome="failed",
+                readback_outcome="not_attempted",
+                enforced_cap_watts=None,
+                actuator="dcgm",
+                observed_at=_observed_now(),
+            )
         min_w = self._coerce_power_limit_watts(
             pl.minPowerLimit, "minPowerLimit", gpu_idx
         )
@@ -1304,12 +1479,28 @@ class DcgmActuator:
             pl.maxPowerLimit, "maxPowerLimit", gpu_idx
         )
         effective_w = self._clamp_with_metrics(watts, min_w, max_w, gpu_idx)
+        ownership_to_record = None
+        if ownership is not None:
+            ownership_to_record = dict(ownership)
+            ownership_to_record["targetWatts"] = effective_w
 
         if expected_uuid is None:
             # Entry identity was unreadable (logged + counted above). Return
             # the clamped effective watts per the Actuator Protocol; NO write
             # happened.
-            return effective_w
+            return ApplyResult(
+                gpu_uuid=constraints_uuid,
+                requested_watts=watts,
+                target_watts=effective_w,
+                constraint_min_watts=min_w,
+                constraint_max_watts=max_w,
+                policy_outcome=policy_outcome,
+                write_outcome="failed",
+                readback_outcome="not_attempted",
+                enforced_cap_watts=None,
+                actuator="dcgm",
+                observed_at=_observed_now(),
+            )
 
         if constraints_uuid != expected_uuid:
             # The SKU range we just clamped against came from a DIFFERENT
@@ -1328,7 +1519,19 @@ class DcgmActuator:
                 expected_uuid,
             )
             self._metrics.apply_failures_total.inc()
-            return effective_w
+            return ApplyResult(
+                gpu_uuid=expected_uuid,
+                requested_watts=watts,
+                target_watts=effective_w,
+                constraint_min_watts=min_w,
+                constraint_max_watts=max_w,
+                policy_outcome=policy_outcome,
+                write_outcome="skipped_identity_mismatch",
+                readback_outcome="not_attempted",
+                enforced_cap_watts=None,
+                actuator="dcgm",
+                observed_at=_observed_now(),
+            )
 
         # Lazy import (deferred until we're actually about to call into
         # DCGM): keeps the actuator constructible and the "no metrics"
@@ -1340,8 +1543,11 @@ class DcgmActuator:
         import dcgm_structs
 
         try:
-            return self._apply_cap_inner(
-                gpu_idx, effective_w, expected_uuid=expected_uuid
+            self._apply_cap_inner(
+                gpu_idx,
+                effective_w,
+                expected_uuid=expected_uuid,
+                ownership=ownership_to_record,
             )
         except _GpuIdentityMismatch as e:
             # The target index re-enumerated onto a different GPU during the
@@ -1356,7 +1562,19 @@ class DcgmActuator:
                 e,
             )
             self._metrics.apply_failures_total.inc()
-            return effective_w
+            return ApplyResult(
+                gpu_uuid=expected_uuid,
+                requested_watts=watts,
+                target_watts=effective_w,
+                constraint_min_watts=min_w,
+                constraint_max_watts=max_w,
+                policy_outcome=policy_outcome,
+                write_outcome="skipped_identity_mismatch",
+                readback_outcome="not_attempted",
+                enforced_cap_watts=None,
+                actuator="dcgm",
+                observed_at=_observed_now(),
+            )
         except dcgm_structs.DCGMError as e:
             # Narrow on purpose: only DCGM write errors
             # are part of the "cap-write failed, log + bump metric +
@@ -1375,7 +1593,60 @@ class DcgmActuator:
                 e,
             )
             self._metrics.apply_failures_total.inc()
-            return effective_w
+            return ApplyResult(
+                gpu_uuid=expected_uuid,
+                requested_watts=watts,
+                target_watts=effective_w,
+                constraint_min_watts=min_w,
+                constraint_max_watts=max_w,
+                policy_outcome=policy_outcome,
+                write_outcome="failed",
+                readback_outcome="not_attempted",
+                enforced_cap_watts=None,
+                actuator="dcgm",
+                observed_at=_observed_now(),
+            )
+
+        try:
+            enforced_w, readback_uuid = self._current_w_with_uuid(gpu_idx)
+            if readback_uuid != expected_uuid:
+                raise _GpuIdentityMismatch(
+                    f"post-write readback UUID {readback_uuid} does not match "
+                    f"anchored UUID {expected_uuid}"
+                )
+        except Exception as e:
+            logger.error(
+                "DCGM cap readback failed identity validation for GPU %d: %s",
+                gpu_idx,
+                e,
+            )
+            return ApplyResult(
+                gpu_uuid=expected_uuid,
+                requested_watts=watts,
+                target_watts=effective_w,
+                constraint_min_watts=min_w,
+                constraint_max_watts=max_w,
+                policy_outcome=policy_outcome,
+                write_outcome="succeeded",
+                readback_outcome="failed",
+                enforced_cap_watts=None,
+                actuator="dcgm",
+                observed_at=_observed_now(),
+            )
+
+        return ApplyResult(
+            gpu_uuid=expected_uuid,
+            requested_watts=watts,
+            target_watts=effective_w,
+            constraint_min_watts=min_w,
+            constraint_max_watts=max_w,
+            policy_outcome=policy_outcome,
+            write_outcome="succeeded",
+            readback_outcome="succeeded",
+            enforced_cap_watts=enforced_w,
+            actuator="dcgm",
+            observed_at=_observed_now(),
+        )
 
     def _apply_cap_inner(
         self,
@@ -1383,6 +1654,7 @@ class DcgmActuator:
         effective_w: int,
         expected_uuid: Optional[str] = None,
         record_ownership: bool = True,
+        ownership: Optional[dict[str, Any]] = None,
     ) -> int:
         """Inner cap-write path that propagates Set failures as exceptions.
 
@@ -1517,26 +1789,35 @@ class DcgmActuator:
         # GPU reset/reinit; dcgmConfigEnforce would only manually re-assert that
         # already-set target, so it is redundant here.
         #
-        # The applied-limit gauge reflects what is LIVE on the GPU right now,
+        # The configured-cap gauge reflects what is LIVE on the GPU right now,
         # so it updates on EVERY successful write — independent of ownership
         # recording. A restore/release writes the factory default with
         # `record_ownership=False`; without this the gauge would keep reporting
         # the released cap forever.
         if self._metrics is not None:
-            self._metrics.applied_limit_watts.labels(gpu=str(gpu_idx)).set(result)
+            self._metrics.configured_cap_watts.labels(gpu=str(gpu_idx)).set(result)
 
         # Restore/release callers pass `record_ownership=False`: they are
         # relinquishing the cap, so claiming ownership here would leave the UUID
         # in `_capped_uuids` for a later sweep to act on.
         if record_ownership:
-            self._record_managed_state(gpu_idx, verified_uuid=observed_uuid)
+            self._record_managed_state(
+                gpu_idx,
+                verified_uuid=observed_uuid,
+                ownership=ownership,
+            )
 
         return result
 
-    def _record_managed_state(self, gpu_idx: int, verified_uuid: str) -> None:
+    def _record_managed_state(
+        self,
+        gpu_idx: int,
+        verified_uuid: str,
+        ownership: Optional[dict[str, Any]] = None,
+    ) -> None:
         """Record post-Set OWNERSHIP bookkeeping. Runs on the Set-success path
         only when the caller CLAIMS ownership; the cap is LIVE on the GPU and
-        SIGTERM / orphan-recovery must find it. The applied-limit gauge is NOT
+        SIGTERM / orphan-recovery must find it. The configured-cap gauge is NOT
         updated here — `_apply_cap_inner` ticks it on every successful write
         (including ownership-less restores) so the metric never goes stale.
 
@@ -1551,12 +1832,18 @@ class DcgmActuator:
         import power_agent
 
         power_agent._managed_gpu_indices.add(gpu_idx)
+        power_agent._managed_gpu_uuid_by_index[gpu_idx] = verified_uuid
         try:
             self._managed_uuid_by_idx[gpu_idx] = verified_uuid
             # Ownership record for the SIGTERM sweep (never overwritten on
             # re-enumeration, unlike `_managed_uuid_by_idx[gpu_idx]`).
             self._capped_uuids.add(verified_uuid)
-            power_agent._record_managed_gpu_by_uuid(verified_uuid)
+            if ownership is None:
+                power_agent._record_managed_gpu_by_uuid(verified_uuid)
+            else:
+                power_agent._record_managed_gpu_by_uuid(
+                    verified_uuid, ownership=ownership
+                )
         except Exception as e:
             # UUID persistence failure is non-fatal: the cap was applied,
             # only the persistent orphan-recovery record is missed.
@@ -1802,7 +2089,7 @@ class DcgmActuator:
         # sync the gauge to the LIVE value so a GPU restored to default
         # externally stops reporting our old cap.
         if self._metrics is not None:
-            self._metrics.applied_limit_watts.labels(gpu=str(idx)).set(current_w)
+            self._metrics.configured_cap_watts.labels(gpu=str(idx)).set(current_w)
         return None
 
     def managed_uuid_for_idx(self, gpu_idx: int) -> str:

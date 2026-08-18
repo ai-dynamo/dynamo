@@ -24,7 +24,9 @@ driver-level cap.
 import os
 import runpy
 import signal
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import power_agent
@@ -49,6 +51,10 @@ class TestMainEntrypoint(unittest.TestCase):
         ns = runpy.run_path(path, run_name="power_agent_fresh_copy")
 
         self.assertIs(ns["_managed_gpu_indices"], managed_state.managed_gpu_indices)
+        self.assertIs(
+            ns["_managed_gpu_uuid_by_index"],
+            managed_state.managed_gpu_uuid_by_index,
+        )
         self.assertIs(ns["_previously_managed"], managed_state.previously_managed)
         self.assertEqual(ns["_MANAGED_STATE_PATH"], managed_state.MANAGED_STATE_PATH)
 
@@ -56,10 +62,14 @@ class TestMainEntrypoint(unittest.TestCase):
 class _ShutdownTestBase(unittest.TestCase):
     def setUp(self):
         power_agent._managed_gpu_indices.clear()
+        power_agent._managed_gpu_uuid_by_index.clear()
+        power_agent._pending_transactional_acquisition.clear()
         power_agent._shutdown.clear()
 
     def tearDown(self):
         power_agent._managed_gpu_indices.clear()
+        power_agent._managed_gpu_uuid_by_index.clear()
+        power_agent._pending_transactional_acquisition.clear()
         power_agent._shutdown.clear()
 
 
@@ -151,6 +161,99 @@ class TestCleanupViaActuator(_ShutdownTestBase):
         dcgm_actuator.restore_default.assert_called_once_with(7)
         dcgm_actuator.shutdown.assert_called_once()
 
+    def test_mixed_mode_restores_static_and_retains_transactional(self):
+        import managed_state
+
+        power_agent._managed_gpu_indices.update([0, 1])
+        power_agent._previously_managed.clear()
+        power_agent._previously_managed.update({"GPU-static", "GPU-transactional"})
+        actuator = MagicMock()
+        actuator.name = "nvml"
+        actuator.get_uuid.side_effect = lambda idx: {
+            0: "GPU-static",
+            1: "GPU-transactional",
+        }[idx]
+        transactional_record = {
+            "controlMode": managed_state.TRANSACTIONAL_CONTROL_MODE,
+            "dgdUID": "dgd-1",
+            "component": "prefill",
+            "podUID": "pod-1",
+            "allocationID": "pod-1/main/GPU-transactional",
+            "targetWatts": 350,
+        }
+        durable = {
+            "version": managed_state.STATE_VERSION,
+            "managed": {
+                "GPU-static": managed_state.static_ownership_record(),
+                "GPU-transactional": transactional_record,
+            },
+        }
+
+        with patch.object(
+            power_agent, "_read_managed_state", return_value=(durable, True)
+        ), patch.object(power_agent, "_persist_managed_gpus"):
+            power_agent._shutdown_cleanup(actuator)
+
+        actuator.restore_default.assert_called_once_with(0)
+        self.assertEqual(power_agent._previously_managed, {"GPU-transactional"})
+        actuator.shutdown.assert_called_once()
+
+    def test_pending_transactional_acquisition_is_retained_on_shutdown(self):
+        import managed_state
+
+        ownership = {
+            "controlMode": managed_state.TRANSACTIONAL_CONTROL_MODE,
+            "dgdUID": "dgd-1",
+            "component": "decode",
+            "podUID": "pod-1",
+            "allocationID": "pod-1/main/GPU-transactional",
+            "targetWatts": 350,
+        }
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._managed_gpu_uuid_by_index[0] = "GPU-transactional"
+        power_agent._previously_managed.add("GPU-transactional")
+        self.addCleanup(power_agent._previously_managed.discard, "GPU-transactional")
+        power_agent._pending_transactional_acquisition["GPU-transactional"] = ownership
+        actuator = MagicMock()
+        actuator.name = "nvml"
+        actuator.get_uuid.return_value = "GPU-transactional"
+
+        with patch.object(
+            power_agent,
+            "_read_managed_state",
+            return_value=(managed_state.empty_managed_state(), True),
+        ), patch.object(
+            power_agent,
+            "_persist_managed_gpus",
+            side_effect=OSError("state volume unavailable"),
+        ):
+            power_agent._shutdown_cleanup(actuator)
+
+        actuator.restore_default.assert_not_called()
+        actuator.shutdown.assert_called_once()
+        self.assertIn(
+            "GPU-transactional", power_agent._pending_transactional_acquisition
+        )
+
+    def test_corrupt_versionless_state_retains_all_caps(self):
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.clear()
+        power_agent._previously_managed.add("GPU-transactional")
+        actuator = MagicMock()
+        actuator.name = "nvml"
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_path = Path(temporary_directory) / "managed.json"
+            state_path.write_text("{}", encoding="utf-8")
+            with patch.object(
+                power_agent, "_MANAGED_STATE_PATH", str(state_path)
+            ), self.assertLogs("power_agent", level="WARNING") as logs:
+                power_agent._shutdown_cleanup(actuator)
+
+        actuator.restore_default.assert_not_called()
+        actuator.shutdown.assert_called_once()
+        self.assertIn("INCONCLUSIVE", "\n".join(logs.output))
+
     def test_per_gpu_restore_failure_does_not_prevent_shutdown(self):
         """A failing restore on one GPU must not stop the loop or prevent
         actuator.shutdown() from being called."""
@@ -189,12 +292,13 @@ class TestCleanupViaActuator(_ShutdownTestBase):
 
 
 class TestCleanupPrunesManagedGpusState(_ShutdownTestBase):
-    """Cleanup restores + prunes managed-GPU state.
+    """Static cleanup restores + prunes managed-GPU state.
 
-    Cleanup restores each managed GPU to default AND prunes that GPU's UUID
-    from `managed_gpus.json`; otherwise the next startup's orphan recovery
-    treats the stale UUID as agent-owned and could clobber a cap applied by
-    another workflow on a now-idle GPU.
+    In static mode, cleanup restores each managed GPU to default AND prunes
+    that GPU's UUID from `managed_gpus.json`; otherwise the next startup's
+    orphan recovery treats the stale UUID as agent-owned and could clobber a
+    cap applied by another workflow on a now-idle GPU. Transactional shutdown
+    retention is covered separately.
     """
 
     def setUp(self):
