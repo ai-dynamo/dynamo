@@ -966,7 +966,7 @@ func TestCheckPCSGReady(t *testing.T) {
 	}
 }
 
-func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
+func TestEvaluateGroveReadiness(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1307,11 +1307,11 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			ready, reason, serviceStatuses, err := GetComponentReadinessAndServiceReplicaStatuses(ctx, fakeKubeClient, betaDGD)
+			readiness, err := EvaluateGroveReadiness(ctx, fakeKubeClient, betaDGD, nil)
 
 			g.Expect(err).NotTo(gomega.HaveOccurred())
-			g.Expect(ready).To(gomega.Equal(tt.wantReady))
-			g.Expect(reason).To(gomega.Equal(tt.wantReason))
+			g.Expect(readiness.Ready).To(gomega.Equal(tt.wantReady))
+			g.Expect(readiness.Message).To(gomega.Equal(tt.wantReason))
 
 			t.Log("Build the expected namespaces from the observed PCS availability")
 			wantServiceStatuses := make(map[string]v1beta1.ComponentReplicaStatus, len(tt.wantServiceStatuses))
@@ -1325,7 +1325,7 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 				}
 				wantServiceStatuses[componentName] = wantStatus
 			}
-			g.Expect(serviceStatuses).To(gomega.Equal(wantServiceStatuses))
+			g.Expect(readiness.ComponentStatuses).To(gomega.Equal(wantServiceStatuses))
 		})
 	}
 }
@@ -2016,7 +2016,7 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 		g.Expect(classification).To(gomega.BeEmpty())
 	})
 
-	t.Run("GetComponentReadinessAndServiceReplicaStatuses propagates the error", func(t *testing.T) {
+	t.Run("EvaluateGroveReadiness propagates a child read error", func(t *testing.T) {
 		g := gomega.NewGomegaWithT(t)
 		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
@@ -2031,31 +2031,11 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 			},
 		})
 		c := newClient(g)
-		ready, _, _, err := GetComponentReadinessAndServiceReplicaStatuses(ctx, c, dgd)
+		readiness, err := EvaluateGroveReadiness(ctx, c, dgd, nil)
 		g.Expect(err).To(gomega.HaveOccurred())
 		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
-		// A transient error is not a normal not-ready result: ready is false and
+		// A transient error is not a normal not-ready result: Ready is false and
 		// the error is what callers must act on.
-		g.Expect(ready).To(gomega.BeFalse())
-	})
-
-	t.Run("ClassifyGroveReadiness propagates the error", func(t *testing.T) {
-		g := gomega.NewGomegaWithT(t)
-		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-			Spec: v1alpha1.DynamoGraphDeploymentSpec{
-				BackendFramework: "vllm",
-				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-					"frontend": {
-						ComponentType: string(commonconsts.ComponentTypeFrontend),
-						Replicas:      ptr.To(int32(1)),
-					},
-				},
-			},
-		})
-		c := newClient(g)
-		_, err := ClassifyGroveReadiness(ctx, c, dgd)
-		g.Expect(err).To(gomega.HaveOccurred())
-		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
+		g.Expect(readiness.Ready).To(gomega.BeFalse())
 	})
 }

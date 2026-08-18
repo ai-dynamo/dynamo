@@ -123,36 +123,6 @@ func EvaluateGroveReadiness(
 	}, nil
 }
 
-// GetComponentReadinessAndServiceReplicaStatuses determines if all Grove components are ready
-// and returns the replica statuses for each component.
-// - PodCliques: spec.replicas == status.readyReplicas
-// - PodCliqueScalingGroups: spec.replicas == status.availableReplicas
-func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, reader client.Reader, dgd *v1beta1.DynamoGraphDeployment) (bool, string, map[string]v1beta1.ComponentReplicaStatus, error) {
-	pcs, err := getGrovePodCliqueSet(ctx, reader, dgd)
-	if err != nil {
-		return false, "", nil, err
-	}
-	readiness, err := EvaluateGroveReadiness(ctx, reader, dgd, pcs)
-	return readiness.Ready, readiness.Message, readiness.ComponentStatuses, err
-}
-
-// ClassifyGroveReadiness returns the DGD-level Ready condition reason for a
-// Grove-backed DGD as one of the v1beta1.DGDReadyReason* constants.
-// It performs the same Grove status reads as
-// GetComponentReadinessAndServiceReplicaStatuses; callers that need both the
-// reason and the readiness/message/component-status detail in the same
-// reconcile should prefer calling EvaluateGroveReadiness directly to avoid
-// reading Grove status twice. A non-nil error indicates a transient read
-// failure that should be retried, not a classification.
-func ClassifyGroveReadiness(ctx context.Context, reader client.Reader, dgd *v1beta1.DynamoGraphDeployment) (string, error) {
-	pcs, err := getGrovePodCliqueSet(ctx, reader, dgd)
-	if err != nil {
-		return "", err
-	}
-	readiness, err := EvaluateGroveReadiness(ctx, reader, dgd, pcs)
-	return readiness.Classification, err
-}
-
 // evaluateGroveComponents is the single per-component evaluation loop behind
 // all public Grove readiness views.
 //
@@ -220,28 +190,6 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 	}
 
 	return true, v1beta1.DGDReadyReasonAllResourcesReady, "", componentStatuses, nil
-}
-
-// getGrovePodCliqueSet reads the parent status once for a readiness evaluation.
-// dgd must be non-nil. It returns nil when the parent has not been created.
-func getGrovePodCliqueSet(
-	ctx context.Context,
-	reader client.Reader,
-	dgd *v1beta1.DynamoGraphDeployment,
-) (*grovev1alpha1.PodCliqueSet, error) {
-	// Treat a missing parent as a deployment with no accepted PCS revision.
-	pcs := &grovev1alpha1.PodCliqueSet{}
-	pcsKey := types.NamespacedName{
-		Name:      PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-		Namespace: dgd.Namespace,
-	}
-	if err := reader.Get(ctx, pcsKey, pcs); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get PodCliqueSet %s: %w", pcsKey, err)
-	}
-	return pcs, nil
 }
 
 // getAcceptedPCSRevisionHash returns the current PCS revision after Grove has
