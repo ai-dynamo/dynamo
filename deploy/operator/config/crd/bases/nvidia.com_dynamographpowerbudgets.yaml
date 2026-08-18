@@ -1,0 +1,364 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+    helm.sh/resource-policy: keep
+  name: dynamographpowerbudgets.nvidia.com
+spec:
+  group: nvidia.com
+  names:
+    kind: DynamoGraphPowerBudget
+    listKind: DynamoGraphPowerBudgetList
+    plural: dynamographpowerbudgets
+    shortNames:
+      - dgpb
+    singular: dynamographpowerbudget
+  scope: Namespaced
+  versions:
+    - name: v1beta1
+      schema:
+        openAPIV3Schema:
+          description: |-
+            DynamoGraphPowerBudget materializes immutable power policy and aggregate
+            enforcement state for one DynamoGraphDeployment.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: |-
+                DynamoGraphPowerBudgetSpec defines the immutable power policy for one
+                DynamoGraphDeployment.
+              properties:
+                budgetWatts:
+                  description: budgetWatts is the aggregate physical-GPU power budget for the owning DGD.
+                  format: int64
+                  minimum: 1
+                  type: integer
+                policy:
+                  description: policy contains immutable replica-admission policy.
+                  properties:
+                    minEndpoint:
+                      description: minEndpoint is the minimum replica count for every power-managed component.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                  required:
+                    - minEndpoint
+                  type: object
+              required:
+                - budgetWatts
+                - policy
+              type: object
+              x-kubernetes-validations:
+                - message: spec is immutable
+                  optionalOldSelf: true
+                  rule: '!oldSelf.hasValue() || self == oldSelf.value()'
+            status:
+              description: DynamoGraphPowerBudgetStatus defines the bounded durable power-budget state.
+              properties:
+                availableWatts:
+                  format: int64
+                  minimum: 0
+                  type: integer
+                committedReplicaTargets:
+                  additionalProperties:
+                    format: int32
+                    type: integer
+                  description: |-
+                    committedReplicaTargets is the durable all-role reservation written before
+                    DGD replica mirroring.
+                  maxProperties: 25
+                  type: object
+                components:
+                  description: components contains one aggregate row per power-managed component.
+                  items:
+                    description: |-
+                      DynamoGraphPowerBudgetComponentStatus contains bounded aggregate state for
+                      one power-managed component. Exact per-GPU evidence remains on Pods.
+                    properties:
+                      enforcedPhysicalGPUs:
+                        description: enforcedPhysicalGPUs is the aggregate count with accepted exact readback.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      inGateBoundWattsPerGPU:
+                        description: inGateBoundWattsPerGPU is the qualified reservation bound B_c.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      inGatePhysicalGPUs:
+                        description: inGatePhysicalGPUs is the aggregate count charged at B_c.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      name:
+                        description: name is the DGD component name.
+                        minLength: 1
+                        type: string
+                      physicalGPUsPerReplica:
+                        description: physicalGPUsPerReplica is the immutable physical-GPU count per replica.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      replicaStatus:
+                        description: replicaStatus reuses the standard aggregate Dynamo component inventory.
+                        properties:
+                          availableReplicas:
+                            description: |-
+                              availableReplicas is the number of available replicas. Populated for
+                              `Deployment` and `PodCliqueScalingGroup`; not available for
+                              `PodClique` or `LeaderWorkerSet`.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          componentKind:
+                            description: |-
+                              componentKind is the underlying resource kind (e.g. `PodClique`,
+                              `Deployment`, `LeaderWorkerSet`).
+                            enum:
+                              - PodClique
+                              - PodCliqueScalingGroup
+                              - Deployment
+                              - LeaderWorkerSet
+                            type: string
+                          componentNames:
+                            description: |-
+                              componentNames is the list of underlying Kubernetes resource names for
+                              this Dynamo component. During normal operation this contains a single
+                              name; during rolling updates it contains both old and new resource names.
+                            items:
+                              type: string
+                            type: array
+                          readyReplicas:
+                            description: |-
+                              readyReplicas is the number of ready replicas. Populated for
+                              `PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for
+                              `PodCliqueScalingGroup`.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          replicas:
+                            description: replicas is the total number of non-terminated replicas.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          runtimeNamespace:
+                            description: |-
+                              runtimeNamespace is the effective Dynamo runtime namespace for this
+                              component. Worker components may include a generation suffix; non-workers and
+                              Grove-backed workers use the base namespace. During rolling updates, worker
+                              status keeps the old active revision namespace until cutover completes.
+                            type: string
+                          scheduledReplicas:
+                            description: |-
+                              scheduledReplicas is the number of replicas the backend scheduler has
+                              scheduled, expressed strictly in Dynamo component-replica units (not
+                              raw backend pod counts). It is a diagnostic aid for distinguishing
+                              capacity/scheduling shortfalls from runtime readiness.
+
+                              It is optional and omitted (nil) when the active backend cannot derive
+                              it reliably in component-replica units — for example before the backing
+                              resource's status has been observed, or for backends that do not report
+                              a scheduling count. A nil value therefore means "not reported", never
+                              "zero scheduled"; consumers must not treat absence as a scheduling
+                              failure.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          updatedReplicas:
+                            description: updatedReplicas is the number of replicas at the current/desired revision.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                        required:
+                          - componentKind
+                          - replicas
+                          - updatedReplicas
+                        type: object
+                      requestedCapWattsPerGPU:
+                        description: requestedCapWattsPerGPU is the immutable requested cap R_c.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      terminatingReplicas:
+                        description: terminatingReplicas remain charged until deletion is observed.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      unenforcedBoundWattsPerGPU:
+                        description: unenforcedBoundWattsPerGPU is the qualified unknown-evidence bound U_c.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      unknownPhysicalGPUs:
+                        description: unknownPhysicalGPUs is the aggregate count charged at U_c.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                      - enforcedPhysicalGPUs
+                      - inGateBoundWattsPerGPU
+                      - inGatePhysicalGPUs
+                      - name
+                      - physicalGPUsPerReplica
+                      - replicaStatus
+                      - requestedCapWattsPerGPU
+                      - terminatingReplicas
+                      - unenforcedBoundWattsPerGPU
+                      - unknownPhysicalGPUs
+                    type: object
+                  maxItems: 25
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - name
+                  x-kubernetes-list-type: map
+                conditions:
+                  description: conditions contains bounded aggregate conditions, currently PowerInfeasible.
+                  items:
+                    description: Condition contains details for one aspect of the current state of this API Resource.
+                    properties:
+                      lastTransitionTime:
+                        description: |-
+                          lastTransitionTime is the last time the condition transitioned from one status to another.
+                          This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                        format: date-time
+                        type: string
+                      message:
+                        description: |-
+                          message is a human readable message indicating details about the transition.
+                          This may be an empty string.
+                        maxLength: 32768
+                        type: string
+                      observedGeneration:
+                        description: |-
+                          observedGeneration represents the .metadata.generation that the condition was set based upon.
+                          For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                          with respect to the current state of the instance.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      reason:
+                        description: |-
+                          reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                          Producers of specific condition types may define expected values and meanings for this field,
+                          and whether the values are considered a guaranteed API.
+                          The value should be a CamelCase string.
+                          This field may not be empty.
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                        type: string
+                      status:
+                        description: status of the condition, one of True, False, Unknown.
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                        type: string
+                      type:
+                        description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                        maxLength: 316
+                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                        type: string
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    type: object
+                  maxItems: 1
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
+                dgdUID:
+                  description: dgdUID binds the status to one DGD enrollment generation.
+                  type: string
+                inventoryEpoch:
+                  description: inventoryEpoch advances only when a semantic ledger input changes.
+                  format: int64
+                  minimum: 0
+                  type: integer
+                ledger:
+                  description: ledger contains aggregate conservative watts only.
+                  properties:
+                    enforcedWatts:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    inGateReservedWatts:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    rolloutExtraWatts:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    totalChargedWatts:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    unknownWatts:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                  required:
+                    - enforcedWatts
+                    - inGateReservedWatts
+                    - rolloutExtraWatts
+                    - totalChargedWatts
+                    - unknownWatts
+                  type: object
+                observedGeneration:
+                  description: observedGeneration is the DGPB generation used for this status.
+                  format: int64
+                  minimum: 0
+                  type: integer
+                phase:
+                  description: phase is the sole persisted replica-fence authority. Only Idle is open.
+                  enum:
+                    - Initializing
+                    - Idle
+                    - Applying
+                    - Recovering
+                    - Stale
+                    - Infeasible
+                    - Unqualified
+                  type: string
+                requiredWatts:
+                  description: requiredWatts and availableWatts are set for PowerInfeasible diagnostics.
+                  format: int64
+                  minimum: 0
+                  type: integer
+                rolloutInProgress:
+                  description: rolloutInProgress is the deployment-wide rollout hold observed by Planner.
+                  type: boolean
+              type: object
+          required:
+            - spec
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}

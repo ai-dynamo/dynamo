@@ -49,12 +49,33 @@ type DynamoGraphDeploymentServiceRef struct {
 	ServiceName string `json:"serviceName"`
 }
 
+// DynamoGraphDeploymentScalingAdapterPendingReason is a bounded replica-request failure reason.
+// +kubebuilder:validation:Enum=BudgetExceeded;UnenforcedBaseline;UnsupportedTopology;UnqualifiedHardware;BelowMinimum;InvalidTarget
+type DynamoGraphDeploymentScalingAdapterPendingReason string
+
 // DynamoGraphDeploymentScalingAdapterStatus defines the observed state of DynamoGraphDeploymentScalingAdapter
 type DynamoGraphDeploymentScalingAdapterStatus struct {
-	// Replicas is the current number of replicas for the target service.
-	// This is synced from the DGD's service replicas and is required for the scale subresource.
+	// Replicas is the actual observed number of replicas for the target service.
+	// It is kept as an alias of ActualReplicas for the scale subresource.
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
+
+	// RequestedReplicas is the complete-vector request submitted through spec.replicas.
+	// +optional
+	RequestedReplicas int32 `json:"requestedReplicas,omitempty"`
+
+	// CommittedReplicas is the replica target durably admitted by the power budget.
+	// +optional
+	CommittedReplicas int32 `json:"committedReplicas,omitempty"`
+
+	// ActualReplicas is the replica count observed in DGD service status.
+	// +optional
+	ActualReplicas int32 `json:"actualReplicas,omitempty"`
+
+	// PendingReason explains why RequestedReplicas has not been committed.
+	// Empty when the request and commitment agree.
+	// +optional
+	PendingReason DynamoGraphDeploymentScalingAdapterPendingReason `json:"pendingReason,omitempty"`
 
 	// Selector is a label selector string for the pods managed by this adapter.
 	// Required for HPA compatibility via the scale subresource.

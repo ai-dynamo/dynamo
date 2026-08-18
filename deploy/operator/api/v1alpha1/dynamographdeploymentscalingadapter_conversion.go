@@ -54,6 +54,10 @@ func (src *DynamoGraphDeploymentScalingAdapter) ConvertTo(dstRaw conversion.Hub)
 	}
 
 	dst.Status.Replicas = src.Status.Replicas
+	dst.Status.RequestedReplicas = src.Status.RequestedReplicas
+	dst.Status.CommittedReplicas = src.Status.CommittedReplicas
+	dst.Status.ActualReplicas = src.Status.ActualReplicas
+	dst.Status.PendingReason = v1beta1.DynamoGraphPowerBudgetPendingReason(src.Status.PendingReason)
 	dst.Status.Selector = src.Status.Selector
 	if src.Status.LastScaleTime != nil {
 		dst.Status.LastScaleTime = src.Status.LastScaleTime.DeepCopy()
@@ -78,6 +82,10 @@ func (dst *DynamoGraphDeploymentScalingAdapter) ConvertFrom(srcRaw conversion.Hu
 	}
 
 	dst.Status.Replicas = src.Status.Replicas
+	dst.Status.RequestedReplicas = src.Status.RequestedReplicas
+	dst.Status.CommittedReplicas = src.Status.CommittedReplicas
+	dst.Status.ActualReplicas = src.Status.ActualReplicas
+	dst.Status.PendingReason = DynamoGraphDeploymentScalingAdapterPendingReason(src.Status.PendingReason)
 	dst.Status.Selector = src.Status.Selector
 	if src.Status.LastScaleTime != nil {
 		dst.Status.LastScaleTime = src.Status.LastScaleTime.DeepCopy()
