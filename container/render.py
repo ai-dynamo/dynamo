@@ -11,6 +11,24 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 _VALID_ARCHS = {"amd64", "arm64"}
 
+_PYTHON_PACKAGE_COMMAND_RE = re.compile(
+    r"\buv\s+(?:pip\s+)?(?:install|sync)\b"
+    r"|(?:^|[\s;&|])(?:\S*/)?pip3?\s+(?:install|wheel)\b"
+    r"|(?:^|[\s;&|])(?:\S*/)?python3?(?:\.\d+)?\s+-m\s+pip\s+(?:install|wheel)\b",
+    re.MULTILINE,
+)
+
+_PYPI_SECRET_MOUNTS = (
+    "RUN --mount=type=secret,id=pip-index-url,env=PIP_INDEX_URL \\\n"
+    "    --mount=type=secret,id=uv-default-index,env=UV_DEFAULT_INDEX \\\n"
+    "    --mount=type=secret,id=pypi-netrc,target=/run/secrets/pypi-netrc,mode=0444 \\\n"
+)
+
+_PYPI_ENV = (
+    "    export NETRC=/run/secrets/pypi-netrc "
+    "PIP_RETRIES=10 UV_HTTP_RETRIES=10 && \\\n"
+)
+
 
 def parse_platform(platform_str: str) -> str:
     """Normalize a --platform value to the template variable used by Jinja2.
@@ -183,6 +201,46 @@ def _make_jinja_env(script_dir):
     )
 
 
+def _inject_python_index_secrets(dockerfile: str) -> str:
+    """Mount optional PyPI credentials in every Python package install layer."""
+    lines = dockerfile.splitlines(keepends=True)
+    result = []
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        if not line.startswith("RUN "):
+            result.append(line)
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(lines) and lines[end - 1].rstrip().endswith("\\"):
+            end += 1
+
+        instruction = "".join(lines[index:end])
+        if not _PYTHON_PACKAGE_COMMAND_RE.search(instruction):
+            result.extend(lines[index:end])
+            index = end
+            continue
+
+        parts = ["    " + line[len("RUN ") :]] + lines[index + 1 : end]
+        command_index = next(
+            (
+                i
+                for i, part in enumerate(parts)
+                if not part.lstrip().startswith("--mount=")
+            ),
+            len(parts),
+        )
+        parts.insert(command_index, _PYPI_ENV)
+        result.append(_PYPI_SECRET_MOUNTS)
+        result.extend(parts)
+        index = end
+
+    return "".join(result)
+
+
 def _render_context(args, context=None):
     # device_key is the lookup key into context.yaml's per-device dict
     # (e.g. "cuda12.9", "xpu"). Computed here so it's available to every
@@ -269,6 +327,7 @@ def render(args, context, script_dir):
     rendered = template.render(context=context, **_render_context(args, context))
     # Replace all instances of 3+ newlines with 2 newlines
     cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
+    cleaned = _inject_python_index_secrets(cleaned)
 
     if args.output_short_filename:
         filename = "rendered.Dockerfile"

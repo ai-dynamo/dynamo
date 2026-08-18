@@ -31,8 +31,6 @@ SHELL ["/bin/bash", "-c"]
 # Estimated layer size: ~800MB–1.0GB (build-essential+clang ~500MB, the rest ~300MB)
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=secret,id=pip-index-url,env=PIP_INDEX_URL \
-    --mount=type=secret,id=pypi-netrc,target=/root/.netrc \
     set -eux; \
     if [ -d /etc/apt/sources.list.d ]; then \
         mkdir -p /tmp/apt-disabled; \
@@ -118,7 +116,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     # marker (Ubuntu <23.04), so no override is needed there in the first place.
     # pip >=26 made the --break-system-packages flag require a boolean argument,
     # so the env-var form is the only portable spelling.
-    PIP_BREAK_SYSTEM_PACKAGES=1 PIP_RETRIES=10 /usr/bin/python3 -m pip install --no-cache-dir yq && \
+    PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
