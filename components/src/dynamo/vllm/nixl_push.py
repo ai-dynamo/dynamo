@@ -52,6 +52,28 @@ def _side_channel_endpoint(vllm_config: VllmConfig) -> Optional[tuple[str, int]]
     return host, port
 
 
+def _nixl_agent_engine_id(engine_id: Any, parallel_config: Any) -> str:
+    """Mirror how vLLM names the NIXL agent for this engine.
+
+    ``kv_transfer_config.engine_id`` is only the *base* identity. When the
+    engine is data-parallel, vLLM rewrites it per rank as it spawns the engine
+    core (``EngineCoreProc.run_engine_core``, and the Ray actor manager does
+    the same), so the agent decode has to name is ``<base>_dp<rank>``. A dense
+    engine keeps the base ID unsuffixed -- TP and TEP with one DP rank included.
+
+    Getting this wrong in either direction is silent: the peer rejects the
+    handshake with "Remote NIXL agent engine ID mismatch" and the transfer
+    falls back rather than failing loudly.
+    """
+    is_data_parallel = (
+        parallel_config.data_parallel_size > 1
+        or parallel_config.data_parallel_index > 0
+    )
+    if not is_data_parallel:
+        return str(engine_id)
+    return f"{engine_id}_dp{parallel_config.data_parallel_index}"
+
+
 def publish_nixl_push_endpoint(
     runtime_config: ModelRuntimeConfig,
     vllm_config: VllmConfig,
@@ -106,8 +128,27 @@ def publish_nixl_push_endpoint(
 
     host, port = endpoint
     parallel_config = vllm_config.parallel_config
+
+    # Dynamo assigns this worker a DP range; vLLM names its NIXL agent from
+    # the rank it believes it is. If those disagree, the identity published
+    # here would address an engine that does not exist, and a wrong identity
+    # fails the handshake quietly. Decline rather than advertise a
+    # plausible-looking lie.
+    dp_index = parallel_config.data_parallel_index
+    if dp_range[0] != dp_index:
+        logger.warning(
+            "NixlPushConnector prefill worker was assigned a DP range starting "
+            "at %d but vLLM reports data_parallel_index=%d. Not advertising "
+            "push coordinates whose engine identity may be wrong; the handoff "
+            "will run sequentially instead of overlapped.",
+            dp_range[0],
+            dp_index,
+        )
+        return False
+
+    nixl_engine_id = _nixl_agent_engine_id(engine_id, parallel_config)
     runtime_config.set_nixl_push_endpoint(
-        str(engine_id),
+        nixl_engine_id,
         host,
         port,
         parallel_config.tensor_parallel_size,
@@ -116,7 +157,7 @@ def publish_nixl_push_endpoint(
     logger.info(
         "Publishing NIXL push endpoint to discovery: engine_id=%s %s:%d "
         "(tp=%d, pp=%d)",
-        engine_id,
+        nixl_engine_id,
         host,
         port,
         parallel_config.tensor_parallel_size,
