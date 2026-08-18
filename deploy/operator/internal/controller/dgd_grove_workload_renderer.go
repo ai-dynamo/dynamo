@@ -46,11 +46,12 @@ type groveWorkloadRenderer struct {
 	dockerSecretRetriever DockerSecretRetriever
 }
 
-// grovePodCliqueSetRender couples the desired PCS to the exact observation
-// used to decide whether the one-way worker hash suffix is needed.
+// grovePodCliqueSetRender couples the desired PCS and rendered DGD to the
+// exact observation used to decide compatibility and the worker hash suffix.
 type grovePodCliqueSetRender struct {
 	existing               *grovev1alpha1.PodCliqueSet
 	desired                *grovev1alpha1.PodCliqueSet
+	renderDeployment       *nvidiacomv1beta1.DynamoGraphDeployment
 	workerHashSuffixNeeded bool
 }
 
@@ -94,8 +95,12 @@ func (r *groveWorkloadRenderer) Render(
 	}
 
 	workerHashSuffixNeeded := shouldRenderGroveWorkerHashSuffix(dgd, existingPodCliqueSet, workerGenerationChanged)
+	renderDeployment, err := groveRenderDeployment(dgd, existingPodCliqueSet, workerHashSuffixNeeded)
+	if err != nil {
+		return nil, err
+	}
 	desired, err := r.renderPodCliqueSet(
-		ctx, dgd, existingPodCliqueSet, restartState, checkpointInfos, workerHashSuffixNeeded,
+		ctx, renderDeployment, existingPodCliqueSet, restartState, checkpointInfos,
 	)
 	if err != nil {
 		return nil, err
@@ -103,23 +108,18 @@ func (r *groveWorkloadRenderer) Render(
 	return &grovePodCliqueSetRender{
 		existing:               existingPodCliqueSet,
 		desired:                desired,
+		renderDeployment:       renderDeployment,
 		workerHashSuffixNeeded: workerHashSuffixNeeded,
 	}, nil
 }
 
 func (r *groveWorkloadRenderer) renderPodCliqueSet(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	existing *grovev1alpha1.PodCliqueSet,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-	workerHashSuffix bool,
 ) (*grovev1alpha1.PodCliqueSet, error) {
-	renderDeployment, err := groveRenderDeployment(dgd, existing, workerHashSuffix)
-	if err != nil {
-		return nil, err
-	}
-
 	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existing)
 	desired, err := dynamo.GenerateGrovePodCliqueSet(
 		ctx,

@@ -93,15 +93,6 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
-	renderDeployment, err := groveRenderDeployment(
-		dgd,
-		renderedPodCliqueSet.desired,
-		renderedPodCliqueSet.workerHashSuffixNeeded,
-	)
-	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to prepare Grove deployment: %w", err)
-	}
-
 	syncedPodCliqueSet, err := r.reconcilePodCliqueSet(ctx, dgd, renderedPodCliqueSet)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
@@ -121,7 +112,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
-	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderDeployment)
+	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderedPodCliqueSet.renderDeployment)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
