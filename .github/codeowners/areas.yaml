@@ -543,6 +543,12 @@ areas:
   - tests/router/test_router_e2e_with_vllm_xpu.py
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
+- label: tpu
+  github_team: '@ai-dynamo/dynamo-tpu-codeowners'
+  path_globs:
+  - examples/backends/vllm/deploy/tpu/
+  - examples/backends/vllm/launch/tpu/
+  - tests/serve/test_vllm_tpu.py
 shared:
 - glob: components/src/dynamo/thunderagent_router/
   owners:
