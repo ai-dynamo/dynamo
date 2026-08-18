@@ -87,6 +87,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Configure Python package index
+        uses: ./.github/actions/configure-pypi
+
       - name: Recheck vCluster before test
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
