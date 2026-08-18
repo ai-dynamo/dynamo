@@ -16,7 +16,10 @@ import pytest
 from kubernetes.client import ApiException
 
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.connectors.base import is_power_aware_connector
+from dynamo.planner.connectors.base import (
+    DynamoGraphPowerBudgetSnapshot,
+    is_power_aware_connector,
+)
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
 from dynamo.planner.errors import DeploymentValidationError, PowerAnnotationInvalidError
 from dynamo.planner.monitoring.dgd_services import (
@@ -88,6 +91,26 @@ def _controller(prefill_watts=700, decode_watts=1200, *, gpus_per_replica=1):
         )
     )
     return controller
+
+
+def _with_transactional_policy(controller, *, budget_watts, min_endpoint):
+    controller.get_power_budget_snapshot = Mock(
+        return_value=_dgpb_snapshot(budget_watts, min_endpoint)
+    )
+    controller.consume_power_budget_snapshot = Mock()
+    return controller
+
+
+def _dgpb_snapshot(budget_watts=5000, min_endpoint=1):
+    return DynamoGraphPowerBudgetSnapshot(
+        budget_watts=budget_watts,
+        min_endpoint=min_endpoint,
+        phase="Idle",
+        inventory_epoch=1,
+        rollout_in_progress=False,
+        components=(),
+        conditions=(),
+    )
 
 
 def _refresh_controller(prefill_cfg, decode_cfg):
@@ -179,6 +202,94 @@ def test_init_infeasible_minimum_footprint_raises():
     env = _env(_controller(700, 1200), budget=1000)
     with pytest.raises(DeploymentValidationError, match="Infeasible power budget"):
         env._load_static_power_caps_at_startup()
+
+
+def test_init_uses_cached_dgpb_policy_instead_of_inactive_planner_fields():
+    controller = _with_transactional_policy(
+        _controller(700, 1200), budget_watts=5000, min_endpoint=1
+    )
+    env = _env(controller, budget=1000, min_endpoint=9)
+
+    env._load_static_power_caps_at_startup()
+
+    assert env.config.total_gpu_power_limit == 5000
+    assert env.config.min_endpoint == 1
+    controller.get_power_budget_snapshot.assert_called_once_with()
+    controller.consume_power_budget_snapshot.assert_not_called()
+
+
+def test_init_fails_when_cached_dgpb_policy_is_infeasible():
+    controller = _with_transactional_policy(
+        _controller(700, 1200), budget_watts=1000, min_endpoint=1
+    )
+    env = _env(controller, budget=10000, min_endpoint=1)
+
+    with pytest.raises(
+        DeploymentValidationError,
+        match=r"min_endpoint=1.*total_gpu_power_limit=1000W",
+    ):
+        env._load_static_power_caps_at_startup()
+
+
+def test_init_static_connector_keeps_planner_policy():
+    env = _env(_controller(700, 1200), budget=5000, min_endpoint=2)
+
+    env._load_static_power_caps_at_startup()
+
+    assert env.config.total_gpu_power_limit == 5000
+    assert env.config.min_endpoint == 2
+
+
+@pytest.mark.asyncio
+async def test_startup_discovers_dgpb_before_legacy_settlement_wait():
+    controller = _controller()
+    snapshot_cache = {"value": None}
+    snapshot = _dgpb_snapshot()
+    deployment = _dgd(
+        _worker("prefill", comp_type="prefill"),
+        _worker("decode", comp_type="decode"),
+    )
+
+    controller.get_power_budget_snapshot = Mock(
+        side_effect=lambda: snapshot_cache["value"]
+    )
+    controller.consume_power_budget_snapshot = Mock()
+
+    async def observe_dgpb():
+        snapshot_cache["value"] = snapshot
+        return 1, 1, False
+
+    controller.get_power_aware_worker_counts = AsyncMock(side_effect=observe_dgpb)
+    controller.get_graph_deployment.return_value = deployment
+    env = _env(controller)
+
+    observed = await env._wait_for_startup_dgd_snapshot()
+
+    assert observed is deployment
+    controller.get_power_aware_worker_counts.assert_awaited_once_with()
+    controller.wait_for_settled_graph_deployment.assert_not_awaited()
+    controller.get_graph_deployment.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_refresh_starts_dgpb_cycle_before_observing_counts():
+    controller = _refresh_controller(_cfg("prefill", 700), _cfg("decode", 1200))
+    events = []
+    controller.get_power_budget_snapshot = Mock(return_value=_dgpb_snapshot())
+    controller.consume_power_budget_snapshot = Mock(
+        side_effect=lambda: events.append("consume")
+    )
+
+    async def observe_counts(**_kwargs):
+        events.append("observe")
+        return 1, 1, True
+
+    controller.get_power_aware_worker_counts = AsyncMock(side_effect=observe_counts)
+    env = _env(controller)
+
+    await env.refresh()
+
+    assert events == ["consume", "observe"]
 
 
 def test_awareness_off_is_a_noop():

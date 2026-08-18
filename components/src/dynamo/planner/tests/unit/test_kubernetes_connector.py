@@ -49,6 +49,8 @@ pytestmark = [
 def mock_kube_api():
     mock_api = Mock()
     mock_api.get_graph_deployment = Mock()
+    mock_api.get_graph_power_budget = Mock(return_value=None)
+    mock_api.update_service_replicas = Mock()
     mock_api.update_graph_replicas = AsyncMock()
     mock_api.wait_for_graph_deployment_ready = AsyncMock()
     mock_api.is_deployment_ready = Mock()
@@ -506,6 +508,24 @@ async def test_add_component_increases_replicas(kubernetes_connector, mock_kube_
 
 
 @pytest.mark.asyncio
+async def test_add_component_transactional_uses_only_dgdsa(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_component("decode-worker", "decode", replicas=1))
+    deployment["metadata"]["annotations"] = {
+        "dynamo.nvidia.com/power-control-mode": "transactional-replica-fence"
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    await kubernetes_connector.add_component(SubComponentType.DECODE, blocking=False)
+
+    mock_kube_api.update_service_replicas.assert_called_once_with(
+        "test-graph", "decode-worker", 2, transactional=True
+    )
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_add_component_with_no_replicas_specified(
     kubernetes_connector, mock_kube_api
 ):
@@ -652,6 +672,75 @@ async def test_set_component_replicas(kubernetes_connector, mock_kube_api):
     ]
     mock_kube_api.update_graph_replicas.assert_has_calls(expected_calls, any_order=True)
     mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_transactional_uses_only_dgdsa(
+    kubernetes_connector, mock_kube_api
+):
+    target_replicas = [
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=3)
+    ]
+    deployment = _deployment(_component("decode-worker", "decode", replicas=1))
+    deployment["metadata"]["annotations"] = {
+        "dynamo.nvidia.com/power-control-mode": "transactional-replica-fence"
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+
+    await kubernetes_connector.set_component_replicas(target_replicas, blocking=False)
+
+    mock_kube_api.update_service_replicas.assert_called_once_with(
+        "test-graph", "decode-worker", 3, transactional=True
+    )
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_transactional_can_cancel_pending_request(
+    kubernetes_connector, mock_kube_api
+):
+    """DGD shows commitment, so an equal request must still reach DGDSA."""
+
+    target_replicas = [
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=1)
+    ]
+    deployment = _deployment(_component("decode-worker", "decode", replicas=1))
+    deployment["metadata"]["annotations"] = {
+        "dynamo.nvidia.com/power-control-mode": "transactional-replica-fence"
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+
+    await kubernetes_connector.set_component_replicas(target_replicas, blocking=False)
+
+    mock_kube_api.update_service_replicas.assert_called_once_with(
+        "test-graph", "decode-worker", 1, transactional=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_transactional_ignores_dgd_ready_guard(
+    kubernetes_connector, mock_kube_api
+):
+    """Applying DGD state must not block a safe DGDSA cancellation."""
+
+    target_replicas = [
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=1)
+    ]
+    deployment = _deployment(_component("decode-worker", "decode", replicas=2))
+    deployment["metadata"]["annotations"] = {
+        "dynamo.nvidia.com/power-control-mode": "transactional-replica-fence"
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+
+    await kubernetes_connector.set_component_replicas(target_replicas, blocking=False)
+
+    mock_kube_api.is_deployment_ready.assert_not_called()
+    mock_kube_api.update_service_replicas.assert_called_once_with(
+        "test-graph", "decode-worker", 1, transactional=True
+    )
 
 
 @pytest.mark.asyncio
