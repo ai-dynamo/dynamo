@@ -66,42 +66,42 @@ func (r *dgdWorkerRolloutReconciler) ReconcileUnsupported(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	isGrove bool,
-) error {
+) (workerGenerationChanged bool, err error) {
 	logger := log.FromContext(ctx)
 
 	if r.currentWorkerHashes(dgd).empty() {
 		hashes, err := desiredWorkerHashes(dgd)
 		if err != nil {
 			logger.Error(err, "Failed to compute worker hash for unsupported pathway")
-			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+			return false, failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
 		}
 		r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(hashes.v2, hashes))
 		if err := r.Update(ctx, dgd); err != nil {
 			logger.Error(err, "Failed to initialize worker hash for unsupported pathway")
-			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+			return false, failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
 		}
 	}
 
 	triggerRollingUpdate, err := r.shouldTriggerRollingUpdate(dgd)
 	if err != nil {
 		logger.Error(err, "Failed to check rolling update trigger for unsupported pathway")
-		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		return false, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
 	if !triggerRollingUpdate {
-		return nil
+		return false, nil
 	}
 
 	hashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		logger.Error(err, "Failed to compute worker hash for unsupported pathway")
-		return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+		return false, failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
 	}
 	r.setCurrentWorkerHashes(dgd, r.workerHashesForUnsupportedPathway(dgd, hashes))
 	if err := r.Update(ctx, dgd); err != nil {
 		// Preserve the existing best-effort behavior: the next reconciliation
 		// retries the metadata update and may emit another warning.
 		logger.Error(err, "Failed to update worker hash for unsupported pathway")
-		return nil
+		return false, nil
 	}
 
 	logger.Info(
@@ -120,7 +120,7 @@ func (r *dgdWorkerRolloutReconciler) ReconcileUnsupported(
 			"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments",
 		)
 	}
-	return nil
+	return true, nil
 }
 
 func (h workerGenerationHashes) empty() bool {

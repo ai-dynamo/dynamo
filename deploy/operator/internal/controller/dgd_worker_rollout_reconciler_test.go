@@ -125,34 +125,29 @@ func newTestComponentWorkloadsReconciler(
 	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout)
 }
 
-func TestShouldMarkGroveLegacyWorkerNamespace(t *testing.T) {
+func TestGroveWorkerHashSuffixMigration(t *testing.T) {
 	tests := []struct {
-		name           string
-		existing       bool
-		existingHash   string
-		existingMarker bool
-		desiredHash    string
-		want           bool
+		name                    string
+		existing                bool
+		existingHash            string
+		existingMarker          bool
+		workerGenerationChanged bool
+		wantSuffix              bool
+		wantMarker              bool
 	}{
-		{name: "new PCS does not need a migration marker", desiredHash: "target"},
-		{name: "legacy PCS with a legacy desired template does not need a migration marker"},
-		{name: "legacy PCS records a marker before a suffixed desired template", existing: true, desiredHash: "target", want: true},
-		{name: "marked PCS does not rewrite its marker", existing: true, existingMarker: true, desiredHash: "target"},
-		{name: "already suffixed PCS does not need a migration marker", existing: true, existingHash: "active", desiredHash: "target"},
+		{name: "new PCS renders a suffix", workerGenerationChanged: true, wantSuffix: true},
+		{name: "legacy PCS with no generation change remains unsuffixed", existing: true},
+		{name: "legacy PCS records migration before a worker generation change", existing: true, workerGenerationChanged: true, wantSuffix: true, wantMarker: true},
+		{name: "marked PCS continues rendering the suffix", existing: true, existingMarker: true, wantSuffix: true},
+		{name: "suffixed PCS continues rendering the suffix", existing: true, existingHash: "active", wantSuffix: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build the existing and desired worker PCS templates")
+			t.Log("Build the existing worker PCS and worker-generation transition")
 			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {ComponentType: consts.ComponentTypeWorker},
 			})
-			desired := &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
-				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: map[string]string{consts.KubeLabelDynamoComponent: "worker"}}},
-			}}}
-			if tt.desiredHash != "" {
-				desired.Spec.Template.Cliques[0].Labels[consts.KubeLabelDynamoWorkerHash] = tt.desiredHash
-			}
 			var existing *grovev1alpha1.PodCliqueSet
 			if tt.existing {
 				existing = &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
@@ -166,12 +161,34 @@ func TestShouldMarkGroveLegacyWorkerNamespace(t *testing.T) {
 				}
 			}
 
-			t.Log("Verify whether this level state requires the legacy namespace marker")
-			if got := shouldMarkGroveLegacyWorkerNamespace(dgd, existing, desired); got != tt.want {
-				t.Fatalf("shouldMarkGroveLegacyWorkerNamespace() = %t, want %t", got, tt.want)
+			t.Log("Verify suffix rendering and marker creation from the worker generation")
+			if got := shouldRenderGroveWorkerHashSuffix(dgd, existing, tt.workerGenerationChanged); got != tt.wantSuffix {
+				t.Fatalf("shouldRenderGroveWorkerHashSuffix() = %t, want %t", got, tt.wantSuffix)
+			}
+			if got := shouldMarkGroveLegacyWorkerNamespace(dgd, existing, tt.workerGenerationChanged); got != tt.wantMarker {
+				t.Fatalf("shouldMarkGroveLegacyWorkerNamespace() = %t, want %t", got, tt.wantMarker)
 			}
 		})
 	}
+}
+
+func TestReconcileUnsupportedDoesNotReportWorkerGenerationChangeForScaling(t *testing.T) {
+	t.Log("Build an active worker generation and apply a replica-only change")
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(int32(1))},
+	})
+	activeHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: activeHash}
+	dgd.GetComponentByName("worker").Replicas = ptr.To(int32(2))
+	reconciler := createTestReconcilerWithStatus(dgd)
+
+	t.Log("Reconcile the unsupported pathway")
+	workerGenerationChanged, err := reconciler.ReconcileUnsupported(context.Background(), dgd, true)
+	require.NoError(t, err)
+
+	t.Log("Verify scaling does not arm a worker generation migration")
+	assert.False(t, workerGenerationChanged)
 }
 
 func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {

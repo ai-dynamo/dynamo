@@ -297,8 +297,8 @@ func (o *groveComponentRevisionObserver) observe(state groveComponentRevisionSta
 	}
 }
 
-// groveLegacyWorkerNamespaceMigrationPending reports whether a PCS is holding
-// routing on the legacy worker namespace while its first suffixed revision rolls out.
+// groveLegacyWorkerNamespaceMigrationPending reports whether a PCS has started
+// its one-time suffix migration and still requires legacy-marker cleanup.
 func groveLegacyWorkerNamespaceMigrationPending(pcs *grovev1alpha1.PodCliqueSet) bool {
 	return pcs != nil && pcs.GetAnnotations()[commonconsts.AnnotationGroveLegacyWorkerNamespace] == commonconsts.KubeLabelValueTrue
 }
@@ -331,7 +331,7 @@ func publishGroveRuntimeNamespaces(
 			continue
 		}
 
-		if legacyMigration || (acceptedPCSRevisionHash != nil && !hasAcceptedWorkerSuffix) {
+		if acceptedPCSRevisionHash != nil && !hasAcceptedWorkerSuffix {
 			componentStatus.RuntimeNamespace = baseNamespace
 			componentStatuses[component.ComponentName] = componentStatus
 			continue

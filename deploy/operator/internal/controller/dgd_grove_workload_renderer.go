@@ -31,7 +31,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -66,6 +65,7 @@ func (r *groveWorkloadRenderer) Render(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+	workerGenerationChanged bool,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	if dgd == nil {
 		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a DynamoGraphDeployment")
@@ -92,7 +92,7 @@ func (r *groveWorkloadRenderer) Render(
 		return nil, err
 	}
 
-	if !shouldRenderGroveWorkerHashSuffix(dgd, existingPodCliqueSet, legacyDesired) {
+	if !shouldRenderGroveWorkerHashSuffix(dgd, existingPodCliqueSet, workerGenerationChanged) {
 		return legacyDesired, nil
 	}
 
@@ -183,7 +183,7 @@ func applyGroveWorkerHashSuffix(
 func shouldRenderGroveWorkerHashSuffix(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	existing *grovev1alpha1.PodCliqueSet,
-	legacyDesired *grovev1alpha1.PodCliqueSet,
+	workerGenerationChanged bool,
 ) bool {
 	if !dgdHasWorkerComponents(dgd) {
 		return false
@@ -194,22 +194,20 @@ func shouldRenderGroveWorkerHashSuffix(
 		return true
 	}
 
-	// Start the one-time migration only when the desired legacy worker template
-	// differs from the active legacy template.
-	return groveWorkerTemplatesChanged(dgd, existing, legacyDesired)
+	return workerGenerationChanged
 }
 
-// shouldMarkGroveLegacyWorkerNamespace starts a migration only when an
-// existing legacy PCS would otherwise receive a suffixed worker template.
+// shouldMarkGroveLegacyWorkerNamespace records an observed worker generation
+// transition before the existing legacy PCS receives its first suffix.
 func shouldMarkGroveLegacyWorkerNamespace(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	existing *grovev1alpha1.PodCliqueSet,
-	desired *grovev1alpha1.PodCliqueSet,
+	workerGenerationChanged bool,
 ) bool {
 	return existing != nil &&
 		!podCliqueSetHasGroveLegacyWorkerNamespace(existing) &&
 		!podCliqueSetUsesGroveWorkerHashSuffix(dgd, existing) &&
-		podCliqueSetUsesGroveWorkerHashSuffix(dgd, desired)
+		workerGenerationChanged
 }
 
 func dgdHasWorkerComponents(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
@@ -236,26 +234,6 @@ func podCliqueSetUsesGroveWorkerHashSuffix(
 		}
 	}
 	return true
-}
-
-func groveWorkerTemplatesChanged(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	existing *grovev1alpha1.PodCliqueSet,
-	desired *grovev1alpha1.PodCliqueSet,
-) bool {
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
-		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
-			continue
-		}
-		if !equality.Semantic.DeepEqual(
-			podCliqueSetCliqueForComponent(existing, component.ComponentName),
-			podCliqueSetCliqueForComponent(desired, component.ComponentName),
-		) {
-			return true
-		}
-	}
-	return false
 }
 
 func podCliqueSetCliqueForComponent(

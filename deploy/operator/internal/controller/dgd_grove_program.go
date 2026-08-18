@@ -107,7 +107,8 @@ func (p *groveProgram) Reconcile(
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
-	if err := p.rollout.ReconcileUnsupported(ctx, req.DGD, true); err != nil {
+	workerGenerationChanged, err := p.rollout.ReconcileUnsupported(ctx, req.DGD, true)
+	if err != nil {
 		return programResult, err
 	}
 	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
@@ -128,17 +129,15 @@ func (p *groveProgram) Reconcile(
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
-	result, waitForPCSObservation, err := p.workloads.Reconcile(
+	result, err := p.workloads.Reconcile(
 		ctx,
 		req.DGD,
 		restart.State,
 		checkpoints.Infos,
+		workerGenerationChanged,
 	)
 	if err != nil {
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
-	}
-	if waitForPCSObservation {
-		return programResult, nil
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != reasonWaitingForCheckpoint {

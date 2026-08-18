@@ -1359,7 +1359,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 		{name: "stale accepted PCS revision publishes its rendered hash instead of the desired DGD hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
 		{name: "accepted completed PCS revision remains published after worker health loss", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, wantNamespace: acceptedHash},
 		{name: "accepted legacy PCS publishes the base namespace", pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true},
-		{name: "completed marked migration keeps the base namespace until the marker is removed", pcsAccepted: true, legacyMigrationMarker: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantMigrationComplete: true},
+		{name: "completed marked migration publishes the suffix before marker cleanup", pcsAccepted: true, legacyMigrationMarker: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash, wantMigrationComplete: true},
 	}
 
 	for _, tt := range tests {
@@ -1449,7 +1449,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			} else if wantNamespace == "active" {
 				wantNamespace = ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), wantNamespace)
 			}
-			if tt.legacyPCS || tt.legacyMigrationMarker {
+			if tt.legacyPCS {
 				wantNamespace = baseNamespace
 			}
 			if readiness.Ready != tt.wantReady {

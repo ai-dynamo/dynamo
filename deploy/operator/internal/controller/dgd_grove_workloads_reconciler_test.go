@@ -101,11 +101,12 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 		},
 	}
 
-	result, _, err := reconciler.newGroveProgram().workloads.Reconcile(
+	result, err := reconciler.newGroveProgram().workloads.Reconcile(
 		context.Background(),
 		dgd,
 		nil,
 		nil,
+		false,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)
