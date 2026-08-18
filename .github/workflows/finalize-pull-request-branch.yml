@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Finalize Pull Request Branch
+
+# This reusable workflow is called through an explicit @main reference. The
+# privileged deletion logic and environment credentials therefore come from the
+# default branch, not from the pull-request commit that invokes it.
+on:
+  workflow_call:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  # Every workflow selected by a numeric pull-request branch must have a run
+  # before the temporary ref is removed. Keep this list aligned with push
+  # triggers; tests/ci/test_pull_request_branch_finalizer.py enforces the set.
+  EXPECTED_WORKFLOWS: |
+    .github/workflows/fern-docs.yml
+    .github/workflows/pr-xpu.yaml
+    .github/workflows/pr.yaml
+    .github/workflows/request-nvskills-ci.yml
+
+jobs:
+  finalize:
+    name: Delete trusted pull request branch
+    if: >-
+      github.repository == 'ai-dynamo/dynamo' &&
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/heads/pull-request/')
+    environment: pull-request-branch-cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate caller identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^pull-request/[0-9]+$ ]]; then
+            echo "::error title=Pull request branch finalizer::Unexpected branch: $GITHUB_REF_NAME"
+            exit 1
+          fi
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Pull request branch finalizer::Unexpected commit SHA"
+            exit 1
+          fi
+
+      - name: Wait for trusted workflows to materialize
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t expected_workflows < <(printf '%s\n' "$EXPECTED_WORKFLOWS" | sed '/^[[:space:]]*$/d')
+
+          for attempt in 1 2 3 4 5; do
+            run_paths=$(gh api --method GET --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs" \
+              --raw-field branch="$GITHUB_REF_NAME" \
+              --raw-field event=push \
+              --raw-field head_sha="$GITHUB_SHA" \
+              --raw-field per_page=100 \
+              --jq '.workflow_runs[].path')
+
+            missing=()
+            for workflow in "${expected_workflows[@]}"; do
+              if ! grep -Fqx -- "$workflow" <<< "$run_paths"; then
+                missing+=("$workflow")
+              fi
+            done
+
+            if (( ${#missing[@]} == 0 )); then
+              exit 0
+            fi
+            if (( attempt == 5 )); then
+              printf '::error title=Pull request branch finalizer::Missing workflow run: %s\n' "${missing[@]}"
+              exit 1
+            fi
+            sleep $((1 << (attempt - 1)))
+          done
+
+      - name: Create a short-lived maintenance token
+        id: maintenance-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ vars.PR_BRANCH_CLEANER_CLIENT_ID }}
+          private-key: ${{ secrets.PR_BRANCH_CLEANER_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Checkout the exact workflow commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          token: ${{ steps.maintenance-token.outputs.token }}
+
+      - name: Delete the unchanged branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          delete_ref="refs/heads/${GITHUB_REF_NAME}"
+
+          if git push --porcelain \
+            --force-with-lease="${delete_ref}:${GITHUB_SHA}" \
+            origin ":${delete_ref}"; then
+            exit 0
+          fi
+
+          current_sha=$(git ls-remote --heads origin "$delete_ref" | awk '{print $1}')
+          if [[ -z "$current_sha" ]]; then
+            echo "::notice title=Pull request branch finalizer::Branch is already absent"
+            exit 0
+          fi
+          if [[ "$current_sha" != "$GITHUB_SHA" ]]; then
+            echo "::notice title=Pull request branch finalizer::Branch moved; leaving the newer commit unchanged"
+            exit 0
+          fi
+
+          echo "::error title=Pull request branch finalizer::Branch still points to $GITHUB_SHA after deletion failed"
+          exit 1
