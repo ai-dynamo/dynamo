@@ -1290,7 +1290,7 @@ impl AgenticTraceBuilder {
             });
         }
         plays.sort_by(|left, right| left.play_id.cmp(&right.play_id));
-        let graph_digest = canonical_agentic_graph_digest(self.header.block_size, &self.nodes)?;
+        let graph_digest = canonical_agentic_graph_digest(self.header.block_size, &mut self.nodes)?;
 
         Ok(AgenticTrace {
             block_size: self.header.block_size,
@@ -1386,7 +1386,7 @@ impl AgenticTrace {
         for node in &mut self.nodes {
             node.not_before_ms -= min_timestamp_ms;
         }
-        self.graph_digest = canonical_agentic_graph_digest(self.block_size, &self.nodes)
+        self.graph_digest = canonical_agentic_graph_digest(self.block_size, &mut self.nodes)
             .expect("validated agentic graph remains serializable after normalization");
         self
     }
@@ -1402,7 +1402,7 @@ impl AgenticTrace {
                 dependency.delay_ms /= ratio;
             }
         }
-        self.graph_digest = canonical_agentic_graph_digest(self.block_size, &self.nodes)?;
+        self.graph_digest = canonical_agentic_graph_digest(self.block_size, &mut self.nodes)?;
         Ok(self)
     }
 
@@ -1477,15 +1477,27 @@ fn validate_agentic_trace_is_acyclic(
     )
 }
 
-fn canonical_agentic_graph_digest(block_size: usize, nodes: &[AgenticNode]) -> Result<String> {
-    #[derive(Serialize)]
-    struct CanonicalGraph {
-        block_size: usize,
-        nodes: Vec<AgenticNode>,
+fn canonical_agentic_graph_digest(block_size: usize, nodes: &mut [AgenticNode]) -> Result<String> {
+    struct Blake3Writer<'a>(&'a mut blake3::Hasher);
+
+    impl std::io::Write for Blake3Writer<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
-    let mut canonical_nodes = nodes.to_vec();
-    for node in &mut canonical_nodes {
+    #[derive(Serialize)]
+    struct CanonicalGraph<'a> {
+        block_size: usize,
+        nodes: &'a [AgenticNode],
+    }
+
+    for node in nodes.iter_mut() {
         node.dependencies.sort_by(|left, right| {
             left.request_id
                 .cmp(&right.request_id)
@@ -1494,11 +1506,12 @@ fn canonical_agentic_graph_digest(block_size: usize, nodes: &[AgenticNode]) -> R
                 .then_with(|| left.delay_ms.total_cmp(&right.delay_ms))
         });
     }
-    let bytes = serde_json::to_vec(&CanonicalGraph {
-        block_size,
-        nodes: canonical_nodes,
-    })?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
+    let mut hasher = blake3::Hasher::new();
+    serde_json::to_writer(
+        Blake3Writer(&mut hasher),
+        &CanonicalGraph { block_size, nodes },
+    )?;
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn trigger_rank(trigger: AgenticDependencyTrigger) -> u8 {
