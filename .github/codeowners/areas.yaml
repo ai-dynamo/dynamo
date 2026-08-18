@@ -437,8 +437,7 @@ areas:
   path_globs:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
-  - components/src/dynamo/common/tests/test_snapshot_lifecycle.py
-  - components/src/dynamo/common/tests/test_snapshot_restore_context.py
+  - components/src/dynamo/common/tests/test_snapshot*
   - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/checkpointjob/

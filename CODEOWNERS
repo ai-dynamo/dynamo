@@ -577,12 +577,11 @@
 /aisimulate/crates/core/src/engine/kv_manager/                               @ai-dynamo/dynamo-performance-codeowners
 /tests/router/test_router_e2e_with_vllm_xpu.py                               @ai-dynamo/dynamo-xpu-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                             @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/common/tests/test_snapshot*                           @ai-dynamo/dynamo-gms-codeowners
 /container/templates/sglang_xpu_framework.Dockerfile                         @ai-dynamo/dynamo-xpu-codeowners
 /components/src/dynamo/trtllm/request_handlers/diffusion/                    @ai-dynamo/dynamo-diffusion-codeowners
 /lib/llm/src/block_manager/v2/physical/transfer/nixl_agent/                  @ai-dynamo/dynamo-kv-memory-codeowners
-/components/src/dynamo/common/tests/test_snapshot_lifecycle.py               @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/sglang/request_handlers/image_diffusion/              @ai-dynamo/dynamo-diffusion-codeowners
-/components/src/dynamo/common/tests/test_snapshot_restore_context.py         @ai-dynamo/dynamo-gms-codeowners
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
 /.agents/                                                                    @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
