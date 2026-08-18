@@ -237,14 +237,6 @@ impl WekaEntry {
     }
 }
 
-impl WekaInnerEntry {
-    fn into_request(self) -> WekaRequest {
-        match self {
-            Self::Normal(request) | Self::Streaming(request) => request,
-        }
-    }
-}
-
 #[derive(Clone)]
 struct IndexedRequest {
     source_id: String,

@@ -719,7 +719,7 @@ mod tests {
         let row: AgenticMooncakeRow = serde_json::from_str(raw).unwrap();
 
         assert_eq!(row.play_id, "play");
-        assert_eq!(row.model.as_deref(), Some("model"));
+        assert_eq!(row.model, "model");
         assert_eq!(row.dependencies.len(), 1);
         assert_eq!(
             row.dependencies[0].trigger,

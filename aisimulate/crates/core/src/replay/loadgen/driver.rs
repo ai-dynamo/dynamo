@@ -667,7 +667,7 @@ impl WorkloadDriver {
         let mut sessions = Vec::with_capacity(trace.nodes.len());
         let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
 
-        for (node_index, mut node) in trace.nodes.into_iter().enumerate() {
+        for (node_index, node) in trace.nodes.into_iter().enumerate() {
             for dependency in &node.dependencies {
                 let source_node = *index_by_id
                     .get(&dependency.request_id)
