@@ -146,7 +146,7 @@ trtllm:
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
     runtime_image_tag: 1.3.0rc24
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
-    baseline_sbom: release@316b840a
+    baseline_sbom: release@16a103b8
   nixl_ref: v1.3.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
