@@ -30,6 +30,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
+COPY --chmod=664 --chown=dynamo:0 tests/__init__.py /workspace/tests/__init__.py
+COPY --chmod=664 --chown=dynamo:0 tests/marker_categories.py /workspace/tests/marker_categories.py
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
