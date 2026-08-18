@@ -7116,6 +7116,7 @@ impl
         let final_stream = speculative_prefill::maybe_wrap_stream(
             final_stream,
             &request,
+            &request_id,
             &next,
             &self.formatter,
             &self.tokenizer,
