@@ -2,13 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-from render import _inject_python_index_secrets
+
+from container.render import _inject_python_index_secrets
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
-def test_python_install_gets_optional_index_secrets():
-    dockerfile = "RUN uv pip install maturin[patchelf]\n"
+@pytest.mark.parametrize(
+    "command",
+    [
+        "uv pip install maturin[patchelf]",
+        "uv build --wheel",
+        'git clone "https://github.com/ai-dynamo/nixl.git" && ninja',
+    ],
+)
+def test_python_package_command_gets_optional_index_secrets(command):
+    dockerfile = f"RUN {command}\n"
 
     rendered = _inject_python_index_secrets(dockerfile)
 
@@ -16,7 +25,7 @@ def test_python_install_gets_optional_index_secrets():
     assert "id=uv-default-index,env=UV_DEFAULT_INDEX" in rendered
     assert "id=pypi-netrc,target=/run/secrets/pypi-netrc" in rendered
     assert rendered.index("id=pypi-netrc") < rendered.index("export NETRC=")
-    assert rendered.index("export NETRC=") < rendered.index("uv pip install")
+    assert rendered.index("export NETRC=") < rendered.index(command)
 
 
 def test_existing_mounts_stay_before_the_shell_command():

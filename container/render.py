@@ -11,10 +11,12 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 _VALID_ARCHS = {"amd64", "arm64"}
 
-_PYTHON_PACKAGE_COMMAND_RE = re.compile(
-    r"\buv\s+(?:pip\s+)?(?:install|sync)\b"
+_PYTHON_PACKAGE_DOWNLOAD_RE = re.compile(
+    r"\buv\s+(?:build|lock|sync|pip\s+(?:compile|install|sync))\b"
     r"|(?:^|[\s;&|])(?:\S*/)?pip3?\s+(?:install|wheel)\b"
-    r"|(?:^|[\s;&|])(?:\S*/)?python3?(?:\.\d+)?\s+-m\s+pip\s+(?:install|wheel)\b",
+    r"|(?:^|[\s;&|])(?:\S*/)?python3?(?:\.\d+)?\s+-m\s+pip\s+(?:install|wheel)\b"
+    # NIXL's Meson build resolves Python build dependencies through uv.
+    r"|github\.com/ai-dynamo/nixl\.git",
     re.MULTILINE,
 )
 
@@ -219,7 +221,7 @@ def _inject_python_index_secrets(dockerfile: str) -> str:
             end += 1
 
         instruction = "".join(lines[index:end])
-        if not _PYTHON_PACKAGE_COMMAND_RE.search(instruction):
+        if not _PYTHON_PACKAGE_DOWNLOAD_RE.search(instruction):
             result.extend(lines[index:end])
             index = end
             continue
