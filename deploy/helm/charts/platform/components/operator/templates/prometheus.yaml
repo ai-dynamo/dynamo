@@ -182,6 +182,10 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: dynamo-epp
+  {{- with .Values.dynamo.metrics.podMonitors.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   {{- if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
