@@ -13,6 +13,7 @@ import (
 	"reflect"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
@@ -34,7 +35,7 @@ const (
 	// GA since: N/A
 	// Configuration: checkpoint.enabled
 	// Auto-detection: N/A
-	// Requires: N/A
+	// Requires: Snapshot serving nvidia.com/v1alpha1
 	// Default: false
 	Checkpoint Name = "checkpoint"
 
@@ -163,7 +164,15 @@ func Defaults() Gates {
 // New detects cluster capabilities and resolves them with operator configuration.
 func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) (Gates, error) {
 	gates := Defaults()
-	gates.Checkpoint = config.Checkpoint.Enabled
+	if config.Checkpoint.Enabled {
+		var err error
+		if gates.Checkpoint, err = resolveCheckpoint(
+			config.Checkpoint.Enabled,
+			detectAPIGroup(ctx, mgr, snapshotv1alpha1.GroupVersion.Group, snapshotv1alpha1.GroupVersion.Version),
+		); err != nil {
+			return Gates{}, err
+		}
+	}
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 
 	var err error
@@ -230,6 +239,17 @@ func resolve(configured *bool, available bool, unavailableMessage string) (bool,
 	}
 	if !available {
 		return false, errors.New(unavailableMessage)
+	}
+	return true, nil
+}
+
+func resolveCheckpoint(enabled, snapshotAvailable bool) (bool, error) {
+	if !enabled {
+		return false, nil
+	}
+	if !snapshotAvailable {
+		return false, fmt.Errorf("checkpoint is enabled in config but the Snapshot API group %s/%s was not detected in the cluster",
+			snapshotv1alpha1.GroupVersion.Group, snapshotv1alpha1.GroupVersion.Version)
 	}
 	return true, nil
 }

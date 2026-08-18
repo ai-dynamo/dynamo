@@ -102,6 +102,32 @@ func TestAPIGroupServesVersion(t *testing.T) {
 	}
 }
 
+func TestResolveCheckpoint(t *testing.T) {
+	tests := []struct {
+		name              string
+		enabled           bool
+		snapshotAvailable bool
+		want              bool
+		wantErr           bool
+	}{
+		{name: "disabled does not require snapshot API", enabled: false, snapshotAvailable: false, want: false},
+		{name: "enabled with snapshot API is enabled", enabled: true, snapshotAvailable: true, want: true},
+		{name: "enabled without snapshot API fails", enabled: true, snapshotAvailable: false, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveCheckpoint(tt.enabled, tt.snapshotAvailable)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("resolveCheckpoint() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Fatalf("resolveCheckpoint() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGateContext(t *testing.T) {
 	want := Gates{Grove: true}
 	got, ok := GateFrom(WithGate(context.Background(), want))

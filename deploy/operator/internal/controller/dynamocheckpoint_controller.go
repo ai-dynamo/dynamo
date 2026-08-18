@@ -700,7 +700,7 @@ func (r *CheckpointReconciler) FinalizeResource(ctx context.Context, ckpt *nvidi
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1alpha1.DynamoCheckpoint{}).
 		Owns(&batchv1.Job{}, builder.WithPredicates(predicate.Funcs{
 			// Ignore creation - we don't need to reconcile when we just created the Job
@@ -708,8 +708,10 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})).
-		Owns(&snapshotv1alpha1.PodSnapshot{}, builder.WithPredicates(predicate.Funcs{
+		}))
+
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		ctrlBuilder = ctrlBuilder.Owns(&snapshotv1alpha1.PodSnapshot{}, builder.WithPredicates(predicate.Funcs{
 			// Ignore create (we just created it). Watch update (status mirror) and
 			// delete (re-enqueue to recreate / unblock). Delete is safe: reconcile
 			// exits at the deletion-timestamp guard before reaching observePodSnapshot.
@@ -717,8 +719,7 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
-		})).
-		Watches(&corev1.Pod{},
+		})).Watches(&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(mapSourcePodToCheckpoint),
 			builder.WithPredicates(predicate.Funcs{
 				// Only checkpoint-source pods, and only their appearance: handleCreating waits solely
@@ -730,7 +731,10 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				DeleteFunc:  func(de event.DeleteEvent) bool { return false },
 				GenericFunc: func(ge event.GenericEvent) bool { return false },
 			}),
-		).
+		)
+	}
+
+	return ctrlBuilder.
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
 		Complete(r)
 }
