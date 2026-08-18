@@ -3,22 +3,18 @@
 
 """The takeover decision: which situation we woke into, and what we do about it.
 
-``test_kv_index.py`` covers the mirror's mechanics. This covers ``on_wake_up``:
-which of the two situations we are in, and what we do about it. Both bugs found
-by actually running this were in here, and neither was covered by a test:
+``test_kv_index.py`` covers the mirror's mechanics. This covers the scheduler
+side: the pause/unpause transitions that bracket a sleep, and the takeover they
+trigger.
 
-- the mirror was wiped on every sleep, because vLLM clears its own index there
-  and we faithfully mirrored that. Silent: the feature just quietly did nothing.
-- "did I inherit these pages?" was read from the GMS grant, which cannot answer
-  it -- ``commit_layout()`` regrants a *creating* writer to RW_DATA too. That
-  one would have replayed a dead engine's labels onto fresh memory.
-
-Real ``BlockPool``, fake engine core. No GPU.
+These drive the *real* ``_make_scheduler_cls`` product over a stand-in base, so
+the transition logic under test is the shipped code rather than a paraphrase.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 
 import pytest
 
@@ -31,6 +27,7 @@ from vllm.v1.core.kv_cache_utils import (  # noqa: E402
     BlockHash,
     make_block_hash_with_group_id,
 )
+from vllm.v1.core.sched.interface import PauseState  # noqa: E402
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -57,36 +54,30 @@ class _Cfg:
 
     class parallel_config:
         tensor_parallel_size = 1
+        world_size = 1
 
 
-class FakeEngineCore:
-    """Just enough EngineCore for on_wake_up: a pool, a scheduler, a probe."""
+class FakeBaseScheduler:
+    """The surface KvIndexScheduler expects of whatever it derives from."""
 
-    def __init__(self, pool, adopted: bool, sleeping: bool = False):
-        self._adopted = adopted
+    def __init__(self, pool):
+        self.kv_cache_manager = type("M", (), {"block_pool": pool})()
         self.vllm_config = _Cfg
-        self.model_executor = type("Ex", (), {"is_sleeping": sleeping})()
-        self.scheduler = type(
-            "Sched",
-            (),
-            {
-                "kv_cache_manager": type("M", (), {"block_pool": pool})(),
-                "schedule": lambda *a, **k: None,
-                "update_from_output": lambda *a, **k: None,
-            },
-        )()
+        self.parallel_config = _Cfg.parallel_config
+        self.pause_state = PauseState.UNPAUSED
 
-    def collective_rpc(self, fn):
-        return [self._adopted]
+    def set_pause_state(self, pause_state) -> None:
+        self.pause_state = pause_state
+
+    def schedule(self):
+        return None
+
+    def update_from_output(self, *a, **k):
+        return None
 
 
-def wake(engine):
-    """A wake, as the plugin performs it: on_wake_up only runs after a sleep."""
-    kv_index._IN_SLEEP = True
-    try:
-        kv_index.on_wake_up(engine)
-    finally:
-        kv_index._IN_SLEEP = False
+def new_scheduler(pool):
+    return kv_index._make_scheduler_cls(FakeBaseScheduler)(pool)
 
 
 def key_for(tag: str):
@@ -97,13 +88,10 @@ def key_for(tag: str):
 
 @pytest.fixture(autouse=True)
 def _seeded_none_hash(monkeypatch):
-    # NONE_HASH is a module global only assigned by init_none_hash(); the
-    # identity digest reads it, so a unit test has to seed it explicitly.
     from vllm.utils.hashing import sha256
 
     monkeypatch.setenv("PYTHONHASHSEED", "0")
     kv_cache_utils.init_none_hash(sha256)
-    monkeypatch.setattr(kv_index, "_IN_SLEEP", False, raising=False)
 
 
 @pytest.fixture
@@ -113,12 +101,24 @@ def path(tmp_path, monkeypatch):
     return p
 
 
+def set_adoption(path: str, *ranks: bool) -> None:
+    """Stand in for what GMSWorker.wake_up publishes, one file per rank."""
+    for rank, adopted in enumerate(ranks):
+        with open(f"{path}.rank{rank}", "w") as f:
+            f.write("1" if adopted else "0")
+
+
 def new_pool():
     return BlockPool(N_BLOCKS, True, BLOCK_SIZE)
 
 
+def sleep_wake(sched):
+    """One full pause/unpause cycle, as EngineCore drives it."""
+    sched.set_pause_state(PauseState.PAUSED_ALL)
+    sched.set_pause_state(PauseState.UNPAUSED)
+
+
 def populate(pool, n=5):
-    """Serve a little: label n blocks and let their batch complete."""
     pool._dyn_mirror.on_schedule()
     blocks = pool.get_new_blocks(n)
     for i, b in enumerate(blocks):
@@ -128,25 +128,15 @@ def populate(pool, n=5):
     return blocks
 
 
-# ---------------------------------------------------------------------------
-# bug 1: sleep must not wipe the mirror
-# ---------------------------------------------------------------------------
-
-
 def test_sleep_does_not_wipe_the_mirror(path):
-    """vLLM clears its index at sleep; under GMS the bytes survive, so we keep ours.
-
-    Regression: mirroring that clear made the feature silently do nothing --
-    every sleep destroyed exactly what the sleep was supposed to preserve.
-    """
     pool = new_pool()
-    engine = FakeEngineCore(pool, adopted=False)
-    wake(engine)
+    set_adoption(path, False)
+    sched = new_scheduler(pool)
+    sleep_wake(sched)
     blocks = populate(pool)
     assert pool._dyn_mirror.live_block_ids() == {b.block_id for b in blocks}
 
-    # Entering the sleep window, vLLM drops its own index.
-    kv_index._IN_SLEEP = True
+    sched.set_pause_state(PauseState.PAUSED_ALL)
     assert pool.reset_prefix_cache() is True
     assert not any(b.block_hash for b in pool.blocks), "vLLM's index should be gone"
     assert pool._dyn_mirror.live_block_ids() == {
@@ -155,191 +145,144 @@ def test_sleep_does_not_wipe_the_mirror(path):
 
 
 def test_reset_outside_a_sleep_does_wipe_the_mirror(path):
-    """An RLHF weight update is the case the wipe exists for."""
     pool = new_pool()
-    engine = FakeEngineCore(pool, adopted=False)
-    wake(engine)
+    set_adoption(path, False)
+    sleep_wake(new_scheduler(pool))
     populate(pool)
 
-    assert kv_index._IN_SLEEP is False
     assert pool.reset_prefix_cache() is True
-    assert (
-        pool._dyn_mirror.live_block_ids() == set()
-    ), "outside a sleep the operator meant it: the labels are dead"
+    assert pool._dyn_mirror.live_block_ids() == set()
 
 
-# ---------------------------------------------------------------------------
-# bug 2: replay only onto pages we actually inherited
-# ---------------------------------------------------------------------------
+def test_unpause_without_a_preceding_pause_does_nothing(path):
+    pool = new_pool()
+    set_adoption(path, False)
+    sched = new_scheduler(pool)
+    sleep_wake(sched)
+    populate(pool)
+    before = pool._dyn_mirror.live_block_ids()
+    assert before, "nothing to protect -- test is vacuous"
+
+    set_adoption(path, True)
+    sched.set_pause_state(PauseState.UNPAUSED)
+
+    assert pool._dyn_mirror.live_block_ids() == before
 
 
 def test_inherited_pages_replay(path):
-    """The happy path: a successor rebuilds the predecessor's index."""
     pool_a = new_pool()
-    wake(FakeEngineCore(pool_a, adopted=False))
+    set_adoption(path, False)
+    sleep_wake(new_scheduler(pool_a))
     blocks = populate(pool_a)
     expected = {b.block_id: b.block_hash for b in blocks}
 
-    pool_b = new_pool()  # a different engine, same geometry
-    wake(FakeEngineCore(pool_b, adopted=True))
+    pool_b = new_pool()
+    set_adoption(path, True)
+    sleep_wake(new_scheduler(pool_b))
 
-    got = {b.block_id: b.block_hash for b in pool_b.blocks if b.block_hash}
-    assert got == expected
+    assert {b.block_id: b.block_hash for b in pool_b.blocks if b.block_hash} == expected
 
 
 def test_fresh_pages_never_replay(path):
-    """The bug that would have served wrong tokens.
-
-    An engine that built its own pool must not install a predecessor's labels:
-    they name pages that no longer exist. Starting a fresh mirror is also what
-    makes a stale one inert for everybody after us.
-    """
     pool_a = new_pool()
-    wake(FakeEngineCore(pool_a, adopted=False))
+    set_adoption(path, False)
+    sleep_wake(new_scheduler(pool_a))
     populate(pool_a)
 
     pool_b = new_pool()
-    wake(FakeEngineCore(pool_b, adopted=False))  # built its own
+    set_adoption(path, False)
+    sleep_wake(new_scheduler(pool_b))
 
-    assert not any(
-        b.block_hash for b in pool_b.blocks
-    ), "labels were installed onto pages this engine allocated itself"
-    assert pool_b._dyn_mirror.live_block_ids() == set(), "stale mirror not discarded"
+    assert not any(b.block_hash for b in pool_b.blocks)
+    assert pool_b._dyn_mirror.live_block_ids() == set()
 
 
 def test_partial_adoption_across_ranks_refuses(path):
-    """Every rank, or nobody.
-
-    The index is engine-wide but the bytes are per-rank, so a partial adoption
-    is correct on the ranks that adopted and garbage on the one that did not --
-    which is the shape that produces plausible-looking wrong output.
-    """
     pool_a = new_pool()
-    wake(FakeEngineCore(pool_a, adopted=False))
+    set_adoption(path, False)
+    sleep_wake(new_scheduler(pool_a))
     populate(pool_a)
 
+    class TwoRank(_Cfg):
+        class parallel_config(_Cfg.parallel_config):
+            world_size = 2
+
     pool_b = new_pool()
-    engine = FakeEngineCore(pool_b, adopted=True)
-    engine.collective_rpc = lambda fn: [True, False]  # rank 1 did not adopt
-    wake(engine)
+    set_adoption(path, True, False)
+    sched = new_scheduler(pool_b)
+    sched.vllm_config = TwoRank
+    sched.parallel_config = TwoRank.parallel_config
+    sleep_wake(sched)
 
     assert not any(b.block_hash for b in pool_b.blocks)
 
 
-def test_a_probe_that_fails_refuses(path):
-    """Losing the signal is a miss, never a guess."""
+def test_a_missing_rank_answer_refuses(path):
     pool_a = new_pool()
-    wake(FakeEngineCore(pool_a, adopted=False))
+    set_adoption(path, False)
+    sleep_wake(new_scheduler(pool_a))
     populate(pool_a)
+    os.unlink(f"{path}.rank0")
 
     pool_b = new_pool()
-    engine = FakeEngineCore(pool_b, adopted=True)
-
-    def boom(fn):
-        raise RuntimeError("workers unreachable")
-
-    engine.collective_rpc = boom
-    wake(engine)
+    sleep_wake(new_scheduler(pool_b))
     assert not any(b.block_hash for b in pool_b.blocks)
-
-
-# ---------------------------------------------------------------------------
-# the ruler
-# ---------------------------------------------------------------------------
 
 
 def test_a_different_ruler_refuses(path):
-    """Same block id, different meaning: the one failure that is not a miss."""
     pool_a = new_pool()
-    wake(FakeEngineCore(pool_a, adopted=False))
+    set_adoption(path, False)
+    sleep_wake(new_scheduler(pool_a))
     populate(pool_a)
 
     class Changed(_Cfg):
         class cache_config(_Cfg.cache_config):
-            block_size = BLOCK_SIZE * 2  # different geometry
+            block_size = BLOCK_SIZE * 2
 
     pool_b = new_pool()
-    engine = FakeEngineCore(pool_b, adopted=True)
-    engine.vllm_config = Changed
-    wake(engine)
+    set_adoption(path, True)
+    sched = new_scheduler(pool_b)
+    sched.vllm_config = Changed
+    sleep_wake(sched)
 
     assert not any(b.block_hash for b in pool_b.blocks)
 
 
 def test_a_different_block_count_refuses(path):
     pool_a = new_pool()
-    wake(FakeEngineCore(pool_a, adopted=False))
+    set_adoption(path, False)
+    sleep_wake(new_scheduler(pool_a))
     populate(pool_a)
 
     pool_b = BlockPool(N_BLOCKS * 2, True, BLOCK_SIZE)
-    wake(FakeEngineCore(pool_b, adopted=True))
+    set_adoption(path, True)
+    sleep_wake(new_scheduler(pool_b))
     assert not any(b.block_hash for b in pool_b.blocks)
 
 
-# ---------------------------------------------------------------------------
-# the known gap
-# ---------------------------------------------------------------------------
-
-
 def test_known_gap_a_non_participating_engine_is_invisible(path):
-    """DOCUMENTS A HOLE. This test asserts behaviour we want to change.
+    """DOCUMENTS A HOLE. Asserts behaviour we want to change.
 
-    An engine with DYN_GMS_PERSIST_KV=1 but this feature *off* adopts the pages,
-    overwrites blocks, and dies without touching the mirror. Nothing it does is
-    observable to us: same geometry, same identity digest, and it leaves no
-    counter behind. The next participant therefore replays labels describing
-    bytes that engine overwrote -- a wrong answer, not a miss.
-
-    Closing it needs a writer epoch on the GMS handshake (a wire change, hence
-    a follow-up). When that lands, this test SHOULD start failing: replace it
-    with one asserting the replay is refused.
+    An engine with persist-KV on but this feature off adopts the pages,
+    overwrites blocks, and leaves nothing observable. Closing it needs a writer
+    epoch on the GMS handshake; when that lands this test SHOULD fail.
     """
     pool_a = new_pool()
-    wake(FakeEngineCore(pool_a, adopted=False))
+    set_adoption(path, False)
+    sleep_wake(new_scheduler(pool_a))
     blocks = populate(pool_a)
     stale = {b.block_id: b.block_hash for b in blocks}
 
-    # Engine B adopts the same pages with the feature off: it never opens the
-    # mirror, so the file still describes engine A's contents while B is free
-    # to overwrite those very blocks.
-
-    # Engine C, a participant again, takes over after B died.
     pool_c = new_pool()
-    wake(FakeEngineCore(pool_c, adopted=True))
+    set_adoption(path, True)
+    sleep_wake(new_scheduler(pool_c))
+
     got = {b.block_id: b.block_hash for b in pool_c.blocks if b.block_hash}
-
-    assert (
-        got == stale
-    ), "if this now differs, the gap may be closed -- rewrite this test"
-
-
-def test_a_wake_that_did_not_follow_a_sleep_does_nothing(path):
-    """A spurious wake must not re-run the takeover.
-
-    Against a live pool it would find every block already labelled, install
-    nothing, and then ``retain_only(set())`` its way through the whole mirror --
-    discarding a perfectly good index without touching a byte of KV.
-    """
-    pool = new_pool()
-    wake(FakeEngineCore(pool, adopted=False))
-    populate(pool)
-    before = pool._dyn_mirror.live_block_ids()
-    assert before, "nothing to protect -- test is vacuous"
-
-    kv_index.on_wake_up(FakeEngineCore(pool, adopted=True))  # no preceding sleep
-
-    assert pool._dyn_mirror.live_block_ids() == before
-
-
-def test_a_partial_wake_does_nothing(path):
-    """Some tags still asleep: not our moment, and touching the pool would be wrong."""
-    pool = new_pool()
-    wake(FakeEngineCore(pool, adopted=True, sleeping=True))
-    assert not hasattr(pool, "_dyn_mirror")
+    assert got == stale, "if this now differs, the gap may be closed -- rewrite this"
 
 
 def test_disabled_without_the_env_var(tmp_path, monkeypatch):
     monkeypatch.delenv("GMS_KV_INDEX_PATH", raising=False)
     pool = new_pool()
-    wake(FakeEngineCore(pool, adopted=True))
+    sleep_wake(new_scheduler(pool))
     assert not hasattr(pool, "_dyn_mirror")

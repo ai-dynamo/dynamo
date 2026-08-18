@@ -62,17 +62,8 @@ _OFF_COMMITTED = 16
 _OFF_IDENTITY = 24
 _DIGEST_BYTES = 32
 
-# vLLM's EngineCore.sleep(level>=1) clears the prefix cache because it assumes
-# the KV is about to be discarded. Under a committed GMS layout it is not -- the
-# server keeps the pages, so the labels stay true. A reset caused by a sleep must
-# therefore NOT wipe the mirror, while an RLHF weight-update reset must, and
-# nothing inside reset_prefix_cache can tell them apart.
-#
-# The flag spans sleep->wake rather than the sleep() call because
-# EngineCoreProc.pause_scheduler may defer the cache clear into an idle callback
-# that fires after sleep() has already returned.
-_IN_SLEEP = False
-
+# NOTE: the sleep flag now lives on the scheduler (``_dyn_sleeping``), not in
+# module scope -- one engine's sleep no longer speaks for the whole process.
 # One slot per block, indexed by block_id -- a flat array, not a map.
 _REC = np.dtype(
     [
@@ -274,7 +265,7 @@ def install_writer(pool, mirror: MirrorFile) -> None:
         # whenever any block is in use, and dropping the mirror on a refusal
         # would zero it on every poll of a busy engine.
         ok = base.reset_prefix_cache(self)
-        if ok and not _IN_SLEEP:
+        if ok and not _sleeping_for(self):
             # Outside a sleep this means the operator dropped the index on
             # purpose -- an RLHF weight update -- so the labels are dead.
             self._dyn_mirror.invalidate_all()
@@ -337,18 +328,27 @@ def _requeue_to_tail(pool, blocks: list) -> None:
     pool.free_block_queue.append_n(blocks)
 
 
-def _probe_adopted(worker) -> bool:
-    """Did THIS rank inherit the previous engine's KV pages?
+def _probe_adopted(path: str, world_size: int) -> bool:
+    """Did EVERY rank inherit its KV pages?
 
-    Runs in the worker process via ``collective_rpc``; module-level so it is
-    picklable to a spawned worker. Reads the flag ``GMSWorker.wake_up`` recorded
-    rather than the live GMS grant, because ``commit_layout()`` regrants a
-    *creating* writer to ``RW_DATA`` as well.
+    The scheduler process has no handle on the executor, so it cannot ask the
+    workers directly. Each rank drops a one-byte answer next to the mirror at
+    wake (``_publish_kv_adoption`` in worker.py) and we read them here.
+
+    Missing or unreadable is a NO -- the index is engine-wide but the bytes are
+    per-rank, so anything short of unanimity has to refuse.
     """
-    return bool(getattr(worker, "_gms_kv_adopted", False))
+    for rank in range(world_size):
+        try:
+            with open(f"{path}.rank{rank}") as f:
+                if f.read(1) != "1":
+                    return False
+        except OSError:
+            return False
+    return world_size > 0
 
 
-def _identity(engine_core, num_blocks: int) -> bytes:
+def _identity(cfg, num_blocks: int) -> bytes:
     """Hash the ruler: everything that decides what a block id measures.
 
     A label says "block 457". That only means something if both engines measure
@@ -358,7 +358,6 @@ def _identity(engine_core, num_blocks: int) -> bytes:
     import vllm
     from vllm.v1.core import kv_cache_utils
 
-    cfg = engine_core.vllm_config
     fields = {
         "vllm": vllm.__version__,
         "model": cfg.model_config.model,
@@ -374,37 +373,29 @@ def _identity(engine_core, num_blocks: int) -> bytes:
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).digest()
 
 
-def on_wake_up(engine_core) -> None:
+def take_over(scheduler) -> None:
     """Take over the index, then start recording. The whole integration.
 
-    Runs after vLLM's ``wake_up`` returns -- the only point that is both after
-    every rank has re-attached its KV memory (``model_executor.wake_up`` is a
-    blocking collective) and before the scheduler can hand out a block.
+    Called from ``set_pause_state(UNPAUSED)``, which vLLM reaches from
+    ``EngineCore.wake_up`` only after ``model_executor.wake_up()`` has returned
+    -- a blocking collective, so every rank has re-attached -- and before the
+    scheduler can hand out a block. vLLM also gates that call on the executor
+    being fully awake, so partial wakes never reach us.
     """
     path = mirror_path()
-    # _IN_SLEEP gates this to wakes that actually followed a sleep. A spurious
-    # wake would otherwise re-run the takeover against a live pool and, finding
-    # nothing installable, retain_only() its way through the whole mirror.
-    if not path or not _IN_SLEEP or engine_core.model_executor.is_sleeping:
+    if not path:
         return
 
-    pool = engine_core.scheduler.kv_cache_manager.block_pool
+    pool = scheduler.kv_cache_manager.block_pool
     num_blocks = len(pool.blocks)
-    identity = _identity(engine_core, num_blocks)
+    identity = _identity(scheduler.vllm_config, num_blocks)
     # vLLM's own index as we find it. Sleep clears it, so this is normally 0;
     # it is what distinguishes "replay rebuilt the index" from "labels happened
     # to survive in process memory".
     labelled_before = sum(1 for b in pool.blocks if b.block_hash is not None)
 
-    # Every rank, or nobody: the index is engine-wide but the bytes are
-    # per-rank, so a partial adoption is correct on the ranks that adopted and
-    # garbage on the one that did not.
-    try:
-        states = engine_core.collective_rpc(_probe_adopted)
-        adopted = bool(states) and all(states)
-    except Exception as e:
-        logger.warning("[kv_index] takeover probe failed (%s); not replaying", e)
-        adopted = False
+    world_size = getattr(scheduler.parallel_config, "world_size", 1)
+    adopted = _probe_adopted(path, world_size)
 
     mirror, reason, installed = None, "not_adopted", []
     if adopted:
@@ -431,8 +422,9 @@ def on_wake_up(engine_core) -> None:
         # is what makes a stale mirror inert for everyone after us.
         mirror = MirrorFile.create(path, num_blocks, identity)
 
+    pool._dyn_scheduler = scheduler
     install_writer(pool, mirror)
-    _install_watermark(engine_core.scheduler, mirror)
+    scheduler._dyn_mirror = mirror
 
 
 def _record_takeover(path: str, **fields) -> None:
@@ -459,70 +451,82 @@ def _disarm(path: str | None) -> None:
         logger.warning("[kv_index] could not disarm mirror %s: %s", path, e)
 
 
-def _install_watermark(scheduler, mirror: MirrorFile) -> None:
-    """Count schedules and completions. Wrapped once; re-pointed on later wakes."""
-    scheduler._dyn_mirror = mirror
-    if getattr(scheduler, "_dyn_watermarked", False):
-        return
-    schedule, update = scheduler.schedule, scheduler.update_from_output
+def _make_scheduler_cls(base: type) -> type:
+    """Derive from whatever scheduler vLLM (or Dynamo) already chose.
 
-    def _schedule(*args, **kwargs):
-        scheduler._dyn_mirror.on_schedule()
-        return schedule(*args, **kwargs)
+    Four overrides on a class we own, replacing the two EngineCore patches and
+    the two instance wraps. ``set_pause_state`` is the interesting one: both the
+    sleep and the wake transition run through it, in the scheduler's own process,
+    at exactly the moments the takeover needs.
+    """
+    from vllm.v1.core.sched.interface import PauseState
 
-    def _update_from_output(*args, **kwargs):
-        out = update(*args, **kwargs)
-        scheduler._dyn_mirror.on_update()
-        return out
+    class KvIndexScheduler(base):  # type: ignore[misc, valid-type]
+        def set_pause_state(self, pause_state) -> None:
+            if pause_state != PauseState.UNPAUSED:
+                # Entering a sleep. vLLM is about to clear its own prefix index
+                # on the assumption the KV is discarded; under a committed GMS
+                # layout it is not, so the mirror must survive that clear.
+                self._dyn_sleeping = True
+                super().set_pause_state(pause_state)
+                return
 
-    scheduler.schedule = _schedule
-    scheduler.update_from_output = _update_from_output
-    scheduler._dyn_watermarked = True
+            super().set_pause_state(pause_state)
+            if not getattr(self, "_dyn_sleeping", False):
+                return  # not a wake from a sleep -- nothing to take over
+            self._dyn_sleeping = False
+            try:
+                take_over(self)
+            except Exception as e:  # persistence must never break serving
+                logger.warning("[kv_index] takeover failed (%s); continuing cold", e)
+                _disarm(mirror_path())
+
+        def schedule(self, *args, **kwargs):
+            mirror = getattr(self, "_dyn_mirror", None)
+            if mirror is not None:
+                mirror.on_schedule()
+            return super().schedule(*args, **kwargs)
+
+        def update_from_output(self, *args, **kwargs):
+            out = super().update_from_output(*args, **kwargs)
+            mirror = getattr(self, "_dyn_mirror", None)
+            if mirror is not None:
+                mirror.on_update()
+            return out
+
+    KvIndexScheduler.__name__ = f"KvIndex{base.__name__}"
+    return KvIndexScheduler
+
+
+def _sleeping_for(pool) -> bool:
+    """The BlockPool hook asks its scheduler whether we are mid-sleep."""
+    sched = getattr(pool, "_dyn_scheduler", None)
+    return bool(sched is not None and getattr(sched, "_dyn_sleeping", False))
 
 
 def enable_kv_index() -> None:
     """Entry point for ``vllm.general_plugins``. Self-disables when unset.
 
-    Patches ``wake_up`` and ``sleep``, and nothing else. Notably NOT
-    ``EngineCore.__init__``: plugins are loaded by its first statement, so a
-    wrapper installed from here could never affect the frame already executing.
+    Wraps the scheduler-class *resolver* rather than setting
+    ``scheduler_cls``: that field is already claimed by Dynamo's
+    InstrumentedScheduler, and naming a class there also silently disables async
+    scheduling. Wrapping keeps whatever base was chosen and derives from it.
     """
     if not mirror_path():
         return
-    from vllm.v1.engine.core import EngineCore
+    from vllm.config.scheduler import SchedulerConfig
 
-    if getattr(EngineCore, "_dyn_kv_index_patched", False):
+    if getattr(SchedulerConfig, "_dyn_kv_index_patched", False):
         return
-    original_wake, original_sleep = EngineCore.wake_up, EngineCore.sleep
+    original = SchedulerConfig.get_scheduler_cls
+    derived: dict[type, type] = {}
 
-    def wake_up(self, *args, **kwargs):
-        global _IN_SLEEP
-        result = original_wake(self, *args, **kwargs)
-        try:
-            on_wake_up(self)
-        except Exception as e:  # persistence must never break serving
-            logger.warning("[kv_index] takeover failed (%s); continuing cold", e)
-            # Disarm. Serving cold is fine; leaving a mirror behind that nobody
-            # is maintaining is not -- this generation would overwrite the very
-            # blocks it still describes, and the next takeover would find every
-            # gate satisfied and replay them.
-            _disarm(mirror_path())
-        finally:
-            # Back to serving: a reset now means what it says. Cleared even on
-            # failure, or an RLHF reset would silently stop invalidating.
-            _IN_SLEEP = False
-        return result
+    def get_scheduler_cls(self):
+        base = original(self)
+        if base not in derived:
+            derived[base] = _make_scheduler_cls(base)
+        return derived[base]
 
-    def sleep(self, *args, **kwargs):
-        global _IN_SLEEP
-        _IN_SLEEP = True  # cleared by the wake, not by this call returning
-        try:
-            return original_sleep(self, *args, **kwargs)
-        except BaseException:
-            _IN_SLEEP = False
-            raise
-
-    EngineCore.wake_up = wake_up
-    EngineCore.sleep = sleep
-    EngineCore._dyn_kv_index_patched = True
+    SchedulerConfig.get_scheduler_cls = get_scheduler_cls
+    SchedulerConfig._dyn_kv_index_patched = True
     logger.info("[kv_index] enabled; mirror at %s", mirror_path())
