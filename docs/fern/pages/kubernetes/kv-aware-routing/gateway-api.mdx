@@ -383,6 +383,17 @@ Keep every other component (workers, sidecars) identical to `$OLD_DGD_NAME` so t
 the same model the same way. This duplicates the worker fleet for the overlap window; only trim
 that duplication if you understand you are reducing verification coverage before cutover.
 
+<Warning>
+If any copied component sets `globalDynamoNamespace: true`, remove that field (or set it to
+`false`) on every component in `$NEW_DGD_MANIFEST`. `globalDynamoNamespace: true` places the
+component in the shared global Dynamo namespace instead of the namespace derived from the DGD
+name, so leaving it set makes `$NEW_DGD_NAME`'s workers join the *same* worker set as
+`$OLD_DGD_NAME` instead of an isolated blue/green pool — the new EPP would then select from a pool
+that also contains old-DGD workers. If your deployment relies on `globalDynamoNamespace: true` for
+cross-DGD worker sharing, blue/green is not a safe migration path; use the in-place procedure
+instead.
+</Warning>
+
 **Step 4 — Apply the new DGD and wait for it, independently of the old one.**
 
 ```bash
@@ -586,7 +597,7 @@ export DYNAMO_VERSION=1.5.0
 
    ```bash
    kubectl apply -n "$NAMESPACE" -f "$DGD_MANIFEST"
-   kubectl rollout status deployment/${DGD_NAME}-epp -n "$NAMESPACE"
+   kubectl rollout status deployment/${DGD_NAME}-epp -n "$NAMESPACE" --timeout=1800s
    ```
 
 3. Send a request per [Verify the request path](#verify-the-request-path) and confirm the EPP logs
