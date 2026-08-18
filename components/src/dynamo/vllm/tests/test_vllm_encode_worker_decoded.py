@@ -4,9 +4,11 @@
 """Unit tests for frontend-decoded image handling in the encode worker."""
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
+from dynamo.vllm.multimodal_handlers import encode_worker_handler
 from dynamo.vllm.multimodal_handlers.encode_worker_handler import EncodeWorkerHandler
 from dynamo.vllm.multimodal_utils.embedding_cache import EmbeddingCache
 from dynamo.vllm.multimodal_utils.protocol import MultiModalInput
@@ -26,6 +28,29 @@ def _handler(*, frontend_decoding: bool) -> EncodeWorkerHandler:
     handler._decoded_content_hash_warning_emitted = False
     handler.embedding_cache = EmbeddingCache()
     return handler
+
+
+def test_image_processor_receives_engine_mm_processor_kwargs(monkeypatch):
+    expected = {"min_pixels": 65536, "max_pixels": 262144}
+    sentinel = object()
+
+    def mock_from_pretrained(model, **kwargs):
+        assert model == "model"
+        assert kwargs == {"trust_remote_code": True, **expected}
+        return sentinel
+
+    monkeypatch.setattr(
+        encode_worker_handler.AutoImageProcessor,
+        "from_pretrained",
+        mock_from_pretrained,
+    )
+    engine_args = SimpleNamespace(
+        model="model",
+        trust_remote_code=True,
+        mm_processor_kwargs=expected,
+    )
+
+    assert encode_worker_handler._load_image_processor(engine_args) is sentinel
 
 
 def test_cache_key_for_url_image_is_unchanged():

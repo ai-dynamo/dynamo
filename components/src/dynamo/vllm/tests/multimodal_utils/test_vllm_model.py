@@ -4,10 +4,12 @@
 """Unit tests for dynamo.vllm.multimodal_utils.model."""
 
 import json
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from dynamo.vllm.multimodal_utils import model as model_module
 from dynamo.vllm.multimodal_utils.model import (
     ModelFamily,
     construct_qwen_decode_mm_data,
@@ -46,6 +48,37 @@ class TestMultiModalUtils:
             )
             # Embedding values are randomly genearted as placehodler, we only check the shape
             assert mm_data["image"]["image_embeds"].shape == (2, 1024)
+
+
+class TestLoadVisionModel:
+    def test_vllm_encoder_settings_from_environment(self, monkeypatch):
+        fake_visual = object()
+        fake_llm = MagicMock()
+        fake_warmup_module = MagicMock()
+        fake_import_module = MagicMock(return_value=fake_warmup_module)
+        model_runner = fake_llm.return_value.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner
+        model_runner.model.visual = fake_visual
+
+        monkeypatch.setattr(model_module, "VLLM_ENCODER", 1)
+        monkeypatch.setattr(model_module, "LLM", fake_llm)
+        monkeypatch.setattr(model_module, "import_module", fake_import_module)
+        monkeypatch.setattr(model_module, "update_environment_variables", MagicMock())
+        monkeypatch.setenv("DYN_QWEN36_MOE_ENCODER_FAMILY_PATCH", "1")
+        monkeypatch.setenv("DYN_VLLM_ENCODER_GPU_MEMORY_UTILIZATION", "0.125")
+        monkeypatch.setenv("DYN_VLLM_ENCODER_KV_CACHE_MEMORY_BYTES", "4294967296")
+        monkeypatch.setenv("DYN_VLLM_ENCODER_MAX_NUM_SEQS", "64")
+
+        loaded = model_module.load_vision_model("Qwen/Qwen3.5-9B")
+
+        kwargs = fake_llm.call_args.kwargs
+        assert kwargs["gpu_memory_utilization"] == 0.125
+        assert kwargs["kv_cache_memory_bytes"] == 4294967296
+        assert kwargs["max_num_seqs"] == 64
+        fake_import_module.assert_called_once_with(
+            "vllm.model_executor.warmup.kernel_warmup"
+        )
+        assert fake_warmup_module.qwen_triton_warmup is model_module._encoder_only_noop
+        assert loaded is fake_visual
 
 
 class TestResolveModelFamily:

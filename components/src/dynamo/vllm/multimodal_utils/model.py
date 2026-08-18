@@ -18,6 +18,7 @@ import json
 import logging
 import os
 from enum import Enum
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +32,15 @@ logger = logging.getLogger(__name__)
 # [gluo NOTE] Debug flag to compare vLLM encoder vs transformers encoder,
 # should be removed once there is proper way to extract vLLM encoder.
 VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
+
+
+def _encoder_only_noop(*_args: Any, **_kwargs: Any) -> None:
+    logger.info("Skipping Qwen text/GDN warmup for mm_encoder_only worker")
+
+
+def _patch_qwen_text_warmup_for_encoder() -> None:
+    module = import_module("vllm.model_executor.warmup.kernel_warmup")
+    module.qwen_triton_warmup = _encoder_only_noop
 
 
 class ModelFamily(str, Enum):
@@ -162,6 +172,8 @@ def load_vision_model(
     Load a vision model from a HuggingFace model ID.
     """
     if VLLM_ENCODER and resolve_model_family(model_id) is ModelFamily.QWEN_VL:
+        if os.getenv("DYN_QWEN36_MOE_ENCODER_FAMILY_PATCH") == "1":
+            _patch_qwen_text_warmup_for_encoder()
         # Disable to get ViT from the same process
         update_environment_variables(
             {
@@ -178,10 +190,16 @@ def load_vision_model(
             trust_remote_code=trust_remote_code,
             # vLLM's free-memory precheck runs before kv_cache_memory_bytes applies;
             # default 0.9 fails on <=24 GiB GPUs when another worker shares the device.
-            gpu_memory_utilization=0.2,
-            kv_cache_memory_bytes=1024
-            * 1024
-            * 64,  # 64MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.
+            gpu_memory_utilization=float(
+                os.getenv("DYN_VLLM_ENCODER_GPU_MEMORY_UTILIZATION", "0.2")
+            ),
+            kv_cache_memory_bytes=int(
+                os.getenv(
+                    "DYN_VLLM_ENCODER_KV_CACHE_MEMORY_BYTES",
+                    str(1024 * 1024 * 64),
+                )
+            ),  # Encoder-only needs only enough KV for vLLM's init lifecycle.
+            max_num_seqs=int(os.getenv("DYN_VLLM_ENCODER_MAX_NUM_SEQS", "64")),
             max_model_len=1,
             mm_encoder_only=True,
             enable_prefix_caching=False,

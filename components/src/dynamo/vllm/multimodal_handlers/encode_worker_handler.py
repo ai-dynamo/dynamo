@@ -48,6 +48,20 @@ CACHE_SIZE_MAXIMUM = 8
 ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
 
 
+def _load_image_processor(engine_args: AsyncEngineArgs):
+    processor_kwargs = getattr(engine_args, "mm_processor_kwargs", None) or {}
+    processor = AutoImageProcessor.from_pretrained(
+        engine_args.model,
+        trust_remote_code=engine_args.trust_remote_code,
+        **processor_kwargs,
+    )
+    logger.info(
+        "Encode worker image processor initialized with mm_processor_kwargs=%s",
+        processor_kwargs,
+    )
+    return processor
+
+
 @dataclass
 class EmbeddingItem:
     # None when the item has no stable identity (e.g. a frontend-decoded
@@ -73,9 +87,7 @@ class EncodeWorkerHandler:
             cache_size=CACHE_SIZE_MAXIMUM,
             enable_frontend_decoding=enable_frontend_decoding,
         )
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model, trust_remote_code=self.engine_args.trust_remote_code
-        )
+        self.image_processor = _load_image_processor(self.engine_args)
         self.vision_model = load_vision_model(
             self.model,
             enforce_eager=self.engine_args.enforce_eager,
