@@ -939,6 +939,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod("worker-0", job))
 		r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
 
+		t.Log("Reconcile the Creating checkpoint with the Checkpoint gate disabled")
 		_, err := r.Reconcile(ctx, ctrl.Request{
 			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
 		})

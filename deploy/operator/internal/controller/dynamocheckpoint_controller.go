@@ -121,6 +121,13 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
+	// Retry terminal Job cleanup before parking checkpoints while the feature is disabled.
+	if isTerminalCheckpointPhase(ckpt.Status.Phase) && ckpt.Status.JobName != "" {
+		if err := r.cleanupTerminalCheckpointJob(ctx, ckpt); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Report active checkpoints as disabled before accessing the external API.
 	if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
 		switch ckpt.Status.Phase {
@@ -152,15 +159,6 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, err
 		}
 		if err := r.Get(ctx, req.NamespacedName, ckpt); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// A Failed phase, or Ready with the new success proof, is the durable record that permits
-	// deleting its Job. Do this before duplicate or artifact-version normalization can discard the
-	// retained Job reference.
-	if isTerminalCheckpointPhase(ckpt.Status.Phase) && ckpt.Status.JobName != "" {
-		if err := r.cleanupTerminalCheckpointJob(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
 		}
 	}

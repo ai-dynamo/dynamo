@@ -327,6 +327,33 @@ func TestCheckpointReconcilePreservesLegacyReadyJob(t *testing.T) {
 	}
 }
 
+func TestCheckpointReconcileCleansTerminalJobWhenDisabled(t *testing.T) {
+	ctx := context.Background()
+
+	t.Log("Create a failed checkpoint with a retained owned Job")
+	ckpt := newOwnedCheckpoint()
+	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
+	ckpt.Status.JobName = defaultCheckpointJobName
+	ckpt.Status.Message = "capture failed"
+	job := healthyCheckpointJob(defaultCheckpointJobName)
+	setCheckpointJobOwner(ckpt, job)
+	reconciler := makeCheckpointReconciler(checkpointTestScheme(), ckpt, job)
+	reconciler.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
+
+	t.Log("Reconcile while the Checkpoint gate is disabled")
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ckpt)})
+	require.NoError(t, err)
+
+	t.Log("Observe the retained Job deleted without changing the terminal checkpoint message")
+	storedJob := &batchv1.Job{}
+	err = reconciler.Get(ctx, client.ObjectKeyFromObject(job), storedJob)
+	require.True(t, apierrors.IsNotFound(err), "retained terminal Job still exists: %v", err)
+	storedCheckpoint := &nvidiacomv1alpha1.DynamoCheckpoint{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(ckpt), storedCheckpoint))
+	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, storedCheckpoint.Status.Phase)
+	assert.Equal(t, "capture failed", storedCheckpoint.Status.Message)
+}
+
 func TestCheckpointTerminalStatusIsDurableBeforeJobCleanup(t *testing.T) {
 	tests := []struct {
 		name       string
