@@ -684,7 +684,7 @@ mod tests {
             source_request_id: "parent-2".to_string(),
             consumer_request_id: Some("parent-1".to_string()),
             child_session_id: Some("child".to_string()),
-            execution_mode: "background".to_string(),
+            execution_mode: "blocking".to_string(),
         });
         let loaded = LoadedAgentTrace {
             requests: vec![

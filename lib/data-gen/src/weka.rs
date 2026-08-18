@@ -313,16 +313,26 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
         .iter()
         .position(|stream| stream.session_id.ends_with(":root"))
         .expect("root stream is present");
+    let parent_timeline = streams
+        .iter()
+        .flat_map(|stream| stream.requests.iter())
+        .map(|request| {
+            (
+                request.source_order,
+                request.source_id.clone(),
+                request.request.t,
+            )
+        })
+        .collect::<Vec<_>>();
     let mut join_markers = Vec::<(String, Vec<String>)>::new();
 
     for (outer_index, subagent) in explicit {
         validate_subagent(subagent, relative_path)?;
-        let Some(spawn_source_id) = streams[root_stream_index]
-            .requests
+        let Some(spawn_source_id) = parent_timeline
             .iter()
-            .filter(|request| request.source_order < outer_index)
-            .max_by_key(|request| request.source_order)
-            .map(|request| request.source_id.clone())
+            .filter(|(source_order, _, _)| *source_order < outer_index)
+            .max_by_key(|(source_order, _, _)| *source_order)
+            .map(|(_, source_id, _)| source_id.clone())
         else {
             continue;
         };
@@ -371,15 +381,13 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
         }
 
         let child_end = subagent_end(subagent);
-        let join_source_id = streams[root_stream_index]
-            .requests
+        let join_source_id = parent_timeline
             .iter()
-            .filter(|request| {
-                request.source_order > outer_index
-                    && request.request.t + JOIN_EPSILON_SECONDS >= child_end
+            .filter(|(source_order, _, timestamp)| {
+                *source_order > outer_index && *timestamp + JOIN_EPSILON_SECONDS >= child_end
             })
-            .min_by_key(|request| request.source_order)
-            .map(|request| request.source_id.clone());
+            .min_by_key(|(source_order, _, _)| *source_order)
+            .map(|(_, source_id, _)| source_id.clone());
 
         let child_stream_indices = streams.len()..(streams.len() + child_streams.len());
         streams.extend(child_streams);
