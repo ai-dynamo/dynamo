@@ -709,6 +709,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-examples.md
                   - page: Planner Design
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-design.md
+                  - page: Power-Aware Planner Design
+                    path: pages/developer-guide/knowledge-base/modular-components/planner/power-aware-planner-design.md
               - section: Profiler
                 collapsed: true
                 contents:
