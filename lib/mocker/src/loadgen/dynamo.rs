@@ -6,10 +6,13 @@
 use std::path::PathBuf;
 
 use aisimulate_core::replay::loadgen::{
-    AgenticMooncakeRow, AgenticToolEvent, AgenticTrace, MooncakeRow, Trace, TraceFileFormat,
-    validate_trace_files,
+    AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticDependency,
+    AgenticDependencyRelation, AgenticDependencyTrigger, AgenticGraphBuilder, AgenticHashIdScope,
+    AgenticMooncakeHeader, AgenticMooncakeRow, AgenticSourceProvenance, AgenticTrace, MooncakeRow,
+    Trace, TraceFileFormat, validate_trace_files,
 };
 use anyhow::{Result, bail};
+use dynamo_data_gen::WekaImporter;
 use dynamo_data_gen::request_trace::{
     agentic::lower_agentic_mooncake_rows,
     load::{RequestTraceMode, load_request_trace_records},
@@ -21,6 +24,23 @@ use dynamo_data_gen::request_trace::{
 pub enum DynamoRequestTrace {
     Standard(Trace),
     Agentic(AgenticTrace),
+}
+
+pub fn load_weka_trace(path: &std::path::Path) -> Result<AgenticTrace> {
+    let importer = WekaImporter::open(path)?;
+    let header = importer.header();
+    let mut builder = AgenticGraphBuilder::new(AgenticMooncakeHeader {
+        schema: header.schema.clone(),
+        version: header.version,
+        block_size: header.block_size,
+        hash_id_scope: AgenticHashIdScope::Local,
+        source: AgenticSourceProvenance {
+            format: header.source.format.clone(),
+            digest: header.source.digest.clone(),
+        },
+    })?;
+    importer.for_each_row(|row| builder.push(agentic_mooncake_row(row)))?;
+    builder.finish()
 }
 
 impl DynamoRequestTrace {
@@ -48,8 +68,21 @@ impl DynamoRequestTrace {
                     Ok(())
                 })?;
                 validate_dynamo_trace_block_size(expected_block_size, block_size)?;
+                let digest = blake3::hash(&serde_json::to_vec(&rows)?)
+                    .to_hex()
+                    .to_string();
+                let header = AgenticMooncakeHeader {
+                    schema: AGENTIC_MOONCAKE_SCHEMA.to_string(),
+                    version: AGENTIC_MOONCAKE_VERSION,
+                    block_size,
+                    hash_id_scope: AgenticHashIdScope::Local,
+                    source: AgenticSourceProvenance {
+                        format: "dynamo_request_trace".to_string(),
+                        digest,
+                    },
+                };
                 Ok(Self::Agentic(AgenticTrace::from_agentic_mooncake_rows(
-                    rows, block_size,
+                    header, rows,
                 )?))
             }
         }
@@ -87,34 +120,42 @@ fn mooncake_row(row: dynamo_data_gen::MooncakeRow) -> MooncakeRow {
 fn agentic_mooncake_row(row: dynamo_data_gen::AgenticMooncakeRow) -> AgenticMooncakeRow {
     AgenticMooncakeRow {
         request_id: row.request_id,
+        play_id: row.play_id,
         session_id: row.session_id,
+        model: row.model,
         input_length: row.input_length,
         output_length: row.output_length,
         output_token_ids: row.output_token_ids,
         hash_ids: row.hash_ids,
-        timestamp: row.timestamp,
-        delay: row.delay,
+        not_before_ms: row.not_before_ms,
         priority: row.priority,
         strict_priority: row.strict_priority,
         policy_class: row.policy_class,
-        request_kind: row.request_kind,
-        wait_for: row.wait_for,
-        branches: row.branches,
-        prefix_reset: row.prefix_reset,
-        tool_wait_ms: row.tool_wait_ms,
-        tool_events: row
-            .tool_events
+        dependencies: row
+            .dependencies
             .into_iter()
-            .map(|event| AgenticToolEvent {
-                tool_call_id: event.tool_call_id,
-                tool_class: event.tool_class,
-                started_at_unix_ms: event.started_at_unix_ms,
-                ended_at_unix_ms: event.ended_at_unix_ms,
-                duration_ms: event.duration_ms,
-                status: event.status,
-                output_bytes: event.output_bytes,
-                output_tokens: event.output_tokens,
-                error_type: event.error_type,
+            .map(|dependency| AgenticDependency {
+                request_id: dependency.request_id,
+                trigger: match dependency.trigger {
+                    dynamo_data_gen::AgenticDependencyTrigger::Dispatch => {
+                        AgenticDependencyTrigger::Dispatch
+                    }
+                    dynamo_data_gen::AgenticDependencyTrigger::Completion => {
+                        AgenticDependencyTrigger::Completion
+                    }
+                },
+                delay_ms: dependency.delay_ms,
+                relation: match dependency.relation {
+                    dynamo_data_gen::AgenticDependencyRelation::Sequence => {
+                        AgenticDependencyRelation::Sequence
+                    }
+                    dynamo_data_gen::AgenticDependencyRelation::Spawn => {
+                        AgenticDependencyRelation::Spawn
+                    }
+                    dynamo_data_gen::AgenticDependencyRelation::Join => {
+                        AgenticDependencyRelation::Join
+                    }
+                },
             })
             .collect(),
     }

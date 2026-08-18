@@ -434,7 +434,7 @@ where
                 &mut self.admission,
                 signal.uuid,
                 self.now_ms,
-                signal.rejected,
+                status,
             )?;
             self.progress.inc_completed();
             self.dispatch_placements(placements)?;
@@ -547,6 +547,9 @@ where
                 request,
                 arrival_time_ms,
                 scheduled_ready_at_ms,
+                authored_request_id,
+                play_id,
+                dispatched_at_ms,
                 metadata,
                 replay_hashes,
                 session_id,
@@ -556,6 +559,10 @@ where
             let output_length = request.metadata().effective_max_output_tokens();
             let session_metadata = session_id.clone().zip(turn_index);
             let uuid = self.assign_request(request, arrival_time_ms, metadata, session_id)?;
+            if let (Some(request_id), Some(play_id)) = (authored_request_id, play_id) {
+                self.collector
+                    .on_agentic_metadata(uuid, request_id, play_id, dispatched_at_ms);
+            }
             if let Some(sink) = &self.artifact_sink {
                 sink.record_request(ReplayArtifactRequest {
                     request_id: uuid,
@@ -1059,6 +1066,12 @@ where
         }
 
         self.progress.finish();
+        if let Some(snapshot) = self.admission.agentic_trajectory_snapshot() {
+            self.collector.set_agentic_trajectory(snapshot);
+        }
+        if let Some(identity) = self.admission.agentic_graph_identity() {
+            self.collector.set_agentic_graph(identity);
+        }
         self.collector.set_runtime_evidence(self.evidence.finish());
         Ok((self.collector, self.stats))
     }

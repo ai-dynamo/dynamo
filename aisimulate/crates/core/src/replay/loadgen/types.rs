@@ -36,10 +36,15 @@ pub struct Trace {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AgenticTrace {
-    pub block_size: usize,
-    pub turns: Vec<AgenticTurnTrace>,
+pub struct ValidatedAgenticGraph {
+    pub(super) block_size: usize,
+    pub(super) source: AgenticSourceProvenance,
+    pub(super) graph_digest: String,
+    pub(super) nodes: Vec<AgenticNode>,
+    pub(super) plays: Vec<AgenticPlay>,
 }
+
+pub type AgenticTrace = ValidatedAgenticGraph;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceFileFormat {
@@ -50,10 +55,12 @@ pub enum TraceFileFormat {
     /// traces: it expands compact session turns into cumulative prompts and can
     /// use much more memory than `Mooncake`.
     MooncakeDelta,
-    /// Mooncake request/cache rows plus explicit request-level workflow
-    /// dependencies. Each row dispatches after `wait_for` completions plus its
-    /// authored delay/tool wait.
+    /// Versioned Mooncake request/cache rows plus typed request-level workflow
+    /// dependencies.
     AgenticMooncake,
+    /// Public Weka/AgentX trace files or directories lowered into the same
+    /// validated graph used by `AgenticMooncake`.
+    Weka,
     AppliedComputeAgentic,
     Dynamo,
 }
@@ -93,29 +100,60 @@ pub struct MooncakeRow {
     pub policy_class: Option<String>,
 }
 
-/// Harness tool span attached to an agentic Mooncake row.
+pub const AGENTIC_MOONCAKE_SCHEMA: &str = "dynamo.agentic_mooncake";
+pub const AGENTIC_MOONCAKE_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgenticSourceProvenance {
+    pub format: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgenticMooncakeHeader {
+    pub schema: String,
+    pub version: u32,
+    pub block_size: usize,
+    pub hash_id_scope: AgenticHashIdScope,
+    pub source: AgenticSourceProvenance,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgenticHashIdScope {
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgenticDependencyTrigger {
+    Dispatch,
+    Completion,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgenticDependencyRelation {
+    Sequence,
+    Spawn,
+    Join,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgenticToolEvent {
-    pub tool_call_id: String,
-    pub tool_class: String,
-    pub started_at_unix_ms: u64,
-    pub ended_at_unix_ms: u64,
-    pub duration_ms: f64,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_type: Option<String>,
+pub struct AgenticDependency {
+    pub request_id: String,
+    pub trigger: AgenticDependencyTrigger,
+    pub delay_ms: f64,
+    pub relation: AgenticDependencyRelation,
 }
 
 /// One producer-neutral agentic Mooncake request row.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgenticMooncakeRow {
     pub request_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub play_id: String,
+    pub session_id: String,
+    pub model: String,
     #[serde(default, alias = "input_tokens")]
     pub input_length: Option<usize>,
     #[serde(default, alias = "output_tokens")]
@@ -124,38 +162,15 @@ pub struct AgenticMooncakeRow {
     pub output_token_ids: Option<Vec<u32>>,
     #[serde(default)]
     pub hash_ids: Option<Vec<u64>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "created_time"
-    )]
-    pub timestamp: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "delay_ms")]
-    pub delay: Option<f64>,
+    pub not_before_ms: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_priority: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_class: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub wait_for: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub branches: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix_reset: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_wait_ms: Option<f64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_events: Vec<AgenticToolEvent>,
-}
-
-impl AgenticMooncakeRow {
-    pub(crate) fn dependency_delay_ms(&self) -> f64 {
-        self.delay.unwrap_or(0.0) + self.tool_wait_ms.unwrap_or(0.0)
-    }
+    pub dependencies: Vec<AgenticDependency>,
 }
 
 impl TraceFileFormat {
@@ -164,6 +179,7 @@ impl TraceFileFormat {
             Self::Mooncake => "mooncake",
             Self::MooncakeDelta => "mooncake-delta",
             Self::AgenticMooncake => "agentic_mooncake",
+            Self::Weka => "weka",
             Self::AppliedComputeAgentic => "applied_compute_agentic",
             Self::Dynamo => "dynamo",
         }
@@ -190,22 +206,103 @@ pub struct TurnTrace {
     pub policy_class: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct AgenticNode {
+    pub(super) request_id: String,
+    pub(super) play_id: String,
+    pub(super) session_id: String,
+    pub(super) model: String,
+    pub(super) input_length: usize,
+    pub(super) max_output_tokens: usize,
+    pub(super) output_token_ids: Option<Vec<u32>>,
+    pub(super) replay_key: Option<String>,
+    pub(super) hash_ids: Vec<u64>,
+    pub(super) not_before_ms: f64,
+    pub(super) priority: i32,
+    pub(super) strict_priority: u32,
+    pub(super) policy_class: Option<String>,
+    pub(super) dependencies: Vec<AgenticDependency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgenticPlay {
+    pub(super) play_id: String,
+    pub(super) root_node: usize,
+    pub(super) nodes: Vec<usize>,
+}
+
+impl ValidatedAgenticGraph {
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    pub fn source(&self) -> &AgenticSourceProvenance {
+        &self.source
+    }
+
+    pub fn graph_digest(&self) -> &str {
+        &self.graph_digest
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn play_count(&self) -> usize {
+        self.plays.len()
+    }
+
+    pub fn nodes(&self) -> &[AgenticNode] {
+        &self.nodes
+    }
+
+    pub fn identity(&self) -> AgenticGraphIdentity {
+        AgenticGraphIdentity {
+            source: self.source.clone(),
+            graph_digest: self.graph_digest.clone(),
+            block_size: self.block_size,
+            node_count: self.nodes.len(),
+            play_count: self.plays.len(),
+        }
+    }
+}
+
+impl AgenticNode {
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn play_id(&self) -> &str {
+        &self.play_id
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn dependencies(&self) -> &[AgenticDependency] {
+        &self.dependencies
+    }
+
+    pub fn not_before_ms(&self) -> f64 {
+        self.not_before_ms
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct AgenticTurnTrace {
-    pub request_id: String,
-    pub session_id: String,
-    pub input_length: usize,
-    pub max_output_tokens: usize,
-    pub output_token_ids: Option<Vec<u32>>,
-    pub replay_key: Option<String>,
-    pub hash_ids: Vec<u32>,
-    pub first_ready_timestamp_ms: Option<f64>,
-    pub delay_after_dependencies_ms: f64,
-    pub priority: i32,
-    pub strict_priority: u32,
-    pub policy_class: Option<String>,
-    pub wait_for: Vec<String>,
-    pub prefix_reset: bool,
+pub struct AgenticTrajectorySnapshot {
+    pub total_trajectories: usize,
+    pub completed_trajectories: usize,
+    pub e2e_latencies_ms: Vec<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgenticGraphIdentity {
+    pub source: AgenticSourceProvenance,
+    pub graph_digest: String,
+    pub block_size: usize,
+    pub node_count: usize,
+    pub play_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +405,9 @@ impl ReplayRequestHashes {
 #[derive(Debug, Clone)]
 pub struct ReadyTurn {
     pub request_uuid: Uuid,
+    pub authored_request_id: Option<String>,
+    pub play_id: Option<String>,
+    pub dispatched_at_ms: f64,
     pub session_id: String,
     pub turn_index: usize,
     pub emit_session_metadata: bool,
@@ -433,6 +533,9 @@ impl ReplayRequestPayload {
 #[derive(Debug)]
 pub struct CompactReadyTurn {
     pub request_uuid: Uuid,
+    pub authored_request_id: Option<String>,
+    pub play_id: Option<String>,
+    pub dispatched_at_ms: f64,
     pub session_id: String,
     pub turn_index: usize,
     pub replay_key: Option<String>,
@@ -447,6 +550,9 @@ impl CompactReadyTurn {
     pub fn into_ready_turn(self) -> ReadyTurn {
         ReadyTurn {
             request_uuid: self.request_uuid,
+            authored_request_id: self.authored_request_id,
+            play_id: self.play_id,
+            dispatched_at_ms: self.dispatched_at_ms,
             session_id: self.session_id,
             turn_index: self.turn_index,
             emit_session_metadata: self.emit_session_metadata,

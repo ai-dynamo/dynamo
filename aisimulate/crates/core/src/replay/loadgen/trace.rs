@@ -10,12 +10,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::driver::WorkloadDriver;
 use super::types::{
-    AgenticMooncakeRow, AgenticTrace, AgenticTurnTrace, DelaySpec, LengthSpec, MooncakeRow,
+    AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticDependency,
+    AgenticDependencyRelation, AgenticDependencyTrigger, AgenticMooncakeHeader, AgenticMooncakeRow,
+    AgenticNode, AgenticPlay, AgenticTrace, DelaySpec, LengthSpec, MooncakeRow,
     ReplayRequestHashes, SessionPartitionSpec, SessionTrace, SyntheticTraceSpec, Trace,
     TraceFileFormat, TurnTrace, effective_replay_key,
 };
@@ -177,25 +179,6 @@ impl TurnTrace {
             policy_class: self.policy_class.clone(),
             replay_context: None,
         })
-    }
-
-    pub fn to_replay_hashes(
-        &self,
-        trace_block_size: usize,
-        engine_block_size: usize,
-    ) -> Result<ReplayRequestHashes> {
-        trace_to_replay_hashes(
-            self.input_length,
-            &self.hash_ids,
-            trace_block_size,
-            engine_block_size,
-        )
-    }
-}
-
-impl AgenticTurnTrace {
-    pub fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
-        synthesize_trace_tokens(self.input_length, &self.hash_ids, trace_block_size)
     }
 
     pub fn to_replay_hashes(
@@ -1051,29 +1034,85 @@ impl Trace {
 }
 
 struct AgenticTraceBuilder {
-    trace_block_size: usize,
-    hash_id_interner: HashIdInterner,
-    turns: Vec<AgenticTurnTrace>,
+    header: AgenticMooncakeHeader,
+    nodes: Vec<AgenticNode>,
     request_ids: std::collections::HashSet<String>,
 }
 
-impl AgenticTraceBuilder {
-    fn new(trace_block_size: usize) -> Self {
-        Self {
-            trace_block_size,
-            hash_id_interner: HashIdInterner::default(),
-            turns: Vec::new(),
-            request_ids: std::collections::HashSet::new(),
+/// Incremental builder for an already-versioned agentic request stream.
+///
+/// Producers can validate and compile rows without retaining a second full
+/// row collection in memory. The returned graph owns the row payloads.
+pub struct AgenticGraphBuilder {
+    inner: AgenticTraceBuilder,
+    row_count: usize,
+}
+
+impl AgenticGraphBuilder {
+    pub fn new(header: AgenticMooncakeHeader) -> Result<Self> {
+        Ok(Self {
+            inner: AgenticTraceBuilder::new(header)?,
+            row_count: 0,
+        })
+    }
+
+    pub fn push(&mut self, row: AgenticMooncakeRow) -> Result<()> {
+        self.inner.push(self.row_count + 1, row)?;
+        self.row_count += 1;
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<AgenticTrace> {
+        if self.inner.is_empty() {
+            bail!("agentic Mooncake rows did not contain any requests");
         }
+        self.inner.finish()
+    }
+}
+
+impl AgenticTraceBuilder {
+    fn new(header: AgenticMooncakeHeader) -> Result<Self> {
+        if header.schema != AGENTIC_MOONCAKE_SCHEMA {
+            bail!(
+                "unsupported agentic Mooncake schema {:?}; expected {:?}",
+                header.schema,
+                AGENTIC_MOONCAKE_SCHEMA
+            );
+        }
+        if header.version != AGENTIC_MOONCAKE_VERSION {
+            bail!(
+                "unsupported agentic Mooncake version {}; expected {}",
+                header.version,
+                AGENTIC_MOONCAKE_VERSION
+            );
+        }
+        if header.block_size == 0 {
+            bail!("agentic Mooncake block_size must be greater than 0");
+        }
+        if header.source.format.trim().is_empty() || header.source.digest.trim().is_empty() {
+            bail!("agentic Mooncake source provenance requires nonempty format and digest");
+        }
+
+        Ok(Self {
+            header,
+            nodes: Vec::new(),
+            request_ids: std::collections::HashSet::new(),
+        })
     }
 
     fn is_empty(&self) -> bool {
-        self.turns.is_empty()
+        self.nodes.is_empty()
     }
 
     fn push(&mut self, line_idx: usize, raw: AgenticMooncakeRow) -> Result<()> {
         if raw.request_id.trim().is_empty() {
             bail!("trace line {} has empty request_id", line_idx + 1);
+        }
+        if raw.play_id.trim().is_empty() {
+            bail!("trace line {} has empty play_id", line_idx + 1);
+        }
+        if raw.session_id.trim().is_empty() {
+            bail!("trace line {} has empty session_id", line_idx + 1);
         }
         if !self.request_ids.insert(raw.request_id.clone()) {
             bail!(
@@ -1083,28 +1122,32 @@ impl AgenticTraceBuilder {
             );
         }
 
-        let delay_after_dependencies_ms = raw.dependency_delay_ms();
         let hash_ids = raw
             .hash_ids
             .ok_or_else(|| anyhow!("trace line {} is missing hash_ids", line_idx + 1))?;
-        let synthesizable_capacity = hash_ids
-            .len()
-            .checked_mul(self.trace_block_size)
-            .ok_or_else(|| anyhow!("trace line {} synthesized capacity overflow", line_idx + 1))?;
-        let input_length = match raw.input_length {
-            Some(input_length) if input_length > synthesizable_capacity => {
-                bail!(
-                    "trace line {} has input_length {} but only {} tokens can be synthesized from {} hash_ids at trace_block_size {}",
-                    line_idx + 1,
-                    input_length,
-                    synthesizable_capacity,
-                    hash_ids.len(),
-                    self.trace_block_size
-                );
-            }
-            Some(input_length) => input_length,
-            None => synthesizable_capacity,
-        };
+        if hash_ids.is_empty() {
+            bail!("trace line {} has empty hash_ids", line_idx + 1);
+        }
+        let input_length = raw
+            .input_length
+            .ok_or_else(|| anyhow!("trace line {} is missing input_length", line_idx + 1))?;
+        if input_length == 0 {
+            bail!("trace line {} has zero input_length", line_idx + 1);
+        }
+        let expected_hashes = input_length.div_ceil(self.header.block_size);
+        if hash_ids.len() != expected_hashes {
+            bail!(
+                "trace line {} has input_length {} at block_size {} and requires exactly {} hash_ids, got {}",
+                line_idx + 1,
+                input_length,
+                self.header.block_size,
+                expected_hashes,
+                hash_ids.len()
+            );
+        }
+        if raw.model.trim().is_empty() {
+            bail!("trace line {} has an empty model", line_idx + 1);
+        }
         let output_length = raw
             .output_length
             .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
@@ -1119,88 +1162,149 @@ impl AgenticTraceBuilder {
                 output_token_ids.len()
             );
         }
-        if !delay_after_dependencies_ms.is_finite() || delay_after_dependencies_ms < 0.0 {
+        if !raw.not_before_ms.is_finite() || raw.not_before_ms < 0.0 {
             bail!(
-                "trace line {} has invalid dependency delay {}",
+                "trace line {} has invalid not_before_ms {}",
                 line_idx + 1,
-                delay_after_dependencies_ms
+                raw.not_before_ms
             );
         }
-        if let Some(timestamp_ms) = raw.timestamp
-            && (!timestamp_ms.is_finite() || timestamp_ms < 0.0)
-        {
-            bail!(
-                "trace line {} has invalid timestamp {}",
-                line_idx + 1,
-                timestamp_ms
-            );
+        for dependency in &raw.dependencies {
+            if dependency.request_id.trim().is_empty() {
+                bail!(
+                    "trace line {} has a dependency with an empty request_id",
+                    line_idx + 1
+                );
+            }
+            if !dependency.delay_ms.is_finite() || dependency.delay_ms < 0.0 {
+                bail!(
+                    "trace line {} has invalid dependency delay {}",
+                    line_idx + 1,
+                    dependency.delay_ms
+                );
+            }
+            match (dependency.relation, dependency.trigger) {
+                (AgenticDependencyRelation::Sequence, AgenticDependencyTrigger::Completion)
+                | (AgenticDependencyRelation::Spawn, _)
+                | (AgenticDependencyRelation::Join, AgenticDependencyTrigger::Completion) => {}
+                (relation, trigger) => bail!(
+                    "trace line {} has invalid {:?} dependency with {:?} trigger",
+                    line_idx + 1,
+                    relation,
+                    trigger
+                ),
+            }
         }
-
-        let hash_ids = self.hash_id_interner.intern_all(hash_ids)?;
 
         let replay_key = output_token_ids.as_ref().map(|_| {
             effective_replay_key(
                 Some(raw.request_id.as_str()),
-                raw.session_id.as_deref(),
+                Some(raw.session_id.as_str()),
                 0,
                 line_idx,
             )
         });
-        self.turns.push(AgenticTurnTrace {
+        self.nodes.push(AgenticNode {
             replay_key,
             request_id: raw.request_id,
-            session_id: raw
-                .session_id
-                .unwrap_or_else(|| format!("request_{}", line_idx + 1)),
+            play_id: raw.play_id,
+            session_id: raw.session_id,
+            model: raw.model,
             input_length,
             max_output_tokens: output_length,
             output_token_ids,
             hash_ids,
-            first_ready_timestamp_ms: raw.timestamp,
-            delay_after_dependencies_ms,
+            not_before_ms: raw.not_before_ms,
             priority: raw.priority.unwrap_or(0),
             strict_priority: raw.strict_priority.unwrap_or(0),
             policy_class: raw.policy_class,
-            wait_for: raw.wait_for,
-            prefix_reset: raw.prefix_reset.unwrap_or(false),
+            dependencies: raw.dependencies,
         });
         Ok(())
     }
 
-    fn finish(self) -> Result<AgenticTrace> {
-        for turn in &self.turns {
-            for dependency in &turn.wait_for {
-                if !self.request_ids.contains(dependency) {
+    fn finish(mut self) -> Result<AgenticTrace> {
+        self.nodes
+            .sort_by(|left, right| left.request_id.cmp(&right.request_id));
+        let index_by_id: HashMap<&str, usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.request_id.as_str(), index))
+            .collect();
+        let mut nodes_by_play: HashMap<String, Vec<usize>> = HashMap::new();
+
+        for (node_index, node) in self.nodes.iter().enumerate() {
+            nodes_by_play
+                .entry(node.play_id.clone())
+                .or_default()
+                .push(node_index);
+            for dependency in &node.dependencies {
+                let Some(&dependency_index) = index_by_id.get(dependency.request_id.as_str())
+                else {
                     bail!(
-                        "request {} waits for unknown request_id {}",
-                        turn.request_id,
-                        dependency
+                        "request {} references unknown request_id {}",
+                        node.request_id,
+                        dependency.request_id
                     );
+                };
+                let dependency_node = &self.nodes[dependency_index];
+                if dependency_index == node_index {
+                    bail!("request {} cannot depend on itself", node.request_id);
                 }
-                if dependency == &turn.request_id {
-                    bail!("request {} cannot wait for itself", turn.request_id);
+                if dependency_node.play_id != node.play_id {
+                    bail!(
+                        "request {} in play {} depends on request {} in play {}",
+                        node.request_id,
+                        node.play_id,
+                        dependency.request_id,
+                        dependency_node.play_id
+                    );
                 }
             }
         }
-        validate_agentic_trace_is_acyclic(&self.turns)?;
+        validate_agentic_trace_is_acyclic(&self.nodes, &index_by_id)?;
+
+        let mut plays = Vec::with_capacity(nodes_by_play.len());
+        for (play_id, mut node_indices) in nodes_by_play {
+            node_indices.sort_unstable();
+            let roots: Vec<_> = node_indices
+                .iter()
+                .copied()
+                .filter(|node_index| self.nodes[*node_index].dependencies.is_empty())
+                .collect();
+            let [root_node] = roots.as_slice() else {
+                bail!(
+                    "play {} must have exactly one root request, found {}",
+                    play_id,
+                    roots.len()
+                );
+            };
+            plays.push(AgenticPlay {
+                play_id,
+                root_node: *root_node,
+                nodes: node_indices,
+            });
+        }
+        plays.sort_by(|left, right| left.play_id.cmp(&right.play_id));
+        let graph_digest = canonical_agentic_graph_digest(self.header.block_size, &self.nodes)?;
 
         Ok(AgenticTrace {
-            block_size: self.trace_block_size,
-            turns: self.turns,
+            block_size: self.header.block_size,
+            source: self.header.source,
+            graph_digest,
+            nodes: self.nodes,
+            plays,
         })
     }
 }
 
 impl AgenticTrace {
-    pub fn from_agentic_mooncake(path: &Path, trace_block_size: usize) -> Result<Self> {
-        if trace_block_size == 0 {
-            bail!("trace_block_size must be greater than 0");
-        }
-
+    pub fn from_agentic_mooncake(path: &Path) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("failed to open trace file {}", path.display()))?;
         let reader = BufReader::new(file);
-        let mut builder = AgenticTraceBuilder::new(trace_block_size);
+        let mut builder = None;
 
         for (line_idx, line) in reader.lines().enumerate() {
             let line = line.with_context(|| {
@@ -1214,16 +1318,36 @@ impl AgenticTrace {
                 continue;
             }
 
+            if builder.is_none() {
+                let header = serde_json::from_str(&line).with_context(|| {
+                    format!(
+                        "failed to parse line {} from {} as the agentic Mooncake v2 header",
+                        line_idx + 1,
+                        path.display()
+                    )
+                })?;
+                builder = Some(AgenticTraceBuilder::new(header)?);
+                continue;
+            }
             let row = serde_json::from_str(&line).with_context(|| {
                 format!(
-                    "failed to parse line {} from {} as agentic Mooncake JSON",
+                    "failed to parse line {} from {} as an agentic Mooncake v2 request",
                     line_idx + 1,
                     path.display()
                 )
             })?;
-            builder.push(line_idx, row)?;
+            builder
+                .as_mut()
+                .expect("builder was initialized from the v2 header")
+                .push(line_idx, row)?;
         }
 
+        let Some(builder) = builder else {
+            bail!(
+                "agentic trace file {} is missing its v2 header",
+                path.display()
+            );
+        };
         if builder.is_empty() {
             bail!(
                 "agentic trace file {} did not contain any requests",
@@ -1235,15 +1359,12 @@ impl AgenticTrace {
     }
 
     pub fn from_agentic_mooncake_rows(
+        header: AgenticMooncakeHeader,
         rows: Vec<AgenticMooncakeRow>,
-        trace_block_size: usize,
     ) -> Result<Self> {
-        if trace_block_size == 0 {
-            bail!("trace_block_size must be greater than 0");
-        }
-        let mut builder = AgenticTraceBuilder::new(trace_block_size);
+        let mut builder = AgenticTraceBuilder::new(header)?;
         for (line_idx, row) in rows.into_iter().enumerate() {
-            builder.push(line_idx, row)?;
+            builder.push(line_idx + 1, row)?;
         }
         if builder.is_empty() {
             bail!("agentic Mooncake rows did not contain any requests");
@@ -1252,20 +1373,18 @@ impl AgenticTrace {
     }
 
     pub fn normalize_starts(mut self) -> Self {
-        let Some(min_timestamp_ms) = self
-            .turns
+        let min_timestamp_ms = self
+            .nodes
             .iter()
-            .filter_map(|turn| turn.first_ready_timestamp_ms)
+            .map(|node| node.not_before_ms)
             .min_by(|left, right| left.total_cmp(right))
-        else {
-            return self;
-        };
+            .unwrap_or(0.0);
 
-        for turn in &mut self.turns {
-            if let Some(timestamp_ms) = turn.first_ready_timestamp_ms.as_mut() {
-                *timestamp_ms -= min_timestamp_ms;
-            }
+        for node in &mut self.nodes {
+            node.not_before_ms -= min_timestamp_ms;
         }
+        self.graph_digest = canonical_agentic_graph_digest(self.block_size, &self.nodes)
+            .expect("validated agentic graph remains serializable after normalization");
         self
     }
 
@@ -1274,12 +1393,13 @@ impl AgenticTrace {
             bail!("ratio must be a finite positive number, got {ratio}");
         }
 
-        for turn in &mut self.turns {
-            if let Some(timestamp_ms) = turn.first_ready_timestamp_ms.as_mut() {
-                *timestamp_ms /= ratio;
+        for node in &mut self.nodes {
+            node.not_before_ms /= ratio;
+            for dependency in &mut node.dependencies {
+                dependency.delay_ms /= ratio;
             }
-            turn.delay_after_dependencies_ms /= ratio;
         }
+        self.graph_digest = canonical_agentic_graph_digest(self.block_size, &self.nodes)?;
         Ok(self)
     }
 
@@ -1289,47 +1409,101 @@ impl AgenticTrace {
     ) -> Result<WorkloadDriver> {
         WorkloadDriver::new_agentic_trace(self, engine_block_size)
     }
+
+    pub fn into_trace_driver_with_options(
+        self,
+        engine_block_size: usize,
+        include_replay_hashes: bool,
+        agentic_lanes: Option<usize>,
+    ) -> Result<WorkloadDriver> {
+        WorkloadDriver::new_agentic_trace_with_options(
+            self,
+            engine_block_size,
+            include_replay_hashes,
+            agentic_lanes,
+        )
+    }
 }
 
-fn validate_agentic_trace_is_acyclic(turns: &[AgenticTurnTrace]) -> Result<()> {
-    let mut index_by_id = HashMap::new();
-    for (idx, turn) in turns.iter().enumerate() {
-        index_by_id.insert(turn.request_id.as_str(), idx);
-    }
-
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Mark {
-        Visiting,
-        Done,
-    }
-
-    fn visit<'a>(
-        idx: usize,
-        turns: &'a [AgenticTurnTrace],
-        index_by_id: &HashMap<&'a str, usize>,
-        marks: &mut Vec<Option<Mark>>,
-    ) -> Result<()> {
-        match marks[idx] {
-            Some(Mark::Done) => return Ok(()),
-            Some(Mark::Visiting) => bail!("cycle detected at request {}", turns[idx].request_id),
-            None => {}
-        }
-        marks[idx] = Some(Mark::Visiting);
-        for dependency in &turns[idx].wait_for {
-            let dep_idx = *index_by_id
-                .get(dependency.as_str())
+fn validate_agentic_trace_is_acyclic(
+    nodes: &[AgenticNode],
+    index_by_id: &HashMap<&str, usize>,
+) -> Result<()> {
+    let mut indegree = nodes
+        .iter()
+        .map(|node| node.dependencies.len())
+        .collect::<Vec<_>>();
+    let mut dependents = vec![Vec::new(); nodes.len()];
+    for (node_index, node) in nodes.iter().enumerate() {
+        for dependency in &node.dependencies {
+            let dependency_index = *index_by_id
+                .get(dependency.request_id.as_str())
                 .expect("dependencies were prevalidated");
-            visit(dep_idx, turns, index_by_id, marks)?;
+            dependents[dependency_index].push(node_index);
         }
-        marks[idx] = Some(Mark::Done);
-        Ok(())
+    }
+    let mut ready = std::collections::VecDeque::from_iter(
+        indegree
+            .iter()
+            .enumerate()
+            .filter_map(|(index, degree)| (*degree == 0).then_some(index)),
+    );
+    let mut visited = 0;
+    while let Some(node_index) = ready.pop_front() {
+        visited += 1;
+        for dependent in &dependents[node_index] {
+            indegree[*dependent] -= 1;
+            if indegree[*dependent] == 0 {
+                ready.push_back(*dependent);
+            }
+        }
+    }
+    if visited == nodes.len() {
+        return Ok(());
+    }
+    bail!(
+        "cycle detected among {} agentic requests",
+        nodes.len() - visited
+    )
+}
+
+fn canonical_agentic_graph_digest(block_size: usize, nodes: &[AgenticNode]) -> Result<String> {
+    #[derive(Serialize)]
+    struct CanonicalGraph {
+        block_size: usize,
+        nodes: Vec<AgenticNode>,
     }
 
-    let mut marks = vec![None; turns.len()];
-    for idx in 0..turns.len() {
-        visit(idx, turns, &index_by_id, &mut marks)?;
+    let mut canonical_nodes = nodes.to_vec();
+    for node in &mut canonical_nodes {
+        node.dependencies.sort_by(|left, right| {
+            left.request_id
+                .cmp(&right.request_id)
+                .then_with(|| trigger_rank(left.trigger).cmp(&trigger_rank(right.trigger)))
+                .then_with(|| relation_rank(left.relation).cmp(&relation_rank(right.relation)))
+                .then_with(|| left.delay_ms.total_cmp(&right.delay_ms))
+        });
     }
-    Ok(())
+    let bytes = serde_json::to_vec(&CanonicalGraph {
+        block_size,
+        nodes: canonical_nodes,
+    })?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn trigger_rank(trigger: AgenticDependencyTrigger) -> u8 {
+    match trigger {
+        AgenticDependencyTrigger::Dispatch => 0,
+        AgenticDependencyTrigger::Completion => 1,
+    }
+}
+
+fn relation_rank(relation: AgenticDependencyRelation) -> u8 {
+    match relation {
+        AgenticDependencyRelation::Sequence => 0,
+        AgenticDependencyRelation::Spawn => 1,
+        AgenticDependencyRelation::Join => 2,
+    }
 }
 
 fn extend_applied_compute_agentic_hash_ids(

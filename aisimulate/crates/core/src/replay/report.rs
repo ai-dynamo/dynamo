@@ -9,6 +9,8 @@ use serde_json::Value;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use uuid::Uuid;
 
+use crate::replay::loadgen::{AgenticGraphIdentity, AgenticTrajectorySnapshot};
+
 // 0.1% relative quantile error. The enlarged store covers latency/rate values
 // spanning roughly 10^28 within one sign while remaining bounded (~512 KiB for
 // the two stores at their maximum size, ~1 MiB for both global sketches).
@@ -23,6 +25,8 @@ pub struct ReplayReport {
     pub prefix_cache_reused_ratio: f64,
     pub first_admission_prefix_cache_reused_ratio: f64,
     pub latency: TraceLatencyStats,
+    pub trajectories: Option<TraceTrajectoryStats>,
+    pub agentic_graph: Option<AgenticGraphIdentity>,
     /// SLA-goodput stats. `Some` only when an SLA was supplied to the collector
     /// (via `set_sla_thresholds`); `None` otherwise — goodput is undefined
     /// without an SLA, so the `goodput_*` keys are omitted from the report.
@@ -116,6 +120,14 @@ pub struct TraceLatencyStats {
     pub itl: TraceInterTokenLatencyStats,
     pub e2e: TraceDistributionStats,
     pub output_token_throughput_per_user: TraceDistributionStats,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceTrajectoryStats {
+    pub total: usize,
+    pub completed: usize,
+    pub incomplete: usize,
+    pub e2e: TraceDistributionStats,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +295,16 @@ impl Serialize for ReplayReport {
         serialize_distribution(&mut map, "tpot", &self.latency.tpot)?;
         serialize_distribution(&mut map, "itl", &self.latency.itl.distribution)?;
         map.serialize_entry("max_itl_ms", &self.latency.itl.max_ms)?;
+        if let Some(trajectories) = &self.trajectories {
+            map.serialize_entry("total_trajectories", &trajectories.total)?;
+            map.serialize_entry("completed_trajectories", &trajectories.completed)?;
+            map.serialize_entry("incomplete_trajectories", &trajectories.incomplete)?;
+            serialize_distribution(&mut map, "trajectory_e2e_latency", &trajectories.e2e)?;
+            map.serialize_entry("p50_trajectory_e2e_latency_ms", &trajectories.e2e.median_ms)?;
+        }
+        if let Some(agentic_graph) = &self.agentic_graph {
+            map.serialize_entry("agentic_graph", agentic_graph)?;
+        }
         serialize_distribution(&mut map, "e2e_latency", &self.latency.e2e)?;
         serialize_rate_distribution(
             &mut map,
@@ -361,6 +383,8 @@ struct TraceRequestStats {
     session_id: Option<String>,
     turn_index: Option<usize>,
     authored_id: Option<String>,
+    play_id: Option<String>,
+    dispatched_at_ms: Option<f64>,
     metadata: Value,
     detail: Option<Box<PerRequestDetail>>,
 }
@@ -548,6 +572,8 @@ pub struct PerRequestRecord {
     /// only carry an internal UUID leave this unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub play_id: Option<String>,
     /// Session identifier from the trace, when present. Mirrors AIPerf's
     /// `conversation_id` field for the same purpose: bucket per-request
     /// records by multi-turn session. Placed first in the serialized output
@@ -561,6 +587,7 @@ pub struct PerRequestRecord {
     pub metadata: Value,
     pub uuid: String,
     pub arrival_time_ms: f64,
+    pub dispatched_at_ms: Option<f64>,
     pub first_admit_ms: Option<f64>,
     pub terminal_time_ms: f64,
     pub first_token_ms: Option<f64>,
@@ -721,6 +748,8 @@ pub struct TraceCollector {
     prefill_gpus_per_worker: usize,
     decode_gpus_per_worker: usize,
     runtime_evidence: crate::replay::OfflineRuntimeEvidence,
+    agentic_trajectory: Option<AgenticTrajectorySnapshot>,
+    agentic_graph: Option<AgenticGraphIdentity>,
 }
 
 impl TraceRequestStats {
@@ -878,6 +907,8 @@ impl TraceCollector {
                 session_id: None,
                 turn_index: None,
                 authored_id: None,
+                play_id: None,
+                dispatched_at_ms: None,
                 metadata: Value::Null,
                 first_admission_reused_input_tokens: 0,
                 detail: self
@@ -901,6 +932,31 @@ impl TraceCollector {
             stats.session_id = Some(session_id);
             stats.turn_index = Some(turn_index);
         }
+    }
+
+    pub fn on_agentic_metadata(
+        &mut self,
+        uuid: Uuid,
+        request_id: String,
+        play_id: String,
+        dispatched_at_ms: f64,
+    ) {
+        if !self.capture_per_request {
+            return;
+        }
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.authored_id = Some(request_id);
+            stats.play_id = Some(play_id);
+            stats.dispatched_at_ms = Some(dispatched_at_ms);
+        }
+    }
+
+    pub fn set_agentic_trajectory(&mut self, snapshot: AgenticTrajectorySnapshot) {
+        self.agentic_trajectory = Some(snapshot);
+    }
+
+    pub fn set_agentic_graph(&mut self, identity: AgenticGraphIdentity) {
+        self.agentic_graph = Some(identity);
     }
 
     /// Retain the ReplaySpec correlation fields before the request crosses
@@ -1227,6 +1283,17 @@ impl TraceCollector {
         let prefill_gpus_per_worker = self.prefill_gpus_per_worker;
         let decode_gpus_per_worker = self.decode_gpus_per_worker;
         let runtime_evidence = self.runtime_evidence;
+        let agentic_graph = self.agentic_graph;
+        let trajectories = self
+            .agentic_trajectory
+            .map(|snapshot| TraceTrajectoryStats {
+                total: snapshot.total_trajectories,
+                completed: snapshot.completed_trajectories,
+                incomplete: snapshot
+                    .total_trajectories
+                    .saturating_sub(snapshot.completed_trajectories),
+                e2e: build_distribution_stats(snapshot.e2e_latencies_ms),
+            });
         let itl_distribution = self.itl_distribution.finish();
         let output_token_throughput_per_user = self.output_token_throughput_per_user.finish();
         let requests = self.requests;
@@ -1357,6 +1424,8 @@ impl TraceCollector {
                 e2e: build_distribution_stats(e2e_latencies),
                 output_token_throughput_per_user,
             },
+            trajectories,
+            agentic_graph,
             goodput,
             per_request,
             runtime_evidence,
@@ -1385,11 +1454,13 @@ impl TraceCollector {
             let last_token_ms = stats.last_token_ms();
             records.push(PerRequestRecord {
                 request_id: stats.authored_id.clone(),
+                play_id: stats.play_id.clone(),
                 session_id: stats.session_id.clone(),
                 turn_index: stats.turn_index,
                 metadata: stats.metadata.clone(),
                 uuid: uuid.to_string(),
                 arrival_time_ms: stats.arrival_time_ms,
+                dispatched_at_ms: stats.dispatched_at_ms,
                 first_admit_ms: stats.first_admit_ms,
                 terminal_time_ms,
                 first_token_ms,

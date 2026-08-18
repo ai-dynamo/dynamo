@@ -4,6 +4,7 @@
 use anyhow::{Result, anyhow, bail};
 use uuid::Uuid;
 
+use crate::replay::ReplayTerminalStatus;
 use crate::replay::handoff::{
     HandoffCoordinatorCore, HandoffId, HandoffOrder, IssuedHandoffAction,
 };
@@ -88,6 +89,8 @@ pub(crate) struct DisaggRequestState {
     pub(crate) destination_routed: bool,
     pub(crate) pending_prefill_action: Option<IssuedHandoffAction>,
     pub(crate) pending_destination_action: Option<IssuedHandoffAction>,
+    terminal_status: Option<ReplayTerminalStatus>,
+    terminal_notified: bool,
 }
 
 #[cfg(test)]
@@ -134,6 +137,8 @@ impl DisaggRequestState {
             destination_routed: false,
             pending_prefill_action: None,
             pending_destination_action: None,
+            terminal_status: None,
+            terminal_notified: false,
         }
     }
 
@@ -230,6 +235,25 @@ impl DisaggRequestState {
         self.replay_hashes = None;
         self.pending_prefill_action = None;
         self.pending_destination_action = None;
+    }
+
+    pub(crate) fn set_terminal_status(&mut self, status: ReplayTerminalStatus) {
+        if self.terminal_status.is_none() {
+            self.terminal_status = Some(status);
+        }
+    }
+
+    pub(crate) fn terminal_status(&self) -> Option<ReplayTerminalStatus> {
+        self.terminal_status
+    }
+
+    pub(crate) fn take_unnotified_terminal_status(&mut self) -> Option<ReplayTerminalStatus> {
+        if self.terminal_notified {
+            return None;
+        }
+        let status = self.terminal_status?;
+        self.terminal_notified = true;
+        Some(status)
     }
 
     pub(crate) fn mark_done(&mut self) {

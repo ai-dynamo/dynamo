@@ -18,6 +18,18 @@ fn write_trace(lines: &[serde_json::Value]) -> NamedTempFile {
     file
 }
 
+fn write_agentic_trace(rows: &[serde_json::Value]) -> NamedTempFile {
+    let mut lines = vec![serde_json::json!({
+        "schema": AGENTIC_MOONCAKE_SCHEMA,
+        "version": AGENTIC_MOONCAKE_VERSION,
+        "block_size": 4,
+        "hash_id_scope": "local",
+        "source": {"format": "test", "digest": "fixture"}
+    })];
+    lines.extend_from_slice(rows);
+    write_trace(&lines)
+}
+
 #[test]
 fn trace_synthesis_bounds_each_hash_block_to_remaining_input() {
     let tokens = synthesize_trace_tokens(1, &[7], usize::MAX).unwrap();
@@ -278,66 +290,86 @@ fn test_from_mooncake_defaults_missing_input_length_from_hash_capacity() {
 }
 
 #[test]
-fn test_from_agentic_mooncake_preserves_dependencies_and_tool_wait() {
-    let file = write_trace(&[
+fn test_from_agentic_mooncake_builds_typed_graph() {
+    let file = write_agentic_trace(&[
         serde_json::json!({
             "request_id": "r1",
+            "play_id": "play",
             "session_id": "root",
-            "timestamp": 0.0,
+            "not_before_ms": 0.0,
             "input_length": 4,
             "output_length": 1,
             "hash_ids": [1],
             "priority": 5,
-            "strict_priority": 6,
-            "prefix_reset": true
+            "strict_priority": 6
         }),
         serde_json::json!({
             "request_id": "r2",
+            "play_id": "play",
             "session_id": "root",
-            "timestamp": 100.0,
-            "delay": 5.0,
-            "tool_wait_ms": 7.0,
-            "wait_for": ["r1"],
+            "not_before_ms": 100.0,
+            "dependencies": [{
+                "request_id": "r1",
+                "trigger": "dispatch",
+                "delay_ms": 12.0,
+                "relation": "spawn"
+            }],
             "input_length": 4,
             "output_length": 1,
             "hash_ids": [1]
         }),
     ]);
 
-    let trace = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap();
-    assert_eq!(trace.turns.len(), 2);
-    assert_eq!(trace.turns[0].request_id, "r1");
-    assert!(trace.turns[0].prefix_reset);
-    assert_eq!(trace.turns[0].priority, 5);
-    assert_eq!(trace.turns[0].strict_priority, 6);
-    assert_eq!(trace.turns[1].wait_for, vec!["r1"]);
-    assert_eq!(trace.turns[1].delay_after_dependencies_ms, 12.0);
+    let trace = AgenticTrace::from_agentic_mooncake(file.path()).unwrap();
+    assert_eq!(trace.nodes.len(), 2);
+    assert_eq!(trace.nodes[0].request_id, "r1");
+    assert_eq!(trace.nodes[0].priority, 5);
+    assert_eq!(trace.nodes[0].strict_priority, 6);
+    assert_eq!(trace.nodes[1].dependencies.len(), 1);
+    assert_eq!(
+        trace.nodes[1].dependencies[0].trigger,
+        AgenticDependencyTrigger::Dispatch
+    );
+    assert_eq!(trace.nodes[1].dependencies[0].delay_ms, 12.0);
+    assert_eq!(trace.plays.len(), 1);
+    assert_eq!(trace.plays[0].root_node, 0);
 }
 
 #[test]
 fn test_from_agentic_mooncake_rejects_unknown_dependency() {
-    let file = write_trace(&[serde_json::json!({
+    let file = write_agentic_trace(&[serde_json::json!({
         "request_id": "r1",
-        "wait_for": ["missing"],
+        "play_id": "play",
+        "session_id": "root",
+        "not_before_ms": 0.0,
+        "dependencies": [{
+            "request_id": "missing",
+            "trigger": "completion",
+            "delay_ms": 0.0,
+            "relation": "join"
+        }],
         "input_length": 4,
         "output_length": 1,
         "hash_ids": [1]
     })]);
 
-    let err = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap_err();
+    let err = AgenticTrace::from_agentic_mooncake(file.path()).unwrap_err();
     assert!(err.to_string().contains("unknown request_id"));
 }
 
 #[test]
 fn test_from_agentic_mooncake_rejects_input_length_above_hash_capacity() {
-    let file = write_trace(&[serde_json::json!({
+    let file = write_agentic_trace(&[serde_json::json!({
         "request_id": "r1",
+        "play_id": "play",
+        "session_id": "root",
+        "not_before_ms": 0.0,
         "input_length": 9,
         "output_length": 1,
         "hash_ids": [1, 2]
     })]);
 
-    let err = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap_err();
+    let err = AgenticTrace::from_agentic_mooncake(file.path()).unwrap_err();
     assert!(err.to_string().contains("input_length 9"));
 }
 

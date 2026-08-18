@@ -162,7 +162,7 @@ pub use report::{
     ReplayRequestPool, ReplayRoutingOutcome, ReplayTerminalStatus,
     ReplayTerminalStatus as RequestTerminalStatus, SlaThresholds, TraceDistributionStats,
     TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
-    TraceThroughputStats,
+    TraceThroughputStats, TraceTrajectoryStats,
 };
 pub use scaling::{NoScaling, ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot};
 pub use spec::{

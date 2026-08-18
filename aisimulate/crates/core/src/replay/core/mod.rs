@@ -9,6 +9,8 @@
 use anyhow::Result;
 use uuid::Uuid;
 
+use crate::replay::ReplayTerminalStatus;
+
 pub mod round_robin;
 
 pub trait RequestIdentity {
@@ -26,6 +28,9 @@ pub struct ReadyArrival<Request, Metadata> {
     pub request: Request,
     pub arrival_time_ms: f64,
     pub metadata: Metadata,
+    pub authored_request_id: Option<String>,
+    pub play_id: Option<String>,
+    pub dispatched_at_ms: f64,
     pub session_id: Option<String>,
     pub turn_index: Option<usize>,
 }
@@ -41,7 +46,12 @@ pub trait AdmissionSource {
         cluster_in_flight: usize,
     ) -> Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>>;
     fn on_output_token(&mut self, request_id: Uuid, token_id: u32) -> Result<()>;
-    fn on_terminal(&mut self, request_id: Uuid, now_ms: f64, rejected: bool) -> Result<()>;
+    fn on_terminal(
+        &mut self,
+        request_id: Uuid,
+        now_ms: f64,
+        status: ReplayTerminalStatus,
+    ) -> Result<()>;
     fn is_drained(&self) -> bool;
     fn total_requests(&self) -> usize;
 }

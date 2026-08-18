@@ -10,15 +10,18 @@ use rand::Rng;
 use rand::rngs::StdRng;
 
 pub use driver::WorkloadDriver;
-pub use trace::validate_trace_files;
+pub use trace::{AgenticGraphBuilder, validate_trace_files};
 #[doc(hidden)]
 pub use types::CompactReadyTurn;
 pub use types::{
-    AgenticMooncakeRow, AgenticToolEvent, AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec,
-    LengthSpec, MooncakeRow, OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY, OUTPUT_REPLAY_ID_ANNOTATION_KEY,
-    ReadyTurn, ReplayRequestHashes, ReplayRequestPayload, SessionPartitionSpec, SessionTrace,
-    SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace, effective_replay_key,
-    output_replay_id_annotation,
+    AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticDependency,
+    AgenticDependencyRelation, AgenticDependencyTrigger, AgenticGraphIdentity, AgenticHashIdScope,
+    AgenticMooncakeHeader, AgenticMooncakeRow, AgenticNode, AgenticPlay, AgenticSourceProvenance,
+    AgenticTrace, AgenticTrajectorySnapshot, ArrivalSpec, DelaySpec, LengthSpec, MooncakeRow,
+    OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY, OUTPUT_REPLAY_ID_ANNOTATION_KEY, ReadyTurn,
+    ReplayRequestHashes, ReplayRequestPayload, SessionPartitionSpec, SessionTrace,
+    SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace, ValidatedAgenticGraph,
+    effective_replay_key, output_replay_id_annotation,
 };
 
 pub(super) const SYNTHETIC_OUTPUT_SEED: u64 = 0xD37A_0A7E_5EED;

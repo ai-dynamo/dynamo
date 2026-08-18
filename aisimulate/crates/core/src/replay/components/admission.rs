@@ -47,6 +47,9 @@ pub(crate) struct ReplayReadyArrival<Metadata> {
     pub(crate) request: ReplayRequestPayload,
     pub(crate) arrival_time_ms: f64,
     pub(crate) scheduled_ready_at_ms: f64,
+    pub(crate) authored_request_id: Option<String>,
+    pub(crate) play_id: Option<String>,
+    pub(crate) dispatched_at_ms: f64,
     pub(crate) metadata: Metadata,
     pub(crate) replay_hashes: Option<ReplayRequestHashes>,
     pub(crate) session_id: Option<String>,
@@ -59,6 +62,9 @@ impl<Metadata> ReplayReadyArrival<Metadata> {
             request: self.request,
             arrival_time_ms: self.arrival_time_ms,
             metadata: self.metadata,
+            authored_request_id: self.authored_request_id,
+            play_id: self.play_id,
+            dispatched_at_ms: self.dispatched_at_ms,
             session_id: self.session_id,
             turn_index: self.turn_index,
         }
@@ -157,6 +163,9 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                         request: ReplayRequestPayload::materialized(request),
                         arrival_time_ms,
                         scheduled_ready_at_ms: arrival_time_ms,
+                        authored_request_id: None,
+                        play_id: None,
+                        dispatched_at_ms: now_ms,
                         metadata: Metadata::from_hashes(None),
                         replay_hashes: None,
                         session_id,
@@ -181,6 +190,9 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                         request: ready.request,
                         arrival_time_ms: ready.scheduled_ready_at_ms,
                         scheduled_ready_at_ms: ready.scheduled_ready_at_ms,
+                        authored_request_id: ready.authored_request_id,
+                        play_id: ready.play_id,
+                        dispatched_at_ms: ready.dispatched_at_ms,
                         metadata: Metadata::from_hashes(metadata_hashes),
                         replay_hashes,
                         session_id,
@@ -205,6 +217,9 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                         request: ReplayRequestPayload::materialized(request),
                         arrival_time_ms: now_ms,
                         scheduled_ready_at_ms: now_ms,
+                        authored_request_id: None,
+                        play_id: None,
+                        dispatched_at_ms: now_ms,
                         metadata: Metadata::from_hashes(None),
                         replay_hashes: None,
                         session_id,
@@ -233,6 +248,9 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                             request: ready.request,
                             arrival_time_ms: now_ms,
                             scheduled_ready_at_ms: ready.scheduled_ready_at_ms,
+                            authored_request_id: ready.authored_request_id,
+                            play_id: ready.play_id,
+                            dispatched_at_ms: ready.dispatched_at_ms,
                             metadata: Metadata::from_hashes(metadata_hashes),
                             replay_hashes,
                             session_id,
@@ -248,12 +266,31 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
         &mut self,
         uuid: Uuid,
         now_ms: f64,
-        rejected: bool,
+        status: crate::replay::ReplayTerminalStatus,
     ) -> Result<()> {
         let AdmissionSource::Workload(driver) = &mut self.source else {
             return Ok(());
         };
-        driver.on_terminal(uuid, now_ms, rejected)
+        driver.on_terminal(uuid, now_ms, status)
+    }
+
+    pub(crate) fn on_request_causal_terminal(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+        status: crate::replay::ReplayTerminalStatus,
+    ) -> Result<()> {
+        let AdmissionSource::Workload(driver) = &mut self.source else {
+            return Ok(());
+        };
+        driver.on_causal_terminal(uuid, now_ms, status)
+    }
+
+    pub(crate) fn on_request_quiescent(&mut self, uuid: Uuid, now_ms: f64) -> Result<()> {
+        let AdmissionSource::Workload(driver) = &mut self.source else {
+            return Ok(());
+        };
+        driver.on_quiescent(uuid, now_ms)
     }
 
     pub(crate) fn on_output_token(&mut self, uuid: Uuid, token_id: u32) -> Result<()> {
@@ -280,6 +317,24 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
             AdmissionSource::Requests(pending) => pending.len(),
             AdmissionSource::Workload(driver) => driver.total_turns(),
         }
+    }
+
+    pub(crate) fn agentic_trajectory_snapshot(
+        &self,
+    ) -> Option<crate::replay::loadgen::AgenticTrajectorySnapshot> {
+        let AdmissionSource::Workload(driver) = &self.source else {
+            return None;
+        };
+        driver.agentic_trajectory_snapshot()
+    }
+
+    pub(crate) fn agentic_graph_identity(
+        &self,
+    ) -> Option<crate::replay::loadgen::AgenticGraphIdentity> {
+        let AdmissionSource::Workload(driver) = &self.source else {
+            return None;
+        };
+        driver.agentic_graph_identity()
     }
 }
 
@@ -308,8 +363,13 @@ impl<Metadata: ReplayAdmissionMetadata> CoreAdmissionSource for AdmissionQueue<M
         AdmissionQueue::on_output_token(self, request_id, token_id)
     }
 
-    fn on_terminal(&mut self, request_id: Uuid, now_ms: f64, rejected: bool) -> Result<()> {
-        AdmissionQueue::on_request_terminal(self, request_id, now_ms, rejected)
+    fn on_terminal(
+        &mut self,
+        request_id: Uuid,
+        now_ms: f64,
+        status: crate::replay::ReplayTerminalStatus,
+    ) -> Result<()> {
+        AdmissionQueue::on_request_terminal(self, request_id, now_ms, status)
     }
 
     fn is_drained(&self) -> bool {

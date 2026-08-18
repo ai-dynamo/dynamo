@@ -1,15 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Agentic lowering: infer the workflow DAG and attribute tool spans to the LLM
-//! row that consumed them.
+//! Agentic lowering from Dynamo request traces into the typed causal schema.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::{AgenticMooncakeRow, AgenticToolEvent, RollingHashIdMapper};
+use crate::{
+    AgenticDependency, AgenticDependencyRelation, AgenticDependencyTrigger, AgenticMooncakeRow,
+    RollingHashIdMapper,
+};
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::load::{LoadedAgentTrace, RequestEntry, ToolEntry};
+use super::load::{LoadedAgentTrace, RequestEntry};
 
 /// Streams agentic Mooncake-compatible rows into the replay builder.
 ///
@@ -147,19 +149,24 @@ where
         }
     }
 
-    let mut wait_for: Vec<Vec<String>> = vec![Vec::new(); loaded.requests.len()];
-    let mut branches: Vec<Vec<String>> = vec![Vec::new(); loaded.requests.len()];
-    let mut prefix_reset = vec![false; loaded.requests.len()];
-    let mut previous_request_start_ms = vec![None; loaded.requests.len()];
+    let mut dependencies: Vec<Vec<AgenticDependency>> = vec![Vec::new(); loaded.requests.len()];
 
     for indices in session_to_indices.values() {
         for (pos, idx) in indices.iter().copied().enumerate() {
-            prefix_reset[idx] = pos == 0;
             if pos > 0 {
                 let previous_request = &loaded.requests[indices[pos - 1]];
-                let previous = &previous_request.request.request_id;
-                push_unique(&mut wait_for[idx], previous.clone());
-                previous_request_start_ms[idx] = Some(previous_request.start_ms);
+                push_dependency(
+                    &mut dependencies[idx],
+                    AgenticDependency {
+                        request_id: previous_request.request.request_id.clone(),
+                        trigger: AgenticDependencyTrigger::Completion,
+                        delay_ms: loaded.requests[idx]
+                            .start_ms
+                            .saturating_sub(previous_request.end_ms)
+                            .max(0) as f64,
+                        relation: AgenticDependencyRelation::Sequence,
+                    },
+                );
             }
         }
     }
@@ -204,11 +211,37 @@ where
                     parent_id
                 );
             }
-            let parent_request_id = loaded.requests[parent_spawn_idx].request.request_id.clone();
-            push_unique(&mut wait_for[first_child_idx], parent_request_id);
-            let child_request_id = loaded.requests[first_child_idx].request.request_id.clone();
-            push_unique(&mut branches[parent_spawn_idx], child_request_id);
-            if let Some(consumer_request_id) = claude.consumer_request_id.as_deref() {
+            let parent_request = &loaded.requests[parent_spawn_idx];
+            let child_request = &loaded.requests[first_child_idx];
+            let (trigger, delay_ms) = if child_request.start_ms < parent_request.end_ms {
+                (
+                    AgenticDependencyTrigger::Dispatch,
+                    child_request
+                        .start_ms
+                        .saturating_sub(parent_request.start_ms)
+                        .max(0) as f64,
+                )
+            } else {
+                (
+                    AgenticDependencyTrigger::Completion,
+                    child_request
+                        .start_ms
+                        .saturating_sub(parent_request.end_ms)
+                        .max(0) as f64,
+                )
+            };
+            push_dependency(
+                &mut dependencies[first_child_idx],
+                AgenticDependency {
+                    request_id: parent_request.request.request_id.clone(),
+                    trigger,
+                    delay_ms,
+                    relation: AgenticDependencyRelation::Spawn,
+                },
+            );
+            if claude.execution_mode == "blocking"
+                && let Some(consumer_request_id) = claude.consumer_request_id.as_deref()
+            {
                 let parent_join_idx = id_to_index[consumer_request_id];
                 if !parent_indices.contains(&parent_join_idx) {
                     bail!(
@@ -218,11 +251,19 @@ where
                         parent_id
                     );
                 }
-                let child_request_id = loaded.requests[last_finishing_child_idx]
-                    .request
-                    .request_id
-                    .clone();
-                push_unique(&mut wait_for[parent_join_idx], child_request_id);
+                let child_request = &loaded.requests[last_finishing_child_idx];
+                push_dependency(
+                    &mut dependencies[parent_join_idx],
+                    AgenticDependency {
+                        request_id: child_request.request.request_id.clone(),
+                        trigger: AgenticDependencyTrigger::Completion,
+                        delay_ms: loaded.requests[parent_join_idx]
+                            .start_ms
+                            .saturating_sub(child_request.end_ms)
+                            .max(0) as f64,
+                        relation: AgenticDependencyRelation::Join,
+                    },
+                );
             }
             continue;
         }
@@ -232,37 +273,77 @@ where
         if let Some(parent_spawn_idx) =
             latest_request_starting_before(&loaded.requests, parent_indices, child_start_ms)
         {
-            let parent_request_id = loaded.requests[parent_spawn_idx].request.request_id.clone();
-            push_unique(&mut wait_for[first_child_idx], parent_request_id);
-            let child_request_id = loaded.requests[first_child_idx].request.request_id.clone();
-            push_unique(&mut branches[parent_spawn_idx], child_request_id);
+            let parent_request = &loaded.requests[parent_spawn_idx];
+            let child_request = &loaded.requests[first_child_idx];
+            let (trigger, delay_ms) = if child_request.start_ms < parent_request.end_ms {
+                (
+                    AgenticDependencyTrigger::Dispatch,
+                    child_request
+                        .start_ms
+                        .saturating_sub(parent_request.start_ms)
+                        .max(0) as f64,
+                )
+            } else {
+                (
+                    AgenticDependencyTrigger::Completion,
+                    child_request
+                        .start_ms
+                        .saturating_sub(parent_request.end_ms)
+                        .max(0) as f64,
+                )
+            };
+            push_dependency(
+                &mut dependencies[first_child_idx],
+                AgenticDependency {
+                    request_id: parent_request.request.request_id.clone(),
+                    trigger,
+                    delay_ms,
+                    relation: AgenticDependencyRelation::Spawn,
+                },
+            );
         }
-        if let Some(parent_join_idx) =
-            first_request_starting_after(&loaded.requests, parent_indices, child_end_ms)
+        if !background_sessions.contains(session_id)
+            && let Some(parent_join_idx) =
+                first_request_starting_after(&loaded.requests, parent_indices, child_end_ms)
         {
-            let child_request_id = loaded.requests[last_finishing_child_idx]
-                .request
-                .request_id
-                .clone();
-            push_unique(&mut wait_for[parent_join_idx], child_request_id);
+            let child_request = &loaded.requests[last_finishing_child_idx];
+            push_dependency(
+                &mut dependencies[parent_join_idx],
+                AgenticDependency {
+                    request_id: child_request.request.request_id.clone(),
+                    trigger: AgenticDependencyTrigger::Completion,
+                    delay_ms: loaded.requests[parent_join_idx]
+                        .start_ms
+                        .saturating_sub(child_request.end_ms)
+                        .max(0) as f64,
+                    relation: AgenticDependencyRelation::Join,
+                },
+            );
         }
     }
-    validate_dependency_dag(&loaded.requests, &wait_for, &id_to_index)?;
+    validate_dependency_dag(&loaded.requests, &dependencies, &id_to_index)?;
 
-    let mut tools_by_session: HashMap<String, Vec<ToolEntry>> = HashMap::new();
-    for tool in loaded.tools {
-        tools_by_session
-            .entry(tool.session_id.clone())
-            .or_default()
-            .push(tool);
-    }
-    for tools in tools_by_session.values_mut() {
-        tools.sort_by_key(|tool| (tool.start_ms, tool.end_ms));
-    }
+    let play_by_session = resolve_play_ids(&session_to_indices, &parent_by_session)?;
 
     let mut mapper = RollingHashIdMapper::new(trace_block_size);
     for (idx, request) in loaded.requests.iter().enumerate() {
-        let hash_ids = mapper.ids_for_sequence_hashes(&request.replay.input_sequence_hashes);
+        let mut hash_ids = mapper.ids_for_sequence_hashes(&request.replay.input_sequence_hashes);
+        let full_blocks = request.replay.input_length / trace_block_size;
+        hash_ids.truncate(full_blocks);
+        while hash_ids.len() < full_blocks {
+            hash_ids.push(private_request_hash(
+                &request.request.request_id,
+                hash_ids.len(),
+                request.replay.input_length,
+            ));
+        }
+        if request.replay.input_length % trace_block_size != 0 {
+            hash_ids.push(private_request_hash(
+                &request.request.request_id,
+                full_blocks,
+                request.replay.input_length,
+            ));
+        }
         let output_length = request.request.output_tokens.ok_or_else(|| {
             anyhow!(
                 "request {} is missing output length",
@@ -270,75 +351,60 @@ where
             )
         })?;
         let session_id = session_id_for(request);
-        let dep_end_ms = wait_for[idx]
-            .iter()
-            .filter_map(|dependency| id_to_index.get(dependency))
-            .map(|dep_idx| loaded.requests[*dep_idx].end_ms)
-            .max();
-        let (delay, tool_wait_ms, tool_events) = if let Some(dep_end_ms) = dep_end_ms {
-            let observed_gap_ms = request.start_ms.saturating_sub(dep_end_ms).max(0) as f64;
-            let tool_event_start_ms = previous_request_start_ms[idx].unwrap_or(dep_end_ms);
-            let (raw_tool_wait_ms, contributing) = tools_by_session
-                .get(&session_id)
-                .map(|tools| {
-                    collect_tools_in_window(
-                        tools,
-                        &request.request.request_id,
-                        tool_event_start_ms,
-                        dep_end_ms,
-                        request.start_ms,
-                    )
-                })
-                .unwrap_or_else(|| (0.0, Vec::new()));
-            let tool_wait_ms = raw_tool_wait_ms.min(observed_gap_ms);
-            let non_tool_wait_ms = (observed_gap_ms - tool_wait_ms).max(0.0);
-            let events = contributing
-                .into_iter()
-                .map(tool_entry_to_event)
-                .collect::<Vec<_>>();
-            (
-                Some(non_tool_wait_ms),
-                (tool_wait_ms > 0.0).then_some(tool_wait_ms),
-                events,
-            )
-        } else {
-            (None, None, Vec::new())
-        };
 
         emit(
             trace_block_size,
             AgenticMooncakeRow {
                 request_id: request.request.request_id.clone(),
-                session_id: Some(session_id.clone()),
+                play_id: play_by_session[&session_id].clone(),
+                session_id,
+                model: request.request.model.clone().ok_or_else(|| {
+                    anyhow!("request {} is missing model", request.request.request_id)
+                })?,
                 input_length: Some(request.replay.input_length),
                 output_length: Some(
                     usize::try_from(output_length)
                         .context("output length does not fit in usize")?,
                 ),
                 hash_ids: Some(hash_ids),
-                request_kind: Some(
-                    if background_sessions.contains(&session_id) {
-                        "background_agent"
-                    } else if parent_by_session.contains_key(&session_id) {
-                        "agent"
-                    } else {
-                        "foreground"
-                    }
-                    .to_string(),
-                ),
-                timestamp: Some((request.start_ms - global_start_ms) as f64),
-                delay,
-                wait_for: std::mem::take(&mut wait_for[idx]),
-                branches: std::mem::take(&mut branches[idx]),
-                prefix_reset: Some(prefix_reset[idx]),
-                tool_wait_ms,
-                tool_events,
+                not_before_ms: (request.start_ms - global_start_ms) as f64,
+                dependencies: std::mem::take(&mut dependencies[idx]),
                 ..Default::default()
             },
         )?;
     }
 
     Ok(trace_block_size)
+}
+
+fn private_request_hash(request_id: &str, block_index: usize, input_length: usize) -> u64 {
+    let digest = blake3::hash(
+        format!("dynamo-request-trace-private-block\0{request_id}\0{block_index}\0{input_length}")
+            .as_bytes(),
+    );
+    u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap())
+}
+
+fn resolve_play_ids(
+    session_to_indices: &HashMap<String, Vec<usize>>,
+    parent_by_session: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    let mut result = HashMap::new();
+    for session_id in session_to_indices.keys() {
+        let mut cursor = session_id.as_str();
+        let mut seen = HashSet::new();
+        while let Some(parent) = parent_by_session.get(cursor) {
+            if !seen.insert(cursor.to_string()) {
+                bail!("agent session parent cycle includes {cursor}");
+            }
+            if !session_to_indices.contains_key(parent) {
+                bail!("agent session {cursor} references unknown parent session {parent}");
+            }
+            cursor = parent;
+        }
+        result.insert(session_id.clone(), cursor.to_string());
+    }
+    Ok(result)
 }
 
 fn session_id_for(request: &RequestEntry) -> String {
@@ -373,94 +439,30 @@ fn first_request_starting_after(
         .min_by_key(|idx| requests[*idx].start_ms)
 }
 
-/// Return tools completed since the previous request started, while computing
-/// wait time only from their overlap with `[wait_start_ms, end_ms]`.
-fn collect_tools_in_window<'a>(
-    tools: &'a [ToolEntry],
-    request_id: &str,
-    event_start_ms: i64,
-    wait_start_ms: i64,
-    end_ms: i64,
-) -> (f64, Vec<&'a ToolEntry>) {
-    let mut contributing: Vec<&ToolEntry> = Vec::new();
-    let mut intervals = Vec::new();
-    for tool in tools {
-        let claude = tool.claude.as_ref();
-        if let Some(consumer_request_id) =
-            claude.and_then(|metadata| metadata.consumer_request_id.as_deref())
-        {
-            if consumer_request_id != request_id {
-                continue;
-            }
-        } else if claude.is_some_and(|metadata| metadata.execution_mode == "background")
-            || tool.end_ms <= event_start_ms
-            || tool.end_ms > end_ms
-        {
-            continue;
-        }
-        contributing.push(tool);
-        let clipped_start = tool.start_ms.max(wait_start_ms);
-        let clipped_end = tool.end_ms.min(end_ms);
-        if clipped_end > clipped_start {
-            intervals.push((clipped_start, clipped_end));
-        }
-    }
-    intervals.sort_unstable();
-
-    let mut total = 0_i64;
-    let mut current: Option<(i64, i64)> = None;
-    for (start, end) in intervals {
-        match current {
-            None => current = Some((start, end)),
-            Some((current_start, current_end)) if start <= current_end => {
-                current = Some((current_start, current_end.max(end)));
-            }
-            Some((current_start, current_end)) => {
-                total += current_end - current_start;
-                current = Some((start, end));
-            }
-        }
-    }
-    if let Some((current_start, current_end)) = current {
-        total += current_end - current_start;
-    }
-    (total as f64, contributing)
-}
-
-fn tool_entry_to_event(entry: &ToolEntry) -> AgenticToolEvent {
-    AgenticToolEvent {
-        tool_call_id: entry.tool_call_id.clone(),
-        tool_class: entry.tool_class.clone(),
-        started_at_unix_ms: entry.start_ms.max(0) as u64,
-        ended_at_unix_ms: entry.end_ms.max(0) as u64,
-        duration_ms: entry.duration_ms,
-        status: entry.status.clone(),
-        output_bytes: entry.output_bytes,
-        output_tokens: entry.output_tokens,
-        error_type: entry.error_type.clone(),
-    }
-}
-
-fn push_unique(values: &mut Vec<String>, value: String) {
-    if !values.iter().any(|existing| existing == &value) {
-        values.push(value);
+fn push_dependency(values: &mut Vec<AgenticDependency>, dependency: AgenticDependency) {
+    if !values.iter().any(|existing| {
+        existing.request_id == dependency.request_id
+            && existing.trigger == dependency.trigger
+            && existing.relation == dependency.relation
+    }) {
+        values.push(dependency);
     }
 }
 
 fn validate_dependency_dag(
     requests: &[RequestEntry],
-    wait_for: &[Vec<String>],
+    dependencies: &[Vec<AgenticDependency>],
     id_to_index: &HashMap<String, usize>,
 ) -> Result<()> {
-    let mut indegree = wait_for.iter().map(Vec::len).collect::<Vec<_>>();
+    let mut indegree = dependencies.iter().map(Vec::len).collect::<Vec<_>>();
     let mut dependents = vec![Vec::new(); requests.len()];
-    for (request_idx, dependencies) in wait_for.iter().enumerate() {
+    for (request_idx, dependencies) in dependencies.iter().enumerate() {
         for dependency in dependencies {
-            let dependency_idx = id_to_index.get(dependency).ok_or_else(|| {
+            let dependency_idx = id_to_index.get(&dependency.request_id).ok_or_else(|| {
                 anyhow!(
                     "request {} depends on unknown request {}",
                     requests[request_idx].request.request_id,
-                    dependency
+                    dependency.request_id
                 )
             })?;
             dependents[*dependency_idx].push(request_idx);
@@ -569,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn agentic_lowering_builds_sequential_waits_and_tool_wait_components() {
+    fn agentic_lowering_builds_completion_sequences() {
         let loaded = LoadedAgentTrace {
             requests: vec![
                 contextual_request("r1", "root", None, 1_000, 1_100, vec![11]),
@@ -581,22 +583,18 @@ mod tests {
         let rows = lower_rows(loaded).unwrap();
 
         assert_eq!(rows.len(), 2);
-        assert!(rows[0].wait_for.is_empty());
-        assert_eq!(rows[0].prefix_reset, Some(true));
-        assert!(rows[0].tool_events.is_empty());
-        assert_eq!(rows[1].wait_for, vec!["r1"]);
-        assert_eq!(rows[1].delay, Some(100.0));
-        assert_eq!(rows[1].tool_wait_ms, Some(100.0));
-        assert_eq!(rows[1].dependency_delay_ms(), 200.0);
-        assert_eq!(rows[1].tool_events.len(), 1);
-        assert_eq!(rows[1].tool_events[0].tool_class, "ls");
-        assert_eq!(rows[1].tool_events[0].tool_call_id, "call-1");
-        assert_eq!(rows[1].tool_events[0].started_at_unix_ms, 1_150);
-        assert_eq!(rows[1].tool_events[0].ended_at_unix_ms, 1_250);
+        assert!(rows[0].dependencies.is_empty());
+        assert_eq!(rows[0].play_id, "root");
+        assert_eq!(rows[1].dependencies.len(), 1);
+        let edge = &rows[1].dependencies[0];
+        assert_eq!(edge.request_id, "r1");
+        assert_eq!(edge.trigger, AgenticDependencyTrigger::Completion);
+        assert_eq!(edge.relation, AgenticDependencyRelation::Sequence);
+        assert_eq!(edge.delay_ms, 200.0);
     }
 
     #[test]
-    fn agentic_lowering_attaches_parallel_tool_events_with_union_wait() {
+    fn non_agent_tool_time_is_preserved_by_the_sequence_gap() {
         let loaded = LoadedAgentTrace {
             requests: vec![
                 contextual_request("r1", "root", None, 1_000, 1_100, vec![11]),
@@ -613,15 +611,8 @@ mod tests {
 
         let rows = lower_rows(loaded).unwrap();
 
-        assert_eq!(rows[1].tool_wait_ms, Some(200.0));
-        assert_eq!(rows[1].tool_events.len(), 3);
-        let classes: Vec<_> = rows[1]
-            .tool_events
-            .iter()
-            .map(|event| event.tool_class.as_str())
-            .collect();
-        assert!(classes.contains(&"read"));
-        assert!(classes.contains(&"find"));
+        assert_eq!(rows[1].dependencies.len(), 1);
+        assert_eq!(rows[1].dependencies[0].delay_ms, 300.0);
     }
 
     #[test]
@@ -641,10 +632,15 @@ mod tests {
             .map(|row| (row.request_id.as_str(), row))
             .collect::<HashMap<_, _>>();
 
-        assert_eq!(by_id["child-1"].wait_for, vec!["parent-1"]);
-        assert_eq!(by_id["parent-1"].branches, vec!["child-1"]);
-        assert_eq!(by_id["parent-2"].wait_for, vec!["parent-1", "child-1"]);
-        assert_eq!(by_id["parent-2"].delay, Some(200.0));
+        assert!(by_id["child-1"].dependencies.iter().any(|edge| {
+            edge.request_id == "parent-1"
+                && edge.trigger == AgenticDependencyTrigger::Completion
+                && edge.relation == AgenticDependencyRelation::Spawn
+                && edge.delay_ms == 100.0
+        }));
+        assert!(by_id["parent-2"].dependencies.iter().any(|edge| {
+            edge.request_id == "child-1" && edge.relation == AgenticDependencyRelation::Join
+        }));
     }
 
     #[test]
@@ -672,17 +668,12 @@ mod tests {
             .map(|row| (row.request_id.as_str(), row))
             .collect::<HashMap<_, _>>();
 
-        assert_eq!(by_id["parent-1"].branches, vec!["child-1"]);
-        assert_eq!(by_id["child-1"].wait_for, vec!["parent-1"]);
-        assert_eq!(
-            by_id["child-1"].request_kind.as_deref(),
-            Some("background_agent")
-        );
-        assert_eq!(by_id["parent-2"].wait_for, vec!["parent-1"]);
-        assert_eq!(by_id["parent-3"].wait_for, vec!["parent-2", "child-1"]);
-        assert_eq!(by_id["parent-3"].tool_wait_ms, Some(100.0));
-        assert_eq!(by_id["parent-3"].delay, Some(50.0));
-        assert_eq!(by_id["parent-3"].tool_events.len(), 1);
+        assert!(by_id["child-1"].dependencies.iter().any(|edge| {
+            edge.request_id == "parent-1" && edge.relation == AgenticDependencyRelation::Spawn
+        }));
+        assert!(!by_id["parent-3"].dependencies.iter().any(|edge| {
+            edge.request_id == "child-1" && edge.relation == AgenticDependencyRelation::Join
+        }));
     }
 
     #[test]
@@ -725,11 +716,9 @@ mod tests {
         })
         .unwrap();
 
-        assert!(rows[0].branches.is_empty());
-        assert_eq!(rows[1].wait_for, vec!["parent-1"]);
-        assert_eq!(rows[1].tool_wait_ms, Some(150.0));
-        assert_eq!(rows[1].delay, Some(50.0));
-        assert_eq!(rows[1].tool_events.len(), 1);
+        assert_eq!(rows[1].dependencies.len(), 1);
+        assert_eq!(rows[1].dependencies[0].request_id, "parent-1");
+        assert_eq!(rows[1].dependencies[0].delay_ms, 200.0);
     }
 
     #[test]
@@ -765,7 +754,11 @@ mod tests {
             .map(|row| (row.request_id.as_str(), row))
             .collect::<HashMap<_, _>>();
 
-        assert!(!by_id["parent-2"].wait_for.contains(&"child-fast".into()));
-        assert!(by_id["parent-3"].wait_for.contains(&"child-slow".into()));
+        assert!(!by_id["parent-2"].dependencies.iter().any(|edge| {
+            edge.request_id == "child-fast" && edge.relation == AgenticDependencyRelation::Join
+        }));
+        assert!(by_id["parent-3"].dependencies.iter().any(|edge| {
+            edge.request_id == "child-slow" && edge.relation == AgenticDependencyRelation::Join
+        }));
     }
 }

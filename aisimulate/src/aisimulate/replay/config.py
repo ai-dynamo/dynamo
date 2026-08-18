@@ -180,6 +180,16 @@ def parse_base_replay_config(args: argparse.Namespace) -> ReplayCliConfig:
             )
     if args.trace_block_size is not None:
         _positive_int(args.trace_block_size, "trace_block_size")
+    if args.agentic_lanes is not None:
+        _positive_int(args.agentic_lanes, "agentic_lanes")
+        if args.trace_format not in {"agentic_mooncake", "weka", "dynamo"}:
+            raise ValueError(
+                "--agentic-lanes requires --trace-format=agentic_mooncake, weka, or dynamo"
+            )
+        if args.replay_concurrency is not None:
+            raise ValueError(
+                "--agentic-lanes cannot be combined with --replay-concurrency"
+            )
 
     workload: dict[str, JSONValue]
     if trace_files:
@@ -194,6 +204,8 @@ def parse_base_replay_config(args: argparse.Namespace) -> ReplayCliConfig:
             workload["replay_concurrency"] = args.replay_concurrency
         if args.max_sim_time_seconds is not None:
             workload["max_sim_time_ms"] = args.max_sim_time_seconds * 1_000.0
+        if args.agentic_lanes is not None:
+            workload["agentic_lanes"] = args.agentic_lanes
     else:
         workload = {
             "isl": args.input_tokens,

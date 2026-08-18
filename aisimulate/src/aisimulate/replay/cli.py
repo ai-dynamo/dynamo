@@ -17,6 +17,7 @@ TRACE_FORMATS = (
     "mooncake",
     "mooncake-delta",
     "agentic_mooncake",
+    "weka",
     "applied_compute_agentic",
     "dynamo",
 )
@@ -61,6 +62,11 @@ def add_base_replay_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--trace-block-size", type=int)
     parser.add_argument("--trace-shared-prefix-ratio", type=float, default=0.0)
     parser.add_argument("--trace-num-prefix-groups", type=int, default=0)
+    parser.add_argument(
+        "--agentic-lanes",
+        type=int,
+        help="fixed closed-loop lanes for agentic trace replay",
+    )
     parser.add_argument("--report-json")
     parser.add_argument("--per-request-jsonl")
     parser.add_argument("--max-sim-time-seconds", type=float)

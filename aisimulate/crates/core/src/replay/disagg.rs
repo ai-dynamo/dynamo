@@ -331,6 +331,8 @@ impl DisaggFlowState {
     ) -> Result<()> {
         if matches!(outcome, HandoffActionOutcome::Failed(_)) {
             collector.on_terminal(uuid, now_ms, ReplayTerminalStatus::Failed);
+            self.state_mut(uuid)?
+                .set_terminal_status(ReplayTerminalStatus::Failed);
         }
         let actions = self
             .state_mut(uuid)?
@@ -357,6 +359,7 @@ impl DisaggFlowState {
         };
         if let Some(status) = terminal_status {
             collector.on_terminal(uuid, now_ms, status);
+            self.state_mut(uuid)?.set_terminal_status(status);
         }
         let actions = self.state_mut(uuid)?.coordinator.on_fact(fact)?;
         self.action_queues.enqueue_all(uuid, actions);
@@ -665,6 +668,8 @@ impl DisaggFlowState {
 
         let handoff_id = self.state(signal.uuid)?.handoff_id;
         collector.on_terminal(signal.uuid, now_ms, ReplayTerminalStatus::Rejected);
+        self.state_mut(signal.uuid)?
+            .set_terminal_status(ReplayTerminalStatus::Rejected);
         self.apply_handoff_fact(
             signal.uuid,
             HandoffFact::Failed { handoff_id },
@@ -778,7 +783,7 @@ impl DisaggFlowState {
         uuid: Uuid,
         _now_ms: f64,
         _stats: &mut DisaggRuntimeStats,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         #[cfg(test)]
         {
             _stats.handoff_ms.insert(uuid, _now_ms);
@@ -794,7 +799,7 @@ impl DisaggFlowState {
 
     #[inline(never)]
     fn record_decode_terminal(
-        &self,
+        &mut self,
         signal: &OutputSignal,
         now_ms: f64,
         collector: &mut TraceCollector,
@@ -823,6 +828,15 @@ impl DisaggFlowState {
             ReplayTerminalStatus::Completed
         };
         collector.on_terminal(signal.uuid, now_ms, terminal_status);
+        self.requests
+            .get_mut(&signal.uuid)
+            .ok_or_else(|| {
+                anyhow!(
+                    "offline disagg replay missing request state for {}",
+                    signal.uuid
+                )
+            })?
+            .set_terminal_status(terminal_status);
         Ok(())
     }
 
@@ -855,13 +869,13 @@ impl DisaggFlowState {
     }
 
     #[inline(never)]
-    fn retire_completed_request(&mut self, uuid: Uuid) -> Result<()> {
+    fn retire_completed_request(&mut self, uuid: Uuid) -> Result<bool> {
         let ready = {
             let state = self.state(uuid)?;
             !state.counted_in_flight && state.coordinator.is_complete()
         };
         if !ready {
-            return Ok(());
+            return Ok(false);
         }
         if self.action_queues.contains(uuid) {
             bail!("offline disagg replay completed handoff still has queued actions for {uuid}");
@@ -873,7 +887,7 @@ impl DisaggFlowState {
         if removed != Some(uuid) {
             bail!("offline disagg replay handoff index is inconsistent for {uuid}");
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -1147,12 +1161,27 @@ where
         outcome: HandoffActionOutcome,
     ) -> Result<()> {
         self.flow
-            .acknowledge_action(uuid, action, outcome, self.now_ms, &mut self.collector)
+            .acknowledge_action(uuid, action, outcome, self.now_ms, &mut self.collector)?;
+        self.notify_causal_terminal(uuid)
     }
 
     fn apply_handoff_fact(&mut self, uuid: Uuid, fact: HandoffFact) -> Result<()> {
         self.flow
-            .apply_handoff_fact(uuid, fact, self.now_ms, &mut self.collector)
+            .apply_handoff_fact(uuid, fact, self.now_ms, &mut self.collector)?;
+        self.notify_causal_terminal(uuid)
+    }
+
+    fn notify_causal_terminal(&mut self, uuid: Uuid) -> Result<()> {
+        let status = self.state_mut(uuid)?.take_unnotified_terminal_status();
+        let Some(status) = status else {
+            return Ok(());
+        };
+        self.admission
+            .on_request_causal_terminal(uuid, self.now_ms, status)
+    }
+
+    fn notify_quiescent(&mut self, uuid: Uuid) -> Result<()> {
+        self.admission.on_request_quiescent(uuid, self.now_ms)
     }
 
     /// Submit a coordinator-owned prefill onto a selected worker.
@@ -1691,12 +1720,21 @@ where
         match self.state(uuid)?.coordinator.completion() {
             Some(HandoffCompletion::Success) => {
                 self.complete_prefill_route(uuid)?;
-                self.flow
-                    .complete_successful_handoff(uuid, self.now_ms, &mut self.stats)?;
+                if self
+                    .flow
+                    .complete_successful_handoff(uuid, self.now_ms, &mut self.stats)?
+                {
+                    self.notify_quiescent(uuid)?;
+                }
             }
             Some(HandoffCompletion::Canceled) => {
-                self.collector
-                    .on_terminal(uuid, self.now_ms, ReplayTerminalStatus::Canceled);
+                let status = self
+                    .state(uuid)?
+                    .terminal_status()
+                    .unwrap_or(ReplayTerminalStatus::Canceled);
+                self.collector.on_terminal(uuid, self.now_ms, status);
+                self.state_mut(uuid)?.set_terminal_status(status);
+                self.notify_causal_terminal(uuid)?;
                 self.cancel_prefill_route(uuid)?;
                 self.cancel_decode_route(uuid)?;
                 self.finish_logical_request(uuid, true)?;
@@ -1708,7 +1746,6 @@ where
 
     fn finish_logical_request(&mut self, uuid: Uuid, remove_actions: bool) -> Result<()> {
         self.flow.prepare_logical_finish(uuid, remove_actions)?;
-        CoreAdmissionSource::on_terminal(&mut self.admission, uuid, self.now_ms, false)?;
         self.progress.inc_completed();
         #[cfg(test)]
         {
@@ -1721,7 +1758,10 @@ where
                     .push(DisaggTransition::WorkloadCompleted { uuid });
             }
         }
-        self.flow.retire_completed_request(uuid)
+        if self.flow.retire_completed_request(uuid)? {
+            self.notify_quiescent(uuid)?;
+        }
+        Ok(())
     }
 
     /// Admit one external request into prefill-side state, collector state, and optional router.
@@ -1850,13 +1890,12 @@ where
 
     /// Process one prefill output signal, including router updates and decode handoff scheduling.
     fn process_prefill_signal(&mut self, signal: OutputSignal) -> Result<()> {
-        match self
-            .flow
-            .inspect_prefill_signal(&signal, self.now_ms, &mut self.collector)?
-        {
-            PrefillSignalDisposition::Pending | PrefillSignalDisposition::Rejected => {
-                return Ok(());
-            }
+        let disposition =
+            self.flow
+                .inspect_prefill_signal(&signal, self.now_ms, &mut self.collector)?;
+        self.notify_causal_terminal(signal.uuid)?;
+        match disposition {
+            PrefillSignalDisposition::Pending | PrefillSignalDisposition::Rejected => return Ok(()),
             PrefillSignalDisposition::Completed => {}
         }
 
@@ -1907,6 +1946,7 @@ where
             &mut self.collector,
             &mut self.traffic,
         )?;
+        self.notify_causal_terminal(signal.uuid)?;
         self.finish_logical_request(signal.uuid, false)?;
         self.dispatch_decode_placements(placements)?;
         Ok(())
@@ -2041,6 +2081,9 @@ where
                 request,
                 arrival_time_ms,
                 metadata,
+                authored_request_id,
+                play_id,
+                dispatched_at_ms,
                 session_id,
                 turn_index,
             } = ready;
@@ -2054,6 +2097,10 @@ where
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);
+            }
+            if let (Some(request_id), Some(play_id)) = (authored_request_id, play_id) {
+                self.collector
+                    .on_agentic_metadata(uuid, request_id, play_id, dispatched_at_ms);
             }
             released_any = true;
         }
@@ -2999,6 +3046,12 @@ where
 
         self.progress.finish();
         self.finish_test_stats();
+        if let Some(snapshot) = self.admission.agentic_trajectory_snapshot() {
+            self.collector.set_agentic_trajectory(snapshot);
+        }
+        if let Some(identity) = self.admission.agentic_graph_identity() {
+            self.collector.set_agentic_graph(identity);
+        }
         self.collector.set_runtime_evidence(self.evidence.finish());
         Ok((self.collector, self.stats))
     }
