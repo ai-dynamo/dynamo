@@ -40,6 +40,12 @@ pub struct WekaImporter {
     header: AgenticMooncakeHeader,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubagentMode {
+    Blocking,
+    Background,
+}
+
 struct WekaFile {
     path: PathBuf,
     relative_path: String,
@@ -55,10 +61,12 @@ impl WekaImporter {
 
         let digest = corpus_digest(&files)?;
         let mut block_size = None;
+        let mut corpus_model = None;
         let mut preflighted = Vec::with_capacity(files.len());
         for (file_path, relative_path) in files {
             let trace: WekaTrace = read_trace(&file_path)?;
             validate_trace_header(&trace, &relative_path)?;
+            let model = trace_request_model(&trace, &relative_path)?;
             match block_size {
                 Some(expected) if expected != trace.block_size => bail!(
                     "Weka corpus mixes block sizes: {} has {}, expected {}",
@@ -67,6 +75,16 @@ impl WekaImporter {
                     expected
                 ),
                 None => block_size = Some(trace.block_size),
+                _ => {}
+            }
+            match corpus_model.as_deref() {
+                Some(expected) if expected != model => bail!(
+                    "Weka corpus mixes request models: {} has {:?}, expected {:?}",
+                    relative_path,
+                    model,
+                    expected
+                ),
+                None => corpus_model = Some(model.to_string()),
                 _ => {}
             }
             preflighted.push(WekaFile {
@@ -313,29 +331,38 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
         .iter()
         .position(|stream| stream.session_id.ends_with(":root"))
         .expect("root stream is present");
-    let parent_timeline = streams
-        .iter()
-        .flat_map(|stream| stream.requests.iter())
-        .map(|request| {
-            (
-                request.source_order,
-                request.source_id.clone(),
-                request.request.t,
-            )
-        })
-        .collect::<Vec<_>>();
+    let parent_stream_count = streams.len();
     let mut join_markers = Vec::<(String, Vec<String>)>::new();
 
     for (outer_index, subagent) in explicit {
-        validate_subagent(subagent, relative_path)?;
-        let Some(spawn_source_id) = parent_timeline
+        let mode = validate_subagent(subagent, relative_path)?;
+        let mut owner_candidates = streams[..parent_stream_count]
             .iter()
-            .filter(|(source_order, _, _)| *source_order < outer_index)
-            .max_by_key(|(source_order, _, _)| *source_order)
-            .map(|(_, source_id, _)| source_id.clone())
-        else {
+            .enumerate()
+            .flat_map(|(stream_index, stream)| {
+                stream
+                    .requests
+                    .iter()
+                    .filter(move |request| request.source_order < outer_index)
+                    .map(move |request| (stream_index, request))
+            })
+            .collect::<Vec<_>>();
+        owner_candidates.sort_by_key(|(_, request)| request.source_order);
+        let Some((owner_stream_index, owner_request)) = owner_candidates.pop() else {
             continue;
         };
+        if owner_candidates
+            .last()
+            .is_some_and(|(_, candidate)| candidate.source_order == owner_request.source_order)
+        {
+            bail!(
+                "Weka trace {} has ambiguous parent-stream ownership for subagent {} at outer index {}",
+                relative_path,
+                subagent.agent_id,
+                outer_index
+            );
+        }
+        let spawn_source_id = owner_request.source_id.clone();
 
         let mut inner = Vec::with_capacity(subagent.requests.len());
         for (inner_index, entry) in subagent.requests.iter().enumerate() {
@@ -380,14 +407,20 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
             stream.scope_id = scope_id.clone();
         }
 
-        let child_end = subagent_end(subagent);
-        let join_source_id = parent_timeline
-            .iter()
-            .filter(|(source_order, _, timestamp)| {
-                *source_order > outer_index && *timestamp + JOIN_EPSILON_SECONDS >= child_end
-            })
-            .min_by_key(|(source_order, _, _)| *source_order)
-            .map(|(_, source_id, _)| source_id.clone());
+        let join_source_id = if mode == SubagentMode::Blocking {
+            let child_end = subagent_end(subagent);
+            streams[owner_stream_index]
+                .requests
+                .iter()
+                .filter(|request| {
+                    request.source_order > outer_index
+                        && request.request.t + JOIN_EPSILON_SECONDS >= child_end
+                })
+                .min_by_key(|request| request.source_order)
+                .map(|request| request.source_id.clone())
+        } else {
+            None
+        };
 
         let child_stream_indices = streams.len()..(streams.len() + child_streams.len());
         streams.extend(child_streams);
@@ -657,7 +690,7 @@ fn install_cross_stream_frontiers(
                             request_id: row_by_source[&predecessor.source_id].clone(),
                             trigger: AgenticDependencyTrigger::Completion,
                             delay_ms: 0.0,
-                            relation: AgenticDependencyRelation::Join,
+                            relation: AgenticDependencyRelation::ReplayBarrier,
                         },
                     );
                 }
@@ -1017,7 +1050,7 @@ fn validate_trace_header(trace: &WekaTrace, relative_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_subagent(subagent: &WekaSubagent, relative_path: &str) -> Result<()> {
+fn validate_subagent(subagent: &WekaSubagent, relative_path: &str) -> Result<SubagentMode> {
     if !subagent.t.is_finite() || subagent.t < 0.0 {
         bail!(
             "Weka trace {} has invalid subagent timestamp",
@@ -1030,16 +1063,65 @@ fn validate_subagent(subagent: &WekaSubagent, relative_path: &str) -> Result<()>
             relative_path
         );
     }
+    let mode = match subagent.status.as_str() {
+        "completed" => SubagentMode::Blocking,
+        "async_launched" => SubagentMode::Background,
+        status => bail!(
+            "Weka trace {} has unsupported non-success subagent status {:?} for {}",
+            relative_path,
+            status,
+            subagent.agent_id
+        ),
+    };
+    if mode == SubagentMode::Blocking && subagent.requests.is_empty() {
+        bail!(
+            "Weka trace {} has blocking subagent {} with no replayable requests; external waits are not modeled",
+            relative_path,
+            subagent.agent_id
+        );
+    }
     let _ = (
         &subagent.subagent_type,
         subagent.total_tokens,
         subagent.tool_use_count,
-        &subagent.status,
         &subagent.models,
         subagent.tool_tokens,
         subagent.system_tokens,
     );
-    Ok(())
+    Ok(mode)
+}
+
+fn trace_request_model<'a>(trace: &'a WekaTrace, relative_path: &str) -> Result<&'a str> {
+    let mut models = BTreeSet::new();
+    for entry in &trace.requests {
+        match entry {
+            WekaEntry::Normal(request) | WekaEntry::Streaming(request) => {
+                models.insert(request.model.as_str());
+            }
+            WekaEntry::Subagent(subagent) => {
+                for entry in &subagent.requests {
+                    let request = match entry {
+                        WekaInnerEntry::Normal(request) | WekaInnerEntry::Streaming(request) => {
+                            request
+                        }
+                    };
+                    models.insert(request.model.as_str());
+                }
+            }
+        }
+    }
+    if models.len() != 1 {
+        bail!(
+            "Weka trace {} must contain exactly one request model, found {}",
+            relative_path,
+            models.len()
+        );
+    }
+    let model = models.into_iter().next().expect("one request model");
+    if model.trim().is_empty() {
+        bail!("Weka trace {} has an empty request model", relative_path);
+    }
+    Ok(model)
 }
 
 fn validate_request(request: &WekaRequest, relative_path: &str) -> Result<()> {
@@ -1251,12 +1333,13 @@ mod tests {
                 {"t":0.8,"type":"s","model":"model","in":9,"out":1,"hash_ids":[1,2,5]},
                 {"t":1.1,"type":"subagent","agent_id":"bg","subagent_type":"Explore","status":"async_launched","requests":[
                     {"t":1.2,"type":"s","model":"model","in":4,"out":0,"hash_ids":[9],"api_time":0.1}
-                ],"models":["model"]}
+                ],"models":["model"]},
+                {"t":1.5,"type":"s","model":"model","in":13,"out":1,"hash_ids":[1,2,5,6]}
             ]),
         );
 
         let (summary, rows) = load_weka_agentic_rows(&path).unwrap();
-        assert_eq!(summary.requests, 4);
+        assert_eq!(summary.requests, 5);
         assert_eq!(summary.raw_zero_outputs, 1);
         let child = rows
             .iter()
@@ -1370,6 +1453,10 @@ mod tests {
             .iter()
             .find(|row| row.request_id.ends_with("outer:2"))
             .unwrap();
+        let main_next = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:3"))
+            .unwrap();
 
         assert_ne!(parent.session_id, child.session_id);
         assert_eq!(child.session_id, child_next.session_id);
@@ -1384,6 +1471,61 @@ mod tests {
                 && edge.trigger == AgenticDependencyTrigger::Completion
                 && edge.relation == AgenticDependencyRelation::Sequence
                 && (edge.delay_ms - 100.0).abs() < 1e-6
+        }));
+        assert!(main_next.dependencies.iter().any(|edge| {
+            edge.request_id == child_next.request_id
+                && edge.trigger == AgenticDependencyTrigger::Completion
+                && edge.relation == AgenticDependencyRelation::ReplayBarrier
+        }));
+    }
+
+    #[test]
+    fn explicit_subagent_spawn_and_join_use_one_parent_stream() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        write_trace(
+            &path,
+            serde_json::json!([
+                {"t":0.0,"type":"s","model":"model","in":8,"out":1,"hash_ids":[1,2],"api_time":1.0},
+                {"t":0.2,"type":"s","model":"model","in":8,"out":1,"hash_ids":[1,3],"api_time":0.2},
+                {"t":0.25,"type":"subagent","agent_id":"owned","subagent_type":"Explore","duration_ms":500,"status":"completed","requests":[
+                    {"t":0.3,"type":"s","model":"model","in":4,"out":1,"hash_ids":[9],"api_time":0.1}
+                ],"models":["model"]},
+                {"t":1.0,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,4]},
+                {"t":1.2,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,3,5]}
+            ]),
+        );
+
+        let (_, rows) = load_weka_agentic_rows(&path).unwrap();
+        let owner = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:1"))
+            .unwrap();
+        let child = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:2:inner:0"))
+            .unwrap();
+        let other_stream_continuation = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:3"))
+            .unwrap();
+        let owner_stream_continuation = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:4"))
+            .unwrap();
+
+        assert!(child.dependencies.iter().any(|edge| {
+            edge.request_id == owner.request_id
+                && edge.trigger == AgenticDependencyTrigger::Dispatch
+                && edge.relation == AgenticDependencyRelation::Spawn
+        }));
+        assert!(!other_stream_continuation.dependencies.iter().any(|edge| {
+            edge.request_id == child.request_id && edge.relation == AgenticDependencyRelation::Join
+        }));
+        assert!(owner_stream_continuation.dependencies.iter().any(|edge| {
+            edge.request_id == child.request_id
+                && edge.trigger == AgenticDependencyTrigger::Completion
+                && edge.relation == AgenticDependencyRelation::Join
         }));
     }
 
@@ -1481,6 +1623,70 @@ mod tests {
             .err()
             .expect("mixed blocks");
         assert!(error.to_string().contains("mixes block sizes"), "{error:#}");
+    }
+
+    #[test]
+    fn corpus_preflight_rejects_mixed_request_models() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        write_trace(
+            &path,
+            serde_json::json!([
+                request(0.0, 4, 1, &[1]),
+                {"t":1.0,"type":"s","model":"other-model","in":4,"out":1,"hash_ids":[2]}
+            ]),
+        );
+
+        let error = WekaImporter::open(&path)
+            .err()
+            .expect("mixed models must fail preflight");
+        assert!(
+            error
+                .to_string()
+                .contains("must contain exactly one request model"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn subagent_status_controls_background_and_blocking_validation() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        let cases = [
+            (
+                "failed",
+                serde_json::json!([request(0.0, 4, 1, &[1]), {
+                    "t":0.1,"type":"subagent","agent_id":"failed","subagent_type":"Explore","status":"failed","requests":[
+                        {"t":0.2,"type":"s","model":"model","in":4,"out":1,"hash_ids":[2]}
+                    ],"models":["model"]
+                }]),
+                "unsupported non-success subagent status",
+            ),
+            (
+                "blocking empty",
+                serde_json::json!([request(0.0, 4, 1, &[1]), {
+                    "t":0.1,"type":"subagent","agent_id":"empty","subagent_type":"Explore","status":"completed","requests":[],"models":["model"]
+                }]),
+                "external waits are not modeled",
+            ),
+        ];
+        for (name, requests, expected) in cases {
+            write_trace(&path, requests);
+            let error = load_weka_agentic_rows(&path).expect_err(name);
+            assert!(error.to_string().contains(expected), "{name}: {error:#}");
+        }
+
+        write_trace(
+            &path,
+            serde_json::json!([
+                request(0.0, 4, 1, &[1]),
+                {"t":0.1,"type":"subagent","agent_id":"background","subagent_type":"Explore","status":"async_launched","requests":[],"models":[]},
+                request(1.0, 8, 1, &[1,2])
+            ]),
+        );
+        let (summary, rows) = load_weka_agentic_rows(&path).unwrap();
+        assert_eq!(summary.requests, 2);
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]

@@ -155,6 +155,9 @@ fn agentic_mooncake_row(row: dynamo_data_gen::AgenticMooncakeRow) -> AgenticMoon
                     dynamo_data_gen::AgenticDependencyRelation::Join => {
                         AgenticDependencyRelation::Join
                     }
+                    dynamo_data_gen::AgenticDependencyRelation::ReplayBarrier => {
+                        AgenticDependencyRelation::ReplayBarrier
+                    }
                 },
             })
             .collect(),

@@ -100,6 +100,7 @@ pub enum AgenticDependencyRelation {
     Sequence,
     Spawn,
     Join,
+    ReplayBarrier,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

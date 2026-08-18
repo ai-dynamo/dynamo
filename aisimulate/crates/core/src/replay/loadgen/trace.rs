@@ -1185,7 +1185,11 @@ impl AgenticTraceBuilder {
             match (dependency.relation, dependency.trigger) {
                 (AgenticDependencyRelation::Sequence, AgenticDependencyTrigger::Completion)
                 | (AgenticDependencyRelation::Spawn, _)
-                | (AgenticDependencyRelation::Join, AgenticDependencyTrigger::Completion) => {}
+                | (AgenticDependencyRelation::Join, AgenticDependencyTrigger::Completion)
+                | (
+                    AgenticDependencyRelation::ReplayBarrier,
+                    AgenticDependencyTrigger::Completion,
+                ) => {}
                 (relation, trigger) => bail!(
                     "trace line {} has invalid {:?} dependency with {:?} trigger",
                     line_idx + 1,
@@ -1502,6 +1506,7 @@ fn relation_rank(relation: AgenticDependencyRelation) -> u8 {
         AgenticDependencyRelation::Sequence => 0,
         AgenticDependencyRelation::Spawn => 1,
         AgenticDependencyRelation::Join => 2,
+        AgenticDependencyRelation::ReplayBarrier => 3,
     }
 }
 
