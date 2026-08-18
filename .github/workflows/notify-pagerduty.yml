@@ -54,6 +54,15 @@ on:
         type: string
         default: ''
 
+      reason:
+        description: |
+          Human-readable cause, for the case where publication never ran at all
+          (no per-stage results exist). When set it REPLACES stage derivation and
+          switches the incident to the "published nothing" wording.
+        required: false
+        type: string
+        default: ''
+
       # --- context for the incident body ------------------------------------
       commit_sha:
         description: "Source commit the nightly published from."
@@ -113,6 +122,7 @@ jobs:
           PD_ROUTING_KEY:  ${{ secrets.PAGERDUTY_OPS_SUPPORT_ROUTING_KEY }}
           PD_ENABLED:      ${{ vars.PAGERDUTY_ENABLED }}
           PIPELINE:        ${{ inputs.pipeline_name }}
+          REASON:          ${{ inputs.reason }}
           DEDUP_KEY:       ${{ inputs.dedup_key }}
           PREPARE:         ${{ inputs.prepare_result }}
           NGC:             ${{ inputs.ngc_result }}
@@ -156,9 +166,18 @@ jobs:
             esac
           }
 
+          # `reason` short-circuits stage derivation: the caller is reporting that
+          # publication never ran, so there are no per-stage results to map and
+          # naming one would point the on-call at the wrong system.
+          if [ -n "${REASON}" ]; then
+            FAILING+=("${REASON}")
+            bump error
+            CLASS="not-published"
+          fi
+
           # `skipped` counts as failure for the publish stages: they are only
           # skipped when prepare-release failed, which is itself a paging case.
-          if [ -n "${PREPARE}" ] && [ "${PREPARE}" != "success" ]; then
+          if [ -z "${REASON}" ] && [ -n "${PREPARE}" ] && [ "${PREPARE}" != "success" ]; then
             FAILING+=("prepare-release (${PREPARE})"); bump error; CLASS="prepare"
           fi
           # Suppressed when prepare-release already failed — the downstream
@@ -178,14 +197,19 @@ jobs:
             echo "Artifact publication is green — no PagerDuty event sent."
             exit 0
           fi
-          [ "${#FAILING[@]}" -gt 1 ] && CLASS="multi-stage"
+          # Guarded on REASON so the not-published class is never clobbered.
+          if [ -z "${REASON}" ] && [ "${#FAILING[@]}" -gt 1 ]; then CLASS="multi-stage"; fi
 
           # "${FAILING[*]}" would join on IFS's first char only, giving "a,b".
           FAILING_STR=$(printf '%s, ' "${FAILING[@]}"); FAILING_STR="${FAILING_STR%, }"
 
           # --- payload ---------------------------------------------------------
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
-          SUMMARY="[${PIPELINE}] Dynamo artifact publication FAILED — ${FAILING_STR} — ${NGC_TAG:-<no tag>}"
+          if [ "${CLASS}" = "not-published" ]; then
+            SUMMARY="[${PIPELINE}] Dynamo nightly published NO artifacts — ${FAILING_STR}"
+          else
+            SUMMARY="[${PIPELINE}] Dynamo artifact publication FAILED — ${FAILING_STR} — ${NGC_TAG:-<no tag>}"
+          fi
           SUMMARY="${SUMMARY:0:1024}"   # PagerDuty truncates summary at 1024 chars
 
           # Destinations are deliberately SYMBOLIC. NGC_PUBLISH_ORG,

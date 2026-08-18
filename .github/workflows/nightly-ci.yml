@@ -1347,10 +1347,13 @@ jobs:
   # fatiguing, drop this job — that is why it is separate rather than folded in.
   notify-pagerduty-not-published:
     name: Notify PagerDuty — nightly did not publish
-    needs: [compute-release-mode, release]
+    needs: [release]
+    # No `compute-release-mode.outputs.release == 'true'` clause: on `schedule`
+    # that output is unconditionally 'true', so the check was redundant — and it
+    # silently suppressed the page when compute-release-mode ITSELF failed (its
+    # output is then empty), which is precisely a nothing-was-published night.
     if: ${{ !cancelled()
         && github.event_name == 'schedule'
-        && needs.compute-release-mode.outputs.release == 'true'
         && needs.release.result == 'skipped' }}
     permissions:
       contents: read
@@ -1358,8 +1361,9 @@ jobs:
     with:
       pipeline_name: Nightly
       dedup_key: ${{ github.repository }}/nightly-not-published/${{ github.run_id }}
-      # No stage ever ran; prepare_result drives the notifier's error-severity path.
-      prepare_result: skipped
+      # NOT prepare_result: no publication stage ever ran, and naming one would
+      # send the on-call to the wrong system. The real cause is upstream.
+      reason: "the release job was skipped — a gating build (vllm/sglang/trtllm/dynamo-pipeline) or an upstream job failed, so nothing was published"
       runbook_url: https://github.com/${{ github.repository }}/blob/main/.github/RUNBOOK-nightly-publication.md
       # PHASE 1: print the payload, page nobody. See release.yml's note.
       dry_run: true
