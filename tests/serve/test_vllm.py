@@ -451,7 +451,9 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.vllm,
             pytest.mark.h100,
-            pytest.mark.nightly,
+            # TEMPORARY (#13482): pre_merge so PR CI validates the timeout fix
+            # on the H100 lane in pr.yaml; revert to nightly after it passes.
+            pytest.mark.pre_merge,
             # TODO: profile to get max_vram and timeout
         ],
         model="deepseek-ai/DeepSeek-V2-Lite",
