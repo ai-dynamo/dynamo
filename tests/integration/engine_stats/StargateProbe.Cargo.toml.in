@@ -1,0 +1,22 @@
+[package]
+name = "stargate-state-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "stargate-state-probe"
+path = "@PROBE_SOURCE@"
+
+[dependencies]
+anyhow = "1"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+stargate = { path = "@STARGATE_ROOT@/crates/stargate" }
+stargate-tls = { path = "@STARGATE_ROOT@/crates/stargate-tls" }
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
