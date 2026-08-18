@@ -145,6 +145,9 @@ func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 	return nil
 }
 
+// SetupDynamoCheckpoint always registers the reconciler so existing checkpoint finalizers can
+// converge when Checkpoint is disabled. CheckpointReconciler.SetupWithManager omits the external
+// PodSnapshot watch unless the resolved Checkpoint gate is enabled.
 func SetupDynamoCheckpoint(mgr ctrl.Manager, opts SetupOptions) error {
 	if err := (&CheckpointReconciler{
 		Client:        mgr.GetClient(),
