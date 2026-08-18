@@ -734,9 +734,14 @@ where
                 } else if let Some(tk) = tokenizer.clone() {
                     let PromptFormatter::OAI(formatter) =
                         prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
-                    // Chat is the only surface that runs speculative prefill, so
-                    // it is the only one that needs the runtime's shutdown token:
-                    // a child token so cancelling it cannot disturb the runtime.
+                    // Chat is the only surface here that runs speculative
+                    // prefill, so it is the only one given the runtime's
+                    // shutdown token: a child token, so cancelling it cannot
+                    // disturb the runtime. The in-process chat pipeline built
+                    // by `entrypoint::input::common::build_pipeline` is a
+                    // second chat surface and is not wired; there the runtime
+                    // and the process go down together, and the warmup's own
+                    // lifetime bound still applies.
                     let preprocessor = OpenAIPreprocessor::new_with_parts_and_cancel(
                         card.clone(),
                         formatter,

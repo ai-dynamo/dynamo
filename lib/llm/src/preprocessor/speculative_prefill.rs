@@ -35,9 +35,9 @@ use crate::protocols::openai::chat_completions::{
 use crate::tokenizers::traits::Tokenizer;
 use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
 
-/// Upper bound on the lifetime of one detached speculative-prefill task.
+/// Upper bound on the lifetime of one dispatched speculative-prefill warmup.
 ///
-/// The task is a best-effort KV-cache warmup for a turn the user may never
+/// The warmup is a best-effort KV-cache fill for a turn the user may never
 /// send, and it is dispatched on a context nobody else holds, so nothing
 /// upstream can ever stop it. A backend that returns a stream which stays
 /// pending instead of reaching EOF would otherwise pin one task — and
@@ -46,6 +46,10 @@ use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
 /// request on a healthy backend and short relative to a human turn: a warmup
 /// that has not finished by now has already lost the race with the next turn
 /// it was warming for.
+///
+/// The bound covers the warmup only. It is armed after the client's turn has
+/// finished, because that is when the warmup is dispatched; a turn is allowed
+/// to take as long as it likes.
 const PREFILL_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Publication slot for the warmup stream's context.
@@ -53,7 +57,7 @@ const PREFILL_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 /// [`prefill_task`] fills it before draining so that the bounding wrapper in
 /// [`maybe_wrap_stream`] can reach the downstream context on the timeout and
 /// cancellation paths.
-type PrefillContextSlot = Arc<Mutex<Option<Arc<dyn AsyncEngineContext>>>>;
+type PrefillContextSlot = Mutex<Option<Arc<dyn AsyncEngineContext>>>;
 
 /// A minimal `OAIChatLikeRequest` for speculative next-turn prefill.
 /// Holds the full conversation (including a new assistant message) and
@@ -94,14 +98,17 @@ impl OAIChatLikeRequest for SpeculativePrefillRequest {
 /// a background task that renders the next-turn prefix and fires a
 /// `max_tokens=1` request through the pipeline to warm the KV cache.
 ///
-/// The spawned task is bounded by [`PREFILL_TASK_TIMEOUT`] and, when `cancel`
-/// is supplied, also ends when that token is cancelled; nothing else can stop
-/// it, because it runs on a context of its own and no owner keeps its handle.
+/// Once dispatched, the warmup is bounded by [`PREFILL_TASK_TIMEOUT`], and the
+/// task ends at any point when `cancel` — where supplied — is cancelled;
+/// nothing else can stop it, because it runs on a context of its own and no
+/// owner keeps its handle. `request_id` identifies the client request that
+/// produced the warmup, so an abandoned or cancelled one can be traced back.
 ///
 /// When the flag is not set, returns the stream unmodified with zero overhead.
 pub fn maybe_wrap_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     request: &NvCreateChatCompletionRequest,
+    request_id: &str,
     next: &Arc<
         dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
     >,
@@ -127,50 +134,80 @@ pub fn maybe_wrap_stream(
     let tokenizer = tokenizer.clone();
     let messages = request.inner.messages.clone();
     let cancel = cancel.cloned();
+    let request_id = request_id.to_string();
+    let model = request.inner.model.clone();
     tokio::spawn(async move {
-        let context_slot: PrefillContextSlot = Arc::new(Mutex::new(None));
+        // Waiting for the client's turn to end is deliberately outside the
+        // bound below: `tx` lives in the wrapper stream returned here, so `rx`
+        // resolves — with `Err` once that stream is dropped — as soon as the
+        // client's generation ends, one way or the other. Charging the wait to
+        // the warmup's budget would spend the whole bound on the turn, and any
+        // turn longer than the bound would never get a warmup at all.
+        let response_text = tokio::select! {
+            biased;
 
-        let warmup = {
-            let context_slot = context_slot.clone();
-            async move {
-                let Ok(response_text) = rx.await else {
-                    return;
-                };
-                if let Err(e) = prefill_task(
-                    next,
-                    formatter,
-                    tokenizer,
-                    messages,
-                    response_text,
-                    &context_slot,
-                )
-                .await
-                {
-                    tracing::warn!(error = %e, "Speculative prefill failed");
+            received = rx => {
+                match received {
+                    Ok(response_text) => response_text,
+                    // No terminal chunk: no assistant turn to warm against.
+                    Err(_) => return,
                 }
             }
+
+            () = cancelled(cancel.clone()) => {
+                tracing::debug!(
+                    request_id = %request_id,
+                    model = %model,
+                    "Speculative prefill cancelled by runtime shutdown before dispatch"
+                );
+                return;
+            }
         };
+
+        let context_slot = PrefillContextSlot::new(None);
         // Pinned and polled by reference so that neither `select!` arm consumes
         // it: on the bail-out arms the warmup future — and with it the
         // downstream stream — is still alive while `stop_downstream` runs, and
         // is dropped only when this block ends.
-        let mut warmup = std::pin::pin!(warmup);
+        let mut warmup = std::pin::pin!(prefill_task(
+            next,
+            formatter,
+            tokenizer,
+            messages,
+            response_text,
+            &context_slot,
+        ));
 
         tokio::select! {
             biased;
 
             outcome = tokio::time::timeout(PREFILL_TASK_TIMEOUT, &mut warmup) => {
-                if outcome.is_err() {
-                    tracing::warn!(
-                        timeout_secs = PREFILL_TASK_TIMEOUT.as_secs(),
-                        "Speculative prefill exceeded its lifetime bound; abandoning warmup"
-                    );
-                    stop_downstream(&context_slot);
+                match outcome {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(
+                        request_id = %request_id,
+                        model = %model,
+                        error = %e,
+                        "Speculative prefill failed"
+                    ),
+                    Err(_) => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            model = %model,
+                            timeout_secs = PREFILL_TASK_TIMEOUT.as_secs(),
+                            "Speculative prefill exceeded its lifetime bound; abandoning warmup"
+                        );
+                        stop_downstream(&context_slot);
+                    }
                 }
             }
 
             () = cancelled(cancel) => {
-                tracing::debug!("Speculative prefill cancelled by runtime shutdown");
+                tracing::debug!(
+                    request_id = %request_id,
+                    model = %model,
+                    "Speculative prefill cancelled by runtime shutdown"
+                );
                 stop_downstream(&context_slot);
             }
         }
@@ -457,6 +494,22 @@ mod tests {
         ]))
     }
 
+    /// The same two chunks, but with `turn` of (virtual) thinking time between
+    /// them, so the terminal chunk — and with it the warmup's dispatch — lands
+    /// only after the client's generation has run that long.
+    fn slow_upstream(
+        turn: Duration,
+    ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> {
+        Box::pin(
+            futures::stream::once(async { chunk("everest is ", false) }).chain(
+                futures::stream::once(async move {
+                    tokio::time::sleep(turn).await;
+                    chunk("8849 m tall.", true)
+                }),
+            ),
+        )
+    }
+
     fn text_of(items: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> String {
         items
             .iter()
@@ -484,8 +537,15 @@ mod tests {
         let engine: Arc<BackendEngine> = backend.clone();
 
         let request = chat_request(true);
-        let wrapped =
-            maybe_wrap_stream(upstream(), &request, &engine, &formatter, &tokenizer, None);
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-bound",
+            &engine,
+            &formatter,
+            &tokenizer,
+            None,
+        );
         // Only the test's own handle and the detached task's clone remain, so
         // the strong count is a faithful release probe.
         drop(engine);
@@ -528,6 +588,67 @@ mod tests {
         );
     }
 
+    /// A reasoning turn that outlives the bound must still get its warmup: the
+    /// bound belongs to the warmup, not to the client's generation. Arming it
+    /// at spawn instead spends the whole budget waiting for the terminal chunk,
+    /// and the warmup is abandoned before it is ever dispatched.
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_longer_than_the_bound_still_gets_its_warmup() {
+        let (formatter, tokenizer) = sample_model_parts();
+        let backend = Arc::new(StallingBackend::default());
+        let engine: Arc<BackendEngine> = backend.clone();
+
+        let request = chat_request(true);
+        let wrapped = maybe_wrap_stream(
+            slow_upstream(PREFILL_TASK_TIMEOUT * 2),
+            &request,
+            "req-long-turn",
+            &engine,
+            &formatter,
+            &tokenizer,
+            None,
+        );
+        drop(engine);
+
+        // The clock auto-advances past the bound here, while the warmup is
+        // still waiting for the turn to finish.
+        let started = Instant::now();
+        let items: Vec<_> = wrapped.collect().await;
+        assert_eq!(items.len(), 2);
+        assert!(
+            started.elapsed() > PREFILL_TASK_TIMEOUT,
+            "the turn must outlast the bound for this test to mean anything"
+        );
+
+        let dispatched = Instant::now();
+        settle().await;
+        assert_eq!(
+            backend.generate_calls(),
+            1,
+            "a turn longer than the bound must still dispatch its warmup"
+        );
+
+        tokio::time::sleep(PREFILL_TASK_TIMEOUT / 2).await;
+        settle().await;
+        assert!(
+            !backend.stream_dropped(),
+            "warmup abandoned before its own bound elapsed"
+        );
+
+        tokio::time::sleep(PREFILL_TASK_TIMEOUT).await;
+        settle().await;
+        assert!(backend.was_asked_to_stop());
+        assert!(
+            backend.stream_dropped(),
+            "warmup should be released once its own bound elapses"
+        );
+        assert_eq!(Arc::strong_count(&backend), 1);
+        // Bracketed with the half-bound check above: release happened after
+        // dispatch + bound/2 and by dispatch + 1.5 * bound, so the bound really
+        // is measured from dispatch and not from the task's spawn.
+        assert!(dispatched.elapsed() < PREFILL_TASK_TIMEOUT * 2);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn stalled_warmup_is_released_when_the_runtime_token_is_cancelled() {
         let (formatter, tokenizer) = sample_model_parts();
@@ -539,6 +660,7 @@ mod tests {
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
+            "req-cancel",
             &engine,
             &formatter,
             &tokenizer,
@@ -577,8 +699,15 @@ mod tests {
         let engine: Arc<BackendEngine> = backend.clone();
 
         let request = chat_request(false);
-        let wrapped =
-            maybe_wrap_stream(upstream(), &request, &engine, &formatter, &tokenizer, None);
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-disabled",
+            &engine,
+            &formatter,
+            &tokenizer,
+            None,
+        );
         drop(engine);
 
         let items: Vec<_> = wrapped.collect().await;
