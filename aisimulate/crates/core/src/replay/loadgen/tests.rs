@@ -296,6 +296,7 @@ fn test_from_agentic_mooncake_builds_typed_graph() {
             "request_id": "r1",
             "play_id": "play",
             "session_id": "root",
+            "model": "model",
             "not_before_ms": 0.0,
             "input_length": 4,
             "output_length": 1,
@@ -307,6 +308,7 @@ fn test_from_agentic_mooncake_builds_typed_graph() {
             "request_id": "r2",
             "play_id": "play",
             "session_id": "root",
+            "model": "model",
             "not_before_ms": 100.0,
             "dependencies": [{
                 "request_id": "r1",
@@ -341,6 +343,7 @@ fn test_from_agentic_mooncake_rejects_unknown_dependency() {
         "request_id": "r1",
         "play_id": "play",
         "session_id": "root",
+        "model": "model",
         "not_before_ms": 0.0,
         "dependencies": [{
             "request_id": "missing",
@@ -363,6 +366,7 @@ fn test_from_agentic_mooncake_rejects_input_length_above_hash_capacity() {
         "request_id": "r1",
         "play_id": "play",
         "session_id": "root",
+        "model": "model",
         "not_before_ms": 0.0,
         "input_length": 9,
         "output_length": 1,
