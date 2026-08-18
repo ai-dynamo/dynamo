@@ -175,7 +175,7 @@ restart.
 Initialization establishes one settled snapshot before permanently caching power facts:
 
 1. Validate that the DGD contains every required worker role.
-2. Wait for the DGD observed generation and worker rollout state to settle.
+2. Wait for the DGD observed generation and worker-rollout state to settle.
 3. List DGD-scoped Pods and compare the raw annotation string on every relevant non-terminal Pod with
    the DGD template value.
 4. Resolve the annotation as a positive integer.
