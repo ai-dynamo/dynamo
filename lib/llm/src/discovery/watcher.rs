@@ -1308,7 +1308,9 @@ fn effective_router_config<'a>(
         .kv_router_config
         .router_decode_policy
         .clone();
-    effective.session_affinity_ttl_secs = frontend_config.session_affinity_ttl_secs;
+    if frontend_config.session_affinity_ttl_secs.is_some() {
+        effective.session_affinity_ttl_secs = frontend_config.session_affinity_ttl_secs;
+    }
     effective.session_affinity_mode = frontend_config.session_affinity_mode;
     Cow::Owned(effective)
 }
@@ -2002,6 +2004,7 @@ mod tests {
         let mut worker = RouterConfig::default();
         worker.kv_router_config.router_temperature = 0.75;
         worker.kv_router_config.router_policy_config = Some("worker-policy.yaml".to_string());
+        worker.session_affinity_ttl_secs = Some(300);
 
         let effective = effective_router_config(Some(&worker), &frontend);
         assert_eq!(effective.kv_router_config.router_temperature, 0.75);
@@ -2019,6 +2022,11 @@ mod tests {
         );
         assert_eq!(effective.session_affinity_ttl_secs, Some(600));
         assert_eq!(effective.session_affinity_mode, SessionAffinityMode::Soft);
+        assert_eq!(
+            effective_router_config(Some(&worker), &RouterConfig::default())
+                .session_affinity_ttl_secs,
+            Some(300)
+        );
         assert!(worker.kv_router_config.router_prefill_policy.is_none());
         assert!(worker.kv_router_config.router_decode_policy.is_none());
     }
