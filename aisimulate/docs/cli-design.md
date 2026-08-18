@@ -555,7 +555,7 @@ engine:
 |---|---:|---|---|---|
 | `engine.mode` | `aggregated` | `{choices: [aggregated, disaggregated]}` | `-` | `aggregated` or `disaggregated`. |
 | `engine.model` | Required | `x` | `-` | Nonempty and fixed during recommendation. |
-| `engine.hardware` | Required | `auto` | `-` | Concrete assignment; `recommend` also accepts `auto` with `optimization.hardware`. |
+| `engine.hardware` | Required | `auto` | `-` | One hardware identifier; `recommend` also accepts `auto` resolved from `optimization.hardware`. |
 | `engine.backend` | `vllm` | `{choices: [vllm, sglang]}` | `-` | `vllm`, `sglang`, or `trtllm`; explicit choices may include supported alternatives. |
 | `engine.backend_version` | `null` | `x` | `-` | Fixed when set. |
 | `engine.context_length` | `"max"` | `x` | `-` | `"max"` derives the effective maximum from the resolved Hugging Face model config; a concrete value must be positive. |
@@ -582,12 +582,9 @@ engine:
 | `engine.kv_transfer.bandwidth_gb_per_second` | `null` | `x` | `-` | Positive when set; `null` disables transfer delay. |
 | `engine.kv_transfer.timing_mode` | `full_prompt` | `x` | `-` | `full_prompt` or `destination_missing`; disaggregated mode only. |
 
-`engine.hardware: auto` is valid only in `recommend` and requires the hardware inventory under
-`optimization.hardware`. The recommender searches the listed hardware SKUs subject to their available
-GPU counts. Every recommended simulation YAML replaces `auto` with a concrete assignment. Aggregated
-mode resolves to one hardware identifier. Disaggregated mode resolves either to one shared identifier
-or to `{prefill: <sku>, decode: <sku>}`; each worker pool is homogeneous, but the two pools may use
-different SKUs.
+`engine.hardware: auto` is valid only in `recommend` and requires the single hardware identifier under
+`optimization.hardware`. Every recommended simulation YAML replaces `auto` with that concrete
+identifier. All worker roles in aggregated or disaggregated mode use the same hardware.
 
 An aggregated configuration uses `workers.aggregated`. A disaggregated configuration uses
 `workers.prefill` and `workers.decode`:
@@ -624,11 +621,10 @@ engine:
       startup_seconds: 0
 ```
 
-All worker roles share the top-level model, backend, backend version, and context length in version 1.
-A disaggregated concrete hardware mapping may select different SKUs for prefill and decode; other
-role-specific model or backend selection is rejected. If `engine.mode` is a recommendation domain
-containing both modes, `workers` declares all three roles. Each concrete candidate retains only the
-role or roles active for its selected mode.
+All worker roles share the top-level model, hardware, backend, backend version, and context length in
+version 1. Role-specific model, hardware, or backend selection is rejected. If `engine.mode` is a
+recommendation domain containing both modes, `workers` declares all three roles. Each concrete
+candidate retains only the role or roles active for its selected mode.
 
 `kv_cache.capacity.type: default` and `timing.type: default` replace the previous public name `aic`.
 They select the stack's default capacity estimator and timing provider. The initial default registry
@@ -800,7 +796,7 @@ The following stay concrete in version 1:
 - Model, concrete hardware values, backend version, and context length.
 - Traffic source, token lengths, session shape, trace contents, and stopping condition.
 - Evaluation thresholds.
-- Optimization target, hardware inventory, constraints, and optimizer controls.
+- Optimization target, hardware selection, constraints, and optimizer controls.
 
 ## Optimization Goal
 
@@ -817,13 +813,13 @@ optimization:
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
 | `optimization.target` | `throughput` | `x` | `-` | Maximize `throughput`, `throughput_per_gpu`, `throughput_per_user`, `goodput`, or `goodput_per_gpu`; minimize `ttft` or `e2e_latency`; or compute `pareto`. |
-| `optimization.hardware` | `null` | `x` | `-` | Required inventory mapping for `engine.hardware: auto`; positive GPU count per SKU. |
+| `optimization.hardware` | `null` | `x` | `-` | One nonempty hardware identifier; required for `engine.hardware: auto`. |
 | `optimization.constraints.min_candidate_gpus` | `null` | `x` | `-` | Positive when set and no greater than the maximum. |
-| `optimization.constraints.max_candidate_gpus` | `32` | `x` | `-` | Positive and bounded by hardware inventory. |
+| `optimization.constraints.max_candidate_gpus` | `32` | `x` | `-` | Positive. |
 
 `pareto` is always the fixed `throughput_per_gpu` and `throughput_per_user` frontier. Goodput targets
-require `evaluation.sla`. Aggregated candidates choose one hardware SKU; disaggregated candidates may
-choose different prefill and decode SKUs without exceeding per-SKU inventory.
+require `evaluation.sla`. `optimization.hardware` never accepts a list or inventory mapping; every
+candidate uses its single hardware identifier.
 
 ## Optimizer Controls
 
@@ -944,9 +940,7 @@ evaluation:
 
 optimization:
   target: goodput_per_gpu
-  hardware:
-    H100-SXM-80GB: 16
-    H200-SXM-141GB: 32
+  hardware: H100-SXM-80GB
   constraints:
     min_candidate_gpus: 1
     max_candidate_gpus: 32
@@ -965,15 +959,13 @@ silently ignored.
 
 ## Pareto Recommendation Example
 
-The following replaces the `optimization` mapping from the scalar example. The hardware inventory is
-still required because that example uses `engine.hardware: auto`:
+The following replaces the `optimization` mapping from the scalar example. The single hardware value
+is still required because that example uses `engine.hardware: auto`:
 
 ```yaml
 optimization:
   target: pareto
-  hardware:
-    H100-SXM-80GB: 16
-    H200-SXM-141GB: 32
+  hardware: H100-SXM-80GB
   constraints:
     min_candidate_gpus: 1
     max_candidate_gpus: 32
