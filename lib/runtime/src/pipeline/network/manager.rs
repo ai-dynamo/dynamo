@@ -38,6 +38,11 @@ use tokio_util::sync::CancellationToken;
 struct RuntimeTcpScope {
     server: tokio::sync::OnceCell<Arc<SharedTcpServer>>,
     actual_port: OnceLock<u16>,
+    // This token deliberately belongs to the Tokio-runtime scope instead of any
+    // individual NetworkManager. Multiple DistributedRuntimes can share one Tokio
+    // runtime, and cancelling one manager's endpoint token must not stop the server
+    // used by its siblings. It also lets Phase 1 endpoint shutdown drain queued work
+    // before the runtime itself tears down this scope.
     cancellation_token: CancellationToken,
     runtime_alive: AtomicBool,
 }
@@ -62,6 +67,10 @@ impl RuntimeTcpScope {
         });
 
         scope
+    }
+
+    fn is_live(&self) -> bool {
+        self.runtime_alive.load(Ordering::Acquire) && !self.cancellation_token.is_cancelled()
     }
 }
 
@@ -94,10 +103,14 @@ fn current_runtime_tcp_scope() -> Arc<RuntimeTcpScope> {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     if let Some(scope) = scopes.get(&runtime_id).and_then(Weak::upgrade)
-        && scope.runtime_alive.load(Ordering::Acquire)
+        && scope.is_live()
     {
         return scope;
     }
+
+    // A long-lived process may create many short-lived runtimes. Do not retain
+    // one dead Weak entry for every runtime it has ever created.
+    scopes.retain(|_, weak| weak.upgrade().is_some_and(|scope| scope.is_live()));
 
     let scope = RuntimeTcpScope::new();
     scopes.insert(runtime_id, Arc::downgrade(&scope));
@@ -110,6 +123,9 @@ struct NetworkConfig {
     // TCP server configuration
     tcp_host: String,
     /// TCP port to bind to. If None, the OS will assign a free port.
+    ///
+    /// Each live Tokio runtime owns a distinct listener, so concurrent runtimes in
+    /// one process must use OS-assigned or otherwise distinct ports.
     tcp_port: Option<u16>,
 
     // TCP client configuration
@@ -286,7 +302,7 @@ impl NetworkManager {
         self.mode
     }
 
-    /// Return the OS-assigned TCP port after the request-plane server has started.
+    /// Return the actual bound TCP port after the request-plane server has started.
     pub fn actual_tcp_rpc_port(&self) -> Result<u16> {
         self.tcp_scope
             .get()
@@ -413,8 +429,15 @@ mod tests {
     use std::time::Duration;
 
     fn manager_for(mode: RequestPlaneMode) -> NetworkManager {
+        manager_for_with_token(mode, CancellationToken::new())
+    }
+
+    fn manager_for_with_token(
+        mode: RequestPlaneMode,
+        cancellation_token: CancellationToken,
+    ) -> NetworkManager {
         NetworkManager::new(
-            CancellationToken::new(),
+            cancellation_token,
             None,
             crate::component::Registry::new(),
             mode,
@@ -438,7 +461,7 @@ mod tests {
         }
     }
 
-    async fn start_and_probe_tcp_server() -> SocketAddr {
+    async fn start_and_probe_tcp_server() -> (SocketAddr, tokio::runtime::Id, NetworkManager) {
         let manager = manager_for(RequestPlaneMode::Tcp);
         let server = manager.server().await.unwrap();
         let address = server
@@ -456,37 +479,116 @@ mod tests {
         .expect("TCP server did not accept a connection before the deadline")
         .expect("TCP server address was not reachable");
 
-        address
+        (address, tokio::runtime::Handle::current().id(), manager)
     }
 
     #[test]
     fn tcp_server_is_not_reused_after_its_tokio_runtime_drops() {
-        let first_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        first_runtime.block_on(start_and_probe_tcp_server());
-        drop(first_runtime);
+        temp_env::with_var_unset("DYN_TCP_RPC_PORT", || {
+            let first_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let (_, first_runtime_id, first_manager) =
+                first_runtime.block_on(start_and_probe_tcp_server());
+            let first_scope = first_manager.tcp_scope.get().unwrap().clone();
+            drop(first_runtime);
 
-        let second_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        second_runtime.block_on(start_and_probe_tcp_server());
+            assert!(
+                !first_scope.is_live(),
+                "dropping the Tokio runtime must mark its retained TCP scope dead"
+            );
+
+            let second_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let (_, second_runtime_id, second_manager) =
+                second_runtime.block_on(start_and_probe_tcp_server());
+            let second_scope = second_manager.tcp_scope.get().unwrap();
+
+            assert!(second_scope.is_live());
+            assert!(
+                !Arc::ptr_eq(&first_scope, second_scope),
+                "a new Tokio runtime must not inherit a dead TCP scope"
+            );
+
+            let scopes = RUNTIME_TCP_SCOPES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if first_runtime_id != second_runtime_id {
+                assert!(
+                    !scopes.contains_key(&first_runtime_id),
+                    "dead entries from prior runtimes must be pruned"
+                );
+            }
+            assert!(scopes.contains_key(&second_runtime_id));
+        });
     }
 
     #[tokio::test]
     async fn tcp_managers_share_server_within_one_tokio_runtime() {
-        let first_manager = manager_for(RequestPlaneMode::Tcp);
-        let second_manager = manager_for(RequestPlaneMode::Tcp);
+        temp_env::async_with_vars([("DYN_TCP_RPC_PORT", None::<&str>)], async {
+            let first_manager = manager_for(RequestPlaneMode::Tcp);
+            let second_manager = manager_for(RequestPlaneMode::Tcp);
 
-        let first_server = first_manager.server().await.unwrap();
-        let second_server = second_manager.server().await.unwrap();
+            let first_server = first_manager.server().await.unwrap();
+            let second_server = second_manager.server().await.unwrap();
 
-        assert_eq!(first_server.address(), second_server.address());
-        assert_eq!(
-            first_manager.actual_tcp_rpc_port().unwrap(),
-            second_manager.actual_tcp_rpc_port().unwrap()
-        );
+            assert_eq!(first_server.address(), second_server.address());
+            assert_eq!(
+                first_manager.actual_tcp_rpc_port().unwrap(),
+                second_manager.actual_tcp_rpc_port().unwrap()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn manager_shutdown_does_not_stop_server_shared_on_tokio_runtime() {
+        temp_env::async_with_vars([("DYN_TCP_RPC_PORT", None::<&str>)], async {
+            let first_shutdown = CancellationToken::new();
+            let second_shutdown = CancellationToken::new();
+            let first_manager =
+                manager_for_with_token(RequestPlaneMode::Tcp, first_shutdown.clone());
+            let second_manager =
+                manager_for_with_token(RequestPlaneMode::Tcp, second_shutdown.clone());
+            let first_server = first_manager.server().await.unwrap();
+            let second_server = second_manager.server().await.unwrap();
+            let address = first_server
+                .address()
+                .strip_prefix("tcp://")
+                .unwrap()
+                .parse::<SocketAddr>()
+                .unwrap();
+
+            assert_eq!(first_server.address(), second_server.address());
+
+            first_shutdown.cancel();
+            tokio::task::yield_now().await;
+
+            assert!(first_shutdown.is_cancelled());
+            assert!(
+                !second_shutdown.is_cancelled(),
+                "manager shutdown tokens must remain independent"
+            );
+            assert!(
+                !second_manager
+                    .tcp_scope
+                    .get()
+                    .unwrap()
+                    .cancellation_token
+                    .is_cancelled(),
+                "one manager must not cancel the Tokio-runtime-shared TCP scope"
+            );
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::net::TcpStream::connect(address),
+            )
+            .await
+            .expect("shared TCP server did not accept a connection before the deadline")
+            .expect("shared TCP server stopped when only one manager shut down");
+        })
+        .await;
     }
 }

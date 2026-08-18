@@ -349,11 +349,10 @@ fn build_transport_type_inner(
     }
 }
 
-/// Build transport type, ensuring TCP server is initialized when needed.
+/// Build transport type, ensuring the TCP server is initialized when needed.
 ///
-/// In TCP mode with an OS-assigned port (`DYN_TCP_RPC_PORT` unset or invalid), the server must bind
-/// before we can construct a correct transport address. This helper ensures that initialization
-/// occurs, then delegates to the internal builder.
+/// The manager snapshots its bind configuration at construction time. Always advertise the
+/// bound port reported by that same manager rather than reading the environment again here.
 pub async fn build_transport_type(
     endpoint: &Endpoint,
     endpoint_id: &EndpointId,
@@ -361,19 +360,14 @@ pub async fn build_transport_type(
 ) -> Result<TransportType> {
     let mode = endpoint.drt().request_plane();
 
-    let fixed_tcp_port = std::env::var("DYN_TCP_RPC_PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .filter(|&p| p != 0);
-
-    let tcp_port = match (mode, fixed_tcp_port) {
-        (RequestPlaneMode::Tcp, Some(port)) => Some(port),
-        (RequestPlaneMode::Tcp, None) => {
-            // The server must bind before its OS-assigned port is available.
+    let tcp_port = match mode {
+        RequestPlaneMode::Tcp => {
+            // The server must bind before its actual port is available, including when
+            // DYN_TCP_RPC_PORT requested port 0 and the OS selected the final port.
             let _ = endpoint.drt().request_plane_server().await?;
             Some(endpoint.drt().network_manager().actual_tcp_rpc_port()?)
         }
-        (RequestPlaneMode::Nats, _) => None,
+        RequestPlaneMode::Nats => None,
     };
 
     build_transport_type_inner(mode, endpoint_id, connection_id, tcp_port)
