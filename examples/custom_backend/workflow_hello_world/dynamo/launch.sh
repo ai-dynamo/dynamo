@@ -44,7 +44,7 @@ python3 -m dynamo.frontend \
     --model-path "$MODEL" \
     --model-name hello-world \
     --workflow-provider \
-    examples.custom_backend.workflow_hello_world.dynamo.provider:provide_workflow &
+    examples.custom_backend.workflow_hello_world.dynamo.workflow:provide_workflow &
 
 DYN_SYSTEM_PORT="$HELLO_SYSTEM_PORT" \
 python3 -m examples.custom_backend.workflow_hello_world.dynamo.worker hello &
