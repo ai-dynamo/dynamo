@@ -305,9 +305,24 @@ impl ServedIndexerService {
         self.retired.load(Ordering::SeqCst)
     }
 
+    /// Stops every endpoint this service registered.
+    ///
+    /// Handles are taken one at a time rather than drained up front so that
+    /// cancelling this future cannot strand the endpoints it has not reached yet:
+    /// those stay owned by the service and a later call finishes them. The handle
+    /// in flight when a cancellation lands is safe either way, because
+    /// `StartedEndpoint::shutdown` cancels the endpoint's token before it awaits
+    /// the endpoint task, so its cleanup runs whether or not anyone awaits it.
     async fn stop_endpoints(&self) {
-        let endpoints = std::mem::take(&mut *self.endpoints.lock());
-        shutdown_endpoints(endpoints).await;
+        while let Some(endpoint) = self.take_endpoint() {
+            shutdown_endpoint(endpoint).await;
+        }
+    }
+
+    /// Separate from `stop_endpoints` so the lock guard is released by the time the
+    /// caller awaits.
+    fn take_endpoint(&self) -> Option<StartedEndpoint> {
+        self.endpoints.lock().pop()
     }
 }
 
@@ -316,11 +331,25 @@ impl ServedIndexerService {
 /// Awaiting matters: a spawned shutdown would leave a window in which discovery
 /// still advertises the retired endpoints and a replacement service in the other
 /// mode would be rejected.
+///
+/// How completely awaiting closes that window is backend-specific, and this is a
+/// weaker guarantee than it looks. The KV-store backend answers
+/// `DiscoveryClient::list` with a direct read, so an awaited unregistration is
+/// visible to the next `verify_service_topology`. The Kubernetes backend answers
+/// from an asynchronously refreshed watch snapshot, so it can still report the
+/// retired endpoints for a short time afterwards and reject the incoming mode
+/// once. That failure is transient rather than the wedge this change fixes: the
+/// registry entry is already gone by then, so a retry succeeds instead of hitting
+/// the same rejection forever.
 async fn shutdown_endpoints(endpoints: Vec<StartedEndpoint>) {
     for endpoint in endpoints {
-        if let Err(error) = endpoint.shutdown().await {
-            tracing::warn!(error = %error, "served indexer endpoint shutdown failed");
-        }
+        shutdown_endpoint(endpoint).await;
+    }
+}
+
+async fn shutdown_endpoint(endpoint: StartedEndpoint) {
+    if let Err(error) = endpoint.shutdown().await {
+        tracing::warn!(error = %error, "served indexer endpoint shutdown failed");
     }
 }
 
@@ -433,11 +462,18 @@ async fn get_or_start_service(
             return Ok(existing);
         }
 
-        // A retired entry observed under the lock is a leftover: retirement runs while
-        // holding this lock, so no retirement is in flight. Its bindings are empty by
-        // construction (the flag is only ever set over an empty map, and insertion
-        // refuses once it is set), so `retire_if_unused` reports true and the entry is
-        // replaced rather than returned.
+        // A retired entry observed under the lock is a leftover: mode-switch retirement
+        // runs while holding this lock, so no retirement of that kind is in flight. On
+        // that path its bindings are empty by construction (`retire_if_unused` only sets
+        // the flag over an empty map, and insertion refuses once it is set), so the call
+        // below reports true and the entry is replaced rather than returned.
+        //
+        // Runtime teardown is the exception, and the reason this is not phrased as an
+        // invariant: `mark_retired` sets the flag whether or not bindings remain. Such
+        // an entry is removed from the registry immediately afterwards, so it is
+        // visible here only for the width of that window, and if it does still hold
+        // bindings the call below reports false and the caller is told about the
+        // conflict rather than having a live service replaced underneath it.
         if !existing.retire_if_unused() {
             // Still in use by another router; the caller reports the conflict.
             return Ok(existing);
@@ -975,9 +1011,70 @@ mod tests {
         drop(handle);
 
         // See `shutdown_and_settle`: leaving teardown unfinished leaks sockets into
-        // the process-wide ZMQ context.
-        let _ = tokio::time::timeout(Duration::from_secs(10), shutdown_complete.cancelled()).await;
+        // the process-wide ZMQ context, so an incomplete teardown fails this test
+        // rather than silently slowing every later event-plane test in the binary.
+        if tokio::time::timeout(Duration::from_secs(10), shutdown_complete.cancelled())
+            .await
+            .is_err()
+        {
+            panic!("runtime did not finish shutting down");
+        }
         tokio::task::yield_now().await;
+    }
+
+    /// Interrupting endpoint teardown must not strand the endpoints it never reached.
+    ///
+    /// Draining every handle out of the service before the first await would leave a
+    /// dropped teardown future's unreached endpoints cancelled by nobody, still
+    /// advertised in discovery, and owned by nothing that could stop them later.
+    #[tokio::test]
+    async fn served_indexer_interrupted_teardown_retains_unreached_endpoints() {
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
+        let (drt, component) = registry_test_component("interrupted-teardown").await;
+        let key = service_key(&component);
+
+        // Approximate mode registers the record endpoint as well as the query one, so
+        // there is a second handle for an interrupted run to leave behind.
+        let handle = ensure_served_indexer_service(
+            component.clone(),
+            ServedIndexerMode::Approximate,
+            "model-a".to_string(),
+            Indexer::None,
+        )
+        .await
+        .expect("approximate served indexer should start");
+        let service = cached_service(&key).expect("service should be registered");
+        assert_eq!(service.endpoints.lock().len(), 2);
+
+        // Polls teardown exactly once, then drops it. One poll gets as far as awaiting
+        // the first endpoint's task, which cannot have finished yet: this is a
+        // current-thread runtime and the task has had no chance to run since its token
+        // was cancelled. `tokio::time::timeout` is deliberately not used here — with a
+        // zero duration it still yields to the runtime, which lets teardown run to
+        // completion and makes the assertion below vacuous.
+        let first_poll = {
+            let mut teardown = std::pin::pin!(service.stop_endpoints());
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            std::future::Future::poll(teardown.as_mut(), &mut cx)
+        };
+        assert!(
+            first_poll.is_pending(),
+            "teardown of a live endpoint should not complete in a single poll"
+        );
+        assert!(
+            !service.endpoints.lock().is_empty(),
+            "an interrupted teardown must leave the unreached handles with the service"
+        );
+
+        // The interrupted attempt cost nothing: a second one still drains the rest.
+        service.stop_endpoints().await;
+        assert!(
+            service.endpoints.lock().is_empty(),
+            "a completed teardown must own no endpoints"
+        );
+
+        drop(handle);
+        shutdown_and_settle(drt).await;
     }
 
     #[tokio::test]
