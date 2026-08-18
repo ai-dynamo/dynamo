@@ -325,9 +325,17 @@ fn prefix_cache_matches_past_the_first_chunk() {
     // The whole prompt is cached, so one admission consumes it all and nothing
     // is left waiting, regardless of chunked_prefill_size.
     assert_eq!(admit.admissions.len(), 1);
-    assert_eq!(admit.admissions[0].reused_input_tokens, prompt.len());
     assert_eq!(admit.can_run.len(), 1);
     assert_eq!(admit.can_run[0].materialized_tokens, prompt.len());
+
+    // The final page is held back for recomputation, so it is reported as
+    // computed rather than reused even though the cache holds it. Without the
+    // cap the allocator matches all 16 tokens and this prompt is modelled as
+    // zero prefill work, which understates the forward pass SGLang still runs
+    // to produce the first output token.
+    assert_eq!(admit.admissions[0].reused_input_tokens, prompt.len() - 4);
+    assert_eq!(admit.prefill_fpm[0].prefix_tokens, prompt.len() - 4);
+    assert_eq!(admit.prefill_fpm[0].tokens_computed, 4);
 }
 
 #[test]

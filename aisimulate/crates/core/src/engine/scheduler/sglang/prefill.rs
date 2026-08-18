@@ -155,7 +155,27 @@ pub(super) fn get_new_batch_prefill(
                 .extend_allocation(alloc_tokens, &mut lease)
                 .then_some(req.materialized_tokens)
         } else {
-            kv_manager.allocate_for_request_lease(alloc_tokens, &mut lease)
+            // The allocator matches the whole `chunk_end` slice, so when the final
+            // page is both complete and cached it reports the page this loop held
+            // back as reused and the request is accounted as zero prefill work —
+            // even though chunk budget was charged for it. Cap the reported prefix
+            // at `resume_from` so `tokens_computed` covers the page SGLang really
+            // does recompute to produce the first output token.
+            //
+            // Only for a request that will actually generate. With no output tokens
+            // there is nothing to produce and no forward pass to model, which is what
+            // `fully_cached_zero_output_request_is_not_forward_pass_work` pins down.
+            // The `resume_from` ceiling itself still applies in that case: without it
+            // a fully matched prompt yields `extend_input == 0` and is unschedulable.
+            //
+            // Only the reported prefix is trimmed; the lease still reuses every
+            // cached page.
+            let matched = kv_manager.allocate_for_request_lease(alloc_tokens, &mut lease);
+            if req.remaining_output_tokens() > 0 {
+                matched.map(|matched| matched.min(resume_from))
+            } else {
+                matched
+            }
         };
 
         let Some(prefix_len) = prefix_len else {
