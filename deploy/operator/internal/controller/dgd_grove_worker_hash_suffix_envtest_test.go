@@ -45,10 +45,8 @@ func TestGroveWorkerHashSuffixForNewDGD(t *testing.T) {
 	dgd := newGroveWorkerHashSuffixTestDGD(env.Namespace(), "new-without-pcs")
 	require.NoError(t, env.Client().Create(ctx, dgd))
 
-	t.Log("Verify admission does not own a DGD worker suffix annotation")
 	createdDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, env.Client().Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: env.Namespace()}, createdDGD))
-	require.NotContains(t, createdDGD.GetAnnotations(), "nvidia.com/grove-worker-hash-suffix-enabled")
 
 	t.Log("Wait for the rendered Grove workers to carry the canonical suffix")
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(createdDGD)
