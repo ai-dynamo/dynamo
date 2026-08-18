@@ -23,8 +23,9 @@ import (
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -40,7 +41,7 @@ import (
 )
 
 // setCheckpointOwner marks snap as controller-owned by ckpt (manual owner ref, scheme-free).
-func setCheckpointOwner(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, snap *nvidiacomv1alpha1.PodSnapshot) {
+func setCheckpointOwner(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, snap *snapshotv1alpha1.PodSnapshot) {
 	snap.OwnerReferences = []metav1.OwnerReference{{
 		APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
 		Kind:       "DynamoCheckpoint",
@@ -134,15 +135,15 @@ func TestFindSourcePod_IgnoresPodNotOwnedByJob(t *testing.T) {
 
 // foreignPodSnapshot builds a PodSnapshot at the checkpoint's name carrying the owner search label
 // but NOT controlled by ckpt (a name/label collision from another owner).
-func foreignPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) *nvidiacomv1alpha1.PodSnapshot {
-	return &nvidiacomv1alpha1.PodSnapshot{
+func foreignPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) *snapshotv1alpha1.PodSnapshot {
+	return &snapshotv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podSnapshotName(ckpt),
 			Namespace: testNamespace,
 			Labels:    map[string]string{consts.SnapshotOwnerLabel: ckpt.Name},
 		},
-		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
-			Source: nvidiacomv1alpha1.PodSnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "someone-else"}},
+		Spec: snapshotv1alpha1.PodSnapshotSpec{
+			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "someone-else"}},
 		},
 	}
 }
@@ -156,7 +157,7 @@ func TestCreatePodSnapshot_CreatesWhenAbsent(t *testing.T) {
 	require.NotNil(t, created)
 	assert.Equal(t, ckpt.Name, created.Name, "PodSnapshot name is the checkpoint name")
 
-	snap := &nvidiacomv1alpha1.PodSnapshot{}
+	snap := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(),
 		client.ObjectKey{Namespace: testNamespace, Name: podSnapshotName(ckpt)}, snap))
 	assert.Equal(t, ckpt.Name, snap.Labels[consts.SnapshotOwnerLabel])
@@ -226,7 +227,7 @@ func TestCreatePodSnapshot_AlreadyExistsOwnedReturnsExisting(t *testing.T) {
 	require.NotNil(t, second)
 	assert.Equal(t, first.Name, second.Name)
 
-	var snaps nvidiacomv1alpha1.PodSnapshotList
+	var snaps snapshotv1alpha1.PodSnapshotList
 	require.NoError(t, r.List(context.Background(), &snaps, client.InNamespace(testNamespace)))
 	assert.Len(t, snaps.Items, 1, "no duplicate snapshot created")
 }
@@ -250,7 +251,7 @@ func TestCreatePodSnapshot_AlreadyExistsNotYetVisibleRequeues(t *testing.T) {
 	name := podSnapshotName(ckpt)
 	funcs := interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			if _, ok := obj.(*nvidiacomv1alpha1.PodSnapshot); ok {
+			if _, ok := obj.(*snapshotv1alpha1.PodSnapshot); ok {
 				return apierrors.NewAlreadyExists(
 					schema.GroupResource{Group: "nvidia.com", Resource: "podsnapshots"}, name)
 			}

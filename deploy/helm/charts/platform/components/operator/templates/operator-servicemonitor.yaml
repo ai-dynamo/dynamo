@@ -29,7 +29,9 @@ metadata:
   name: {{ include "dynamo-operator.fullname" . }}-operator
   namespace: {{ .Release.Namespace }}
   labels:
-    release: prometheus
+    {{- with .Values.metricsService.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
     {{- include "dynamo-operator.labels" . | nindent 4 }}
 spec:
   selector:

@@ -50,7 +50,7 @@ jobs:
 
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, recipe-check, api-docs, fern-check, fern-broken-links, operator, snapshot, rust-tests, rust-clippy, docs-website-composition]
+    needs: [changed-files, pre-commit, recipe-check, api-docs, fern-check, fern-broken-links, operator, rust-tests, rust-clippy, docs-website-composition]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -314,21 +314,6 @@ jobs:
     - name: Run operator envtests
       working-directory: deploy/operator
       run: make envtest
-
-  snapshot:
-    needs: changed-files
-    if: needs.changed-files.outputs.snapshot == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
-    - name: Run snapshot agent checks
-      uses: ./.github/actions/check-deploy-component
-      with:
-        component: snapshot
-        platform: linux/amd64
 
   rust-tests:
     needs: changed-files

@@ -33,7 +33,7 @@ pub mod videos;
 
 use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
-    TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
+    TEMPERATURE_RANGE, validate_range, validate_top_p,
 };
 
 /// Side from which prompt tokens are truncated.
@@ -124,8 +124,9 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
 
         let mut temperature = validate_range(self.get_temperature(), &TEMPERATURE_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating temperature: {}", e))?;
-        let mut top_p = validate_range(self.get_top_p(), &TOP_P_RANGE)
-            .map_err(|e| anyhow::anyhow!("Error validating top_p: {}", e))?;
+        // `top_p` must be between MIN_TOP_P and MAX_TOP_P.
+        let mut top_p: Option<f32> = self.get_top_p();
+        validate_top_p(top_p).map_err(|e| anyhow::anyhow!("Error validating top_p: {}", e))?;
         let frequency_penalty =
             validate_range(self.get_frequency_penalty(), &FREQUENCY_PENALTY_RANGE)
                 .map_err(|e| anyhow::anyhow!("Error validating frequency_penalty: {}", e))?;
