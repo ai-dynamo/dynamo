@@ -19,7 +19,7 @@ FRONTEND_DECODING=false
 # This is intended for functional testing with small models (e.g. 2B) where CI
 # only has 1 GPU available. It reduces performance by:
 #   - Enabling --enforce-eager (disables torch.compile and CUDA graph capture)
-#   - Hardcoding P/D KV cache to 512 MB (skips all memory profiling)
+#   - Capping P/D KV cache at 2 GiB for the default model (skips memory profiling)
 #   - Limiting --max-model-len to 4096 tokens on P/D workers
 #   - Limiting P/D workers to image=3,video=3,audio=0 (--limit-mm-per-prompt)
 #   - Using lower gpu-memory-utilization fractions to share the GPU
@@ -29,10 +29,10 @@ SINGLE_GPU=false
 # Layout: encode + prefill on GPU 0, decode on GPU 1. Preserves the disagg
 # semantic — prefill→decode KV transfer still crosses the GPU boundary via
 # NIXL — while halving the GPU footprint vs the default 3-GPU mode. Same
-# small-KV defaults as --single-gpu (enforce-eager, 512 MB KV, max-model-len
-# 4096, limit-mm-per-prompt 3/3/0) so it's a functional-testing knob, not a
-# perf config. Override _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES to grow the
-# KV cap when profiling.
+# packed-worker defaults as --single-gpu (enforce-eager, 2 GiB default KV cap,
+# max-model-len 4096, limit-mm-per-prompt 3/3/0) so it's a functional-testing
+# knob, not a perf config. Override _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES when
+# profiling another model.
 TWO_GPU=false
 
 # Parse command line arguments
@@ -163,10 +163,9 @@ if [[ "$SINGLE_GPU" == "true" || "$TWO_GPU" == "true" ]]; then
     EXTRA_ARGS="--enforce-eager"
     # Default KV cache cap for packed worker layouts.
     #
-    # vLLM has a preflight check: KV must hold at least one max-model-len
-    # request. For LLaVA-1.5-7b at max-model-len=4096, that's ~2 GiB
-    # minimum. 512 MB used to work for older vLLM / smaller max-model-len
-    # but vLLM 0.20+ rejects it.
+    # vLLM requires the KV cache to hold at least one max-model-len request.
+    # The default LLaVA-1.5-7b model needs approximately 2 GiB at
+    # max-model-len=4096. Smaller models may use lower profiled values.
     #
     # The profiler/test framework overrides via _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES,
     # and gpu_utils.sh builds args.
