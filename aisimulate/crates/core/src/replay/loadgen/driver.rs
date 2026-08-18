@@ -2248,6 +2248,29 @@ mod tests {
     }
 
     #[test]
+    fn agentic_lane_waits_for_quiescence_after_causal_completion() {
+        let trace = agentic_trace(vec![
+            agentic_node("a", "play-a", 0.0, Vec::new()),
+            agentic_node("b", "play-b", 0.0, Vec::new()),
+        ]);
+        let mut driver = WorkloadDriver::new_agentic_trace_with_lanes(trace, 1, 1).unwrap();
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].authored_request_id.as_deref(), Some("a"));
+        driver
+            .on_causal_terminal(first[0].request_uuid, 10.0, ReplayTerminalStatus::Completed)
+            .unwrap();
+        assert!(driver.pop_ready(20.0, usize::MAX).is_empty());
+
+        driver.on_quiescent(first[0].request_uuid, 20.0).unwrap();
+        let second = driver.pop_ready(20.0, usize::MAX);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].authored_request_id.as_deref(), Some("b"));
+        assert_eq!(second[0].dispatched_at_ms, 20.0);
+    }
+
+    #[test]
     fn agentic_join_uses_the_slowest_completion_constraint() {
         let spawn = |request_id| {
             agentic_node(

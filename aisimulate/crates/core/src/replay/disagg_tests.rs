@@ -16,7 +16,11 @@ use crate::replay::components::{AdmissionQueue, NoReplayMetadata, ReplayEngineOb
 use crate::replay::core::EngineEventBatch;
 use crate::replay::core::round_robin::PoolRoundRobinPlacement;
 use crate::replay::engine::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
-use crate::replay::loadgen::{SessionTrace, Trace, TurnTrace};
+use crate::replay::loadgen::{
+    AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticDependency,
+    AgenticDependencyRelation, AgenticDependencyTrigger, AgenticHashIdScope, AgenticMooncakeHeader,
+    AgenticMooncakeRow, AgenticSourceProvenance, AgenticTrace, SessionTrace, Trace, TurnTrace,
+};
 
 struct CaptureOncePolicy {
     at_ms: f64,
@@ -254,6 +258,67 @@ fn request(
         arrival_timestamp_ms: Some(arrival_ms),
         ..Default::default()
     }
+}
+
+fn agentic_row(
+    request_id: &str,
+    play_id: &str,
+    input_length: usize,
+    output_length: usize,
+    block_size: usize,
+    hash_seed: u64,
+    dependencies: Vec<AgenticDependency>,
+) -> AgenticMooncakeRow {
+    let block_count = input_length.div_ceil(block_size);
+    AgenticMooncakeRow {
+        request_id: request_id.to_string(),
+        play_id: play_id.to_string(),
+        session_id: play_id.to_string(),
+        model: "model".to_string(),
+        input_length: Some(input_length),
+        output_length: Some(output_length),
+        hash_ids: Some(
+            (0..block_count)
+                .map(|block| hash_seed + block as u64)
+                .collect(),
+        ),
+        dependencies,
+        ..Default::default()
+    }
+}
+
+fn agentic_trace(block_size: usize, rows: Vec<AgenticMooncakeRow>) -> AgenticTrace {
+    AgenticTrace::from_agentic_mooncake_rows(
+        AgenticMooncakeHeader {
+            schema: AGENTIC_MOONCAKE_SCHEMA.to_string(),
+            version: AGENTIC_MOONCAKE_VERSION,
+            block_size,
+            hash_id_scope: AgenticHashIdScope::Local,
+            source: AgenticSourceProvenance {
+                format: "test".to_string(),
+                digest: "agentic-pd-lifecycle".to_string(),
+            },
+        },
+        rows,
+    )
+    .unwrap()
+}
+
+fn run_agentic_workload_collect(
+    config: &TestDisaggConfig,
+    trace: AgenticTrace,
+    lanes: usize,
+) -> (ReplayReport, DisaggRuntimeStats) {
+    let driver =
+        WorkloadDriver::new_agentic_trace_with_lanes(trace, config.prefill_args.block_size, lanes)
+            .unwrap();
+    let (collector, stats) =
+        DisaggRuntime::new_workload(config, None, None, driver, ReplayMode::Trace)
+            .unwrap()
+            .with_per_request_records(true)
+            .run()
+            .unwrap();
+    (collector.finish(), stats)
 }
 
 struct DisaggRuntime;
@@ -680,6 +745,193 @@ fn decode_terminal_retains_handoff_until_deferred_cleanup_drains() {
                 .all(|snapshot| snapshot.phase == DisaggPhase::Done)
         );
     }
+}
+
+#[rstest::rstest]
+#[case(EngineType::Vllm)]
+#[case(EngineType::Sglang)]
+fn agentic_pd_edges_use_emission_and_final_decode_boundaries(#[case] engine_type: EngineType) {
+    let mut config = match engine_type {
+        EngineType::Vllm => disagg_config(),
+        EngineType::Sglang => sglang_disagg_config(),
+        EngineType::Trtllm => unreachable!(),
+    };
+    config.num_prefill_workers = 1;
+    config.num_decode_workers = 1;
+    let block_size = config.prefill_args.block_size;
+    let trace = agentic_trace(
+        block_size,
+        vec![
+            agentic_row("root", "play", 256, 20, block_size, 1_000, Vec::new()),
+            agentic_row(
+                "dispatch-child",
+                "play",
+                128,
+                1,
+                block_size,
+                2_000,
+                vec![AgenticDependency {
+                    request_id: "root".to_string(),
+                    trigger: AgenticDependencyTrigger::Dispatch,
+                    delay_ms: 0.0,
+                    relation: AgenticDependencyRelation::Spawn,
+                }],
+            ),
+            agentic_row(
+                "completion-child",
+                "play",
+                128,
+                1,
+                block_size,
+                3_000,
+                vec![AgenticDependency {
+                    request_id: "root".to_string(),
+                    trigger: AgenticDependencyTrigger::Completion,
+                    delay_ms: 0.0,
+                    relation: AgenticDependencyRelation::Sequence,
+                }],
+            ),
+        ],
+    );
+
+    let (report, _) = run_agentic_workload_collect(&config, trace, 1);
+    let by_id = report
+        .per_request
+        .iter()
+        .map(|record| (record.request_id.as_deref().unwrap(), record))
+        .collect::<std::collections::HashMap<_, _>>();
+    let root = by_id["root"];
+    let dispatch_child = by_id["dispatch-child"];
+    let completion_child = by_id["completion-child"];
+
+    assert_eq!(dispatch_child.dispatched_at_ms, root.dispatched_at_ms);
+    assert!(
+        completion_child.dispatched_at_ms.unwrap() >= root.terminal_time_ms,
+        "completion child must wait for final decode terminal: {by_id:#?}"
+    );
+    let trajectories = report.trajectories.unwrap();
+    assert_eq!(trajectories.total, 1);
+    assert_eq!(trajectories.completed, 1);
+    assert_eq!(trajectories.incomplete, 0);
+}
+
+#[rstest::rstest]
+#[case(EngineType::Vllm)]
+#[case(EngineType::Sglang)]
+fn agentic_lane_recycles_only_after_pd_quiescence(#[case] engine_type: EngineType) {
+    let mut config = cleanup_overtake_config(engine_type);
+    config.num_prefill_workers = 1;
+    config.num_decode_workers = 1;
+    let block_size = config.prefill_args.block_size;
+    let trace = agentic_trace(
+        block_size,
+        vec![
+            agentic_row(
+                "first-root",
+                "play-0",
+                block_size,
+                1,
+                block_size,
+                10_000,
+                Vec::new(),
+            ),
+            agentic_row(
+                "long-prefill-child",
+                "play-0",
+                100_000,
+                1,
+                block_size,
+                20_000,
+                vec![AgenticDependency {
+                    request_id: "first-root".to_string(),
+                    trigger: AgenticDependencyTrigger::Dispatch,
+                    delay_ms: 0.0,
+                    relation: AgenticDependencyRelation::Spawn,
+                }],
+            ),
+            agentic_row(
+                "next-root",
+                "play-1",
+                block_size,
+                1,
+                block_size,
+                30_000,
+                Vec::new(),
+            ),
+        ],
+    );
+
+    let (report, _) = run_agentic_workload_collect(&config, trace, 1);
+    let by_id = report
+        .per_request
+        .iter()
+        .map(|record| (record.request_id.as_deref().unwrap(), record))
+        .collect::<std::collections::HashMap<_, _>>();
+    let next_dispatch = by_id["next-root"].dispatched_at_ms.unwrap();
+    for request_id in ["first-root", "long-prefill-child"] {
+        let prior = by_id[request_id];
+        assert!(next_dispatch >= prior.terminal_time_ms);
+        assert!(next_dispatch >= prior.source_released_ms.unwrap());
+    }
+    let trajectories = report.trajectories.unwrap();
+    assert_eq!(trajectories.total, 2);
+    assert_eq!(trajectories.completed, 2);
+    assert_eq!(trajectories.incomplete, 0);
+}
+
+#[test]
+fn agentic_prefill_rejection_skips_descendants_and_releases_the_lane() {
+    let mut config = disagg_config();
+    config.num_prefill_workers = 1;
+    config.num_decode_workers = 1;
+    config.prefill_args.block_size = 4;
+    config.prefill_args.num_gpu_blocks = 4;
+    config.prefill_args.max_num_batched_tokens = 64;
+    config.decode_args.block_size = 4;
+    config.decode_args.num_gpu_blocks = 4;
+    config.decode_args.max_num_batched_tokens = 64;
+    let trace = agentic_trace(
+        4,
+        vec![
+            agentic_row("rejected-root", "play-0", 100, 1, 4, 40_000, Vec::new()),
+            agentic_row(
+                "skipped-child",
+                "play-0",
+                4,
+                1,
+                4,
+                50_000,
+                vec![AgenticDependency {
+                    request_id: "rejected-root".to_string(),
+                    trigger: AgenticDependencyTrigger::Completion,
+                    delay_ms: 0.0,
+                    relation: AgenticDependencyRelation::Sequence,
+                }],
+            ),
+            agentic_row("next-root", "play-1", 4, 1, 4, 60_000, Vec::new()),
+        ],
+    );
+
+    let (report, _) = run_agentic_workload_collect(&config, trace, 1);
+    assert_eq!(report.per_request.len(), 2);
+    assert!(
+        report
+            .per_request
+            .iter()
+            .all(|record| record.request_id.as_deref() != Some("skipped-child"))
+    );
+    assert!(report.per_request.iter().any(|record| {
+        record.request_id.as_deref() == Some("rejected-root")
+            && record.terminal_status == ReplayTerminalStatus::Rejected
+    }));
+    assert!(report.per_request.iter().any(|record| {
+        record.request_id.as_deref() == Some("next-root")
+            && record.terminal_status == ReplayTerminalStatus::Completed
+    }));
+    let trajectories = report.trajectories.unwrap();
+    assert_eq!(trajectories.total, 2);
+    assert_eq!(trajectories.completed, 1);
+    assert_eq!(trajectories.incomplete, 1);
 }
 
 #[test]
