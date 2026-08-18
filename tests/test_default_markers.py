@@ -4,11 +4,9 @@
 """Tests for the repository-wide default-marker hook."""
 
 from pathlib import Path
+from types import ModuleType
 
 import pytest
-
-import conftest as root_conftest_plugin
-from conftest import _NO_DEFAULT_MARKERS_ENV, pytest_itemcollected
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 pytest_plugins = ["pytester"]
@@ -27,16 +25,27 @@ class _FakeItem:
         self.markers.add(marker.name)
 
 
-def test_unmarked_test_gets_both_defaults():
+@pytest.fixture
+def root_conftest(request: pytest.FixtureRequest) -> ModuleType:
+    """Return the repository-root conftest without importing an ambiguous name."""
+    root_path = Path(__file__).parents[1] / "conftest.py"
+    for plugin in request.config.pluginmanager.get_plugins():
+        plugin_file = getattr(plugin, "__file__", None)
+        if plugin_file and Path(plugin_file).resolve() == root_path.resolve():
+            return plugin
+    pytest.fail("Repository-root conftest plugin was not loaded")
+
+
+def test_unmarked_test_gets_both_defaults(root_conftest):
     item = _FakeItem()
-    pytest_itemcollected(item)
+    root_conftest.pytest_itemcollected(item)
     assert item.markers == {"pre_merge", "gpu_0"}
 
 
 def test_unmarked_test_in_sibling_collection_root_gets_both_defaults(pytester):
     """The root hook must cover trees that do not load tests/conftest.py."""
-    root_conftest = Path(root_conftest_plugin.__file__)
-    pytester.makeconftest(root_conftest.read_text())
+    root_conftest_path = Path(__file__).parents[1] / "conftest.py"
+    pytester.makeconftest(root_conftest_path.read_text())
     sibling_root = pytester.path / "components" / "src"
     sibling_root.mkdir(parents=True)
     sibling_test = sibling_root / "test_unmarked.py"
@@ -53,29 +62,29 @@ def test_unmarked_test_in_sibling_collection_root_gets_both_defaults(pytester):
     result.assert_outcomes(passed=1)
 
 
-def test_machine_marker_is_not_overridden():
+def test_machine_marker_is_not_overridden(root_conftest):
     """A gpu_2 test must not also become gpu_0 and match CPU-only selectors."""
     item = _FakeItem("gpu_2")
-    pytest_itemcollected(item)
+    root_conftest.pytest_itemcollected(item)
     assert item.markers == {"gpu_2", "pre_merge"}
 
 
-def test_non_gpu_machine_markers_are_recognized():
+def test_non_gpu_machine_markers_are_recognized(root_conftest):
     """xpu/h100/k8s tests declare hardware and must keep it."""
     item = _FakeItem("xpu_1", "post_merge")
-    pytest_itemcollected(item)
+    root_conftest.pytest_itemcollected(item)
     assert item.markers == {"xpu_1", "post_merge"}
 
 
-def test_defaults_disabled_by_env(monkeypatch):
+def test_defaults_disabled_by_env(monkeypatch, root_conftest):
     """The marker gate relies on this opt-out to see authored markers only."""
-    monkeypatch.setenv(_NO_DEFAULT_MARKERS_ENV, "1")
+    monkeypatch.setenv(root_conftest._NO_DEFAULT_MARKERS_ENV, "1")
     item = _FakeItem()
-    pytest_itemcollected(item)
+    root_conftest.pytest_itemcollected(item)
     assert item.markers == set()
 
 
-def test_marker_gate_opts_out_with_the_same_env_var():
+def test_marker_gate_opts_out_with_the_same_env_var(root_conftest):
     """A typo in the report's copy of the name would silently re-mask the gate."""
     source = Path(__file__).parent / "report_pytest_markers.py"
-    assert _NO_DEFAULT_MARKERS_ENV in source.read_text()
+    assert root_conftest._NO_DEFAULT_MARKERS_ENV in source.read_text()
