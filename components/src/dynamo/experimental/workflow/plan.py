@@ -5,19 +5,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping, Tuple
+from typing import Mapping
 
 from dynamo.experimental.workflow.ir import WorkflowIR
-from dynamo.experimental.workflow.types import (
-    StageContract,
-    ValueRef,
-    WorkflowValidationError,
-    validate_name,
-)
-
-IN_PROCESS_CARRIER = "in_process"
+from dynamo.experimental.workflow.types import StageContract, WorkflowValidationError, validate_name
 
 
 @dataclass(frozen=True)
@@ -34,30 +27,11 @@ Binding = InlineBinding
 
 
 @dataclass(frozen=True)
-class EdgePlan:
-    """One physical producer-to-consumer connection in an execution plan."""
-
-    source: ValueRef
-    target_stage: str
-    target_port: str
-    carrier: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.source, ValueRef):
-            raise WorkflowValidationError("edge source must use ValueRef")
-        validate_name(self.target_stage, "edge target stage")
-        validate_name(self.target_port, "edge target port")
-        if self.carrier != IN_PROCESS_CARRIER:
-            raise WorkflowValidationError(f"unsupported edge carrier {self.carrier!r}")
-
-
-@dataclass(frozen=True)
 class ExecutionPlan:
-    """A workflow plus in-memory placement and carrier decisions."""
+    """A workflow plus immutable in-memory stage bindings."""
 
     workflow: WorkflowIR
     bindings: Mapping[str, Binding]
-    edges: Tuple[EdgePlan, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not isinstance(self.workflow, WorkflowIR):
@@ -83,51 +57,7 @@ class ExecutionPlan:
                 f"extra={sorted(actual_stages - expected_stages)}"
             )
 
-        edges = tuple(self.edges)
-        actual_edges: dict[tuple[str, str], EdgePlan] = {}
-        for edge in edges:
-            if not isinstance(edge, EdgePlan):
-                raise WorkflowValidationError("execution plan edges must use EdgePlan")
-            key = (edge.target_stage, edge.target_port)
-            if key in actual_edges:
-                raise WorkflowValidationError(
-                    f"duplicate edge targeting stage {key[0]!r} port {key[1]!r}"
-                )
-            actual_edges[key] = edge
-
-        expected_edges = {
-            (stage.id, port): source
-            for stage in self.workflow.stages
-            for port, source in stage.inputs.items()
-        }
-        if set(actual_edges) != set(expected_edges):
-            missing = sorted(set(expected_edges) - set(actual_edges))
-            extra = sorted(set(actual_edges) - set(expected_edges))
-            raise WorkflowValidationError(
-                "execution plan edges differ from workflow inputs; "
-                f"missing={missing}, extra={extra}"
-            )
-        for key, source in expected_edges.items():
-            edge = actual_edges[key]
-            if edge.source != source:
-                raise WorkflowValidationError(
-                    f"edge targeting stage {key[0]!r} port {key[1]!r} "
-                    "does not match the workflow definition"
-                )
-            if edge.carrier != IN_PROCESS_CARRIER:
-                raise WorkflowValidationError(
-                    f"inline stage {key[0]!r} port {key[1]!r} requires "
-                    "the in-process carrier"
-                )
-
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
-        object.__setattr__(
-            self,
-            "edges",
-            tuple(
-                sorted(edges, key=lambda edge: (edge.target_stage, edge.target_port))
-            ),
-        )
 
     @property
     def stage_contracts(self) -> Mapping[str, StageContract]:
