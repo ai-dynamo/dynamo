@@ -23,7 +23,8 @@ KV-aware selection is provided by the runtime-free
 [selection service](../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/standalone-selection.md),
 which the EPP runs **in-process**: the EPP and the selection service are compiled into one binary,
 so there is no separate selector Deployment and no HTTP hop. The EPP can run single-replica, or
-**replicated** with cross-replica active-load sync between EPP pods (see
+**replicated** with cross-replica active-load sync and startup KV-index recovery between EPP pods
+(see
 [Replicated mode](../../../../../docs/fern/pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx#epp-replication)).
 
 Whether the EPP uses the Dynamo runtime or not is controlled with the `DYN_EPP_MODE` environment
@@ -66,8 +67,9 @@ flowchart LR
 - Operator-managed lifecycle for Workers, Services, `InferencePool`, and EPP resources.
 - Request migration, rejection, cancellation - overall admission control
 - Data parallelism (The standalone mode which targets DP=1.)
-- Cross-replica KV-index warm-up when new replica re-warms from live traffic + replay.
-- Initial worker cache-state synchronization instead of rebuilding the index only from live traffic.
+- Active-reservation or load-state snapshots. Replica lifecycle events converge only after a replica
+  joins.
+- An atomic KV-index snapshot plus live-event handoff or event-cursor protocol.
 - Per-tenant KV cache isolation with x-tenant-id / cache_salt. This requires per-engine support and as such is not supported in the Standalone mode.
 - Management of Transient disconnects. In the Dynamo mode the KV-cache updates the worker sent during the gap are recovered from the worker's **replay** socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is set (and the vLLM worker exposes one); otherwise the index refreshes from new traffic.
 - Dropped events / gaps management. The `SelectionCore` indexer does seq-watermark gap detection and replays missed events from the worker's replay socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is configured. Without a replay socket, gaps are dropped and the index re-warms from new traffic.
