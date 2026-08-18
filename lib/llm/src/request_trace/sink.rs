@@ -136,9 +136,12 @@ impl RequestTraceSink for JsonlRequestTraceSink {
 
     async fn emit(&self, record: &RequestTraceRecord) {
         let guard = self.writer.lock().await;
-        match guard.as_ref() {
-            Some(writer) if writer.send(record.clone()).await.is_ok() => {}
-            _ => tracing::warn!("request trace file sink closed; dropping record"),
+        let sent = match guard.as_ref() {
+            Some(writer) => writer.send(record.clone()).await.is_ok(),
+            None => false,
+        };
+        if !sent {
+            tracing::warn!("request trace file sink closed; dropping record");
         }
     }
 
