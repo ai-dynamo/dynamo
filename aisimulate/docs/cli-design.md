@@ -695,6 +695,7 @@ planner:
 | `planner.kalman_q_trend` | `0.1` | `{choices: [0.1, 1.0]}` | `load_predictor` | Positive; Kalman only. |
 | `planner.kalman_r` | `10.0` | `{choices: [5.0, 10.0]}` | `load_predictor` | Positive; Kalman only. |
 | `planner.kalman_min_points` | `5` | `{choices: [3, 5]}` | `load_predictor` | Positive; Kalman only. |
+| `planner.max_num_gpus` | `8` | `x` | `-` | Positive Planner runtime scaling ceiling; maps to Dynamo Planner `max_gpu_budget`. |
 | `planner.min_workers` | `1` | `-` | `-` | Nonnegative. |
 | `planner.prefill_min_workers` | `null` | `-` | `-` | Positive when set. |
 | `planner.decode_min_workers` | `null` | `-` | `-` | Positive when set. |
@@ -708,15 +709,15 @@ YAML.
 dimensions. `load_predictor` is different: its candidates run in a pre-sweep for every selected
 throughput-adjustment interval, and the winning predictor mapping is materialized into the candidate.
 
-`planner.policy`, `planner.target`, and the three runtime minimum-worker knobs are not covered by a
-preset. `simulate` may set a concrete target and otherwise uses `throughput`. In `recommend`, target
-is derived: throughput targets and Pareto map to `throughput`, `ttft` and `e2e_latency` map to
-`latency`, and goodput targets map to `sla`.
+`planner.policy`, `planner.target`, `planner.max_num_gpus`, and the three runtime minimum-worker knobs
+are not covered by a preset. `simulate` may set a concrete target and otherwise uses `throughput`. In
+`recommend`, target is derived: throughput targets and Pareto map to `throughput`, `ttft` and
+`e2e_latency` map to `latency`, and goodput targets map to `sla`.
 
-Planner runtime minimums and recommendation candidate GPU constraints are separate:
+Planner runtime limits and recommendation candidate GPU constraints are separate:
 
-- `planner.min_workers`, `prefill_min_workers`, and `decode_min_workers` constrain runtime scaling
-  during one simulated candidate run.
+- `planner.max_num_gpus`, `min_workers`, `prefill_min_workers`, and `decode_min_workers` constrain
+  runtime scaling during one simulated candidate run.
 - `optimization.constraints` constrains which static candidate deployments the recommender evaluates.
 
 When `planner.policy: disabled` or the `disabled` scaling-policy preset is selected, no Planner
