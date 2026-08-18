@@ -56,6 +56,11 @@ pub struct Recorder<T> {
     event_tx: Option<mpsc::Sender<T>>,
     /// A cancellation token for managing shutdown
     cancel: CancellationToken,
+    /// Set by [`Recorder::close`] before it drops the sender, to mark a graceful
+    /// close as in progress. While it is set the writer task stops honouring
+    /// `cancel`, so a cancellation raised during the drain cannot cut the drain
+    /// short. Owned by this recorder alone and never handed out.
+    closing: CancellationToken,
     /// Counter for the number of events written
     event_count: Arc<Mutex<usize>>,
     /// Time when the first event was received
@@ -113,6 +118,8 @@ where
         let event_count = Arc::new(Mutex::new(0));
         let event_count_clone = event_count.clone();
         let cancel_clone = token.clone();
+        let closing = CancellationToken::new();
+        let closing_clone = closing.clone();
         let start_time = Instant::now();
         let first_event_time = Arc::new(Mutex::new(None));
         let first_event_time_clone = first_event_time.clone();
@@ -172,7 +179,11 @@ where
                 tokio::select! {
                     biased;
 
-                    _ = cancel_clone.cancelled() => {
+                    // Disabled once a graceful close is in progress. `select!` is
+                    // `biased`, so without this guard an already-cancelled token would
+                    // win every iteration and the drain arm below would never be
+                    // reached, abandoning events `close` promised to write.
+                    _ = cancel_clone.cancelled(), if !closing_clone.is_cancelled() => {
                         // Flush any pending writes before shutting down
                         if let Err(e) = writer.flush().await {
                             tracing::error!("Failed to flush on shutdown: {}", e);
@@ -300,6 +311,7 @@ where
         Ok(Self {
             event_tx: Some(event_tx),
             cancel: token,
+            closing,
             event_count,
             first_event_time,
             writer_task: Some(writer_task),
@@ -345,11 +357,34 @@ where
     /// writer task sees `None` after at most the events already accepted.
     /// Callers holding a clone from [`Recorder::event_sender`] must drop it
     /// first, otherwise the channel stays open and this call waits for them.
+    ///
+    /// The drain takes precedence over the cancellation token passed to the
+    /// constructor: a cancellation raised once this call is under way no longer
+    /// cuts the drain short.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the writer task panicked, or if the cancellation token
+    /// had **already** been cancelled when this was called. In that case the
+    /// writer task had stopped before the graceful path could take effect, so
+    /// events queued at that point were abandoned and this call cannot make the
+    /// guarantee its name implies. It reports that rather than returning `Ok`.
     pub async fn close(mut self) -> anyhow::Result<()> {
+        // Order matters: block the abrupt branch before closing the channel, so a
+        // cancellation racing this call cannot preempt the drain.
+        self.closing.cancel();
+        let cancelled_before_close = self.cancel.is_cancelled();
+
         drop(self.event_tx.take());
         if let Some(writer_task) = self.writer_task.take() {
             writer_task.await.context("recorder writer task panicked")?;
         }
+
+        anyhow::ensure!(
+            !cancelled_before_close,
+            "recorder was already cancelled when close was called; \
+             events still queued at that point were abandoned"
+        );
         Ok(())
     }
 
@@ -759,5 +794,156 @@ mod tests {
         );
 
         println!("Load test with file rotation completed successfully");
+    }
+
+    /// Two-way handshake used to park the writer task inside `Serialize` for as
+    /// long as the test needs, with no sleeping on either side: the writer
+    /// announces it is parked, then blocks until released.
+    struct BarrierGate {
+        parked_tx: mpsc::UnboundedSender<()>,
+        release_rx: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    /// Event whose serialization blocks on a [`BarrierGate`] when one is
+    /// attached. The gate is never serialized, so the on-disk shape is `{"id":N}`.
+    #[derive(Clone, Deserialize)]
+    struct BarrierEvent {
+        id: u64,
+        #[serde(skip)]
+        gate: Option<Arc<BarrierGate>>,
+    }
+
+    impl Serialize for BarrierEvent {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            if let Some(gate) = &self.gate {
+                gate.parked_tx.send(()).expect("test still listening");
+                // Ignore the result: a dropped release sender also releases us.
+                let _ = gate.release_rx.lock().unwrap().recv();
+            }
+            let mut state = serializer.serialize_struct("BarrierEvent", 1)?;
+            state.serialize_field("id", &self.id)?;
+            state.end()
+        }
+    }
+
+    fn recorded_ids(path: &Path) -> Vec<u64> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+                entry["event"]["id"].as_u64().unwrap()
+            })
+            .collect()
+    }
+
+    /// A cancellation raised *after* `close` has started must not cut the drain
+    /// short. The writer task's `select!` is `biased` with the cancellation branch
+    /// first, so without the graceful-close guard the cancellation would win the
+    /// next iteration and abandon everything still queued.
+    ///
+    /// Determinism comes from two things and no sleeping: the writer task is
+    /// parked inside record 1's `Serialize` and so cannot poll the `select!` at
+    /// all, and `close`'s future is polled once by hand before the cancellation,
+    /// which runs everything up to its first `.await` — the graceful-close signal
+    /// and the sender drop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_drains_even_when_cancelled_mid_drain() {
+        const EVENTS: u64 = 32;
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("cancel_during_close.jsonl");
+
+        let token = CancellationToken::new();
+        let recorder: Recorder<BarrierEvent> = Recorder::new_with_options(
+            token.clone(),
+            &file_path,
+            RecorderOptions {
+                // Large buffer and no flush timer, so only the drain on channel
+                // close can get these records to disk.
+                buffer_bytes: 1024 * 1024,
+                flush_interval: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let event_tx = recorder.event_sender();
+
+        let (parked_tx, mut parked_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new(BarrierGate {
+            parked_tx,
+            release_rx: std::sync::Mutex::new(release_rx),
+        });
+
+        // Event 1 parks the writer task inside its own serialization.
+        event_tx
+            .send(BarrierEvent {
+                id: 1,
+                gate: Some(gate),
+            })
+            .await
+            .unwrap();
+        parked_rx.recv().await.expect("writer task parked");
+
+        // Events 2..=N queue up behind the parked writer.
+        for id in 2..=EVENTS {
+            event_tx
+                .send(BarrierEvent { id, gate: None })
+                .await
+                .expect("send accepted while the writer is busy");
+        }
+        drop(event_tx);
+
+        // Drive `close` up to its first `.await`: the graceful-close signal is set
+        // and the recorder's own sender is dropped, but the writer task is still
+        // parked and has not observed either.
+        let mut close_fut = Box::pin(recorder.close());
+        assert!(
+            futures::poll!(close_fut.as_mut()).is_pending(),
+            "close cannot finish while the writer task is parked"
+        );
+
+        // Now cancel, then release. The writer wakes with the token already
+        // cancelled and must still drain.
+        token.cancel();
+        release_tx.send(()).expect("writer task waiting on release");
+
+        close_fut
+            .await
+            .expect("close after a mid-drain cancellation");
+
+        assert_eq!(
+            recorded_ids(&file_path),
+            (1..=EVENTS).collect::<Vec<_>>(),
+            "every accepted event must survive a cancellation raised during close"
+        );
+    }
+
+    /// `close` cannot honour its guarantee when the token was cancelled before it
+    /// was ever called: the writer task has already stopped and whatever was
+    /// queued is gone. It must report that rather than returning `Ok`.
+    #[tokio::test]
+    async fn close_reports_a_cancellation_that_preceded_it() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("cancelled_before_close.jsonl");
+
+        let token = CancellationToken::new();
+        let recorder = TestEventRecorder::new(token.clone(), &file_path, None, None, None)
+            .await
+            .unwrap();
+
+        token.cancel();
+
+        let error = recorder
+            .close()
+            .await
+            .expect_err("close must not claim success after an earlier cancellation");
+        assert!(
+            error.to_string().contains("already cancelled"),
+            "unexpected error: {error}"
+        );
     }
 }
