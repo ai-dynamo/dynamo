@@ -36,11 +36,11 @@ fn direct_weka_and_materialized_v2_compile_to_identical_graphs() {
         "block_size": 4,
         "hash_id_scope": "local",
         "requests": [
-            {"t":0.0,"type":"s","model":"model","in":8,"out":2,"hash_ids":[1,2],"api_time":1.0},
+            {"t":0.0,"type":"s","model":"model","in":8,"out":2,"hash_ids":[1,2],"api_time":1.302552},
             {"t":0.2,"type":"subagent","agent_id":"a","subagent_type":"Explore","duration_ms":500,"status":"completed","requests":[
                 {"t":0.25,"type":"s","model":"model","in":6,"out":1,"hash_ids":[3,4],"api_time":0.25}
             ],"models":["model"]},
-            {"t":0.7,"type":"s","model":"model","in":12,"out":3,"hash_ids":[1,2,5]}
+            {"t":1.303837,"type":"s","model":"model","in":12,"out":3,"hash_ids":[1,2,5]}
         ]
     });
     std::fs::write(&source, serde_json::to_vec(&weka).unwrap()).unwrap();

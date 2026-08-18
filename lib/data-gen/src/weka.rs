@@ -20,6 +20,8 @@ use crate::{
 const JOIN_EPSILON_SECONDS: f64 = 1e-6;
 const SEAM_MAX_GAP_SECONDS: f64 = 3600.0;
 const SEAM_MIN_OVERLAP_RATIO: f64 = 0.5;
+const NANOSECONDS_PER_SECOND: f64 = 1_000_000_000.0;
+const NANOSECONDS_PER_MILLISECOND: f64 = 1_000_000.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WekaImportSummary {
@@ -466,8 +468,9 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
                 AgenticDependency {
                     request_id: row_by_source[&predecessor.source_id].clone(),
                     trigger: AgenticDependencyTrigger::Completion,
-                    delay_ms: (request.request.t - request_end(&predecessor.request)).max(0.0)
-                        * 1000.0,
+                    delay_ms: seconds_to_milliseconds(
+                        request.request.t - request_end(&predecessor.request),
+                    ),
                     relation: AgenticDependencyRelation::Sequence,
                 },
             );
@@ -489,12 +492,12 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
         let (trigger, delay_ms) = if first.request.t < request_end(&parent.request) {
             (
                 AgenticDependencyTrigger::Dispatch,
-                (first.request.t - parent.request.t).max(0.0) * 1000.0,
+                seconds_to_milliseconds(first.request.t - parent.request.t),
             )
         } else {
             (
                 AgenticDependencyTrigger::Completion,
-                (first.request.t - request_end(&parent.request)).max(0.0) * 1000.0,
+                seconds_to_milliseconds(first.request.t - request_end(&parent.request)),
             )
         };
         push_dependency(
@@ -543,9 +546,9 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
             AgenticDependency {
                 request_id: row_by_source[&root_source].clone(),
                 trigger: AgenticDependencyTrigger::Dispatch,
-                delay_ms: (first.request.t - streams[root_stream_index].requests[0].request.t)
-                    .max(0.0)
-                    * 1000.0,
+                delay_ms: seconds_to_milliseconds(
+                    first.request.t - streams[root_stream_index].requests[0].request.t,
+                ),
                 relation: AgenticDependencyRelation::Spawn,
             },
         );
@@ -572,7 +575,7 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
                 output_length: Some(request.request.output_length.max(1)),
                 output_token_ids: None,
                 hash_ids: Some(hash_ids),
-                not_before_ms: (request.request.t - root_time).max(0.0) * 1000.0,
+                not_before_ms: seconds_to_milliseconds(request.request.t - root_time),
                 priority: None,
                 strict_priority: None,
                 policy_class: None,
@@ -1170,6 +1173,10 @@ fn subagent_end(subagent: &WekaSubagent) -> f64 {
 
 fn request_end(request: &WekaRequest) -> f64 {
     request.t + request.api_time.unwrap_or(0.0).max(0.0)
+}
+
+fn seconds_to_milliseconds(seconds: f64) -> f64 {
+    (seconds.max(0.0) * NANOSECONDS_PER_SECOND).round() / NANOSECONDS_PER_MILLISECOND
 }
 
 fn request_order(left: &IndexedRequest, right: &IndexedRequest) -> std::cmp::Ordering {
