@@ -7,7 +7,7 @@ from dynamo.workflow.builder import StageHandle, Workflow
 from dynamo.workflow.compiler import DeploymentSpec, compile_workflow
 from dynamo.workflow.ir import StageIR, WorkflowIR
 from dynamo.workflow.orchestrator import WorkflowOrchestrator
-from dynamo.workflow.plan import EdgePlan, ExecutionPlan, InlineBinding
+from dynamo.workflow.plan import ExecutionPlan, InlineBinding
 from dynamo.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
 from dynamo.workflow.types import (
     PortSpec,
@@ -21,7 +21,6 @@ from dynamo.workflow.types import (
 __all__ = [
     "PortSpec",
     "DeploymentSpec",
-    "EdgePlan",
     "StageContract",
     "StageHandle",
     "StageIR",

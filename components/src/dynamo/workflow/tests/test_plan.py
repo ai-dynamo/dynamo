@@ -5,12 +5,10 @@ import pytest
 
 from dynamo.workflow import (
     DeploymentSpec,
-    EdgePlan,
     ExecutionPlan,
     InlineBinding,
     StageContract,
     StreamSpec,
-    ValueRef,
     ValueSpec,
     Workflow,
     WorkflowValidationError,
@@ -44,22 +42,14 @@ def _workflow() -> Workflow:
 def test_execution_plan_contains_only_in_memory_decisions() -> None:
     plan = compile_workflow(_workflow(), DeploymentSpec.inline(normalize="normalizer"))
 
+    assert plan.workflow == _workflow().build()
     assert plan.bindings == {"normalize": InlineBinding(runner_key="normalizer")}
-    assert plan.edges == (
-        EdgePlan(
-            source=ValueRef.for_input("text"),
-            target_stage="normalize",
-            target_port="text",
-            carrier="in_process",
-        ),
-    )
 
 
 def test_compilation_defaults_to_stage_id_inline_bindings() -> None:
     plan = compile_workflow(_workflow())
 
     assert plan.bindings == {"normalize": InlineBinding(runner_key="normalize")}
-    assert all(edge.carrier == "in_process" for edge in plan.edges)
 
 
 def test_compilation_rejects_declared_stream_execution() -> None:
@@ -81,19 +71,11 @@ def test_compilation_rejects_declared_stream_execution() -> None:
         compile_workflow(workflow)
 
 
-def test_execution_plan_rejects_invalid_physical_edges() -> None:
+def test_execution_plan_rejects_missing_stage_bindings() -> None:
     plan = compile_workflow(_workflow(), DeploymentSpec.inline(normalize="normalizer"))
 
-    with pytest.raises(WorkflowValidationError, match="does not match"):
+    with pytest.raises(WorkflowValidationError, match=r"missing=\['normalize'\]"):
         ExecutionPlan(
             workflow=plan.workflow,
-            bindings=plan.bindings,
-            edges=(
-                EdgePlan(
-                    source=ValueRef.for_input("other"),
-                    target_stage="normalize",
-                    target_port="text",
-                    carrier="in_process",
-                ),
-            ),
+            bindings={},
         )
