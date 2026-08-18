@@ -630,7 +630,7 @@ See [ScalingAdapter](#scalingadapter).
 </ParamField>
 
 <ParamField path="eppConfig" type="EPPConfig">
-Deprecated Go-EPP configuration. Omit for the native Rust EPP; kept for upgrade compatibility. Only applicable when ComponentType is "epp".
+EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components. Only applicable when ComponentType is "epp". Deprecated: omit this field for the native Rust EPP. Presence of eppConfig keeps the Go EPP Pod contract until migration clears it.
 See [EPPConfig](#eppconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -791,7 +791,7 @@ See [ScalingAdapter](#scalingadapter).
 </ParamField>
 
 <ParamField path="eppConfig" type="EPPConfig">
-Deprecated Go-EPP configuration. Omit for the native Rust EPP; kept for upgrade compatibility. Only applicable when ComponentType is "epp".
+EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components. Only applicable when ComponentType is "epp". Deprecated: omit this field for the native Rust EPP. Presence of eppConfig keeps the Go EPP Pod contract until migration clears it.
 See [EPPConfig](#eppconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -1321,7 +1321,9 @@ See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1
 
 <Accordion id="eppconfig" title="EPPConfig">
 EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
-Deprecated: omit for the native Rust EPP; kept for upgrade compatibility.
+
+Deprecated: Go EPP is deprecated. New EPP components should omit eppConfig and
+use the native Rust EPP. Kept for round-trip and upgrade compatibility.
 
 
 **Kind:** `type`
@@ -2938,7 +2940,7 @@ See [ScalingAdapter](#v1beta1-scalingadapter).
 </ParamField>
 
 <ParamField path="eppConfig" type="EPPConfig">
-Deprecated Go-EPP configuration. Omit for the native Rust EPP; kept for upgrade compatibility. Only meaningful when `type` is `epp`.
+eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin components. Only meaningful when `type` is `epp`. Deprecated: omit this field for the native Rust EPP. Presence of `eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config mount) so existing DGDs keep running across operator upgrades until migration is started by clearing this field.
 See [EPPConfig](#v1beta1-eppconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -3041,7 +3043,7 @@ See [ScalingAdapter](#v1beta1-scalingadapter).
 </ParamField>
 
 <ParamField path="eppConfig" type="EPPConfig">
-Deprecated Go-EPP configuration. Omit for the native Rust EPP; kept for upgrade compatibility. Only meaningful when `type` is `epp`.
+eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin components. Only meaningful when `type` is `epp`. Deprecated: omit this field for the native Rust EPP. Presence of `eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config mount) so existing DGDs keep running across operator upgrades until migration is started by clearing this field.
 See [EPPConfig](#v1beta1-eppconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -3511,7 +3513,11 @@ See [PlacementStatus](#v1beta1-placementstatus).
 
 <Accordion id="v1beta1-eppconfig" title="EPPConfig">
 EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
-Deprecated: omit for the native Rust EPP; kept for upgrade compatibility.
+
+Deprecated: Go EPP is deprecated. New EPP components should omit `eppConfig`
+and use the native Rust EPP (env-var configuration only). Existing DGDs that
+still set `eppConfig` keep the Go EPP Pod contract until they migrate
+explicitly by clearing `eppConfig` (and updating the image).
 
 
 **Kind:** `type`

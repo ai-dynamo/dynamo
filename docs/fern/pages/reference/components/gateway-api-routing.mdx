@@ -25,9 +25,9 @@ and is configured through `DYN_*` environment variables. It implements the GAIE
 </ParamField>
 
 <ParamField path="spec.components[].eppConfig" type="object">
-  Deprecated Go-EPP configuration. Omit for the native Rust EPP. When present, the operator keeps
-  the legacy Go EPP Pod contract (CLI flags and config mount) so existing DGDs survive operator
-  upgrades until you migrate by clearing this field and updating the image. See
+  Deprecated Go-EPP configuration. When present, keep the EPP image pinned to 1.4; upgrading only
+  the Dynamo Operator does not require migration. To select the native Rust EPP, remove this field
+  and switch the image to 1.5 or later in the same update. Admission rejects mixed combinations. See
   [Route Requests with Gateway API](../../kubernetes/kv-aware-routing/gateway-api.mdx).
 </ParamField>
 

@@ -132,6 +132,16 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	// Validate runtime compatibility against the source-version fields.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
 		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
+		if spec.ComponentType == nvidiacomv1beta1.ComponentTypeEPP {
+			if err := eppRuntimeCompatibilityError(
+				image,
+				spec.RuntimeVersionOverride,
+				spec.EPPConfig != nil,
+				fldPath.Child("eppConfig"),
+			); err != nil {
+				allErrs = append(allErrs, err)
+			}
+		}
 		if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.allowMissingRuntimeVersionOverride &&

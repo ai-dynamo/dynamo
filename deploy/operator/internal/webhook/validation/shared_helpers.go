@@ -45,6 +45,8 @@ const (
 	runtimeVersionOverrideRequiredMessage = "is required when the specified main container image has no parseable semantic-version tag"
 )
 
+var nativeRustEPPMinRuntimeVersion = runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}
+
 // runtimeVersionValidationSource identifies the API representation whose field
 // paths must be used for runtime-version validation errors.
 type runtimeVersionValidationSource uint8
@@ -120,6 +122,38 @@ func runtimeVersionOverrideRequired(image, override string) bool {
 	}
 	_, err := runtimeversion.ParseImageVersion(image)
 	return err != nil
+}
+
+// eppRuntimeCompatibilityError returns the cross-field error for an EPP image/config mismatch.
+// Invalid or unavailable runtime versions are reported by the runtime-version validator.
+func eppRuntimeCompatibilityError(
+	image string,
+	override string,
+	hasEPPConfig bool,
+	eppConfigPath *field.Path,
+) *field.Error {
+	version, err := runtimeversion.Resolve(image, override)
+	if err != nil {
+		return nil
+	}
+
+	if version.Compare(nativeRustEPPMinRuntimeVersion) >= 0 {
+		if hasEPPConfig {
+			return field.Forbidden(
+				eppConfigPath,
+				"must be omitted for native Rust EPP images with runtime version 1.5.0 or later",
+			)
+		}
+		return nil
+	}
+
+	if !hasEPPConfig {
+		return field.Required(
+			eppConfigPath,
+			"is required for legacy Go EPP images with runtime version earlier than 1.5.0",
+		)
+	}
+	return nil
 }
 
 func hasContainerNamed(containers []corev1.Container, name string) bool {

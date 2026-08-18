@@ -220,13 +220,13 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 	spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName:          "epp",
 		ComponentType:          nvidiacomv1beta1.ComponentTypeEPP,
-		RuntimeVersionOverride: "1.1.0",
+		RuntimeVersionOverride: "1.5.0",
 		PodTemplate: &corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
 			},
 			Spec: corev1.PodSpec{
-				Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}, {Name: "sidecar"}},
+				Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/dynamo-frontend:1.5.0"}, {Name: "sidecar"}},
 				InitContainers: []corev1.Container{{Name: "init"}},
 			},
 		},

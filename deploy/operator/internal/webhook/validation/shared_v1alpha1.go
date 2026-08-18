@@ -80,6 +80,16 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	// Validate runtime compatibility against the source-version fields.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
 		image, imagePath := runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
+		if spec.ComponentType == consts.ComponentTypeEPP {
+			if err := eppRuntimeCompatibilityError(
+				image,
+				spec.RuntimeVersionOverride,
+				spec.EPPConfig != nil,
+				fldPath.Child("eppConfig"),
+			); err != nil {
+				allErrs = append(allErrs, err)
+			}
+		}
 		if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.allowMissingRuntimeVersionOverride &&
