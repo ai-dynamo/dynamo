@@ -120,13 +120,13 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:e2ab50957fc309d3fb110e6331ab8bfb7dd4f0074df41cbbf0bc3c64c8bc0e52",
+      "baseline_digest": "sha256:3309c2e1f7b1048fea9f392423afd91080c9f9e63796692872cff477e2562220",
       "baseline_image": "vllm/vllm-openai-xpu",
-      "baseline_sbom": "vllm-openai-xpu@e2ab5095-amd64.cdx.json",
-      "baseline_tag": "v0.26.0",
-      "from_digest": "sha256:e2ab50957fc309d3fb110e6331ab8bfb7dd4f0074df41cbbf0bc3c64c8bc0e52",
+      "baseline_sbom": "vllm-openai-xpu@3309c2e1-amd64.cdx.json",
+      "baseline_tag": "v0.27.1",
+      "from_digest": "sha256:3309c2e1f7b1048fea9f392423afd91080c9f9e63796692872cff477e2562220",
       "from_image": "vllm/vllm-openai-xpu",
-      "from_tag": "v0.26.0",
+      "from_tag": "v0.27.1",
       "platform": "linux/amd64"
     },
     {

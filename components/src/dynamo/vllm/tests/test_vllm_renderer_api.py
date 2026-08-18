@@ -545,6 +545,10 @@ class TestVllmRendererApi:
         preprocessing and tool_parser.extract_tool_calls_streaming(...)
         during streaming post-processing.
         """
+        assert isinstance(ToolParser.engine_based_streaming, bool), (
+            "ToolParser.engine_based_streaming contract changed; update the "
+            "engine-parser flush path in frontend/prepost.py"
+        )
         assert hasattr(ToolParser, "adjust_request"), (
             "ToolParser no longer has 'adjust_request'; "
             "update preprocess_chat_request in "
@@ -587,6 +591,16 @@ class TestVllmRendererApi:
         and extract_reasoning on the non-streaming finalize path to separate
         reasoning tokens from content tokens.
         """
+        assert isinstance(ReasoningParser.engine_based_streaming, bool), (
+            "ReasoningParser.engine_based_streaming contract changed; update "
+            "the engine-parser path in frontend/prepost.py"
+        )
+        assert hasattr(
+            ReasoningParser, "has_engine_confirmed_reasoning_end"
+        ), "ReasoningParser no longer exposes the engine-confirmed end state"
+        assert hasattr(
+            ReasoningParser, "adjust_initial_state_from_prompt"
+        ), "ReasoningParser no longer exposes prompt-state adjustment"
         assert hasattr(ReasoningParser, "extract_reasoning_streaming"), (
             "ReasoningParser no longer has 'extract_reasoning_streaming'; "
             "update StreamingPostProcessor in "
