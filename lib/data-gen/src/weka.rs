@@ -905,14 +905,16 @@ fn resolve_seams(
             continue;
         };
         let new_tail_hashes = chains[owner].tail_hashes.clone();
+        let new_tail = &request_by_source[&new_tail_source];
         for candidate in registered {
             if candidate == elected || chains[candidate].spliced_into.is_some() {
                 continue;
             }
-            let depth = lcp(
-                &new_tail_hashes,
-                &chains[candidate].requests[0].request.hash_ids,
-            );
+            let candidate_first = &chains[candidate].requests[0].request;
+            if new_tail.t > candidate_first.t + JOIN_EPSILON_SECONDS {
+                continue;
+            }
+            let depth = lcp(&new_tail_hashes, &candidate_first.hash_ids);
             if depth == 0 {
                 continue;
             }

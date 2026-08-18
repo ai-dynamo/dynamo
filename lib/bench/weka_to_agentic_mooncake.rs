@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use dynamo_data_gen::{MooncakeJsonlWriter, WekaImporter};
+use dynamo_mocker::loadgen::AgenticTrace;
 
 #[derive(Debug, Parser)]
 #[command(name = "weka_to_agentic_mooncake")]
@@ -38,6 +39,7 @@ fn main() -> Result<()> {
     writer.write_agentic_header(importer.header())?;
     let summary = importer.for_each_row(|row| writer.write_agentic_row(&row))?;
     let stats = writer.finish()?;
+    AgenticTrace::from_agentic_mooncake(temporary_path.as_ref())?;
     temporary_path
         .persist(&args.output)
         .with_context(|| format!("failed to publish {}", args.output.display()))?;

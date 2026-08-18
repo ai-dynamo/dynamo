@@ -1464,9 +1464,16 @@ fn validate_agentic_trace_is_acyclic(
     if visited == nodes.len() {
         return Ok(());
     }
+    let blocked = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(index, degree)| (*degree > 0).then_some(nodes[index].request_id.as_str()))
+        .take(8)
+        .collect::<Vec<_>>();
     bail!(
-        "cycle detected among {} agentic requests",
-        nodes.len() - visited
+        "cycle detected among {} agentic requests; blocked request IDs: {}",
+        nodes.len() - visited,
+        blocked.join(", ")
     )
 }
 

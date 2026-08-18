@@ -62,6 +62,38 @@ fn direct_weka_and_materialized_v2_compile_to_identical_graphs() {
     );
 }
 
+#[test]
+fn weka_seam_rekey_never_uses_a_future_parent() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.json");
+    let weka = serde_json::json!({
+        "id": "play",
+        "models": ["model"],
+        "block_size": 4,
+        "hash_id_scope": "local",
+        "requests": [
+            {"t":0.0,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,3],"api_time":0.2},
+            {"t":1.0,"type":"s","model":"model","in":8,"out":1,"hash_ids":[1,9],"api_time":0.2},
+            {"t":2.0,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,8],"api_time":0.2}
+        ]
+    });
+    std::fs::write(&source, serde_json::to_vec(&weka).unwrap()).unwrap();
+
+    let trace = load_weka_trace(&source).unwrap();
+    let early_fork = trace
+        .nodes()
+        .iter()
+        .find(|node| node.request_id().ends_with("outer:1"))
+        .unwrap();
+
+    assert!(
+        early_fork
+            .dependencies()
+            .iter()
+            .all(|dependency| { !dependency.request_id.ends_with("outer:2") })
+    );
+}
+
 fn request_trace_row(
     request_id: &str,
     block_size: usize,
