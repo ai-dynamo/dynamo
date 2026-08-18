@@ -25,8 +25,7 @@ use dynamo_kv_router::indexer::cuckoo::{
 #[cfg(test)]
 use dynamo_kv_router::protocols::ExternalSequenceBlockHash;
 use dynamo_kv_router::protocols::{
-    DpRank, KvCacheEventData, KvCacheEventError, RouterEvent, StorageTier, WorkerId,
-    WorkerWithDpRank,
+    DpRank, KvCacheEventData, KvCacheEventError, RouterEvent, WorkerId, WorkerWithDpRank,
 };
 #[cfg(feature = "ckf-diagnostics")]
 use parking_lot::Mutex;
@@ -1195,28 +1194,16 @@ fn replacement_state(
                 message: "event identity does not match replacement rank".to_string(),
             });
         }
-        if event.storage_tier != StorageTier::Device {
-            continue;
-        }
-        let KvCacheEventData::Stored(store) = event.event.data else {
-            return Err(KvDcRelayError::InvalidTreeDump {
+        replacement.push_event(event).map_err(|error| match error {
+            KvCacheEventError::AllocationFailed => KvDcRelayError::Build(
+                dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
+            ),
+            _ => KvDcRelayError::InvalidTreeDump {
                 worker_id,
                 dp_rank,
-                message: "tree dump contains a non-Stored event".to_string(),
-            });
-        };
-        replacement
-            .push_store(&store)
-            .map_err(|error| match error {
-                KvCacheEventError::AllocationFailed => KvDcRelayError::Build(
-                    dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
-                ),
-                _ => KvDcRelayError::InvalidTreeDump {
-                    worker_id,
-                    dp_rank,
-                    message: format!("tree dump is not canonical replay order: {error}"),
-                },
-            })?;
+                message: format!("tree dump is not canonical replay order: {error}"),
+            },
+        })?;
     }
     Ok(replacement)
 }
