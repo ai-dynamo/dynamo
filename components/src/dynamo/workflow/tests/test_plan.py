@@ -141,8 +141,37 @@ def test_remote_rich_value_cannot_cross_a_process_boundary(
     value = workflow.input("value", value_spec)
     result = workflow.stage("stage", contract, value=value)
     workflow.output("result", result.result)
+    deployment = DeploymentSpec.remote(stage="workflows.stage.generate")
 
-    with pytest.raises(WorkflowValidationError, match="cannot cross a process boundary"):
+    with pytest.raises(
+        WorkflowValidationError, match="cannot cross a process boundary"
+    ):
+        compile_workflow(workflow, deployment)
+
+    with pytest.raises(
+        WorkflowValidationError, match="cannot cross a process boundary"
+    ):
+        ExecutionPlan(
+            workflow=workflow.build(),
+            bindings=deployment.bindings,
+        )
+
+
+def test_remote_rich_workflow_output_cannot_cross_a_process_boundary() -> None:
+    rich_value = ValueSpec(type="object", class_id="opaque.Value")
+    contract = StageContract(
+        id="rich-output-stage",
+        inputs={"request": ValueSpec(type="json")},
+        outputs={"value": rich_value},
+    )
+    workflow = Workflow("remote-rich-output")
+    request = workflow.input("request", ValueSpec(type="json"))
+    result = workflow.stage("stage", contract, request=request)
+    workflow.output("value", result.value)
+
+    with pytest.raises(
+        WorkflowValidationError, match="cannot cross a process boundary"
+    ):
         compile_workflow(
             workflow,
             DeploymentSpec.remote(stage="workflows.stage.generate"),
