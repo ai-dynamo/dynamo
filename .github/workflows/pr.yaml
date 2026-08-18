@@ -120,6 +120,17 @@ jobs:
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
+  finalize-pull-request-branch:
+    name: Finalize pull request branch
+    needs: changed-files
+    if: ${{ always() }}
+    # Deliberately load privileged deletion logic from the default branch,
+    # never from the pull-request commit executing this caller workflow.
+    uses: ai-dynamo/dynamo/.github/workflows/finalize-pull-request-branch.yml@main
+    permissions:
+      actions: read
+      contents: read
+
   backend-status-check:
     runs-on: ubuntu-latest
     needs:
