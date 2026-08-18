@@ -608,6 +608,7 @@ struct GenerateMetricCollector {
     tracker: Arc<RequestTracker>,
     input_tokens: usize,
     output_tokens: usize,
+    worker_info_observed: bool,
 }
 
 impl GenerateMetricCollector {
@@ -623,7 +624,28 @@ impl GenerateMetricCollector {
             tracker,
             input_tokens,
             output_tokens: 0,
+            worker_info_observed: false,
         }
+    }
+
+    /// Copy routed worker labels once, after the tracker has populated them.
+    fn observe_worker_info(&mut self) {
+        if self.worker_info_observed {
+            return;
+        }
+
+        let Some(worker) = self.tracker.get_worker_info() else {
+            return;
+        };
+        self.response.set_worker_info(
+            worker.prefill_worker_id,
+            worker.prefill_dp_rank,
+            self.tracker.prefill_worker_type().map(String::from),
+            worker.decode_worker_id,
+            worker.decode_dp_rank,
+            self.tracker.decode_worker_type().map(String::from),
+        );
+        self.worker_info_observed = true;
     }
 
     fn observe(&mut self, annotated: &Annotated<LLMEngineOutput>) {
@@ -631,25 +653,22 @@ impl GenerateMetricCollector {
             return;
         };
 
-        if let Some(worker) = self.tracker.get_worker_info() {
-            self.response.set_worker_info(
-                worker.prefill_worker_id,
-                worker.prefill_dp_rank,
-                self.tracker.prefill_worker_type().map(String::from),
-                worker.decode_worker_id,
-                worker.decode_dp_rank,
-                self.tracker.decode_worker_type().map(String::from),
-            );
-        }
+        self.observe_worker_info();
 
         let cached_tokens = output
             .completion_usage
             .as_ref()
+            // A migrated attempt includes already-delivered output tokens in
+            // its prompt. Ignore that attempt-local usage for this logical
+            // request and let the RequestTracker fallback run on drop.
+            .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
             .and_then(|usage| usage.prompt_tokens_details.as_ref())
             .and_then(|details| details.cached_tokens)
             .map(|tokens| tokens as usize);
         self.response.observe_cached_tokens(cached_tokens);
 
+        // RetryManager appends delivered tokens to the retried request and only
+        // yields newly generated deltas, so this remains exact across migration.
         let chunk_tokens = output.token_ids.len();
         self.output_tokens += chunk_tokens;
         self.response.observe_current_osl(self.output_tokens);
@@ -661,6 +680,16 @@ impl GenerateMetricCollector {
         }
         self.response
             .observe_response(self.input_tokens, chunk_tokens);
+    }
+}
+
+impl Drop for GenerateMetricCollector {
+    fn drop(&mut self) {
+        // Matching backend usage is authoritative when present. The response
+        // collector latches it during streaming; this logical-request router
+        // estimate fills missing or migration-expanded attempt usage.
+        self.response
+            .observe_cached_tokens(self.tracker.cached_tokens());
     }
 }
 
@@ -929,7 +958,7 @@ mod tests {
         pin::Pin,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU32, Ordering},
         },
         task::{Context as TaskContext, Poll},
         time::Duration,
@@ -941,7 +970,8 @@ mod tests {
     use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
     use dynamo_runtime::{
         engine::{AsyncEngine, ResponseStream},
-        pipeline::{Error, ManyOut, SingleIn},
+        pipeline::{Error, ManyOut, Operator, ServerStreamingEngine, SingleIn},
+        protocols::maybe_error::MaybeError,
     };
     use futures::Stream;
     use tokio::sync::Notify;
@@ -1028,6 +1058,15 @@ mod tests {
 
     struct MetricEngine;
 
+    struct MigrationMetricBackend {
+        calls: AtomicU32,
+    }
+
+    struct MigrationMetricEngine {
+        migration: Arc<crate::migration::Migration>,
+        backend: Arc<MigrationMetricBackend>,
+    }
+
     struct TokenThenPendingEngine {
         started: Arc<Notify>,
         dropped: Arc<AtomicBool>,
@@ -1102,6 +1141,75 @@ mod tests {
             });
             let stream = first.chain(second);
             Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for MigrationMetricBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let prompt_tokens = request.token_ids.len() as u32;
+            let context = request.context();
+            let stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> =
+                if call == 0 {
+                    assert_eq!(prompt_tokens, 3);
+                    Box::pin(futures::stream::iter([
+                        Annotated::from_data(LLMEngineOutput {
+                            token_ids: vec![10],
+                            index: Some(0),
+                            ..Default::default()
+                        }),
+                        Annotated::from_err(
+                            dynamo_runtime::error::DynamoError::builder()
+                                .error_type(dynamo_runtime::error::ErrorType::Disconnected)
+                                .message("migrate after one delivered token")
+                                .build(),
+                        ),
+                    ]))
+                } else {
+                    assert_eq!(call, 1);
+                    assert_eq!(prompt_tokens, 4);
+                    Box::pin(futures::stream::iter([Annotated::from_data(
+                        LLMEngineOutput {
+                            token_ids: vec![11],
+                            index: Some(0),
+                            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                            completion_usage: Some(dynamo_protocols::types::CompletionUsage {
+                                prompt_tokens,
+                                completion_tokens: 1,
+                                total_tokens: prompt_tokens + 1,
+                                prompt_tokens_details: Some(
+                                    dynamo_protocols::types::PromptTokensDetails {
+                                        audio_tokens: None,
+                                        cached_tokens: Some(prompt_tokens),
+                                    },
+                                ),
+                                completion_tokens_details: None,
+                            }),
+                            ..Default::default()
+                        },
+                    )]))
+                };
+            Ok(ResponseStream::new(stream, context))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for MigrationMetricEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let backend: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+                self.backend.clone();
+            self.migration.generate(request, backend).await
         }
     }
 
@@ -2197,7 +2305,8 @@ mod tests {
         const DP_RANK: &str = "3";
 
         let tracker = Arc::new(RequestTracker::new());
-        tracker.record_isl(3, None);
+        // Backend-reported usage must take precedence over this router estimate.
+        tracker.record_isl(3, Some(1));
         tracker.record_worker(
             WORKER_ID.parse().unwrap(),
             Some(DP_RANK.parse().unwrap()),
@@ -2355,6 +2464,132 @@ mod tests {
                 .get()
                 > 0.0
         );
+    }
+
+    #[test]
+    fn generate_metrics_fall_back_to_tracker_cached_tokens() {
+        const MODEL: &str = "generate-tracker-cache-test-model";
+
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(3, Some(2));
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = state.manager().metric_model_for(MODEL).to_string();
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+
+        {
+            let mut collector =
+                GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+            collector.observe(&Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![10],
+                index: Some(0),
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                ..Default::default()
+            }));
+        }
+
+        let families = registry.gather();
+        let cached_tokens = metric_value(
+            &families,
+            "dynamo_frontend_cached_tokens",
+            &[("model", metric_model.as_str())],
+        )
+        .get_histogram();
+        assert_eq!(cached_tokens.get_sample_count(), 1);
+        assert_eq!(cached_tokens.get_sample_sum(), 2.0);
+    }
+
+    #[tokio::test]
+    async fn migrated_generate_uses_logical_request_cache_metrics() {
+        const MODEL: &str = "generate-migration-metric-test-model";
+
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(3, Some(1));
+        let context = Context::new(
+            PreprocessedRequest::builder()
+                .model(MODEL.to_string())
+                .token_ids(vec![1, 2, 3])
+                .stop_conditions(crate::protocols::common::StopConditions {
+                    max_tokens: Some(2),
+                    ..Default::default()
+                })
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .tracker(Some(tracker))
+                .build()
+                .expect("build migration metric test request"),
+        );
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = state.manager().metric_model_for(MODEL).to_string();
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+        let backend = Arc::new(MigrationMetricBackend {
+            calls: AtomicU32::new(0),
+        });
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(MigrationMetricEngine {
+                migration: crate::migration::Migration::new(
+                    1,
+                    None,
+                    MODEL.to_string(),
+                    state.metrics_clone(),
+                ),
+                backend: backend.clone(),
+            });
+
+        let response = generate_dispatch(
+            engine,
+            context,
+            "req-generate-migration-metrics".to_string(),
+            MODEL.to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            state
+                .metrics_clone()
+                .get_migration_ongoing_request_count(MODEL),
+            1
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read Generate response");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse Generate response");
+        assert_eq!(body["choices"][0]["token_ids"], serde_json::json!([10, 11]));
+
+        let families = registry.gather();
+        let model_labels = [("model", metric_model.as_str())];
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_sum(),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_output_tokens_total",
+                &model_labels,
+            )
+            .get_counter()
+            .value(),
+            2.0
+        );
+        let cached_tokens =
+            metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels).get_histogram();
+        assert_eq!(cached_tokens.get_sample_count(), 1);
+        assert_eq!(cached_tokens.get_sample_sum(), 1.0);
     }
 
     #[test]
