@@ -1291,6 +1291,103 @@ mod tests {
     }
 
     #[test]
+    fn post_completion_spawn_and_equality_join_preserve_recorded_timing() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        write_trace(
+            &path,
+            serde_json::json!([
+                {"t":0.0,"type":"s","model":"model","in":8,"out":1,"hash_ids":[1,2],"api_time":0.5},
+                {"t":0.8,"type":"subagent","agent_id":"a","subagent_type":"Explore","duration_ms":400,"status":"completed","requests":[
+                    {"t":0.9,"type":"s","model":"model","in":8,"out":1,"hash_ids":[3,4],"api_time":0.2},
+                    {"t":1.15,"type":"s","model":"model","in":12,"out":1,"hash_ids":[3,4,5],"api_time":0.05}
+                ],"models":["model"]},
+                {"t":1.2,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,6]}
+            ]),
+        );
+
+        let (_, rows) = load_weka_agentic_rows(&path).unwrap();
+        let parent = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:0"))
+            .unwrap();
+        let first_child = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:1:inner:0"))
+            .unwrap();
+        let second_child = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:1:inner:1"))
+            .unwrap();
+        let consumer = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:2"))
+            .unwrap();
+
+        assert!(first_child.dependencies.iter().any(|edge| {
+            edge.request_id == parent.request_id
+                && edge.trigger == AgenticDependencyTrigger::Completion
+                && edge.relation == AgenticDependencyRelation::Spawn
+                && (edge.delay_ms - 400.0).abs() < 1e-6
+        }));
+        assert!(second_child.dependencies.iter().any(|edge| {
+            edge.request_id == first_child.request_id
+                && edge.trigger == AgenticDependencyTrigger::Completion
+                && edge.relation == AgenticDependencyRelation::Sequence
+                && (edge.delay_ms - 50.0).abs() < 1e-6
+        }));
+        assert!(consumer.dependencies.iter().any(|edge| {
+            edge.request_id == second_child.request_id
+                && edge.trigger == AgenticDependencyTrigger::Completion
+                && edge.relation == AgenticDependencyRelation::Join
+        }));
+    }
+
+    #[test]
+    fn flattened_hash_fork_becomes_a_dispatch_spawned_child_stream() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        write_trace(
+            &path,
+            serde_json::json!([
+                {"t":0.0,"type":"s","model":"model","in":8,"out":1,"hash_ids":[1,2],"api_time":2.0},
+                {"t":0.5,"type":"s","model":"model","in":8,"out":1,"hash_ids":[1,3],"api_time":0.2},
+                {"t":0.8,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,3,4],"api_time":0.2},
+                {"t":2.0,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,5]}
+            ]),
+        );
+
+        let (_, rows) = load_weka_agentic_rows(&path).unwrap();
+        let parent = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:0"))
+            .unwrap();
+        let child = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:1"))
+            .unwrap();
+        let child_next = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:2"))
+            .unwrap();
+
+        assert_ne!(parent.session_id, child.session_id);
+        assert_eq!(child.session_id, child_next.session_id);
+        assert!(child.dependencies.iter().any(|edge| {
+            edge.request_id == parent.request_id
+                && edge.trigger == AgenticDependencyTrigger::Dispatch
+                && edge.relation == AgenticDependencyRelation::Spawn
+                && (edge.delay_ms - 500.0).abs() < 1e-6
+        }));
+        assert!(child_next.dependencies.iter().any(|edge| {
+            edge.request_id == child.request_id
+                && edge.trigger == AgenticDependencyTrigger::Completion
+                && edge.relation == AgenticDependencyRelation::Sequence
+                && (edge.delay_ms - 100.0).abs() < 1e-6
+        }));
+    }
+
+    #[test]
     fn local_hashes_are_namespaced_and_partial_tails_are_private() {
         let directory = tempdir().unwrap();
         write_trace(
@@ -1305,5 +1402,107 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_ne!(rows[0].hash_ids, rows[1].hash_ids);
         assert_eq!(rows[0].hash_ids.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn extra_hashes_are_truncated_and_missing_blocks_are_request_private() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        write_trace(
+            &path,
+            serde_json::json!([request(0.0, 8, 1, &[7, 8, 999]), request(1.0, 12, 1, &[7])]),
+        );
+
+        let (_, rows) = load_weka_agentic_rows(&path).unwrap();
+        let first = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:0"))
+            .unwrap()
+            .hash_ids
+            .as_ref()
+            .unwrap();
+        let second = rows
+            .iter()
+            .find(|row| row.request_id.ends_with("outer:1"))
+            .unwrap()
+            .hash_ids
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 3);
+        assert_eq!(first[0], second[0]);
+        assert_ne!(first[1], second[1]);
+        assert_ne!(second[1], second[2]);
+    }
+
+    #[test]
+    fn corpus_preflight_is_deterministic_and_rejects_mixed_block_sizes() {
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        for directory in [&first, &second] {
+            std::fs::create_dir(directory.path().join("nested")).unwrap();
+        }
+        write_trace(
+            &first.path().join("nested/b.json"),
+            serde_json::json!([request(0.0, 4, 1, &[2])]),
+        );
+        write_trace(
+            &first.path().join("a.json"),
+            serde_json::json!([request(0.0, 4, 1, &[1])]),
+        );
+        write_trace(
+            &second.path().join("a.json"),
+            serde_json::json!([request(0.0, 4, 1, &[1])]),
+        );
+        write_trace(
+            &second.path().join("nested/b.json"),
+            serde_json::json!([request(0.0, 4, 1, &[2])]),
+        );
+        assert_eq!(
+            WekaImporter::open(first.path())
+                .unwrap()
+                .header()
+                .source
+                .digest,
+            WekaImporter::open(second.path())
+                .unwrap()
+                .header()
+                .source
+                .digest
+        );
+
+        let mixed_path = second.path().join("nested/b.json");
+        let mut mixed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&mixed_path).unwrap()).unwrap();
+        mixed["block_size"] = 8.into();
+        std::fs::write(&mixed_path, serde_json::to_vec(&mixed).unwrap()).unwrap();
+        let error = WekaImporter::open(second.path())
+            .err()
+            .expect("mixed blocks");
+        assert!(error.to_string().contains("mixes block sizes"), "{error:#}");
+    }
+
+    #[test]
+    fn subagent_without_a_preceding_parent_is_rejected() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        write_trace(
+            &path,
+            serde_json::json!([
+                {"t":0.0,"type":"subagent","agent_id":"orphan","subagent_type":"Explore","status":"completed","requests":[
+                    {"t":0.0,"type":"s","model":"model","in":4,"out":1,"hash_ids":[9]}
+                ],"models":["model"]},
+                request(1.0, 4, 1, &[1])
+            ]),
+        );
+
+        let error = load_weka_agentic_rows(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("orphan subagents are unsupported"),
+            "{error:#}"
+        );
     }
 }

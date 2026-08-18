@@ -11,7 +11,7 @@ use dynamo_kv_router::protocols::{
 };
 use tempfile::NamedTempFile;
 
-use super::DynamoRequestTrace;
+use super::{DynamoRequestTrace, load_weka_trace};
 
 fn write_trace(lines: &[serde_json::Value]) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
@@ -19,6 +19,47 @@ fn write_trace(lines: &[serde_json::Value]) -> NamedTempFile {
         writeln!(file, "{}", serde_json::to_string(line).unwrap()).unwrap();
     }
     file
+}
+
+#[test]
+fn direct_weka_and_materialized_v2_compile_to_identical_graphs() {
+    use aisimulate_core::replay::loadgen::AgenticTrace;
+    use dynamo_data_gen::{MooncakeJsonlWriter, WekaImporter};
+    use tempfile::tempdir;
+
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("source.json");
+    let materialized = directory.path().join("trace.agentic.jsonl");
+    let weka = serde_json::json!({
+        "id": "play",
+        "models": ["model"],
+        "block_size": 4,
+        "hash_id_scope": "local",
+        "requests": [
+            {"t":0.0,"type":"s","model":"model","in":8,"out":2,"hash_ids":[1,2],"api_time":1.0},
+            {"t":0.2,"type":"subagent","agent_id":"a","subagent_type":"Explore","duration_ms":500,"status":"completed","requests":[
+                {"t":0.25,"type":"s","model":"model","in":6,"out":1,"hash_ids":[3,4],"api_time":0.25}
+            ],"models":["model"]},
+            {"t":0.7,"type":"s","model":"model","in":12,"out":3,"hash_ids":[1,2,5]}
+        ]
+    });
+    std::fs::write(&source, serde_json::to_vec(&weka).unwrap()).unwrap();
+
+    let importer = WekaImporter::open(&source).unwrap();
+    let mut writer = MooncakeJsonlWriter::create(&materialized, None).unwrap();
+    writer.write_agentic_header(importer.header()).unwrap();
+    importer
+        .for_each_row(|row| writer.write_agentic_row(&row))
+        .unwrap();
+    writer.finish().unwrap();
+
+    let direct = load_weka_trace(&source).unwrap();
+    let through_v2 = AgenticTrace::from_agentic_mooncake(&materialized).unwrap();
+    assert_eq!(direct.identity(), through_v2.identity());
+    assert_eq!(
+        serde_json::to_value(direct.nodes()).unwrap(),
+        serde_json::to_value(through_v2.nodes()).unwrap()
+    );
 }
 
 fn request_trace_row(

@@ -378,6 +378,116 @@ fn test_from_agentic_mooncake_rejects_input_length_above_hash_capacity() {
 }
 
 #[test]
+fn agentic_v2_rejects_invalid_schema_and_graph_contracts() {
+    enum Fixture {
+        Raw(Vec<serde_json::Value>),
+        Rows(Vec<serde_json::Value>),
+    }
+
+    let node = |request_id: &str, play_id: &str, dependencies: serde_json::Value| {
+        serde_json::json!({
+            "request_id": request_id,
+            "play_id": play_id,
+            "session_id": "session",
+            "model": "model",
+            "not_before_ms": 0.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1],
+            "dependencies": dependencies
+        })
+    };
+    let dependency = |request_id: &str| {
+        serde_json::json!({
+            "request_id": request_id,
+            "trigger": "completion",
+            "delay_ms": 0.0,
+            "relation": "sequence"
+        })
+    };
+    let cases = [
+        (
+            "headerless",
+            Fixture::Raw(vec![node("r1", "p", serde_json::json!([]))]),
+            "v2 header",
+        ),
+        (
+            "unknown version",
+            Fixture::Raw(vec![serde_json::json!({
+                "schema": AGENTIC_MOONCAKE_SCHEMA,
+                "version": AGENTIC_MOONCAKE_VERSION + 1,
+                "block_size": 4,
+                "hash_id_scope": "local",
+                "source": {"format": "test", "digest": "fixture"}
+            })]),
+            "unsupported agentic Mooncake version",
+        ),
+        (
+            "duplicate request",
+            Fixture::Rows(vec![
+                node("r1", "p", serde_json::json!([])),
+                node("r1", "p", serde_json::json!([])),
+            ]),
+            "duplicates request_id",
+        ),
+        (
+            "cycle",
+            Fixture::Rows(vec![
+                node("r1", "p", serde_json::json!([dependency("r2")])),
+                node("r2", "p", serde_json::json!([dependency("r1")])),
+            ]),
+            "cycle detected",
+        ),
+        (
+            "cross-play dependency",
+            Fixture::Rows(vec![
+                node("r1", "p1", serde_json::json!([])),
+                node("r2", "p2", serde_json::json!([dependency("r1")])),
+            ]),
+            "depends on request r1 in play p1",
+        ),
+        (
+            "invalid timing",
+            Fixture::Rows(vec![{
+                let mut value = node("r1", "p", serde_json::json!([]));
+                value["not_before_ms"] = serde_json::json!(-1.0);
+                value
+            }]),
+            "invalid not_before_ms",
+        ),
+        (
+            "invalid typed edge",
+            Fixture::Rows(vec![
+                node("r1", "p", serde_json::json!([])),
+                node(
+                    "r2",
+                    "p",
+                    serde_json::json!([{
+                        "request_id": "r1",
+                        "trigger": "dispatch",
+                        "delay_ms": 0.0,
+                        "relation": "join"
+                    }]),
+                ),
+            ]),
+            "invalid Join dependency with Dispatch trigger",
+        ),
+    ];
+
+    for (name, fixture, expected) in cases {
+        let file = match fixture {
+            Fixture::Raw(lines) => write_trace(&lines),
+            Fixture::Rows(rows) => write_agentic_trace(&rows),
+        };
+        let error = AgenticTrace::from_agentic_mooncake(file.path()).expect_err(name);
+        assert!(
+            format!("{error:#}").contains(expected),
+            "{name}: unexpected error: {error:#}"
+        );
+    }
+}
+
+#[test]
 fn test_from_applied_compute_agentic_expands_rows_into_num_turns_plus_final_request() {
     let file = write_trace(&[serde_json::json!({
         "num_turns": 2,
