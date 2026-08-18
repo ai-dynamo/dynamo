@@ -86,8 +86,37 @@
               "source_revision": {
                 "type": "string",
                 "pattern": "^[0-9a-f]{40}$"
+              },
+              "source_kind": {
+                "type": "string",
+                "enum": ["deploy-asset", "github-release"]
+              },
+              "release_tag": {
+                "type": "string",
+                "minLength": 1
+              },
+              "release_state": {
+                "type": "string",
+                "enum": ["draft", "prerelease", "release"]
               }
             },
+            "dependentRequired": {
+              "release_tag": ["release_state"],
+              "release_state": ["release_tag"]
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "source_kind": { "const": "github-release" }
+                  },
+                  "required": ["source_kind"]
+                },
+                "then": {
+                  "required": ["release_tag", "release_state"]
+                }
+              }
+            ],
             "additionalProperties": false
           }
         }

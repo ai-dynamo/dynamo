@@ -17,8 +17,14 @@ artifacts:
   recipe_specific_image_periods:
   - image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
     source_revision: 70d2ef431b82ecd42e73c001149ea64bd1816010
+    source_kind: github-release
+    release_tag: v1.5.0-nemotron-3.5-lightning-dev.1
+    release_state: prerelease
   - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
     source_revision: 70d2ef431b82ecd42e73c001149ea64bd1816010
+    source_kind: github-release
+    release_tag: v1.5.0-nemotron-3.5-lightning-dev.1
+    release_state: prerelease
 targets:
 - id: vllm-agg-b200-dspark
   recommended: true

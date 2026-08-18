@@ -35,6 +35,10 @@ _SPEC.loader.exec_module(catalog_validate)
     ("recipe_id", "expected_images"),
     (
         (
+            "deepseek-v4-pro",
+            ("nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-deepseek-v4-dev.1",),
+        ),
+        (
             "glm-5-2",
             ("nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1",),
         ),
@@ -86,11 +90,50 @@ def test_recipe_specific_images_are_catalog_owned(
     ("recipe_id", "expected_periods"),
     (
         (
+            "deepseek-v4-pro",
+            (
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-deepseek-v4-dev.1",
+                    "source_revision": "154e76c85233c027565ed3aca220669be1577b6f",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.3.0-deepseek-v4-dev.1",
+                    "release_state": "prerelease",
+                },
+            ),
+        ),
+        (
             "glm-5-2",
             (
                 {
                     "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1",
                     "source_revision": "9ab57d7ecefdd2a2af2e2a2c889724a157457cd6",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.3.0-glm-5.2-dev.1",
+                    "release_state": "prerelease",
+                },
+            ),
+        ),
+        (
+            "inkling",
+            (
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1",
+                    "source_revision": "73aa2073d12c8cbd5c955f618aed251be920b8cd",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.4.0-inkling-dev.1",
+                    "release_state": "prerelease",
+                },
+            ),
+        ),
+        (
+            "kimi-k2-6",
+            (
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-kimi-k2.6-dev.1",
+                    "source_revision": "66a95d5aa3b5d238fd94b6f8243c4e479cb7242c",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.3.0-kimi-k2.6-dev.1",
+                    "release_state": "prerelease",
                 },
             ),
         ),
@@ -100,6 +143,52 @@ def test_recipe_specific_images_are_catalog_owned(
                 {
                     "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1",
                     "source_revision": "92ec0146e4221c7c9e5013e3bd51db6113f96935",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.4.0-kimi-k3-dev.1",
+                    "release_state": "prerelease",
+                },
+            ),
+        ),
+        (
+            "nemotron-3-5-lightning",
+            (
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1",
+                    "source_revision": "70d2ef431b82ecd42e73c001149ea64bd1816010",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.5.0-nemotron-3.5-lightning-dev.1",
+                    "release_state": "prerelease",
+                },
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1",
+                    "source_revision": "70d2ef431b82ecd42e73c001149ea64bd1816010",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.5.0-nemotron-3.5-lightning-dev.1",
+                    "release_state": "prerelease",
+                },
+            ),
+        ),
+        (
+            "nemotron-3-super",
+            (
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-super-dev.1",
+                    "source_revision": "3424174cb83301418af5a000e9d09f2a4f93261c",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.3.0-nemotron-super-dev.1",
+                    "release_state": "prerelease",
+                },
+            ),
+        ),
+        (
+            "nemotron-3-ultra",
+            (
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1",
+                    "source_revision": "002cf02ce2b0c3679996526edec89becebe5dd06",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.3.0-nemotron-ultra-dev.1",
+                    "release_state": "draft",
                 },
             ),
         ),
@@ -335,6 +424,77 @@ def test_recipe_image_validation_allows_retroactive_open_start(
 
     errors = catalog_validate._image_attribution.recipe_image_errors(
         artifacts, [deploy], "retroactive"
+    )
+
+    assert errors == []
+
+
+def test_recipe_image_validation_allows_github_release_provenance_without_current_deploy_asset() -> (
+    None
+):
+    image = "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-deepseek-v4-dev.1"
+    artifacts = {
+        "recipe_specific_images": [image],
+        "recipe_specific_image_periods": [
+            {
+                "image": image,
+                "source_revision": "1" * 40,
+                "source_kind": "github-release",
+                "release_tag": "v1.3.0-deepseek-v4-dev.1",
+                "release_state": "prerelease",
+            }
+        ],
+    }
+
+    errors = catalog_validate._image_attribution.recipe_image_errors(
+        artifacts, [], "release-provenance"
+    )
+
+    assert errors == []
+
+
+def test_recipe_image_validation_requires_complete_github_release_provenance() -> None:
+    image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-model-dev.2"
+    artifacts = {
+        "recipe_specific_images": [image],
+        "recipe_specific_image_periods": [
+            {
+                "image": image,
+                "source_revision": "2" * 40,
+                "source_kind": "github-release",
+            }
+        ],
+    }
+
+    errors = catalog_validate._image_attribution.recipe_image_errors(
+        artifacts, [], "missing-release-metadata"
+    )
+
+    assert any("missing release_tag" in error for error in errors)
+    assert any("invalid release_state" in error for error in errors)
+
+
+def test_recipe_image_validation_allows_multiple_release_generations() -> None:
+    images = [
+        "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1",
+        "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-nemotron-ultra-dev.2",
+    ]
+    artifacts = {
+        "recipe_specific_images": images,
+        "recipe_specific_image_periods": [
+            {
+                "image": image,
+                "source_revision": str(index) * 40,
+                "source_kind": "github-release",
+                "release_tag": f"v1.{index + 2}.0-nemotron-ultra-dev.{index}",
+                "release_state": "prerelease",
+            }
+            for index, image in enumerate(images, start=1)
+        ],
+    }
+
+    errors = catalog_validate._image_attribution.recipe_image_errors(
+        artifacts, [], "release-series"
     )
 
     assert errors == []

@@ -16,6 +16,9 @@ artifacts:
   recipe_specific_image_periods:
   - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
     source_revision: 9ab57d7ecefdd2a2af2e2a2c889724a157457cd6
+    source_kind: github-release
+    release_tag: v1.3.0-glm-5.2-dev.1
+    release_state: prerelease
 targets:
 - id: sglang-agg-b200
   recommended: false
