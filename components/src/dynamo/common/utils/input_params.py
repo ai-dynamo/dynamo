@@ -73,6 +73,16 @@ class InputParamManager:
                 for reserved in ("tokenize", "add_generation_prompt"):
                     extra_kwargs.pop(reserved, None)
 
+                # The OpenAI `tools` array is a template input like the ones
+                # above: apply_chat_template renders the model's tool block from
+                # it. Without it the prompt is built as if no tools existed, so
+                # the model is never told they are available and cannot emit a
+                # tool call. Routed through extra_kwargs rather than passed as a
+                # keyword so an explicit chat_template_kwargs["tools"] still wins
+                # instead of colliding into a duplicate-keyword TypeError.
+                if "tools" in request and "tools" not in extra_kwargs:
+                    extra_kwargs["tools"] = request["tools"]
+
                 # Inject reasoning_content as <think> blocks into content,
                 # but only if the template doesn't handle it natively.
                 # Templates like Nemotron and Qwen3 reference reasoning_content
