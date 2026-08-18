@@ -36,7 +36,6 @@ jobs:
       api_docs: ${{ steps.changes.outputs.api_docs }}
       fern_components: ${{ steps.changes.outputs.fern_components }}
       operator: ${{ steps.changes.outputs.operator }}
-      snapshot: ${{ steps.changes.outputs.snapshot }}
       rust: ${{ steps.changes.outputs.rust }}
     steps:
       - name: Checkout code

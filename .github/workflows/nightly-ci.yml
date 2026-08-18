@@ -330,8 +330,8 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, snapshot agent,
-  # runtime EFA variants)
+  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, runtime EFA
+  # variants)
   # ============================================================================
   # Built HERE — not reused from post-merge — for two reasons:
   #   1. OSRB from the get-go: GitLab's nvbug:attach-compliance resolves
@@ -1029,8 +1029,8 @@ jobs:
     # strictly: release.yml copies their -nightly ECR images to NGC and extracts
     # wheels from the dynamo-pipeline image, so a failed build must not publish a
     # partial release. manual-release-approval is `skipped` on cron, `success` on dispatch.
-    # The optional-image builds (operator, planner, frontend, snapshot agent,
-    # EFA variants) are ORDERING-ONLY needs (deliberately absent from the
+    # The optional-image builds (operator, planner, frontend, EFA variants)
+    # are ORDERING-ONLY needs (deliberately absent from the
     # gate below): release.yml copies them fail-soft, so a flake in any of
     # them must not block the runtime nightly — but the copy step has to run
     # after they finish or the crane probe would race the builds.
