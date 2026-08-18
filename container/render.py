@@ -226,7 +226,12 @@ def _inject_python_index_secrets(dockerfile: str) -> str:
             index = end
             continue
 
-        parts = ["    " + line[len("RUN ") :]] + lines[index + 1 : end]
+        # Keep template-local settings from silently weakening the runner policy.
+        instruction = re.sub(
+            r"\bUV_HTTP_RETRIES=\d+\b", "UV_HTTP_RETRIES=10", instruction
+        )
+        instruction_lines = instruction.splitlines(keepends=True)
+        parts = ["    " + instruction_lines[0][len("RUN ") :]] + instruction_lines[1:]
         command_index = next(
             (
                 i

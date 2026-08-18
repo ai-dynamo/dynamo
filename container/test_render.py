@@ -42,6 +42,15 @@ def test_existing_mounts_stay_before_the_shell_command():
     assert rendered.index("export NETRC=") < rendered.index("export UV_CACHE_DIR")
 
 
+def test_runner_retry_policy_overrides_template_default():
+    dockerfile = "RUN export UV_HTTP_RETRIES=5 && \\\n" "    uv pip install aiofiles\n"
+
+    rendered = _inject_python_index_secrets(dockerfile)
+
+    assert "UV_HTTP_RETRIES=5" not in rendered
+    assert rendered.count("UV_HTTP_RETRIES=10") == 2
+
+
 def test_non_python_run_is_unchanged():
     dockerfile = "RUN cargo build --release\n"
 
