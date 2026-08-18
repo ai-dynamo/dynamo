@@ -2,34 +2,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod artifacts;
-mod collector;
 mod entrypoints;
 pub(crate) mod offline;
 mod online;
 mod router_shared;
 mod validate;
 
-use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use dynamo_kv_router::PrefillLoadEstimator;
 
+/// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
+pub use aisimulate_core::ReplayReport as TraceSimulationReport;
+pub(crate) use aisimulate_core::replay::TraceCollector;
+pub use aisimulate_core::replay::{
+    CanonicalReplayCoverage, CanonicalReplayRecord, LifecycleOperation, OfflineRuntimeEvidence,
+    PerRequestRecord, ReplayCaptureOptions, ReplayDeterminism, ReplayTerminalStatus, SlaThresholds,
+    TraceDistributionStats, TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats,
+    TraceRequestCounts, TraceThroughputStats,
+};
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use artifacts::native_g1_parent_chain_artifact;
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
-};
-pub(crate) use collector::TraceCollector;
-#[cfg(test)]
-pub(crate) use collector::TraceRequestStatsSnapshot;
-pub use collector::{
-    PerRequestAdmissionRecord, PerRequestRecord, PerRequestRoutingRecord, ReplayRequestPool,
-    ReplayRoutingOutcome, ReplayTerminalStatus, SlaThresholds, TraceDistributionStats,
-    TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
-    TraceSimulationReport, TraceThroughputStats,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {
@@ -41,50 +39,6 @@ pub enum ReplayRouterMode {
 pub enum ReplayArgsMode {
     Aggregated,
     Disagg,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ReplayDeterminism {
-    #[default]
-    Random,
-    CanonicalV1,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ReplayCaptureOptions {
-    pub capture_per_request: bool,
-    pub capture_planner_details: bool,
-    pub capture_canonical_evidence: bool,
-    pub determinism: ReplayDeterminism,
-}
-
-impl ReplayCaptureOptions {
-    pub fn effective_per_request(self) -> bool {
-        self.capture_per_request || self.capture_canonical_evidence
-    }
-}
-
-thread_local! {
-    static REPLAY_DETERMINISM: Cell<ReplayDeterminism> =
-        const { Cell::new(ReplayDeterminism::Random) };
-}
-
-pub fn with_replay_determinism<T>(determinism: ReplayDeterminism, run: impl FnOnce() -> T) -> T {
-    struct Reset(ReplayDeterminism);
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            REPLAY_DETERMINISM.with(|current| current.set(self.0));
-        }
-    }
-
-    let previous = REPLAY_DETERMINISM.with(|current| current.replace(determinism));
-    let _reset = Reset(previous);
-    run()
-}
-
-#[cfg(feature = "replay-bench")]
-pub(crate) fn canonical_replay_active() -> bool {
-    REPLAY_DETERMINISM.with(|current| current.get() == ReplayDeterminism::CanonicalV1)
 }
 
 pub type ReplayPrefillLoadEstimator = Arc<dyn PrefillLoadEstimator>;
@@ -108,6 +62,10 @@ impl OfflineDisaggReplayConfig {
     }
 }
 
+pub use aisimulate_core::replay::TrafficStats;
+pub use aisimulate_core::replay::{
+    ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
+};
 pub use entrypoints::{
     ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
     generate_trace_worker_artifacts_offline_with_kv_event_visibility,
@@ -136,10 +94,12 @@ pub use entrypoints::{
     simulate_concurrency_workload_with_router_mode,
     simulate_concurrency_workload_with_router_mode_and_options,
     simulate_concurrency_workload_with_router_mode_and_options_and_scaling_policy,
+    simulate_loaded_trace_disagg_with_router_mode_and_capture_options,
     simulate_loaded_trace_disagg_with_router_mode_and_options,
     simulate_loaded_trace_disagg_with_router_mode_and_options_and_scaling_policy,
     simulate_loaded_trace_live_with_router_mode,
     simulate_loaded_trace_live_with_router_mode_and_options,
+    simulate_loaded_trace_with_router_mode_and_capture_options,
     simulate_loaded_trace_with_router_mode_and_options,
     simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy, simulate_trace_file,
     simulate_trace_file_disagg_with_router_mode,
@@ -163,22 +123,8 @@ pub use entrypoints::{
     simulate_trace_workload_with_router_mode,
     simulate_trace_workload_with_router_mode_and_options_and_scaling_policy,
 };
-pub use offline::components::TrafficStats;
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;
-pub use offline::scaling::{ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot};
-pub use offline::{
-    CANONICAL_RESULT_EXCLUSIONS, CANONICAL_SCHEMA_VERSION, CanonicalAicIdentity,
-    CanonicalAicImplementation, CanonicalDeterminismMetadata, CanonicalEngineConfig,
-    CanonicalExecutionMetadata, CanonicalReplayCoverage, CanonicalReplayMetadata,
-    CanonicalReplayRecord, CanonicalReplayRouterMode, CanonicalReplayTopology,
-    CanonicalRouterMetadata, CanonicalSemanticFeatures, CanonicalSlaMetadata,
-    CanonicalSyntheticSpec, CanonicalWorkloadMetadata, EnginePressureState, KvIngestBoundary,
-    KvIngestBoundaryStats, KvIngestEvidence, LifecycleOperation, OfflineRuntimeEvidence,
-    PressureEvidence, PressureKind, PressureRecord, WorkerLifecycleTransition,
-    WorkerLifecycleTransitionKind, WorkerPool, WorkerPoolState, canonical_engine_pool_metadata,
-    canonical_router_metadata, canonical_topology, with_runtime_evidence,
-};
 pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(
@@ -226,44 +172,6 @@ pub(crate) fn normalize_trace_requests(
 mod tests {
     use super::*;
     use uuid::Uuid;
-
-    #[test]
-    fn test_replay_itl_uses_per_token_gaps() {
-        fn assert_ddsketch_relative_error(actual: f64, expected: f64) {
-            assert!((actual - expected).abs() <= expected.abs() * 0.001 + f64::EPSILON);
-        }
-
-        let mut collector = TraceCollector::default();
-        let uuid = Uuid::from_u128(11);
-
-        collector.on_arrival(uuid, 0.0, 4, 4);
-        collector.on_admit(uuid, 0.0, 0);
-        collector.on_token(uuid, 10.0);
-        collector.on_token(uuid, 11.0);
-        collector.on_token(uuid, 12.0);
-        collector.on_token(uuid, 110.0);
-        collector.on_terminal(uuid, 110.0, ReplayTerminalStatus::Completed);
-
-        let report = collector.finish();
-
-        assert!((report.latency.tpot.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
-        assert!((report.latency.itl.distribution.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
-        assert_ddsketch_relative_error(report.latency.itl.distribution.median_ms, 1.0);
-        assert_ddsketch_relative_error(report.latency.itl.distribution.p75_ms, 98.0);
-        assert_ddsketch_relative_error(report.latency.itl.distribution.p90_ms, 98.0);
-        assert_ddsketch_relative_error(report.latency.itl.distribution.p95_ms, 98.0);
-        assert_eq!(report.latency.itl.max_ms, 98.0);
-        assert_eq!(report.latency.ttst.min_ms, 1.0);
-        assert_eq!(report.latency.ttst.max_ms, 1.0);
-        assert_eq!(
-            report.latency.output_token_throughput_per_user.min_ms,
-            1000.0 / 98.0
-        );
-        assert_eq!(
-            report.latency.output_token_throughput_per_user.max_ms,
-            1000.0
-        );
-    }
 
     #[test]
     fn test_normalize_trace_requests_applies_arrival_speedup_ratio() {

@@ -24,10 +24,16 @@ def _engine_args_payload(
     attention_dp = int(sample[f"{prefix}attention_dp"])
     moe_tp = int(sample[f"{prefix}moe_tp"])
     moe_ep = int(sample[f"{prefix}moe_ep"])
+    backend = sample["backend"]
+    memory_fraction_field = {
+        "vllm": "gpu_memory_utilization",
+        "sglang": "mem_fraction_static",
+        "trtllm": "free_gpu_memory_fraction",
+    }[backend]
     payload: dict[str, Any] = {
         "worker_type": "aggregated" if role == "agg" else role,
-        "engine_type": sample["backend"],
-        "aic_backend": sample["backend"],
+        "engine_type": backend,
+        "aic_backend": backend,
         "aic_backend_version": backend_version,
         "aic_system": sample["hardware_sku"],
         "aic_model_path": sample["model_name"],
@@ -36,7 +42,7 @@ def _engine_args_payload(
         "max_num_batched_tokens": int(sample[f"{role}_max_num_batched_tokens"]),
         "max_num_seqs": int(sample[f"{role}_max_num_seqs"]),
         "block_size": int(sample[f"{role}_block_size"]),
-        "gpu_memory_utilization": float(sample[f"{role}_gpu_memory_utilization"]),
+        memory_fraction_field: float(sample[f"{role}_gpu_memory_utilization"]),
         "enable_prefix_caching": bool(sample[f"{role}_enable_prefix_caching"]),
     }
     if moe_tp * moe_ep > 1:

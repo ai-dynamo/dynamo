@@ -16,7 +16,13 @@ from aisimulate.sweeper import (
 
 
 class ExampleRunner:
-    def run(self, spec):
+    def run(
+        self,
+        spec,
+        *,
+        output_requirements=None,
+    ):
+        del output_requirements
         deployment = spec.backend_deployment
         engine_args = deployment.agg_engine_args or deployment.decode_engine_args or {}
         max_num_seqs = float(engine_args.get("max_num_seqs", 1))
