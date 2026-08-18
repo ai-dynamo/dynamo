@@ -17,6 +17,14 @@ from dynamo.common.configuration.groups.kv_router_args import (
 )
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 
+# `dynamo._core` is the compiled pyo3 extension. It is present in a normal dev
+# build but absent from a pure-Python checkout, so guard it at collection rather
+# than letting the import error out mid-test.
+KvRouterConfig = pytest.importorskip(
+    "dynamo._core",
+    reason="the compiled dynamo._core binding is not built in this environment",
+).KvRouterConfig
+
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
@@ -211,8 +219,6 @@ def test_session_prefix_index_is_opt_in_and_reaches_the_binding() -> None:
 
     # The kwargs dict is unpacked straight into the Rust binding, so a name that
     # does not match the pyo3 signature fails here rather than at serve time.
-    from dynamo._core import KvRouterConfig
-
     KvRouterConfig(**enabled_kwargs)
 
 

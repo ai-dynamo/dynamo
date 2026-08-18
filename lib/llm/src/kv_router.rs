@@ -374,8 +374,9 @@ where
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 }
 
-/// The deepest block this lookup matched anywhere, as the last matched hash of
-/// the worker with the highest device overlap.
+/// The deepest device-tier block this lookup matched, as the last matched hash
+/// of the worker with the highest device overlap. Lower cache tiers are not
+/// considered; the only caller passes device match details.
 ///
 /// The session index records what the session's prefix reached, not which
 /// worker served it, so this deliberately runs before worker selection: the
@@ -1082,10 +1083,28 @@ where
         // so it is logged and the request continues.
         if let Some(index) = self.session_prefix_index.as_ref()
             && let Some(session) = session_context.as_ref()
-            && let Some(matched_hash) = deepest_matched_hash(&tiered_matches.device)
-            && let Err(err) = index.update_session_from_match(session.session_id(), matched_hash)
         {
-            tracing::warn!(%err, "failed to record session prefix match");
+            if let Some(matched_hash) = deepest_matched_hash(&tiered_matches.device)
+                && let Err(err) =
+                    index.update_session_from_match(session.session_id(), matched_hash)
+            {
+                tracing::warn!(%err, "failed to record session prefix match");
+            }
+
+            // Release the session once the request says it is over. These two
+            // markers are the only end-of-session signal the router sees, and
+            // both are optional, so this reclaims promptly when a client sends
+            // one without being the only thing that bounds the index — the
+            // indexer's own session cap covers clients that never send either.
+            // Ordering matters: reclaim after recording, so a final request
+            // that also carries a match does not leave the match behind.
+            let session_over = session.session_final() == Some(true)
+                || session
+                    .kv_hints()
+                    .is_some_and(|hints| hints.evict_session());
+            if session_over {
+                index.remove_session(session.session_id());
+            }
         }
 
         drop(tiered_matches);

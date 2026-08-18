@@ -12,9 +12,19 @@
 //! [`ExternalSequenceBlockHash`] nodes plus, per session, the set of nodes that
 //! are currently the deepest known point of that session's block chains. Nodes
 //! are never dropped because the engine evicted or cleared the underlying
-//! blocks; they are dropped only when the owning session is cleaned up through
-//! [`SessionPrefixIndexer::remove_session`]. Eviction changes where a block
-//! lives, not whether the session ever produced it.
+//! blocks; they are dropped only when the owning session goes, either through
+//! [`SessionPrefixIndexer::remove_session`] or through the capacity bound
+//! below. Eviction changes where a block lives, not whether the session ever
+//! produced it.
+//!
+//! Retention is bounded. The router calls [`SessionPrefixIndexer::remove_session`]
+//! when a request marks its session final, but that signal is optional and many
+//! clients never send it, so the index also caps how many sessions it tracks
+//! ([`DEFAULT_MAX_SESSIONS`], overridable via
+//! [`SessionPrefixIndexer::with_max_sessions`]). Passing the cap evicts the
+//! least recently touched session by exactly the path `remove_session` takes.
+//! Both halves are needed: the lifecycle signal reclaims promptly when it
+//! arrives, and the cap is what makes growth bounded when it never does.
 //!
 //! Structure follows the enhancement proposal:
 //!
@@ -36,7 +46,7 @@
 //! [`SessionId`] alias is still what the map stores, and a clone happens only on
 //! first insert.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -46,6 +56,16 @@ use crate::protocols::ExternalSequenceBlockHash;
 
 /// Logical session identity as owned by this index.
 pub type SessionId = String;
+
+/// Default ceiling on tracked sessions, past which the least recently touched
+/// session is evicted.
+///
+/// Sized so the common case never reaches it — a router serving far fewer
+/// concurrent sessions than this behaves exactly as if the index were
+/// unbounded — while a router that never receives an end-of-session signal
+/// still settles at a fixed footprint instead of growing for the life of the
+/// process.
+pub const DEFAULT_MAX_SESSIONS: usize = 16_384;
 
 new_key_type! {
     /// Generational handle to a [`LogicalNode`] in the arena.
@@ -105,6 +125,17 @@ pub enum SessionPrefixIndexError {
         /// The block whose recorded parent disagrees with the update.
         block: ExternalSequenceBlockHash,
     },
+
+    /// A stored-blocks update tried to attach a block underneath a block that
+    /// the first one already sits at or above. Applying it would close a parent
+    /// cycle, and every walk of the forest follows parent links, so the cycle
+    /// would turn later reads into non-terminating loops holding the write
+    /// lock. Rejected before the arena is touched.
+    #[error("block {block:?} would become its own ancestor")]
+    CyclicParent {
+        /// The block whose graft would close the cycle.
+        block: ExternalSequenceBlockHash,
+    },
 }
 
 /// Session-aware logical prefix index.
@@ -116,17 +147,70 @@ pub struct SessionPrefixIndexer {
     state: RwLock<IndexState>,
 }
 
+/// One session's retained state: the deepest nodes it has reached, and when it
+/// was last touched, which is what the capacity bound evicts on.
+///
+/// `last_touch` is `None` only between the entry's creation and the
+/// [`IndexState::touch_session`] call that immediately follows it. Making that
+/// gap explicit matters: a numeric sentinel would alias whichever session
+/// legitimately holds that sequence number and evict it instead.
 #[derive(Debug, Default)]
+struct SessionEntry {
+    frontiers: FxHashSet<NodeId>,
+    last_touch: Option<u64>,
+}
+
+#[derive(Debug)]
 struct IndexState {
     nodes: SlotMap<NodeId, LogicalNode>,
     hash_to_node: FxHashMap<ExternalSequenceBlockHash, NodeId>,
-    sessions: HashMap<SessionId, FxHashSet<NodeId>>,
+    sessions: HashMap<SessionId, SessionEntry>,
+    /// Touch sequence to session id, so the least recently touched session is
+    /// the first entry. Kept in lockstep with [`SessionEntry::last_touch`]:
+    /// every session in `sessions` has exactly one entry here.
+    lru: BTreeMap<u64, SessionId>,
+    /// Monotonic touch counter. `u64` at one touch per routed request does not
+    /// wrap in any realistic process lifetime.
+    next_touch: u64,
+    max_sessions: usize,
+}
+
+impl Default for IndexState {
+    fn default() -> Self {
+        Self {
+            nodes: SlotMap::default(),
+            hash_to_node: FxHashMap::default(),
+            sessions: HashMap::default(),
+            lru: BTreeMap::default(),
+            next_touch: 0,
+            max_sessions: DEFAULT_MAX_SESSIONS,
+        }
+    }
 }
 
 impl SessionPrefixIndexer {
-    /// Create an empty index.
+    /// Create an empty index holding at most [`DEFAULT_MAX_SESSIONS`] sessions.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create an empty index holding at most `max_sessions` sessions.
+    ///
+    /// A cap of zero is raised to one: an index that could retain nothing would
+    /// discard each session as it was recorded, which is not a useful state to
+    /// let a caller configure by accident.
+    pub fn with_max_sessions(max_sessions: usize) -> Self {
+        Self {
+            state: RwLock::new(IndexState {
+                max_sessions: max_sessions.max(1),
+                ..IndexState::default()
+            }),
+        }
+    }
+
+    /// The ceiling on tracked sessions.
+    pub fn max_sessions(&self) -> usize {
+        self.state.read().max_sessions
     }
 
     /// Resolve a block hash to its arena slot, if this index knows the block.
@@ -147,7 +231,7 @@ impl SessionPrefixIndexer {
             .read()
             .sessions
             .get(session_id)
-            .map(|frontiers| frontiers.iter().copied().collect())
+            .map(|entry| entry.frontiers.iter().copied().collect())
             .unwrap_or_default()
     }
 
@@ -176,12 +260,12 @@ impl SessionPrefixIndexer {
             None => None,
         };
 
-        let Some(frontiers) = state.sessions.get(session_id) else {
+        let Some(entry) = state.sessions.get(session_id) else {
             return Ok(Vec::new());
         };
 
-        let mut lineages = Vec::with_capacity(frontiers.len());
-        for &frontier in frontiers {
+        let mut lineages = Vec::with_capacity(entry.frontiers.len());
+        for &frontier in &entry.frontiers {
             let path = state.path_to_root(frontier);
             let start = match anchor_node {
                 Some(anchor) => match path.iter().position(|&node| node == anchor) {
@@ -272,13 +356,7 @@ impl SessionPrefixIndexer {
     /// removes logical nodes; block eviction never does.
     pub fn remove_session(&self, session_id: &str) -> bool {
         let mut state = self.state.write();
-        let Some(frontiers) = state.sessions.remove(session_id) else {
-            return false;
-        };
-        for frontier in frontiers {
-            state.release_frontier(frontier);
-        }
-        true
+        state.drop_session(session_id)
     }
 
     /// Number of logical nodes currently retained.
@@ -312,23 +390,106 @@ impl IndexState {
     }
 
     /// Read-only check that no block in the chain is already parented somewhere
-    /// other than where this chain would put it.
+    /// other than where this chain would put it, and that applying the chain
+    /// cannot close a parent cycle.
+    ///
+    /// The cycle half matters because a block already known only as a root has
+    /// `parent == None` and so passes the conflict check, after which the apply
+    /// loop would graft it under whatever parent this call supplies — including
+    /// one of its own descendants. `dominators` is every hash that will sit at
+    /// or above the chain once it is applied: the supplied parent, everything
+    /// already above that parent, and the chain's own earlier blocks. A block
+    /// that appears in that set is being asked to become its own ancestor.
     fn validate_chain(
         &self,
         parent_hash: Option<ExternalSequenceBlockHash>,
         block_hashes: &[ExternalSequenceBlockHash],
     ) -> Result<(), SessionPrefixIndexError> {
+        let mut dominators: FxHashSet<ExternalSequenceBlockHash> = FxHashSet::default();
+        if let Some(parent_hash) = parent_hash {
+            dominators.insert(parent_hash);
+            if let Some(&parent_node) = self.hash_to_node.get(&parent_hash) {
+                dominators.extend(
+                    self.path_to_root(parent_node)
+                        .into_iter()
+                        .map(|node| self.nodes[node].block_hash),
+                );
+            }
+        }
+
         let mut expected_parent = parent_hash;
         for &block_hash in block_hashes {
+            if dominators.contains(&block_hash) {
+                return Err(SessionPrefixIndexError::CyclicParent { block: block_hash });
+            }
             if let Some(&existing) = self.hash_to_node.get(&block_hash)
                 && let Some(recorded) = self.nodes[existing].parent
                 && Some(self.nodes[recorded].block_hash) != expected_parent
             {
                 return Err(SessionPrefixIndexError::ConflictingParent { block: block_hash });
             }
+            dominators.insert(block_hash);
             expected_parent = Some(block_hash);
         }
         Ok(())
+    }
+
+    /// Remove a session and reclaim what no other session needs, returning
+    /// whether the session was known. Shared by the public
+    /// [`SessionPrefixIndexer::remove_session`] and by capacity eviction, so
+    /// both reclaim by exactly the same path.
+    fn drop_session(&mut self, session_id: &str) -> bool {
+        let Some(entry) = self.sessions.remove(session_id) else {
+            return false;
+        };
+        if let Some(last_touch) = entry.last_touch {
+            self.lru.remove(&last_touch);
+        }
+        for frontier in entry.frontiers {
+            self.release_frontier(frontier);
+        }
+        true
+    }
+
+    /// Mark `session_id` as the most recently used session.
+    fn touch_session(&mut self, session_id: &str) {
+        let seq = self.next_touch;
+        let Some(entry) = self.sessions.get_mut(session_id) else {
+            return;
+        };
+        let previous = entry.last_touch.replace(seq);
+        self.next_touch += 1;
+        if let Some(previous) = previous {
+            self.lru.remove(&previous);
+        }
+        self.lru.insert(seq, session_id.to_string());
+    }
+
+    /// Evict least recently touched sessions until the cap is respected.
+    ///
+    /// Called after a session is recorded rather than before, so the session
+    /// that just arrived is the most recently touched one and is never the
+    /// victim of its own insertion.
+    fn enforce_session_cap(&mut self) {
+        while self.sessions.len() > self.max_sessions {
+            let Some((_, victim)) = self.lru.pop_first() else {
+                // `lru` and `sessions` are maintained together, so this is
+                // unreachable; breaking rather than looping keeps a bookkeeping
+                // bug from becoming a hang.
+                debug_assert!(false, "lru is empty while sessions is over capacity");
+                break;
+            };
+            if let Some(entry) = self.sessions.remove(&victim) {
+                for frontier in entry.frontiers {
+                    self.release_frontier(frontier);
+                }
+            }
+            tracing::debug!(
+                session_id = %victim,
+                max_sessions = self.max_sessions,
+                "session prefix index evicted its least recently used session"
+            );
+        }
     }
 
     fn resolve_or_insert_root(&mut self, block_hash: ExternalSequenceBlockHash) -> NodeId {
@@ -338,10 +499,23 @@ impl IndexState {
         }
     }
 
+    /// Walk parent links from `tail`, root first.
+    ///
+    /// Bounded by the arena size. An acyclic forest cannot yield a longer path,
+    /// so the bound never truncates a well-formed walk; it is a backstop that
+    /// makes a corrupted arena degrade into a short answer rather than spin
+    /// forever while holding the index lock. `validate_chain` is what actually
+    /// keeps the forest acyclic.
     fn path_to_root(&self, tail: NodeId) -> Vec<NodeId> {
+        let limit = self.nodes.len();
         let mut path = Vec::new();
         let mut current = Some(tail);
         while let Some(node) = current {
+            if path.len() >= limit {
+                debug_assert!(false, "parent cycle in session prefix index forest");
+                tracing::error!("session prefix index parent walk exceeded the arena; truncating");
+                break;
+            }
             path.push(node);
             current = self.nodes[node].parent;
         }
@@ -350,11 +524,21 @@ impl IndexState {
     }
 
     /// Is `candidate` at or above `node` in the forest?
+    ///
+    /// Bounded on the same reasoning as [`Self::path_to_root`].
     fn is_ancestor_or_self(&self, candidate: NodeId, node: NodeId) -> bool {
+        let limit = self.nodes.len();
         let mut current = Some(node);
+        let mut steps = 0usize;
         while let Some(walk) = current {
             if walk == candidate {
                 return true;
+            }
+            steps += 1;
+            if steps > limit {
+                debug_assert!(false, "parent cycle in session prefix index forest");
+                tracing::error!("session prefix index ancestry walk exceeded the arena; aborting");
+                return false;
             }
             current = self.nodes[walk].parent;
         }
@@ -365,19 +549,26 @@ impl IndexState {
     /// anything changed. Frontiers that `node` now subsumes are dropped so a
     /// session holds only the deepest point of each chain it has touched.
     fn advance_frontier(&mut self, session_id: &str, node: NodeId) -> bool {
-        if let Some(frontiers) = self.sessions.get(session_id)
-            && frontiers
+        let already_reached = self.sessions.get(session_id).is_some_and(|entry| {
+            entry
+                .frontiers
                 .iter()
                 .any(|&frontier| self.is_ancestor_or_self(node, frontier))
-        {
+        });
+        if already_reached {
+            // The frontier does not move, but the session is demonstrably still
+            // being routed, so it must not drift towards eviction while a
+            // genuinely idle session outranks it.
+            self.touch_session(session_id);
             return false;
         }
 
         let subsumed: Vec<NodeId> = self
             .sessions
             .get(session_id)
-            .map(|frontiers| {
-                frontiers
+            .map(|entry| {
+                entry
+                    .frontiers
                     .iter()
                     .copied()
                     .filter(|&frontier| self.is_ancestor_or_self(frontier, node))
@@ -390,11 +581,14 @@ impl IndexState {
         }
         self.nodes[node].frontier_refs += 1;
 
-        let frontiers = self.sessions.entry(session_id.to_string()).or_default();
+        let entry = self.sessions.entry(session_id.to_string()).or_default();
         for frontier in subsumed {
-            frontiers.remove(&frontier);
+            entry.frontiers.remove(&frontier);
         }
-        frontiers.insert(node);
+        entry.frontiers.insert(node);
+
+        self.touch_session(session_id);
+        self.enforce_session_cap();
         true
     }
 
@@ -724,6 +918,125 @@ mod tests {
         assert!(
             indexer.get_node(stale).is_none(),
             "a handle to a removed node must not resolve to its replacement"
+        );
+    }
+
+    #[test]
+    fn passing_the_session_cap_evicts_the_least_recently_used_session() {
+        let chain = hashes(vec![1, 2, 3]);
+        let indexer = SessionPrefixIndexer::with_max_sessions(2);
+        assert_eq!(indexer.max_sessions(), 2);
+
+        indexer.update_session_from_match("s1", chain[0]).unwrap();
+        indexer.update_session_from_match("s2", chain[1]).unwrap();
+        // Touch s1 so s2 becomes the least recently used of the two.
+        indexer.update_session_from_match("s1", chain[1]).unwrap();
+
+        indexer.update_session_from_match("s3", chain[2]).unwrap();
+
+        assert!(
+            lineage_of(&indexer, "s2").is_empty(),
+            "the least recently touched session is the one evicted"
+        );
+        assert!(
+            !lineage_of(&indexer, "s1").is_empty(),
+            "a recently touched session survives the eviction"
+        );
+        assert!(
+            !lineage_of(&indexer, "s3").is_empty(),
+            "the session that triggered the eviction is retained"
+        );
+    }
+
+    #[test]
+    fn eviction_releases_the_evicted_session_arena_nodes() {
+        let chain = hashes(vec![1, 2]);
+        let indexer = SessionPrefixIndexer::with_max_sessions(1);
+
+        indexer.update_session_from_match("s1", chain[0]).unwrap();
+        let evicted = indexer.get_node_from_hash(chain[0]).unwrap();
+
+        indexer.update_session_from_match("s2", chain[1]).unwrap();
+
+        assert!(
+            indexer.get_node(evicted).is_none(),
+            "eviction must reclaim the arena exactly as remove_session does"
+        );
+        assert!(
+            indexer.get_node_from_hash(chain[0]).is_none(),
+            "the evicted session's hash index entry must go with its node"
+        );
+    }
+
+    #[test]
+    fn a_zero_session_cap_is_clamped_to_one_tracked_session() {
+        let chain = hashes(vec![1]);
+        let indexer = SessionPrefixIndexer::with_max_sessions(0);
+
+        assert_eq!(
+            indexer.max_sessions(),
+            1,
+            "a cap of zero would track nothing"
+        );
+        indexer.update_session_from_match("s1", chain[0]).unwrap();
+        assert!(
+            !lineage_of(&indexer, "s1").is_empty(),
+            "the sole tracked session must survive its own insertion"
+        );
+    }
+
+    #[test]
+    fn a_chain_that_would_close_a_cycle_is_rejected() {
+        let chain = hashes(vec![1, 2, 3]);
+        let indexer = SessionPrefixIndexer::new();
+
+        // Build A -> B -> C.
+        indexer
+            .update_session_from_stored_blocks("s1", None, &chain)
+            .unwrap();
+
+        // Now claim A is stored under C. Accepting that would make A its own
+        // ancestor and leave the parent walks looping forever.
+        let err = indexer
+            .update_session_from_stored_blocks("s1", Some(chain[2]), &chain[..1])
+            .expect_err("grafting an ancestor under its own descendant must fail");
+        assert!(
+            matches!(
+                err,
+                SessionPrefixIndexError::CyclicParent { block } if block == chain[0]
+            ),
+            "expected CyclicParent for the offending block, got {err:?}"
+        );
+
+        // The rejected update must leave the original forest intact.
+        assert_eq!(
+            lineage_of(&indexer, "s1"),
+            vec![chain.clone()],
+            "a rejected chain must not half-apply"
+        );
+    }
+
+    #[test]
+    fn a_block_repeated_within_one_chain_is_rejected() {
+        let chain = hashes(vec![1, 2]);
+        let indexer = SessionPrefixIndexer::new();
+
+        // A -> B -> A within a single event: the cycle closes on a node this
+        // very chain created, so the check cannot rely on existing parents.
+        let repeating = vec![chain[0], chain[1], chain[0]];
+        let err = indexer
+            .update_session_from_stored_blocks("s1", None, &repeating)
+            .expect_err("a chain that revisits its own block must fail");
+        assert!(
+            matches!(
+                err,
+                SessionPrefixIndexError::CyclicParent { block } if block == chain[0]
+            ),
+            "expected CyclicParent for the repeated block, got {err:?}"
+        );
+        assert!(
+            lineage_of(&indexer, "s1").is_empty(),
+            "a rejected chain must not create any nodes"
         );
     }
 }
