@@ -34,9 +34,10 @@ pub use disagg::DisaggregationMode;
 pub use dynamo_llm::model_type::ModelInput;
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
-    FinishReason, GenerateContext, GuidedDecodingOptions, HEALTH_CHECK_KEY, KvEventPublisher,
-    KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, LogProbs,
-    Metrics, MetricsBindings, MetricsCtx, MultimodalData, OnPublisherReady,
+    FinishReason, GenerateContext, GuidedDecodingOptions, HEALTH_CHECK_KEY,
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KvEventPublisher, KvEventSource, KvHintAction, KvHints,
+    KvSourceLocationsPayload, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration,
+    LogProbs, Metrics, MetricsBindings, MetricsCtx, MultimodalData, OnPublisherReady,
     OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest, RawEngine,
     SamplingOptions, StopConditions, StopReason, TopLogprob, TopLogprobs, chunk, usage,
 };

@@ -1,40 +1,92 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Router-generated hints that are attached to selected backend requests.
+//! Typed KV-cache hints attached to selected backend requests.
 
 use serde::{Deserialize, Serialize};
 
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
-/// Key for router-generated backend hints inside KV transfer params.
-pub const ROUTER_HINT_EXTRA_ARGS_KEY: &str = "router_hint";
+/// The selected worker can consume a `TRANSFER` hint with the v1 payload.
+// TODO: Rename these constants and wire values with the matching KVCC names.
+pub const KV_HINT_TRANSFER_CAPABILITY_KEY: &str = "router_hint";
 
-/// Worker runtime_data key. Boolean true means the worker can consume router_hint extra args.
-pub const ROUTER_HINT_RUNTIME_CAPABILITY_KEY: &str = "router_hint";
-
-/// Worker runtime_data key for matching router-hint sources to targets by backend role.
-pub const ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY: &str = "router_hint_worker_type";
-
-/// Worker runtime_data key for per-global-DP-rank advertised KVCC control endpoints.
-pub const ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
+/// Worker runtime-data keys used to build transfer hints.
+pub const KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str = "router_hint_worker_type";
+pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
     "router_hint_source_control_endpoints";
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KvHintProtocolVersion {
+    #[serde(rename = "0.1")]
+    V0_1,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KvSourceLocationsActionVersion {
+    #[serde(rename = "1.0")]
+    V1_0,
+}
+
+/// Typed payload for the `kv.source_locations@1.0` point-to-point action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RouterHint {
+pub struct KvSourceLocationsPayload {
     pub source_control_endpoint: String,
     /// Root-aligned source-side KV block hashes. `block_hashes[i]`
     /// corresponds to request block `i`; the target decides which suffix to fetch.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
+/// One typed action in a [`KvHints`] envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action_type")]
+pub enum KvHintAction {
+    #[serde(rename = "kv.source_locations")]
+    SourceLocations {
+        action_id: String,
+        action_version: KvSourceLocationsActionVersion,
+        payload: KvSourceLocationsPayload,
+    },
+}
+
+impl KvHintAction {
+    pub fn source_locations(
+        action_id: impl Into<String>,
+        payload: KvSourceLocationsPayload,
+    ) -> Self {
+        Self::SourceLocations {
+            action_id: action_id.into(),
+            action_version: KvSourceLocationsActionVersion::V1_0,
+            payload,
+        }
+    }
+}
+
+/// Versioned actions for the selected backend request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KvHints {
+    pub protocol_version: KvHintProtocolVersion,
+    pub message_id: String,
+    pub actions: Vec<KvHintAction>,
+}
+
+impl KvHints {
+    pub fn new(message_id: impl Into<String>, actions: Vec<KvHintAction>) -> Self {
+        Self {
+            protocol_version: KvHintProtocolVersion::V0_1,
+            message_id: message_id.into(),
+            actions,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RouterHintRootCandidates {
+pub struct KvTransferCandidates {
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
     pub owner_prefix_blocks: Vec<(WorkerWithDpRank, usize)>,
 }
 
-impl RouterHintRootCandidates {
+impl KvTransferCandidates {
     pub fn best_source<F>(
         &self,
         prefix_blocks_to_beat: usize,
@@ -65,11 +117,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn serializes_versioned_source_locations_action() {
+        let hints = KvHints::new(
+            "msg-123",
+            vec![KvHintAction::source_locations(
+                "a1",
+                KvSourceLocationsPayload {
+                    source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+                    block_hashes: vec![
+                        ExternalSequenceBlockHash(11),
+                        ExternalSequenceBlockHash(22),
+                    ],
+                },
+            )],
+        );
+
+        assert_eq!(
+            serde_json::to_value(hints).unwrap(),
+            serde_json::json!({
+                "protocol_version": "0.1",
+                "message_id": "msg-123",
+                "actions": [{
+                    "action_id": "a1",
+                    "action_type": "kv.source_locations",
+                    "action_version": "1.0",
+                    "payload": {
+                        "source_control_endpoint": "tcp://127.0.0.1:23280",
+                        "block_hashes": [11, 22],
+                    },
+                }],
+            })
+        );
+    }
+
+    #[test]
     fn best_source_selects_longest_eligible_prefix() {
         let worker_a = WorkerWithDpRank::new(7, 0);
         let worker_b = WorkerWithDpRank::new(8, 0);
         let excluded = WorkerWithDpRank::new(9, 0);
-        let candidates = RouterHintRootCandidates {
+        let candidates = KvTransferCandidates {
             block_hashes: vec![
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102),
@@ -95,7 +181,7 @@ mod tests {
 
     #[test]
     fn best_source_fails_closed_on_invalid_prefix_length() {
-        let candidates = RouterHintRootCandidates {
+        let candidates = KvTransferCandidates {
             block_hashes: vec![ExternalSequenceBlockHash(101)],
             owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 0), 2)],
         };
@@ -107,7 +193,7 @@ mod tests {
     fn best_source_requires_prefix_longer_than_threshold() {
         let worker_a = WorkerWithDpRank::new(7, 0);
         let worker_b = WorkerWithDpRank::new(8, 0);
-        let candidates = RouterHintRootCandidates {
+        let candidates = KvTransferCandidates {
             block_hashes: vec![
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102),

@@ -1175,24 +1175,31 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
-def test_build_sampling_params_allowlists_router_hint_extra_args():
+def test_build_sampling_params_attaches_kv_hint_action_envelope():
     from dynamo.vllm.handlers import build_sampling_params
 
-    router_hint = {
+    source_locations_payload = {
         "source_control_endpoint": "tcp://127.0.0.1:23280",
         "block_hashes": [11, 22],
+    }
+    kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-123",
+        "actions": [
+            {
+                "action_id": "a1",
+                "action_type": "kv.source_locations",
+                "action_version": "1.0",
+                "payload": source_locations_payload,
+            },
+        ],
     }
     request = {
         "token_ids": [1, 2, 3],
         "sampling_options": {},
         "stop_conditions": {},
         "output_options": {},
-        "extra_args": {
-            "kv_transfer_params": {
-                "router_hint": router_hint,
-                "untrusted_connector_param": "dropped",
-            },
-        },
+        "kv_hints": kv_hint,
     }
 
     default_sampling_params = {
@@ -1213,7 +1220,7 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
     assert sp.extra_args == {
         "kv_transfer_params": {
             "internal": "kept",
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
         },
         "other_internal": "kept",
     }
@@ -1226,50 +1233,49 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
         {"do_remote_decode": True, "remote_engine_id": "prefill-a"},
     ],
 )
-def test_update_kv_transfer_params_preserves_router_hint_only(kv_transfer_params):
+def test_update_kv_transfer_params_preserves_kv_hint_only(kv_transfer_params):
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    request_router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23280",
-        "block_hashes": [11, 22],
+    request_kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-request",
+        "actions": [],
     }
-    stale_router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23281",
-        "block_hashes": [33, 44],
+    stale_kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-stale",
+        "actions": [],
     }
     sampling_params = SimpleNamespace(
         extra_args={
             "kv_transfer_params": {
-                "router_hint": request_router_hint,
+                "kv_hint": request_kv_hint,
                 "untrusted_connector_param": "dropped",
             }
         }
     )
-    kv_transfer_params = {**kv_transfer_params, "router_hint": stale_router_hint}
+    kv_transfer_params = {**kv_transfer_params, "kv_hint": stale_kv_hint}
 
     _update_kv_transfer_params(
-        sampling_params, kv_transfer_params, preserve_router_hint=True
+        sampling_params, kv_transfer_params, preserve_kv_hint=True
     )
 
     assert sampling_params.extra_args["kv_transfer_params"] == {
-        **{
-            key: value
-            for key, value in kv_transfer_params.items()
-            if key != "router_hint"
-        },
-        "router_hint": request_router_hint,
+        **{key: value for key, value in kv_transfer_params.items() if key != "kv_hint"},
+        "kv_hint": request_kv_hint,
     }
 
 
-def test_update_kv_transfer_params_drops_existing_router_hint_by_default():
+def test_update_kv_transfer_params_drops_existing_kv_hint_by_default():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23280",
-        "block_hashes": [11, 22],
+    kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-request",
+        "actions": [],
     }
     sampling_params = SimpleNamespace(
-        extra_args={"kv_transfer_params": {"router_hint": router_hint}}
+        extra_args={"kv_transfer_params": {"kv_hint": kv_hint}}
     )
 
     _update_kv_transfer_params(sampling_params, {"transfer_id": "prefill-1"})
@@ -1279,12 +1285,13 @@ def test_update_kv_transfer_params_drops_existing_router_hint_by_default():
     }
 
 
-def test_update_kv_transfer_params_drops_replacement_router_hint():
+def test_update_kv_transfer_params_drops_replacement_kv_hint():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    stale_router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23281",
-        "block_hashes": [33, 44],
+    stale_kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-stale",
+        "actions": [],
     }
     sampling_params = SimpleNamespace(extra_args={})
 
@@ -1292,7 +1299,7 @@ def test_update_kv_transfer_params_drops_replacement_router_hint():
         sampling_params,
         {
             "transfer_id": "prefill-1",
-            "router_hint": stale_router_hint,
+            "kv_hint": stale_kv_hint,
         },
     )
 
@@ -1304,13 +1311,14 @@ def test_update_kv_transfer_params_drops_replacement_router_hint():
 def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23280",
-        "block_hashes": [11, 22],
+    kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-request",
+        "actions": [],
     }
     shared_extra_args = {
         "kv_transfer_params": {
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
             "internal": "kept-in-default",
         },
         "other_internal": "kept",
@@ -1318,12 +1326,12 @@ def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     sampling_params = SimpleNamespace(extra_args=shared_extra_args)
 
     _update_kv_transfer_params(
-        sampling_params, {"transfer_id": "prefill-1"}, preserve_router_hint=True
+        sampling_params, {"transfer_id": "prefill-1"}, preserve_kv_hint=True
     )
 
     assert shared_extra_args == {
         "kv_transfer_params": {
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
             "internal": "kept-in-default",
         },
         "other_internal": "kept",
@@ -1332,7 +1340,7 @@ def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     assert sampling_params.extra_args == {
         "kv_transfer_params": {
             "transfer_id": "prefill-1",
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
         },
         "other_internal": "kept",
     }
