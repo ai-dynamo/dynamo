@@ -111,24 +111,6 @@ class SGLangProcess(ManagedEngineProcessMixin):
         self.data_parallel_size = data_parallel_size
         self.worker_processes = []
         self.store_backend = store_backend
-        inherited_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-        visible_devices = (
-            [device.strip() for device in inherited_visible_devices.split(",")]
-            if inherited_visible_devices
-            else None
-        )
-
-        def resolve_gpu_devices(start: int, count: int) -> str:
-            logical_indices = range(start, start + count)
-            if visible_devices is None:
-                return ",".join(str(index) for index in logical_indices)
-            if start + count > len(visible_devices):
-                raise ValueError(
-                    f"SGLang requested {count} GPU(s) starting at logical GPU "
-                    f"{start}, but CUDA_VISIBLE_DEVICES exposes only "
-                    f"{inherited_visible_devices}"
-                )
-            return ",".join(visible_devices[index] for index in logical_indices)
 
         # Dynamically allocate unique system and KV event ports to avoid
         # conflicts in parallel test runs.
@@ -170,14 +152,19 @@ class SGLangProcess(ManagedEngineProcessMixin):
             # Calculate GPU device for this process
             if single_gpu:
                 # Force all processes to GPU 0 (for single-GPU testing)
-                gpu_device = resolve_gpu_devices(gpu_start_index, 1)
+                gpu_device = str(gpu_start_index)
             elif data_parallel_size is not None:
                 # Worker sees dp_rank GPUs (each DP rank gets its own GPU)
                 worker_start_gpu = gpu_start_index + worker_idx * data_parallel_size
-                gpu_device = resolve_gpu_devices(worker_start_gpu, data_parallel_size)
+                gpu_device = ",".join(
+                    str(i)
+                    for i in range(
+                        worker_start_gpu, worker_start_gpu + data_parallel_size
+                    )
+                )
             else:
                 # No DP; worker sees one GPU
-                gpu_device = resolve_gpu_devices(gpu_start_index + worker_idx, 1)
+                gpu_device = str(gpu_start_index + worker_idx)
 
             command = [
                 "python3",
@@ -253,11 +240,6 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 "DYN_FORWARDPASS_METRIC_PORT": str(self._fpm_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
-            if data_parallel_size is not None:
-                # FlashInfer's fused DeepSeek top-k kernel does not support
-                # A10G (SM86). Exercise the equivalent Triton/JIT path until
-                # SGLang's capability-aware fallback reaches our container.
-                env_vars["SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK"] = "1"
 
             # Add DYN_FILE_KV if using file storage backend
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
@@ -357,7 +339,6 @@ def test_router_decisions_sglang_multiple_workers(
 @pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(3.7)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
