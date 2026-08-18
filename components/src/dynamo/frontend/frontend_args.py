@@ -13,6 +13,7 @@ from dynamo.common.configuration.groups.aic_perf_args import (
     AicPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
+    CONDITIONAL_DISAGG_POLICY_CHOICES,
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
@@ -24,6 +25,7 @@ from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
+    parse_bool,
 )
 
 from . import __version__
@@ -89,6 +91,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
+    tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
 
@@ -98,6 +101,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_load_aware_preset()
+        self.apply_conditional_disagg_config()
 
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
@@ -162,6 +166,39 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
+        if self.conditional_disagg_policy not in CONDITIONAL_DISAGG_POLICY_CHOICES:
+            raise ValueError(
+                "--router-conditional-disagg-config policy must be one of "
+                + ", ".join(
+                    f"'{choice}'" for choice in CONDITIONAL_DISAGG_POLICY_CHOICES
+                )
+            )
+        if self.conditional_disagg_eff_isl_threshold < 0:
+            raise ValueError(
+                "--router-conditional-disagg-config eff_isl_threshold must be >= 0"
+            )
+        if not 0.0 <= self.conditional_disagg_eff_isl_ratio_threshold <= 1.0:
+            raise ValueError(
+                "--router-conditional-disagg-config eff_isl_ratio_threshold must be in [0.0, 1.0]"
+            )
+        if (
+            self.conditional_disagg_prefill_busy_threshold is not None
+            and self.conditional_disagg_prefill_busy_threshold < 0
+        ):
+            raise ValueError(
+                "--router-conditional-disagg-config prefill_busy_threshold must be >= 0"
+            )
+        if (
+            self.conditional_disagg_decode_busy_threshold is not None
+            and self.conditional_disagg_decode_busy_threshold < 0
+        ):
+            raise ValueError(
+                "--router-conditional-disagg-config decode_busy_threshold must be >= 0"
+            )
+        if self.conditional_disagg_enabled and self.router_mode != "kv":
+            raise ValueError("--router-conditional-disagg requires --router-mode=kv")
+        if self.conditional_disagg_enabled and not self.use_kv_events:
+            raise ValueError("--router-conditional-disagg requires --router-kv-events")
         self.validate_rejection_thresholds()
         self.log_rejection_thresholds()
 
@@ -277,7 +314,9 @@ class FrontendArgGroup(ArgGroup):
         )
 
         # Router options (shared with dynamo.router)
-        RouterArgGroup().add_arguments(parser)
+        RouterArgGroup(
+            default_router_mode="round-robin", include_frontend_only=True
+        ).add_arguments(parser)
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup().add_arguments(parser)
@@ -302,7 +341,8 @@ class FrontendArgGroup(ArgGroup):
             default=0,
             help=(
                 "Maximum number of times a request may be migrated to a different engine worker. "
-                "When > 0, enables request migration on worker disconnect."
+                "When > 0, enables migration after worker disconnects, response timeouts, "
+                "incomplete streams, and worker-local overload rejection."
             ),
             arg_type=int,
         )
@@ -549,6 +589,23 @@ class FrontendArgGroup(ArgGroup):
                 "Has no effect on TikToken models."
             ),
             choices=["default", "fastokens", "basetenkenizer"],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--tokenizer-fallback",
+            env_var="DYN_TOKENIZER_FALLBACK",
+            default=True,
+            help=(
+                "Automatic fallback to HuggingFace is deprecated and will be "
+                "disabled by default in a future release. The current behavior "
+                "falls back when the selected fastokens or basetenkenizer backend "
+                "cannot load the model tokenizer. Use "
+                "--no-tokenizer-fallback to fail model initialization instead. "
+                "In dynamic mode, discovery retries the load while the frontend "
+                "continues running."
+            ),
+            env_value_type=parse_bool,
         )
 
         add_negatable_bool_argument(

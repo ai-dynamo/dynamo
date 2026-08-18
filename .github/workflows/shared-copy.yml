@@ -10,6 +10,11 @@ on:
         description: 'Plain runtime image tag prefix from the build workflow'
         required: true
         type: string
+      target_image:
+        description: 'Target image repository in ACR'
+        required: false
+        type: string
+        default: ''
       cuda_version:
         description: 'CUDA versions to copy as a JSON array'
         required: true
@@ -62,8 +67,6 @@ jobs:
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
-        env:
-          ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
         run: |
           CUDA_VERSION="${{ matrix.cuda_version }}"
           TARGET_TAG_PLAIN="${{ inputs.target_tag_plain }}"
@@ -96,14 +99,14 @@ jobs:
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}
         uses: ./.github/actions/skopeo-copy
         with:
-          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          source_image: ai-dynamo/dynamo
+          source_registry: ${{ vars.ECR_REGISTRY }}
+          source_image: ${{ vars.ECR_REPOSITORY }}
           source_tag: ${{ steps.calculate-target-tag.outputs.source_tag }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_image: ai-dynamo/dynamo
+          target_image: ${{ inputs.target_image || vars.ACR_REPOSITORY }}
           target_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
-          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          source_aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          source_ecr_registry: ${{ vars.ECR_REGISTRY }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}

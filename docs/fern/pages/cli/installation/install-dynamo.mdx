@@ -119,7 +119,7 @@ This covers single-machine setups only. Multi-node disaggregated serving additio
       </Tab>
     </Tabs>
 
-    See [Release Artifacts](../../reference/general/release-artifacts.mdx#container-images) for the complete artifact inventory.
+    See [Release Artifacts](../../reference/general/release-artifacts.mdx) for the complete artifact inventory.
 
   </Step>
 
@@ -189,10 +189,10 @@ Ensure you passed `--gpus all` to `docker run`. Without this flag, the container
 
 ```bash
 # Correct
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
 
 # Wrong -- no GPU access
-docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
 ```
 
 ## Next Steps

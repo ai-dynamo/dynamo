@@ -196,6 +196,16 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 		))
 	}
 
+	// Restrict the durable workload provider to programs implemented by the controller.
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]; exists &&
+		value != consts.WorkloadProviderComponent && value != consts.WorkloadProviderGrove {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			value,
+			[]string{consts.WorkloadProviderComponent, consts.WorkloadProviderGrove},
+		))
+	}
+
 	if hasIntraPodFailover && objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode] != "container" {
 		allErrs = append(allErrs, field.Invalid(
 			annotationsPath.Key(consts.KubeAnnotationDynamoKubeDiscoveryMode),
@@ -269,6 +279,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 
 		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
+
+		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
 
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
@@ -497,6 +509,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentUpdate(
 	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
+	allErrs = append(allErrs, v.validateObjectMetaUpdate(
+		&newDGD.ObjectMeta,
+		&oldDGD.ObjectMeta,
+		field.NewPath("metadata"),
+	)...)
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpecUpdate(
 		&newDGD.Spec,
 		&oldDGD.Spec,
@@ -517,6 +534,43 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentUpdate(
 			}
 		}
 	}
+	return allErrs
+}
+
+// validateObjectMetaUpdate validates a DGD metadata update.
+// newObjectMeta, oldObjectMeta, and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
+	newObjectMeta *metav1.ObjectMeta,
+	oldObjectMeta *metav1.ObjectMeta,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	annotationsPath := fldPath.Child("annotations")
+	newProvider, newProviderExists := newObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
+	oldProvider, oldProviderExists := oldObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
+
+	// Reserve the initial legacy-provider materialization for the configured operator identity.
+	if !oldProviderExists && newProviderExists && v.operatorPrincipal != "" &&
+		(v.userInfo == nil || v.userInfo.Username != v.operatorPrincipal) {
+		allErrs = append(allErrs, field.Forbidden(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			"may only be materialized by the Dynamo operator",
+		))
+	}
+
+	// Once materialized, the workload provider cannot be replaced or removed.
+	if oldProviderExists && (!newProviderExists || newProvider != oldProvider) {
+		var invalidValue any
+		if newProviderExists {
+			invalidValue = newProvider
+		}
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			invalidValue,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
+
 	return allErrs
 }
 

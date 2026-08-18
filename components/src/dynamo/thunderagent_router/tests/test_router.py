@@ -20,12 +20,18 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 @dataclass
 class FakeCapacity:
-    """Stand-in for WorkerCapacityProvider that returns a fixed snapshot."""
+    """Stand-in for WorkerCapacityProvider with configurable worker state."""
 
     workers: dict[int, int] = field(default_factory=dict)
+    live_workers: Optional[set[int]] = None
 
     def snapshot(self) -> dict[int, int]:
         return dict(self.workers)
+
+    def live_worker_ids(self) -> set[int]:
+        if self.live_workers is not None:
+            return set(self.live_workers)
+        return set(self.workers)
 
 
 def make_router(
@@ -128,6 +134,50 @@ async def test_assigned_worker_hint_reflects_sticky_assignment():
     await router.assign_worker("p1", 3)
     decision = await router.before_request("p1", estimated_prompt_tokens=100)
     assert decision.assigned_worker_hint == 3
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_assignment_moves_to_replacement():
+    router, capacity = make_router(capacity_workers={1: 1000})
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.workers = {}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.workers = {2: 1000}
+    capacity.live_workers = {1, 2}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    capacity.live_workers = {2}
+    decision = await router.before_request("p1", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 2
+    assert router._stat_worker_assignments == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_replacement_bypasses_new_program_fairness_gate():
+    router, capacity = make_router(capacity_workers={1: 300})
+    decision = await router.before_request("active", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 1
+
+    waiter = asyncio.create_task(
+        router.before_request("waiting", estimated_prompt_tokens=100)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+    assert router._table.programs["waiting"].lifecycle == ProgramLifecycle.PAUSED
+
+    capacity.workers = {2: 1000}
+    capacity.live_workers = {2}
+    decision = await router.before_request("active", estimated_prompt_tokens=100)
+    assert decision.assigned_worker_hint == 2
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
 
 
 @pytest.mark.asyncio

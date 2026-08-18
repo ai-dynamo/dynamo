@@ -17,6 +17,7 @@ from typing import Any
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.exceptions import VLLMClientError
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -37,6 +38,7 @@ from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_fe
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
+from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
@@ -86,6 +88,36 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     if type(context_length) is not int or context_length <= 0:
         return None
     return context_length
+
+
+def _runtime_config_structural_tag_options(
+    mdc: ModelDeploymentCard,
+) -> tuple[str, str, str]:
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return "off", "auto", "auto"
+    return (
+        runtime_config.get("structural_tag_mode", "off"),
+        runtime_config.get("structural_tag_scope", "auto"),
+        runtime_config.get("structural_tag_schema", "auto"),
+    )
+
+
+def _ensure_chat_template(
+    tokenizer: Any, local_dir: str, chat_template_flag: str | None
+) -> None:
+    """Set tokenizer.chat_template so vLLM's renderer handles tool calls.
+
+    Skipped for MistralTokenizer (--tokenizer-mode mistral): it has no
+    chat_template attribute and renders via mistral_common, so leave it
+    untouched rather than attach an HF template it never uses.
+    """
+    if not hasattr(tokenizer, "chat_template"):
+        return
+    if tokenizer.chat_template is None:
+        tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
+    if chat_template_flag:
+        tokenizer.chat_template = load_chat_template(chat_template_flag)
 
 
 def _mm_feature_modality(feature: Any) -> str:
@@ -156,6 +188,8 @@ def _build_reasoning_parser_metadata(
         return None, None
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
+    if chat_template_kwargs.get("enable_thinking") is False:
+        return True, parser_kwargs
     if not getattr(request_for_sampling, "include_reasoning", True):
         return True, parser_kwargs
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
@@ -248,6 +282,9 @@ class VllmProcessor:
         enable_auto_tool_choice: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         default_thinking_mode: str | None = None,
+        structural_tag_mode: str = "off",
+        structural_tag_scope: str = "auto",
+        structural_tag_schema: str = "auto",
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -260,6 +297,9 @@ class VllmProcessor:
         self.enable_auto_tool_choice = enable_auto_tool_choice
         self.default_chat_template_kwargs = default_chat_template_kwargs
         self.default_thinking_mode = default_thinking_mode
+        self.structural_tag_mode = structural_tag_mode
+        self.structural_tag_scope = structural_tag_scope
+        self.structural_tag_schema = structural_tag_schema
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -436,9 +476,15 @@ class VllmProcessor:
         Run a single request through the engine. Does pre and post processing on this machine, delegates
         model inference to a backend using the router.
         """
-        with _nvtx.annotate("mm_frontend:generator", color="blue"):
-            async for item in self._generator_inner(request, context=context):
-                yield item
+        try:
+            with _nvtx.annotate("mm_frontend:generator", color="blue"):
+                async for item in self._generator_inner(request, context=context):
+                    yield item
+        except VLLMClientError as exc:
+            # vLLM 0.27 replaced many request-side ValueError/TypeError raises
+            # with this hierarchy. Preserve vLLM's 400/404/422 distinction at
+            # Dynamo's HTTP boundary.
+            raise vllm_client_error_to_http_error(exc) from exc
 
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
@@ -465,6 +511,9 @@ class VllmProcessor:
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
                 default_chat_template_kwargs=self.default_chat_template_kwargs,
                 default_thinking_mode=self.default_thinking_mode,
+                structural_tag_mode=self.structural_tag_mode,
+                structural_tag_scope=self.structural_tag_scope,
+                structural_tag_schema=self.structural_tag_schema,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -472,6 +521,7 @@ class VllmProcessor:
         chat_template_kwargs = pre.chat_template_kwargs
         engine_prompt = pre.engine_prompt
         tokens = pre.prompt_token_ids
+        guided_decoding = pre.guided_decoding
 
         if request_for_sampling.max_completion_tokens is not None:
             max_tokens = request_for_sampling.max_completion_tokens
@@ -594,6 +644,8 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        if guided_decoding is not None:
+            dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
         if reasoning_ended is not None:
             dynamo_preproc["reasoning_ended"] = reasoning_ended
         if reasoning_parser_kwargs is not None:
@@ -636,15 +688,27 @@ class VllmProcessor:
                 ] = request_for_sampling.mm_processor_kwargs
 
             def new_post_processor() -> StreamingPostProcessor:
+                # vLLM tool parsers keep mutable streaming state. Give every
+                # n>1 choice its own parser instead of reusing the parser that
+                # adjusted the shared request during preprocessing.
+                choice_tool_parser = (
+                    self.tool_parser_class(self.tokenizer, request_for_sampling.tools)
+                    if tool_parser is not None and self.tool_parser_class is not None
+                    else None
+                )
                 return StreamingPostProcessor(
                     tokenizer=self.tokenizer,
                     request_for_sampling=request_for_sampling,
                     sampling_params=sampling_params,
                     prompt_token_ids=tokens,
-                    tool_parser=tool_parser,
+                    tool_parser=choice_tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
+                    reasoning_ended=reasoning_ended,
                     stream_response=bool(request.get("stream", False)),
+                    uses_dynamo_json_tool_call_fallback=(
+                        pre.uses_dynamo_json_tool_call_fallback
+                    ),
                 )
 
             # StreamingPostProcessor keeps delta/tool/reasoning parser state, so
@@ -875,6 +939,11 @@ class VllmProcessor:
 
                 yield envelope
             _nvtx.end_range(rng_stream)
+        except VLLMClientError:
+            # Preserve request-side 400/404/422 errors for generator(), which
+            # translates them at Dynamo's HTTP boundary. The generic handler
+            # below is reserved for genuine internal failures.
+            raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
             yield make_internal_error(request_id, str(e))
@@ -983,16 +1052,9 @@ class EngineFactory:
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
 
-        # vLLM's renderer skips its AutoProcessor fallback when tools are present,
-        # so tool calls crash unless tokenizer.chat_template is set; load from disk.
-        if tokenizer.chat_template is None:
-            tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
-
-        # --chat-template overrides; load_chat_template accepts either a file path
-        # or an inline Jinja template string.
-        chat_template_flag = getattr(self.flags, "chat_template", None)
-        if chat_template_flag:
-            tokenizer.chat_template = load_chat_template(chat_template_flag)
+        _ensure_chat_template(
+            tokenizer, local_dir, getattr(self.flags, "chat_template", None)
+        )
 
         # Resolve stream_interval: env var override > backend config > default (20)
         stream_interval = self.stream_interval
@@ -1036,6 +1098,11 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
         default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
+        (
+            structural_tag_mode,
+            structural_tag_scope,
+            structural_tag_schema,
+        ) = _runtime_config_structural_tag_options(mdc)
 
         block_size = self.config.kv_cache_block_size or 16
 
@@ -1052,6 +1119,9 @@ class EngineFactory:
                 self.flags, "default_chat_template_kwargs", None
             ),
             default_thinking_mode=default_thinking_mode,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope=structural_tag_scope,
+            structural_tag_schema=structural_tag_schema,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

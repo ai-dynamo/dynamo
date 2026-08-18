@@ -438,6 +438,14 @@ impl LoadEstimator {
             .remove(lora_name);
     }
 
+    pub(crate) fn reset(&self) {
+        self.data.clear();
+        self.predictors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
     pub fn start_polling(
         self: Arc<Self>,
         scheduler: Arc<KvScheduler>,
@@ -584,7 +592,7 @@ impl LoadEstimator {
     }
 
     /// Remove all tracking data for a LoRA. After this call the LoRA will no
-    /// longer appear in [`get_current_load`] results. Useful when a LoRA is
+    /// longer appear in `get_current_load` results. Useful when a LoRA is
     /// permanently unloaded and its stale rate-counter / predictor entries
     /// should be purged.
     pub fn remove_lora(&self, lora_name: &str) {

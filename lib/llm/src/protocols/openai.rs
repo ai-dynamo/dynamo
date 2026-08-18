@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::{
     ContentProvider,
@@ -15,6 +16,7 @@ use crate::types::TokenIdType;
 pub mod audios;
 pub mod batches;
 pub mod chat_completions;
+pub mod classify;
 pub mod common_ext;
 pub mod completions;
 pub(crate) mod delta_common;
@@ -22,6 +24,7 @@ pub mod embeddings;
 pub mod generate;
 pub mod images;
 pub mod models;
+pub mod pooling;
 pub mod responses;
 pub mod stream_aggregator;
 pub mod tools;
@@ -30,8 +33,16 @@ pub mod videos;
 
 use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
-    TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
+    TEMPERATURE_RANGE, validate_range, validate_top_p,
 };
+
+/// Side from which prompt tokens are truncated.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTruncationSide {
+    Left,
+    Right,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AnnotatedDelta<R> {
@@ -113,8 +124,9 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
 
         let mut temperature = validate_range(self.get_temperature(), &TEMPERATURE_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating temperature: {}", e))?;
-        let mut top_p = validate_range(self.get_top_p(), &TOP_P_RANGE)
-            .map_err(|e| anyhow::anyhow!("Error validating top_p: {}", e))?;
+        // `top_p` must be between MIN_TOP_P and MAX_TOP_P.
+        let mut top_p: Option<f32> = self.get_top_p();
+        validate_top_p(top_p).map_err(|e| anyhow::anyhow!("Error validating top_p: {}", e))?;
         let frequency_penalty =
             validate_range(self.get_frequency_penalty(), &FREQUENCY_PENALTY_RANGE)
                 .map_err(|e| anyhow::anyhow!("Error validating frequency_penalty: {}", e))?;
@@ -318,6 +330,7 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
     fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage;
 
     /// Returns the request tracker if available, for accessing worker timing metrics.
+    /// Implementors that own request timing data must override this method.
     fn tracker(&self) -> Option<std::sync::Arc<common::timing::RequestTracker>> {
         None
     }
@@ -344,6 +357,16 @@ pub struct ParsingOptions {
     /// fire. `None` / `Some(true)` leave the tool calls untouched.
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
+
+    /// Non-streaming only: when the aggregated message has no non-reasoning
+    /// `content`, move the parsed `reasoning_content` into `content` instead of
+    /// returning empty content. Set by the chat and Anthropic HTTP handlers for
+    /// any request carrying `force_nonempty_content=true` — the caller asked for
+    /// non-empty content, so a reasoning-only turn must surface the reasoning as
+    /// content. Not keyed on the model or its parser. When content was
+    /// generated, reasoning stays in `reasoning_content`.
+    #[serde(default)]
+    pub move_reasoning_to_content_when_empty: bool,
 }
 
 impl ParsingOptions {
@@ -353,6 +376,7 @@ impl ParsingOptions {
             reasoning_parser,
             experimental_v2_batch_eligible: false,
             parallel_tool_calls: None,
+            move_reasoning_to_content_when_empty: false,
         }
     }
 
@@ -369,6 +393,14 @@ impl ParsingOptions {
     /// untouched.
     pub fn with_parallel_tool_calls(mut self, parallel_tool_calls: Option<bool>) -> Self {
         self.parallel_tool_calls = parallel_tool_calls;
+        self
+    }
+
+    /// Set whether a reasoning-only aggregated message should surface its
+    /// `reasoning_content` as `content` (non-streaming force_nonempty_content;
+    /// see the field docs).
+    pub fn with_move_reasoning_to_content_when_empty(mut self, enabled: bool) -> Self {
+        self.move_reasoning_to_content_when_empty = enabled;
         self
     }
 }

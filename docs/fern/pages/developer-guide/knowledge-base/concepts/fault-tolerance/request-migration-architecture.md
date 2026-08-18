@@ -25,7 +25,7 @@ Key responsibilities:
 - Manages retry logic with configurable migration limits
 - Tracks partial response state for seamless continuation
 
-The migration limit and max sequence length are configured at the **frontend** level and apply globally to all models served by that frontend. See [Enable migration on the Frontend](../../../../kubernetes/fault-tolerance/request-migration.md#enable-migration-on-the-frontend) in the use-case guide for the flags and environment variables.
+The migration limit and max sequence length are configured at the **frontend** level and apply globally to all models served by that frontend. See [Enable migration on the Frontend](../../../../kubernetes/fault-tolerance/request-migration.md) in the use-case guide for the flags and environment variables.
 
 ## Token State Tracking and Request Migration
 

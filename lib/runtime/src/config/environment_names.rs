@@ -34,6 +34,9 @@ pub mod logging {
     /// Enable JSONL logging format
     pub const DYN_LOGGING_JSONL: &str = "DYN_LOGGING_JSONL";
 
+    /// Console log format: "readable" or "jsonl"; blank uses the legacy fallback
+    pub const DYN_LOGGING_CONSOLE_FORMAT: &str = "DYN_LOGGING_CONSOLE_FORMAT";
+
     /// Disable ANSI terminal colors in logs
     pub const DYN_SDK_DISABLE_ANSI_LOGGING: &str = "DYN_SDK_DISABLE_ANSI_LOGGING";
 
@@ -61,7 +64,7 @@ pub mod logging {
         pub const OTEL_EXPORTER_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
         /// OTLP exporter endpoint URL for traces
-        /// Spec: https://opentelemetry.io/docs/specs/otel/protocol/exporter/
+        /// Spec: <https://opentelemetry.io/docs/specs/otel/protocol/exporter/>
         pub const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
         /// OTLP exporter endpoint URL for logs. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT or the protocol default when unset.
@@ -286,7 +289,7 @@ pub mod kvbm {
     /// NIXL backend configuration
     pub mod nixl {
         /// Prefix for NIXL backend environment variables
-        /// Pattern: DYN_KVBM_NIXL_BACKEND_<backend>=true/false
+        /// Pattern: `DYN_KVBM_NIXL_BACKEND_<backend>`=true/false
         /// Example: DYN_KVBM_NIXL_BACKEND_UCX=true
         pub const PREFIX: &str = "DYN_KVBM_NIXL_BACKEND_";
     }
@@ -302,9 +305,10 @@ pub mod llm {
 
     /// HTTP status code returned when the frontend rejects a request because
     /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
-    /// to 503 for Service Unavailable retry semantics. Any valid HTTP status
-    /// code (100–999) is accepted; an unparseable or out-of-range value falls
-    /// back to 529.
+    /// to 503 for Service Unavailable retry semantics. Status codes from 200
+    /// through 999 are accepted; an informational value from 100 through 199,
+    /// an unparseable value, or an out-of-range value falls back to 529. The
+    /// value is read and cached on first use.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
 
     /// Emit an SSE comment at this interval while a streaming response has no
@@ -431,7 +435,7 @@ pub mod llm {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
         pub const DYN_METRICS_PREFIX: &str = "DYN_METRICS_PREFIX";
 
-        /// Histogram bucket configuration (pattern: <PREFIX>_MIN, <PREFIX>_MAX, <PREFIX>_COUNT)
+        /// Histogram bucket configuration (pattern: `<PREFIX>_MIN`, `<PREFIX>_MAX`, `<PREFIX>_COUNT`)
         /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
@@ -667,8 +671,9 @@ pub mod router {
 
 /// Request plane transport environment variables
 pub mod request_plane {
-    /// Request plane payload codec selection: "json" or "msgpack".
-    /// JSON is the compatibility default.
+    /// Preferred payload codec advertised by every request-plane endpoint in this process.
+    /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
+    /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 }
 
@@ -742,7 +747,7 @@ pub mod event_plane {
 /// ZMQ Broker environment variables
 pub mod zmq_broker {
     /// Explicit ZMQ broker URL (takes precedence over discovery)
-    /// Format: "xsub=<url1>[;<url2>...] , xpub=<url1>[;<url2>...]"
+    /// Format: `"xsub=<url1>[;<url2>...] , xpub=<url1>[;<url2>...]"`
     /// Example: "xsub=tcp://broker:5555 , xpub=tcp://broker:5556"
     pub const DYN_ZMQ_BROKER_URL: &str = "DYN_ZMQ_BROKER_URL";
 
@@ -825,6 +830,7 @@ mod tests {
             logging::DYN_LOG,
             logging::DYN_LOGGING_CONFIG_PATH,
             logging::DYN_LOGGING_JSONL,
+            logging::DYN_LOGGING_CONSOLE_FORMAT,
             logging::DYN_SDK_DISABLE_ANSI_LOGGING,
             logging::DYN_LOG_USE_LOCAL_TZ,
             logging::DYN_LOGGING_SPAN_EVENTS,

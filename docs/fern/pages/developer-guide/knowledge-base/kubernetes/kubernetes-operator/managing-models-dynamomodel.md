@@ -125,7 +125,7 @@ spec:
 ```
 
 **For complete field specifications, validation rules, and all options, see:**
-📖 [DynamoModel API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md#dynamomodel)
+📖 [DynamoModel API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx#dynamomodel)
 
 ### Status Summary
 
@@ -664,7 +664,7 @@ The operator automatically handles all service discovery - you don't configure s
 
 For complete field specifications, validation rules, and detailed type definitions, see:
 
-**📖 [Dynamo CRD API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md#dynamomodel)**
+**📖 [Dynamo CRD API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx#dynamomodel)**
 
 ## Summary
 
@@ -678,4 +678,4 @@ DynamoModel provides declarative model management for Dynamo deployments:
 **Next Steps:**
 - Try the [Quick Start](#quick-start) example
 - Explore [Common Use Cases](#common-use-cases)
-- Check the [API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md#dynamomodel) for advanced configuration
+- Check the [API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx#dynamomodel) for advanced configuration

@@ -7,12 +7,16 @@
 
 use std::sync::Arc;
 
-use dynamo_runtime::protocols::EndpointId;
+use async_trait::async_trait;
+use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
+use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
+use dynamo_runtime::{component::Endpoint, protocols::EndpointId};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::KvWorkerMonitor,
-    kv_router::{EncoderRouter, KvRouter, PrefillRouter},
+    discovery::{KvWorkerMonitor, allocator::AllocatorTrimOnDrop},
+    kv_router::{EncoderRouter, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -20,12 +24,109 @@ use crate::{
         openai::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
-            completions::OpenAICompletionsStreamingEngine,
+            classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
-            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
 };
+
+type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
+
+struct RequestLifetimeEngine<Req, Resp>
+where
+    Req: AsyncEngineContextProvider + Send + 'static,
+    Resp: AsyncEngineContextProvider + 'static,
+{
+    inner: Arc<dyn AsyncEngine<Req, Resp, Error>>,
+    teardown: Arc<AllocatorTrimOnDrop>,
+}
+
+#[async_trait]
+impl<Req, Resp> AsyncEngine<Req, Resp, Error> for RequestLifetimeEngine<Req, Resp>
+where
+    Req: AsyncEngineContextProvider + Send + 'static,
+    Resp: AsyncEngineContextProvider + 'static,
+{
+    async fn generate(&self, request: Req) -> Result<Resp, Error> {
+        request.context().retain(self.teardown.clone());
+        let response = self.inner.generate(request).await?;
+        response.context().retain(self.teardown.clone());
+        Ok(response)
+    }
+}
+
+fn retain_teardown_until_requests_finish<Req, Resp>(
+    engine: Option<Arc<dyn AsyncEngine<Req, Resp, Error>>>,
+    teardown: &Arc<AllocatorTrimOnDrop>,
+) -> Option<Arc<dyn AsyncEngine<Req, Resp, Error>>>
+where
+    Req: AsyncEngineContextProvider + Send + 'static,
+    Resp: AsyncEngineContextProvider + 'static,
+{
+    engine.map(|inner| {
+        Arc::new(RequestLifetimeEngine {
+            inner,
+            teardown: teardown.clone(),
+        }) as Arc<dyn AsyncEngine<Req, Resp, Error>>
+    })
+}
+
+struct LoraContextEngine<Req: Data, Resp: Data> {
+    inner: StreamingEngine<Req, Resp>,
+    lora_name: String,
+}
+
+#[async_trait]
+impl<Req: Data, Resp: Data> AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>
+    for LoraContextEngine<Req, Resp>
+{
+    async fn generate(&self, mut request: SingleIn<Req>) -> Result<ManyOut<Resp>, Error> {
+        request.insert(
+            crate::preprocessor::LORA_NAME_CONTEXT_KEY,
+            self.lora_name.clone(),
+        );
+        self.inner.generate(request).await
+    }
+}
+
+struct LoraGenerateEngine {
+    inner: GenerateStreamingEngine,
+    lora_name: String,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<crate::protocols::common::preprocessor::PreprocessedRequest>,
+        ManyOut<crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>>,
+        Error,
+    > for LoraGenerateEngine
+{
+    async fn generate(
+        &self,
+        mut request: SingleIn<crate::protocols::common::preprocessor::PreprocessedRequest>,
+    ) -> Result<
+        ManyOut<crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>>,
+        Error,
+    > {
+        request.routing.get_or_insert_default().lora_name = Some(self.lora_name.clone());
+        self.inner.generate(request).await
+    }
+}
+
+fn lora_context_engine<Req: Data, Resp: Data>(
+    engine: &Option<StreamingEngine<Req, Resp>>,
+    lora_name: &str,
+) -> Option<StreamingEngine<Req, Resp>> {
+    engine.as_ref().map(|inner| {
+        Arc::new(LoraContextEngine {
+            inner: inner.clone(),
+            lora_name: lora_name.to_string(),
+        }) as Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>
+    })
+}
 
 /// A set of workers from the same namespace/configuration with their own pipeline.
 pub struct WorkerSet {
@@ -35,6 +136,9 @@ pub struct WorkerSet {
     /// Exact serving pool identity. Discovery-backed WorkerSets always set
     /// this; in-process models have no distributed endpoint.
     endpoint_id: Option<EndpointId>,
+
+    /// Endpoint handle used only by committed topology reconciliation.
+    topology_endpoint: Option<Endpoint>,
 
     /// MDC checksum for this set's configuration
     mdcsum: String,
@@ -46,6 +150,8 @@ pub struct WorkerSet {
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
     pub(crate) embeddings_engine: Option<OpenAIEmbeddingsStreamingEngine>,
+    pub(crate) classify_engine: Option<OpenAIClassifyStreamingEngine>,
+    pub(crate) pooling_engine: Option<OpenAIPoolingStreamingEngine>,
     pub(crate) images_engine: Option<OpenAIImagesStreamingEngine>,
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
@@ -53,15 +159,12 @@ pub struct WorkerSet {
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
-    /// KV router for this set's workers (if KV mode)
-    pub(crate) kv_router: Option<Arc<KvRouter>>,
-
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
 
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
-    pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
+    pub(crate) prefill_router: Option<Arc<dyn PrefillRouterLifecycle>>,
 
     /// Optional multimodal encoder hop. Stored for discovery-driven
     /// deactivation/reactivation when Encode workers leave or rejoin.
@@ -70,6 +173,13 @@ pub struct WorkerSet {
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
+
+    /// Cancels background work created while materializing this WorkerSet.
+    lifecycle_cancellation: Option<CancellationToken>,
+
+    /// Drops after engine fields and after every active request context releases it.
+    allocator_trim: Option<Arc<AllocatorTrimOnDrop>>,
+    allocator_trim_wrapped: bool,
 }
 
 impl WorkerSet {
@@ -77,22 +187,27 @@ impl WorkerSet {
         Self {
             namespace,
             endpoint_id: None,
+            topology_endpoint: None,
             mdcsum,
             card,
             chat_engine: None,
             completions_engine: None,
             embeddings_engine: None,
+            classify_engine: None,
+            pooling_engine: None,
             images_engine: None,
             videos_engine: None,
             audios_engine: None,
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
-            kv_router: None,
             worker_monitor: None,
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
+            lifecycle_cancellation: None,
+            allocator_trim: None,
+            allocator_trim_wrapped: false,
         }
     }
 
@@ -104,8 +219,13 @@ impl WorkerSet {
         self.endpoint_id.as_ref()
     }
 
-    pub(crate) fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
-        self.endpoint_id = Some(endpoint_id);
+    pub(crate) fn set_topology_endpoint(&mut self, endpoint: Endpoint) {
+        self.endpoint_id = Some(endpoint.id());
+        self.topology_endpoint = Some(endpoint);
+    }
+
+    pub(crate) fn topology_endpoint(&self) -> Option<&Endpoint> {
+        self.topology_endpoint.as_ref()
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -126,6 +246,14 @@ impl WorkerSet {
 
     pub fn has_embeddings_engine(&self) -> bool {
         self.embeddings_engine.is_some()
+    }
+
+    pub fn has_classify_engine(&self) -> bool {
+        self.classify_engine.is_some()
+    }
+
+    pub fn has_pooling_engine(&self) -> bool {
+        self.pooling_engine.is_some()
     }
 
     pub fn has_images_engine(&self) -> bool {
@@ -173,6 +301,8 @@ impl WorkerSet {
         self.has_chat_engine()
             || self.has_completions_engine()
             || self.has_embeddings_engine()
+            || self.has_classify_engine()
+            || self.has_pooling_engine()
             || self.has_images_engine()
             || self.has_tensor_engine()
             || self.has_videos_engine()
@@ -231,6 +361,94 @@ impl WorkerSet {
     pub fn set_instance_watcher(&mut self, rx: watch::Receiver<Vec<u64>>) {
         self.instance_count_rx = Some(rx);
     }
+
+    pub(crate) fn set_lifecycle_cancellation(&mut self, cancellation: CancellationToken) {
+        self.lifecycle_cancellation = Some(cancellation);
+    }
+
+    pub(crate) fn initialize_allocator_trim_on_teardown(&mut self) -> Arc<AllocatorTrimOnDrop> {
+        self.allocator_trim
+            .get_or_insert_with(|| Arc::new(AllocatorTrimOnDrop::new()))
+            .clone()
+    }
+
+    pub(crate) fn enable_allocator_trim_on_teardown(&mut self) {
+        if self.allocator_trim_wrapped {
+            return;
+        }
+        let teardown = self.initialize_allocator_trim_on_teardown();
+        macro_rules! retain_for_requests {
+            ($field:ident) => {
+                self.$field = retain_teardown_until_requests_finish(self.$field.take(), &teardown);
+            };
+        }
+        retain_for_requests!(chat_engine);
+        retain_for_requests!(completions_engine);
+        retain_for_requests!(embeddings_engine);
+        retain_for_requests!(classify_engine);
+        retain_for_requests!(pooling_engine);
+        retain_for_requests!(images_engine);
+        retain_for_requests!(videos_engine);
+        retain_for_requests!(audios_engine);
+        retain_for_requests!(tensor_engine);
+        retain_for_requests!(realtime_engine);
+        retain_for_requests!(generate_engine);
+        self.allocator_trim_wrapped = true;
+    }
+
+    pub(crate) fn adapter_view(&self, card: ModelDeploymentCard) -> Self {
+        let lora_name = card
+            .lora
+            .as_ref()
+            .expect("adapter views require LoRA metadata")
+            .name
+            .clone();
+        let generate_engine = self.generate_engine.as_ref().map(|inner| {
+            Arc::new(LoraGenerateEngine {
+                inner: inner.clone(),
+                lora_name: lora_name.clone(),
+            }) as GenerateStreamingEngine
+        });
+        let mut view = Self {
+            namespace: self.namespace.clone(),
+            endpoint_id: self.endpoint_id.clone(),
+            topology_endpoint: self.topology_endpoint.clone(),
+            mdcsum: self.mdcsum.clone(),
+            card,
+            chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
+            completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
+            embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),
+            classify_engine: lora_context_engine(&self.classify_engine, &lora_name),
+            pooling_engine: lora_context_engine(&self.pooling_engine, &lora_name),
+            images_engine: lora_context_engine(&self.images_engine, &lora_name),
+            videos_engine: lora_context_engine(&self.videos_engine, &lora_name),
+            audios_engine: lora_context_engine(&self.audios_engine, &lora_name),
+            tensor_engine: lora_context_engine(&self.tensor_engine, &lora_name),
+            // Realtime is bidirectional, so the server-streaming LoRA context wrapper cannot
+            // inject the adapter identity. Fail closed instead of serving the base weights.
+            realtime_engine: None,
+            generate_engine,
+            worker_monitor: self.worker_monitor.clone(),
+            prefill_router: self.prefill_router.clone(),
+            encoder_router: self.encoder_router.clone(),
+            instance_count_rx: self.instance_count_rx.clone(),
+            lifecycle_cancellation: None,
+            allocator_trim: None,
+            allocator_trim_wrapped: false,
+        };
+        if self.allocator_trim.is_some() {
+            view.enable_allocator_trim_on_teardown();
+        }
+        view
+    }
+}
+
+impl Drop for WorkerSet {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.lifecycle_cancellation.take() {
+            cancellation.cancel();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -245,16 +463,18 @@ mod tests {
     use crate::types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     };
+    use crate::types::openai::classify::{NvCreateClassifyRequest, NvCreateClassifyResponse};
     use crate::types::openai::completions::{
         NvCreateCompletionRequest, NvCreateCompletionResponse,
     };
     use crate::types::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
     use crate::types::openai::images::{NvCreateImageRequest, NvImagesResponse};
+    use crate::types::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
     use crate::types::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
     use async_trait::async_trait;
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
-    use std::marker::PhantomData;
+    use std::{marker::PhantomData, sync::Mutex};
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
         WorkerSet::new(
@@ -288,11 +508,83 @@ mod tests {
         }
     }
 
+    struct CaptureGenerateEngine {
+        observed_lora: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for CaptureGenerateEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            *self.observed_lora.lock().unwrap() = request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.clone());
+            Err(anyhow::anyhow!("captured request"))
+        }
+    }
+
     #[test]
     fn test_worker_set_basics() {
         let ws = make_worker_set("ns1", "abc123");
         assert_eq!(ws.namespace(), "ns1");
         assert_eq!(ws.mdcsum(), "abc123");
+    }
+
+    #[tokio::test]
+    async fn adapter_view_routes_generate_requests_with_adapter_identity() {
+        let observed_lora = Arc::new(Mutex::new(None));
+        let mut base = make_worker_set("ns1", "abc123");
+        base.generate_engine = Some(Arc::new(CaptureGenerateEngine {
+            observed_lora: observed_lora.clone(),
+        }));
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let adapter = base.adapter_view(adapter_card);
+        let request = PreprocessedRequest::builder()
+            .model("adapter-model".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+
+        let result = adapter
+            .generate_engine
+            .as_ref()
+            .unwrap()
+            .generate(SingleIn::new(request))
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            observed_lora.lock().unwrap().as_deref(),
+            Some("adapter-model")
+        );
+    }
+
+    #[test]
+    fn adapter_view_does_not_advertise_unwrapped_realtime_engine() {
+        let mut base = make_worker_set("ns1", "abc123");
+        base.realtime_engine = Some(Arc::new(crate::engines::EchoBidirectionalEngine));
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+
+        let adapter = base.adapter_view(adapter_card);
+
+        assert!(base.has_realtime_engine());
+        assert!(!adapter.has_realtime_engine());
     }
 
     #[test]
@@ -301,6 +593,8 @@ mod tests {
         assert!(!ws.has_chat_engine());
         assert!(!ws.has_completions_engine());
         assert!(!ws.has_embeddings_engine());
+        assert!(!ws.has_classify_engine());
+        assert!(!ws.has_pooling_engine());
         assert!(!ws.has_images_engine());
         assert!(!ws.has_videos_engine());
         assert!(!ws.has_audios_engine());
@@ -348,6 +642,18 @@ mod tests {
             has_embeddings_engine,
             StubEngine::<NvCreateEmbeddingRequest, NvCreateEmbeddingResponse>::new(),
             "embeddings"
+        );
+        check!(
+            classify_engine,
+            has_classify_engine,
+            StubEngine::<NvCreateClassifyRequest, NvCreateClassifyResponse>::new(),
+            "classify"
+        );
+        check!(
+            pooling_engine,
+            has_pooling_engine,
+            StubEngine::<NvCreatePoolingRequest, NvCreatePoolingResponse>::new(),
+            "pooling"
         );
         check!(
             images_engine,

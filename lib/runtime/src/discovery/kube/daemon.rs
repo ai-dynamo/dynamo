@@ -324,7 +324,7 @@ impl DiscoveryDaemon {
                 continue;
             }
 
-            match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
+            match super::crd::deserialize_metadata(arc_cr.spec.data.clone()) {
                 Ok(metadata) => {
                     tracing::trace!("Loaded metadata from CR '{cr_name}'");
                     let cached = CachedCrMetadata {

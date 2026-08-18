@@ -10,6 +10,9 @@ model:
   hf_id: moonshotai/Kimi-K3
   precision: MXFP4 experts + BF16 dense, FP8 KV cache
 status: experimental  # Day-0
+artifacts:
+  recipe_specific_images:
+  - nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
 targets:
 - id: vllm-agg-gb200
   recommended: false

@@ -152,7 +152,7 @@ else
 fi
 
 # --- CONFIGURATION ---
-NAMESPACE="buildkit"
+NAMESPACE="${BUILDKIT_NAMESPACE:?BUILDKIT_NAMESPACE must be set}"
 PORT="1234"
 # Highest buildkit pod ordinal to probe, exclusive. Must be >= the KEDA
 # maxReplicaCount for the buildkit StatefulSet, or pods above this ordinal are

@@ -117,7 +117,7 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_io_kwargs: Option<MediaDecoder>,
 
-    /// When true, logprob token fields are returned as "token_id:<id>" instead
+    /// When true, logprob token fields are returned as "token_id:`<id>`" instead
     /// of decoded text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
@@ -877,16 +877,31 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_accepts_positive_max_tokens() {
+    fn test_validate_accepts_max_tokens_at_upper_bound() {
         let request_json = json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}],
-            "max_tokens": 1
+            "max_tokens": 1_048_576
         });
         let request: NvCreateChatCompletionRequest =
             serde_json::from_value(request_json).expect("Failed to deserialize request");
 
         assert!(ValidateRequest::validate(&request).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_max_tokens_above_upper_bound() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1_048_577
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request)
+            .expect_err("max_tokens above the upper bound must be rejected");
+        assert!(err.to_string().contains("must not exceed 1048576"));
     }
 
     #[test]

@@ -22,13 +22,7 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
-featureGates:
-  # -- Temporary internal gate for GMS + Snapshot.
-  gmsSnapshot: false
-
 # Environment variables to pass to operator Deployment.
-#
-# Prefer featureGates.gmsSnapshot for the temporary GMS + Snapshot gate.
 env: []
 
 # -- DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments.
@@ -85,6 +79,10 @@ controllerManager:
       repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
       # tag is optional - if not set, will use Chart.AppVersion
       tag: ""
+    # Default DGDR profiler image, put into DGDR spec.image when unset. Empty
+    # derives dynamo-planner:<chart appVersion>, which only exists for GA
+    # releases.
+    dgdrDefaultImage: ""
     resources:
       limits:
         cpu: 1024m
@@ -152,6 +150,12 @@ metricsService:
   # true=always create both (use for helm template / GitOps workflows),
   # false=never create either
   enabled: null
+  # -- Labels for the operator ServiceMonitor. Label-selecting Prometheus installs
+  # only discover monitors carrying their release label; the default matches the
+  # release name used by deploy/observability/setup-monitoring.sh. Override when your
+  # Prometheus release is named differently, e.g. {release: kube-prometheus-stack}.
+  labels:
+    release: prometheus
   ports:
   - name: metrics
     port: 8080
