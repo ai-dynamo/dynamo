@@ -132,22 +132,12 @@ impl HealthCheckManager {
                         let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
 
                         if let Some(target) = target {
-                            // Race the in-flight send too: a canary against an unresponsive
-                            // endpoint is bounded only by `request_timeout`, and holding here
-                            // would hold this task's `Arc<Self>` past shutdown.
-                            tokio::select! {
-                                biased;
-
-                                _ = token.cancelled() => {
-                                    debug!("Runtime shutdown started while sending health check for {}", endpoint_subject);
-                                    break;
-                                }
-
-                                result = manager.send_health_check_request(&endpoint_subject, &target.payload) => {
-                                    if let Err(e) = result {
-                                        error!("Failed to send health check for {}: {}", endpoint_subject, e);
-                                    }
-                                }
+                            // Dispatch only: this resolves the engine and spawns the request,
+                            // so it does not block on an unresponsive endpoint. The in-flight
+                            // request is cancelled inside `send_health_check_request`, which
+                            // observes the same token from its own spawned task.
+                            if let Err(e) = manager.send_health_check_request(&endpoint_subject, &target.payload).await {
+                                error!("Failed to send health check for {}: {}", endpoint_subject, e);
                             }
                         } else {
                             // This should never happen - targets are registered at startup and never removed
@@ -282,10 +272,11 @@ impl HealthCheckManager {
         let endpoint_subject_owned = endpoint_subject.to_string();
         let payload = payload.clone();
         let timeout = self.config.request_timeout;
+        let token = self.cancellation_token.clone();
 
         // Spawn task to send health check and wait for response
         tokio::spawn(async move {
-            let result = tokio::time::timeout(timeout, async {
+            let request_future = tokio::time::timeout(timeout, async {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
@@ -336,8 +327,25 @@ impl HealthCheckManager {
                         );
                     }
                 }
-            })
-            .await;
+            });
+
+            // This is where the canary actually waits, so this is where cancellation
+            // has to be observed. `request_timeout` alone would let a request against
+            // an unresponsive endpoint outlive the start of shutdown by that long.
+            // Dropping `request_future` here cancels the in-flight `generate()`.
+            let result = tokio::select! {
+                biased;
+
+                _ = token.cancelled() => {
+                    debug!(
+                        "Runtime shutdown started, abandoning in-flight health check for {}",
+                        endpoint_subject_owned
+                    );
+                    return;
+                }
+
+                result = request_future => result,
+            };
 
             // Handle timeout
             if result.is_err() {
@@ -834,6 +842,89 @@ mod push_handler_notify_tests {
             calls_after_shutdown,
             "no canary request should begin after runtime shutdown"
         );
+    }
+
+    // =================================================================
+    // Test 7: Runtime shutdown → in-flight canary is cancelled
+    // Test 6 covers canaries that never start. This covers the one that
+    // was already running when shutdown began, which is bounded only by
+    // `request_timeout` unless cancellation reaches the spawned request.
+    // =================================================================
+
+    /// Engine whose `generate` never returns, standing in for an endpoint that
+    /// has stopped answering.
+    struct MockBlockingEngine {
+        in_flight: Arc<AtomicUsize>,
+    }
+
+    /// Decrements the in-flight count when the blocked future is dropped, which
+    /// is the observable signal that the request was cancelled.
+    struct InFlightGuard(Arc<AtomicUsize>);
+
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for MockBlockingEngine
+    {
+        async fn generate(
+            &self,
+            _input: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            self.in_flight.fetch_add(1, Ordering::SeqCst);
+            let _guard = InFlightGuard(self.in_flight.clone());
+            std::future::pending::<()>().await;
+            unreachable!("blocking engine never completes");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_in_flight_health_check_cancelled_on_runtime_shutdown() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.shutdown_cancels_in_flight";
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let engine = Arc::new(MockBlockingEngine {
+            in_flight: in_flight.clone(),
+        });
+        let _notifier = register_endpoint(&drt, endpoint, engine);
+
+        // A long `request_timeout` is the point of this test: it is what separates
+        // "the request was cancelled" from "the timeout happened to fire".
+        let config = HealthCheckConfig {
+            canary_wait_time: Duration::from_millis(50),
+            request_timeout: Duration::from_secs(30),
+        };
+        // `start` consumes the `Arc`, so the spawned tasks are left as its only
+        // owners — the same ownership shape as production.
+        Arc::new(HealthCheckManager::new(drt.clone(), config))
+            .start()
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while in_flight.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a canary request should be in flight before shutdown");
+
+        drt.shutdown();
+
+        // Two seconds is far inside the thirty-second `request_timeout`, so the guard
+        // can only have dropped because cancellation dropped the request future.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while in_flight.load(Ordering::SeqCst) != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("in-flight health check should be cancelled when runtime shutdown begins");
     }
 }
 
