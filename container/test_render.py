@@ -1,9 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
-from container.render import _inject_python_index_secrets
+_RENDER_PATH = Path(__file__).with_name("render.py")
+_RENDER_SPEC = importlib.util.spec_from_file_location(
+    "dynamo_container_render", _RENDER_PATH
+)
+assert _RENDER_SPEC is not None and _RENDER_SPEC.loader is not None
+_RENDER_MODULE = importlib.util.module_from_spec(_RENDER_SPEC)
+_RENDER_SPEC.loader.exec_module(_RENDER_MODULE)
+_inject_python_index_secrets = _RENDER_MODULE._inject_python_index_secrets
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
