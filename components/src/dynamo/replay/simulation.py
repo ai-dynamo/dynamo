@@ -16,9 +16,11 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
+from aisimulate.aic import materialize_aic_num_gpu_blocks
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
+    ReplayOutputRequirements,
     ReplayReport,
     ReplaySpec,
     RunnerCapabilities,
@@ -63,6 +65,7 @@ class DynamoReplayRunnerFactory:
             replay_spec_api_version=_REPLAY_SPEC_API_VERSION,
             supported_backend_topologies=_SUPPORTED_BACKEND_TOPOLOGIES,
             supported_hooks=(_PLANNER_HOOK, _ROUTER_HOOK),
+            supports_disaggregated_attention_dp=False,
         )
 
     def create(self, worker_id: int) -> DynamoReplayRunner:
@@ -85,9 +88,15 @@ class DynamoReplayRunner:
     trace_block_size: int = 512
     benchmark_granularity: int = 8
 
-    def run(self, spec: ReplaySpec) -> ReplayReport:
+    def run(
+        self,
+        spec: ReplaySpec,
+        *,
+        output_requirements: ReplayOutputRequirements | None = None,
+    ) -> ReplayReport:
         """Execute one trace or synthetic replay with requested Dynamo hooks."""
 
+        output_requirements = output_requirements or ReplayOutputRequirements()
         self.capabilities.require_compatible(spec)
         planner_config, router_mode, router_config = self._resolve_hooks(
             spec.runtime_hooks
@@ -99,7 +108,9 @@ class DynamoReplayRunner:
             "replay_concurrency": self._effective_in_flight_cap(spec),
             "planner_config": planner_config,
             "benchmark_granularity": self.benchmark_granularity,
-            "capture_per_request": False,
+            # Sweeper uses the lightweight default. CLI and other callers can
+            # explicitly request detailed output through the Runner contract.
+            "capture_per_request": output_requirements.capture_per_request,
             "capture_planner_details": False,
             **self._goodput_sla_kwargs(spec),
         }
@@ -111,7 +122,7 @@ class DynamoReplayRunner:
             common.update(self._synthetic_kwargs(spec))
             report = self._run_synthetic(spec, common)
 
-        metrics, metadata = self._normalize_report(report)
+        metrics, metadata = self._normalize_report(report, output_requirements)
         self._require_goodput_metric(metrics, spec)
         return ReplayReport(metrics=metrics, metadata=metadata)
 
@@ -205,7 +216,9 @@ class DynamoReplayRunner:
     def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
-        return MockEngineArgs.from_json(json.dumps(payload))
+        return MockEngineArgs.from_json(
+            json.dumps(materialize_aic_num_gpu_blocks(payload))
+        )
 
     def _run_trace(self, spec: ReplaySpec, common: dict[str, Any]):
         deployment = spec.backend_deployment
@@ -294,7 +307,10 @@ class DynamoReplayRunner:
         }
 
     @staticmethod
-    def _normalize_report(report: Any) -> tuple[dict[str, float], dict[str, JSONValue]]:
+    def _normalize_report(
+        report: Any,
+        output_requirements: ReplayOutputRequirements,
+    ) -> tuple[dict[str, float], dict[str, JSONValue]]:
         metadata: dict[str, JSONValue] = {}
         if hasattr(report, "summary"):
             trace_report = dict(report.summary)
@@ -314,6 +330,17 @@ class DynamoReplayRunner:
         for name, value in trace_report.items():
             if isinstance(value, Real):
                 metrics[str(name)] = float(value)
+        if (
+            output_requirements.include_raw_report
+            or output_requirements.capture_per_request
+        ):
+            if hasattr(report, "to_dict"):
+                native_report = report.to_dict()
+            elif hasattr(report, "trace_report"):
+                native_report = {"trace_report": dict(report.trace_report)}
+            else:
+                native_report = dict(report)
+            metadata["native_report"] = native_report
         return metrics, metadata
 
     @staticmethod

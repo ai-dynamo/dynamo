@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping
 from copy import deepcopy
 from enum import Enum
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tqdm import tqdm  # type: ignore[import-untyped]
 
 from aisimulate.sweeper.provider import (
@@ -25,6 +26,7 @@ from aisimulate.sweeper.provider import (
 
 from .load_predictor import (
     LOAD_PREDICTOR_PRESETS,
+    complete_predictor_preset,
     predictor_fields,
     sweep_load_predictor,
 )
@@ -100,80 +102,195 @@ def _default_load_predictors() -> list[str | dict[str, Any]]:
     return list(LOAD_PREDICTOR_PRESETS)
 
 
+def _validate_preset_entries(
+    name: str,
+    values: list[str | dict[str, Any]],
+    presets: frozenset[str],
+    allowed_keys: frozenset[str],
+    required_keys: frozenset[str],
+) -> None:
+    if not values:
+        raise ValueError(f"{name}.preset must list at least one choice")
+    for value in values:
+        if isinstance(value, str):
+            if value not in presets:
+                raise ValueError(
+                    f"{name}.preset has invalid choice {value!r}; "
+                    f"allowed: {sorted(presets)}"
+                )
+            continue
+        unknown = set(value) - allowed_keys
+        missing = required_keys - set(value)
+        if unknown:
+            raise ValueError(
+                f"{name}.preset mapping has unknown keys {sorted(unknown)}; "
+                f"allowed: {sorted(allowed_keys)}"
+            )
+        if missing:
+            raise ValueError(
+                f"{name}.preset mapping is missing required keys {sorted(missing)}"
+            )
+
+
+class ScalingPolicySearch(BaseModel):
+    """Preset choices that cover every scaling-policy knob."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preset: list[str | dict[str, Any]] = Field(
+        default_factory=_default_scaling_policies
+    )
+
+    @model_validator(mode="after")
+    def _validate_preset(self) -> ScalingPolicySearch:
+        _validate_preset_entries(
+            "scaling_policy",
+            self.preset,
+            frozenset(SCALING_POLICIES),
+            _SCALING_KEYS,
+            _SCALING_KEYS,
+        )
+        return self
+
+
+class FpmSamplingSearch(BaseModel):
+    """Preset choices that cover every FPM-sampling knob."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preset: list[str | dict[str, Any]] = Field(default_factory=_default_fpm_sampling)
+
+    @model_validator(mode="after")
+    def _validate_preset(self) -> FpmSamplingSearch:
+        _validate_preset_entries(
+            "fpm_sampling",
+            self.preset,
+            frozenset(FPM_SAMPLING),
+            _FPM_KEYS,
+            _FPM_KEYS,
+        )
+        return self
+
+
+class LoadSensitivitySearch(BaseModel):
+    """Preset choices that cover every load-sensitivity knob."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preset: list[str | dict[str, Any]] = Field(
+        default_factory=_default_load_sensitivity
+    )
+
+    @model_validator(mode="after")
+    def _validate_preset(self) -> LoadSensitivitySearch:
+        _validate_preset_entries(
+            "load_sensitivity",
+            self.preset,
+            frozenset(LOAD_SENSITIVITY),
+            _LOAD_KEYS,
+            _LOAD_KEYS,
+        )
+        return self
+
+
+class LoadPredictorSearch(BaseModel):
+    """Preset choices that cover every load-predictor knob."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preset: list[str | dict[str, Any]] = Field(default_factory=_default_load_predictors)
+
+    @field_validator("preset", mode="after")
+    @classmethod
+    def _complete_custom_presets(
+        cls, values: list[str | dict[str, Any]]
+    ) -> list[str | dict[str, Any]]:
+        del cls
+        completed: list[str | dict[str, Any]] = []
+        for value in values:
+            if isinstance(value, str):
+                completed.append(value)
+                continue
+            unknown = set(value) - _PREDICTOR_KEYS
+            if unknown:
+                raise ValueError(
+                    "load_predictor.preset mapping has unknown keys "
+                    f"{sorted(unknown)}; allowed: {sorted(_PREDICTOR_KEYS)}"
+                )
+            if "load_predictor" not in value:
+                raise ValueError(
+                    "load_predictor.preset mapping is missing required key "
+                    "'load_predictor'"
+                )
+            completed.append(complete_predictor_preset(value))
+        return completed
+
+    @model_validator(mode="after")
+    def _validate_preset(self) -> LoadPredictorSearch:
+        _validate_preset_entries(
+            "load_predictor",
+            self.preset,
+            frozenset(LOAD_PREDICTOR_PRESETS),
+            _PREDICTOR_KEYS,
+            _PREDICTOR_KEYS,
+        )
+        return self
+
+
+_LEGACY_PRESET_REMOVAL_NOTE = (
+    "Legacy flat Dynamo Planner Sweeper preset fields are deprecated and will be "
+    "removed after the 1.5 release. Nest choices under each sub-item's 'preset' field."
+)
+
+
 class PlannerSearchSpace(BaseModel):
     """Validated Planner-owned search space."""
 
     model_config = ConfigDict(extra="forbid")
 
-    scaling_policy: list[str | dict[str, Any]] = Field(
-        default_factory=_default_scaling_policies
+    scaling_policy: ScalingPolicySearch = Field(default_factory=ScalingPolicySearch)
+    fpm_sampling: FpmSamplingSearch = Field(default_factory=FpmSamplingSearch)
+    load_sensitivity: LoadSensitivitySearch = Field(
+        default_factory=LoadSensitivitySearch
     )
-    fpm_sampling: list[str | dict[str, Any]] = Field(
-        default_factory=_default_fpm_sampling
-    )
-    load_sensitivity: list[str | dict[str, Any]] = Field(
-        default_factory=_default_load_sensitivity
-    )
-    load_predictor_candidates: list[str | dict[str, Any]] = Field(
-        default_factory=_default_load_predictors
-    )
+    load_predictor: LoadPredictorSearch = Field(default_factory=LoadPredictorSearch)
     min_endpoint: int | None = Field(default=None, ge=1)
+    prefill_min_endpoint: int | None = Field(default=None, ge=1)
+    decode_min_endpoint: int | None = Field(default=None, ge=1)
 
-    @model_validator(mode="after")
-    def _validate_choices(self) -> PlannerSearchSpace:
-        specifications = (
-            (
-                "scaling_policy",
-                self.scaling_policy,
-                frozenset(SCALING_POLICIES),
-                _SCALING_KEYS,
-                _SCALING_KEYS,
-            ),
-            (
-                "fpm_sampling",
-                self.fpm_sampling,
-                frozenset(FPM_SAMPLING),
-                _FPM_KEYS,
-                _FPM_KEYS,
-            ),
-            (
-                "load_sensitivity",
-                self.load_sensitivity,
-                frozenset(LOAD_SENSITIVITY),
-                _LOAD_KEYS,
-                _LOAD_KEYS,
-            ),
-            (
-                "load_predictor_candidates",
-                self.load_predictor_candidates,
-                frozenset(LOAD_PREDICTOR_PRESETS),
-                _PREDICTOR_KEYS,
-                frozenset({"load_predictor"}),
-            ),
-        )
-        for name, values, presets, allowed_keys, required_keys in specifications:
-            if not values:
-                raise ValueError(f"{name} must list at least one choice")
-            for value in values:
-                if isinstance(value, str):
-                    if value not in presets:
-                        raise ValueError(
-                            f"{name} has invalid choice {value!r}; "
-                            f"allowed: {sorted(presets)}"
-                        )
-                    continue
-                unknown = set(value) - allowed_keys
-                missing = required_keys - set(value)
-                if unknown:
-                    raise ValueError(
-                        f"{name} dict has unknown keys {sorted(unknown)}; "
-                        f"allowed: {sorted(allowed_keys)}"
-                    )
-                if missing:
-                    raise ValueError(
-                        f"{name} dict is missing required keys {sorted(missing)}"
-                    )
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_flat_presets(cls, data: Any) -> Any:
+        # Backward compatibility: remove this conversion after the 1.5 release.
+        if not isinstance(data, Mapping):
+            return data
+
+        upgraded = dict(data)
+        legacy_fields: list[str] = []
+        for name in ("scaling_policy", "fpm_sampling", "load_sensitivity"):
+            value = upgraded.get(name)
+            if value is not None and not isinstance(value, (Mapping, BaseModel)):
+                upgraded[name] = {"preset": value}
+                legacy_fields.append(name)
+
+        if "load_predictor_candidates" in upgraded:
+            if "load_predictor" in upgraded:
+                raise ValueError(
+                    "load_predictor_candidates cannot be combined with load_predictor"
+                )
+            upgraded["load_predictor"] = {
+                "preset": upgraded.pop("load_predictor_candidates")
+            }
+            legacy_fields.append("load_predictor_candidates")
+
+        if legacy_fields:
+            warnings.warn(
+                f"{_LEGACY_PRESET_REMOVAL_NOTE} Legacy fields: "
+                f"{', '.join(legacy_fields)}.",
+                FutureWarning,
+                stacklevel=4,
+            )
+        return upgraded
 
 
 def _plain(value: Any) -> Any:
@@ -271,7 +388,7 @@ class DynamoPlannerSweepConfigProvider:
         raw_sla = context.goal.get("sla")
         sla = raw_sla if isinstance(raw_sla, Mapping) else None
         kept, dropped = _policy_filter(
-            space.scaling_policy,
+            space.scaling_policy.preset,
             optimization_target=optimization_target,
             sla=sla,
         )
@@ -302,7 +419,7 @@ class DynamoPlannerSweepConfigProvider:
         trace_path = context.workload.get("trace_path")
         predictor_result = sweep_load_predictor(
             policies=kept,
-            candidates=space.load_predictor_candidates,
+            candidates=space.load_predictor.preset,
             trace_path=str(trace_path) if trace_path is not None else None,
             show_progress=context.show_progress,
         )
@@ -314,8 +431,10 @@ class DynamoPlannerSweepConfigProvider:
             "scaling_policy": _json_choices(kept)
         }
         if planner_enabled:
-            local_choices["fpm_sampling"] = _json_choices(space.fpm_sampling)
-            local_choices["load_sensitivity"] = _json_choices(space.load_sensitivity)
+            local_choices["fpm_sampling"] = _json_choices(space.fpm_sampling.preset)
+            local_choices["load_sensitivity"] = _json_choices(
+                space.load_sensitivity.preset
+            )
         fragment = SearchSpaceFragment(
             choices_by_branch={
                 mode: deepcopy(local_choices)
@@ -397,6 +516,8 @@ class DynamoPlannerSweepConfigProvider:
             optimization_target=str(state["optimization_target"]),
             sla=state["sla"] if isinstance(state["sla"], dict) else None,
             min_endpoint=space.min_endpoint,
+            prefill_min_endpoint=space.prefill_min_endpoint,
+            decode_min_endpoint=space.decode_min_endpoint,
         )
         hook = RuntimeHookSpec(
             provider=_HOOK.provider,
@@ -418,6 +539,8 @@ def _planner_config_payload(
     optimization_target: str,
     sla: Mapping[str, JSONValue] | None,
     min_endpoint: int | None,
+    prefill_min_endpoint: int | None,
+    decode_min_endpoint: int | None,
 ) -> dict[str, JSONValue]:
     """Build the exact PlannerConfig payload used by the pre-refactor Sweeper."""
 
@@ -438,6 +561,10 @@ def _planner_config_payload(
         payload["min_gpu_budget"] = _int_value(sample, "min_gpu_budget")
     if min_endpoint is not None:
         payload["min_endpoint"] = min_endpoint
+    if mode in ("disagg", "prefill") and prefill_min_endpoint is not None:
+        payload["prefill_min_endpoint"] = prefill_min_endpoint
+    if mode in ("disagg", "decode") and decode_min_endpoint is not None:
+        payload["decode_min_endpoint"] = decode_min_endpoint
 
     if mode == "disagg":
         payload["prefill_engine_num_gpu"] = _int_value(

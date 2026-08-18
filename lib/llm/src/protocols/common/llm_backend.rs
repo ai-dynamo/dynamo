@@ -146,7 +146,7 @@ pub struct BackendOutput {
 
     /// Router-computed data handed back to the frontend (e.g. per-request timing from
     /// a standalone router) so it joins this request's trace/metrics. Dynamo-internal,
-    /// consumed by the frontend and not surfaced to clients. See [`RoutingData`].
+    /// consumed by the frontend and not surfaced to clients. See [`RoutingData`](crate::protocols::common::timing::RoutingData).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
@@ -232,7 +232,7 @@ pub struct LLMEngineOutput {
     pub engine_data: Option<serde_json::Value>,
 
     /// Router-computed data handed back to the frontend (e.g. standalone-router timing).
-    /// Dynamo-internal; consumed by the frontend. See [`RoutingData`].
+    /// Dynamo-internal; consumed by the frontend. See [`RoutingData`](crate::protocols::common::timing::RoutingData).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }

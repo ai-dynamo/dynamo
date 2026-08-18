@@ -12,8 +12,11 @@ use super::{
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
-use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use crate::scheduling::types::{
+    KvSchedulerError, SchedulingRequest, SessionContext, WorkerSelectionPolicyError,
+};
 
+/// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
     pub(super) request: &'a SchedulingRequest,
     pub(super) request_id: &'a str,
@@ -25,6 +28,7 @@ pub struct WorkerSelectionContext<'a> {
     pub(super) router_temperature_override: Option<f64>,
 }
 
+/// One eligible worker and the optional inputs requested by a filter or scorer.
 pub struct WorkerCandidate {
     pub(super) worker: WorkerWithDpRank,
     pub(super) inputs: WorkerInputs,
@@ -33,6 +37,7 @@ pub struct WorkerCandidate {
     pub(super) routing: WorkerRoutingInput,
 }
 
+/// One eligible worker and its total cost after all scorers run.
 #[derive(Clone, Copy)]
 pub struct ScoredWorkerCandidate {
     pub(super) worker: WorkerWithDpRank,
@@ -44,14 +49,19 @@ pub struct ScoredWorkerCandidate {
 pub struct WorkerInputs(u8);
 
 impl WorkerInputs {
+    /// Request no optional worker inputs.
     pub const NONE: Self = Self(0);
+    /// Request KV-cache overlap inputs.
     pub const CACHE: Self = Self(1 << 0);
+    /// Request active-load inputs.
     pub const LOAD: Self = Self(1 << 1);
+    /// Request routing-constraint inputs.
     pub const ROUTING: Self = Self(1 << 2);
-    pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0);
+    pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0);
     pub(super) const MIN_ACTIVE_PREFILL_TOKENS: Self = Self(1 << 3);
+    pub(super) const DEFAULT_POLICY_CACHE: Self = Self(1 << 4);
 
-    pub const fn contains(self, other: Self) -> bool {
+    pub(super) const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
@@ -68,15 +78,19 @@ impl BitOr for WorkerInputs {
     }
 }
 
+/// KV-cache overlap values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerCacheInput {
     pub(super) effective_overlap_blocks: f64,
+    pub(super) default_device_overlap_blocks: f64,
     pub(super) device_overlap_blocks: f64,
     pub(super) host_overlap_blocks: f64,
     pub(super) disk_overlap_blocks: f64,
+    pub(super) default_shared_beyond_device_blocks: u32,
     pub(super) shared_beyond_device_blocks: u32,
 }
 
+/// Active-load values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerLoadInput {
     pub(super) raw_prefill_blocks: f64,
@@ -85,6 +99,7 @@ pub struct WorkerLoadInput {
     pub(super) active_requests: usize,
 }
 
+/// Routing-constraint values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerRoutingInput {
     pub(super) preferred_taint_multiplier: Option<f64>,
@@ -99,6 +114,7 @@ pub struct WorkerInputView<'a> {
     pub(super) routing: Option<&'a [WorkerRoutingInput]>,
 }
 
+/// Adds one finite cost contribution to each eligible worker.
 pub trait WorkerScorer: Send {
     /// Declare the worker-signal groups needed by this scorer.
     fn required_worker_inputs(&self) -> WorkerInputs {
@@ -130,6 +146,7 @@ pub trait WorkerFilter: Send {
     ) -> Result<bool, WorkerSelectionPolicyError>;
 }
 
+/// Selects one row after all filters and scorers run.
 pub trait WorkerPicker: Send {
     /// Declare the optional worker-signal columns needed by this picker.
     fn required_worker_inputs(&self) -> WorkerInputs {
@@ -146,60 +163,68 @@ pub trait WorkerPicker: Send {
 }
 
 impl WorkerSelectionContext<'_> {
-    pub fn request_id(&self) -> &str {
-        self.request_id
-    }
-
+    /// Return the incoming prompt size in KV blocks.
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
     }
 
+    /// Return the number of tokens in one KV block.
     pub fn block_size(&self) -> u32 {
         self.block_size
     }
 
+    /// Return whether this request contributes to prefill-load tracking.
     pub fn tracks_prefill_tokens(&self) -> bool {
         self.track_prefill_tokens
     }
 
-    pub fn session_id(&self) -> Option<&str> {
-        self.request.session_id.as_deref()
+    /// Return the session metadata available to worker selection.
+    pub fn session_context(&self) -> Option<&SessionContext> {
+        self.request.session_context.as_ref()
     }
 
+    /// Return the expected output length, if the request supplies one.
     pub fn expected_output_tokens(&self) -> Option<u32> {
         self.request.expected_output_tokens
     }
 
+    /// Return the request's scheduler priority boost.
     pub fn priority_jump(&self) -> f64 {
         self.request.priority_jump
     }
 
+    /// Return the request's strict integer priority.
     pub fn strict_priority(&self) -> u32 {
         self.request.strict_priority
     }
 
+    /// Return the request-level router temperature override, if present.
     pub fn router_temperature_override(&self) -> Option<f64> {
         self.router_temperature_override
     }
 }
 
 impl WorkerCandidate {
+    /// Return this candidate's worker ID and data-parallel rank.
     pub fn worker(&self) -> WorkerWithDpRank {
         self.worker
     }
 
+    /// Return KV-cache inputs when the component requested [`WorkerInputs::CACHE`].
     pub fn cache(&self) -> Option<&WorkerCacheInput> {
         self.inputs
             .contains(WorkerInputs::CACHE)
             .then_some(&self.cache)
     }
 
+    /// Return active-load inputs when the component requested [`WorkerInputs::LOAD`].
     pub fn load(&self) -> Option<&WorkerLoadInput> {
         self.inputs
             .contains(WorkerInputs::LOAD)
             .then_some(&self.load)
     }
 
+    /// Return routing inputs when the component requested [`WorkerInputs::ROUTING`].
     pub fn routing(&self) -> Option<&WorkerRoutingInput> {
         self.inputs
             .contains(WorkerInputs::ROUTING)
@@ -243,74 +268,80 @@ impl WorkerCandidate {
 }
 
 impl ScoredWorkerCandidate {
+    /// Return this candidate's worker ID and data-parallel rank.
     pub fn worker(&self) -> WorkerWithDpRank {
         self.worker
     }
 
+    /// Return the sum of all scorer contributions for this candidate.
     pub fn cost(&self) -> f64 {
         self.cost
     }
 }
 
 impl WorkerCacheInput {
-    pub fn effective_overlap_blocks(&self) -> f64 {
-        self.effective_overlap_blocks
-    }
-
+    /// Return device-resident prefix overlap in KV blocks.
     pub fn device_overlap_blocks(&self) -> f64 {
         self.device_overlap_blocks
     }
 
+    /// Return host-pinned prefix overlap in KV blocks.
     pub fn host_overlap_blocks(&self) -> f64 {
         self.host_overlap_blocks
     }
 
+    /// Return disk prefix overlap in KV blocks.
     pub fn disk_overlap_blocks(&self) -> f64 {
         self.disk_overlap_blocks
     }
 
+    /// Return shared-cache hits beyond the device-resident prefix.
     pub fn shared_beyond_device_blocks(&self) -> u32 {
         self.shared_beyond_device_blocks
     }
 }
 
 impl WorkerLoadInput {
-    pub fn raw_prefill_blocks(&self) -> f64 {
-        self.raw_prefill_blocks
-    }
-
+    /// Return the tokens active in this worker's prefill stage.
     pub fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
     }
 
+    /// Return the projected active decode footprint in KV blocks.
     pub fn decode_cost_blocks(&self) -> f64 {
         self.decode_cost_blocks
     }
 
+    /// Return this worker's active request count.
     pub fn active_requests(&self) -> usize {
         self.active_requests
     }
 }
 
 impl WorkerRoutingInput {
+    /// Return the optional cost multiplier from preferred routing constraints.
     pub fn preferred_taint_multiplier(&self) -> Option<f64> {
         self.preferred_taint_multiplier
     }
 }
 
 impl<'a> WorkerInputView<'a> {
+    /// Return the eligible candidates and their total costs.
     pub fn candidates(self) -> &'a [ScoredWorkerCandidate] {
         self.candidates
     }
 
+    /// Return index-aligned KV-cache inputs when the picker requested them.
     pub fn cache(self) -> Option<&'a [WorkerCacheInput]> {
         self.cache
     }
 
+    /// Return index-aligned active-load inputs when the picker requested them.
     pub fn load(self) -> Option<&'a [WorkerLoadInput]> {
         self.load
     }
 
+    /// Return index-aligned routing inputs when the picker requested them.
     pub fn routing(self) -> Option<&'a [WorkerRoutingInput]> {
         self.routing
     }
@@ -348,23 +379,31 @@ pub(super) struct CustomWorkerSelectionState {
 /// custom scorer and picker implementations through [`Self::new`].
 pub struct WorkerSelectionPolicy {
     kv_router_config: KvRouterConfig,
-    worker_type: &'static str,
+    worker_label: &'static str,
     state: WorkerSelectionPolicyState,
 }
 
 impl WorkerSelectionPolicy {
+    /// Build a custom policy with no filters.
+    ///
+    /// `worker_label` identifies the worker pool in routing logs. A typed policy factory normally
+    /// passes [`crate::WorkerType::as_str`].
     pub fn new(
         kv_router_config: KvRouterConfig,
-        worker_type: &'static str,
+        worker_label: &'static str,
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
-        Self::new_with_filters(kv_router_config, worker_type, Vec::new(), scorers, picker)
+        Self::new_with_filters(kv_router_config, worker_label, Vec::new(), scorers, picker)
     }
 
+    /// Build a custom policy from ordered filters, additive scorers, and one picker.
+    ///
+    /// `worker_label` identifies the worker pool in routing logs. A typed policy factory normally
+    /// passes [`crate::WorkerType::as_str`].
     pub fn new_with_filters(
         kv_router_config: KvRouterConfig,
-        worker_type: &'static str,
+        worker_label: &'static str,
         filters: Vec<Box<dyn WorkerFilter>>,
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: Box<dyn WorkerPicker>,
@@ -378,7 +417,7 @@ impl WorkerSelectionPolicy {
         });
         Self {
             kv_router_config,
-            worker_type,
+            worker_label,
             state: WorkerSelectionPolicyState::Custom(RefCell::new(CustomWorkerSelectionState {
                 filters,
                 scorers,
@@ -395,12 +434,15 @@ impl WorkerSelectionPolicy {
         }
     }
 
-    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
-    pub(crate) fn default(kv_router_config: KvRouterConfig, worker_type: &'static str) -> Self {
+    /// Wrap Dynamo's built-in selector for a host that uses the policy selector type.
+    ///
+    /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
+    /// [`crate::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
+    pub fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
         let picker = DefaultWorkerPicker::new(kv_router_config.router_temperature);
         Self {
             kv_router_config,
-            worker_type,
+            worker_label,
             state: WorkerSelectionPolicyState::Default(picker),
         }
     }
@@ -606,7 +648,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
         };
         select_worker_with_policy(
             &self.kv_router_config,
-            self.worker_type,
+            self.worker_label,
             state,
             workers,
             request,
@@ -625,9 +667,10 @@ mod tests {
     use super::super::test_support::*;
     use super::super::{DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector};
     use super::*;
+    use crate::scheduling::{WorkerSelectionInputTrigger, WorkerSelectionKvHints};
 
     #[test]
-    fn public_default_policy_matches_default_selector() {
+    fn default_policy_matches_default_selector() {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
         let workers = HashMap::from([
@@ -645,12 +688,7 @@ mod tests {
         let expected = DefaultWorkerSelector::new(Some(config.clone()), "test")
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
-        let policy = WorkerSelectionPolicy::new(
-            config.clone(),
-            "test",
-            vec![Box::new(DefaultWorkerScorer::new(config, "test"))],
-            Box::new(DefaultWorkerPicker::new(0.0)),
-        );
+        let policy = WorkerSelectionPolicy::default(config, "test");
         let actual = policy
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
@@ -688,8 +726,8 @@ mod tests {
                     .iter()
                     .enumerate()
                     .max_by(|(_, left), (_, right)| {
-                        left.effective_overlap_blocks()
-                            .total_cmp(&right.effective_overlap_blocks())
+                        left.device_overlap_blocks()
+                            .total_cmp(&right.device_overlap_blocks())
                     })
                     .map(|(row, _)| row)
                     .expect("eligible candidate"))
@@ -703,8 +741,8 @@ mod tests {
             (1, TaintedWorkerConfig::default()),
         ]);
         let mut request = base_request(16);
-        request.overlap.effective_overlap_blocks =
-            HashMap::from([(worker0, 0.25), (worker1, 0.75)]);
+        request.overlap.tier_overlap_blocks.device =
+            FxHashMap::from_iter([(worker0, 1), (worker1, 3)]);
         let policy = WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "test",
@@ -719,7 +757,45 @@ mod tests {
     }
 
     #[test]
-    fn custom_picker_receives_agent_metadata() {
+    fn custom_policy_does_not_receive_effective_overlap_as_device_overlap() {
+        struct RawDeviceOverlapPicker;
+
+        impl WorkerPicker for RawDeviceOverlapPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CACHE
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert_eq!(
+                    input.cache().expect("cache input")[0].device_overlap_blocks(),
+                    0.0
+                );
+                Ok(0)
+            }
+        }
+
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
+        let mut request = base_request(16);
+        request.overlap.effective_overlap_blocks.insert(worker, 3.5);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(RawDeviceOverlapPicker),
+        );
+
+        policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+    }
+
+    #[test]
+    fn custom_picker_receives_session_metadata() {
         struct ContextPicker;
 
         impl WorkerPicker for ContextPicker {
@@ -728,7 +804,15 @@ mod tests {
                 context: &WorkerSelectionContext<'_>,
                 _input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
-                assert_eq!(context.session_id(), Some("session-1"));
+                let session = context.session_context().expect("session context");
+                assert_eq!(session.session_id(), "session-1");
+                assert_eq!(session.parent_session_id(), Some("root"));
+                assert_eq!(session.session_final(), Some(false));
+                assert!(session.kv_hints().expect("KV hints").evict_session());
+                assert_eq!(
+                    session.input_trigger(),
+                    Some(WorkerSelectionInputTrigger::ToolResult)
+                );
                 assert_eq!(context.expected_output_tokens(), Some(128));
                 assert_eq!(context.priority_jump(), 3.0);
                 assert_eq!(context.strict_priority(), 2);
@@ -738,7 +822,13 @@ mod tests {
 
         let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
         let mut request = base_request(16);
-        request.session_id = Some("session-1".into());
+        request.session_context = Some(SessionContext::new(
+            "session-1".into(),
+            Some("root".into()),
+            Some(false),
+            Some(WorkerSelectionKvHints::new(true)),
+            Some(WorkerSelectionInputTrigger::ToolResult),
+        ));
         request.expected_output_tokens = Some(128);
         request.priority_jump = 3.0;
         request.strict_priority = 2;

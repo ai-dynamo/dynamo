@@ -10,6 +10,9 @@ model:
   hf_id: thinkingmachines/Inkling-NVFP4
   precision: NVFP4
 status: experimental
+artifacts:
+  recipe_specific_images:
+  - nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
 targets:
 - id: agg-b200
   recommended: true

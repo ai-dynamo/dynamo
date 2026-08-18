@@ -96,6 +96,24 @@ def branch_knob_choices(search_space, deployment_mode: str) -> dict[str, list[An
     return {name: list(getattr(search_space, name)) for name in names}
 
 
+def _runner_supports_parallel_config(
+    capabilities: RunnerCapabilities | None,
+    deployment_mode: str,
+    config: _ParallelConfig,
+) -> bool:
+    """Apply runner topology limits before a config enters the sampler domain."""
+
+    if capabilities is None or deployment_mode != "disagg":
+        return True
+    if not isinstance(config, DisaggParallelConfig):
+        return False
+    return capabilities.supports_attention_dp(
+        deployment_mode,
+        config.prefill.shape.dp,
+        config.decode.shape.dp,
+    )
+
+
 def enumerate_branches(
     config: SmartSearchConfig,
     *,
@@ -155,6 +173,13 @@ def enumerate_branches(
                 )
             except (NoPerfDatabase, NoViableParallelConfig):
                 continue  # backend unusable for this mode -> drop it from the search
+            legal = [
+                cfg
+                for cfg in legal
+                if _runner_supports_parallel_config(
+                    runner_capabilities, deployment_mode, cfg
+                )
+            ]
             legal_set = set(legal)
             for cfg in pinned if pinned is not None else legal:
                 if cfg in legal_set:

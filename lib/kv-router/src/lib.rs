@@ -22,6 +22,7 @@ pub mod scheduling;
 pub mod sequences;
 pub mod services;
 pub mod tracking_hash;
+pub mod worker_type;
 pub mod zmq_wire;
 
 // Backward-compat re-exports: old top-level module paths still work
@@ -71,20 +72,20 @@ pub use scheduling::LocalScheduler;
 pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
 pub use scheduling::{
-    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse,
-    WorkerSelectionPolicyError,
+    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, SessionContext,
+    WorkerSelectionInputTrigger, WorkerSelectionKvHints, WorkerSelectionPolicyError,
 };
 pub use selector::{
-    DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector, ScoredWorkerCandidate,
-    WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView, WorkerInputs,
-    WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy, WorkerSelector,
+    DefaultWorkerSelector, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter,
+    WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelector,
 };
 pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
+pub use worker_type::WorkerType;
 
 /// Factory that creates one worker-selection policy per routing partition.
 pub type WorkerSelectionPolicyFactory = Arc<
-    dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> WorkerSelectionPolicy
+    dyn for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> WorkerSelectionPolicy
         + Send
         + Sync,
 >;
