@@ -463,16 +463,12 @@ impl KvDcRelayHandle {
         Ok(())
     }
 
-    async fn replace_ranks(
+    async fn replace_rank_states(
         &self,
-        replacements: Vec<RankReplacement>,
+        states: HashMap<WorkerWithDpRank, DcCkfRankReplacement>,
+        payload_weight: usize,
     ) -> Result<(), KvDcRelayError> {
-        let weight = replacements
-            .iter()
-            .flat_map(|replacement| &replacement.events)
-            .map(event_payload_weight)
-            .fold(0usize, usize::saturating_add)
-            .min(DEFAULT_PENDING_BLOCK_PERMITS) as u32;
+        let weight = payload_weight.min(DEFAULT_PENDING_BLOCK_PERMITS) as u32;
         let permit = self
             .payload_permits
             .clone()
@@ -480,7 +476,7 @@ impl KvDcRelayHandle {
             .await
             .map_err(|_| KvDcRelayError::ShuttingDown)?;
         self.submit(|response| ActorCommand::ReplaceRanks {
-            replacements,
+            states,
             _payload_permit: permit,
             response,
         })
@@ -490,17 +486,20 @@ impl KvDcRelayHandle {
     #[cfg(test)]
     async fn replace_rank(
         &self,
-        publisher_id: PublisherId,
+        _publisher_id: PublisherId,
         worker_id: WorkerId,
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
     ) -> Result<(), KvDcRelayError> {
-        self.replace_ranks(vec![RankReplacement {
-            publisher_id,
-            worker_id,
-            dp_rank,
-            events,
-        }])
+        let weight = events
+            .iter()
+            .map(event_payload_weight)
+            .fold(0usize, usize::saturating_add);
+        let state = replacement_state(worker_id, dp_rank, events)?;
+        self.replace_rank_states(
+            HashMap::from([(WorkerWithDpRank::new(worker_id, dp_rank), state)]),
+            weight,
+        )
         .await
     }
 
@@ -644,19 +643,88 @@ impl KvDcRelayRecoveryTarget {
             state.flush_scheduled = false;
             std::mem::take(&mut state.pending)
         };
-        let (replacements, responses): (Vec<_>, Vec<_>) = pending
-            .into_iter()
-            .map(|pending| (pending.replacement, pending.response))
-            .unzip();
+        // Replacement states are built off the actor, and a malformed dump stays local to
+        // its rank: only pool-wide failures (allocation, actor invariants) reject the batch.
+        let mut states: HashMap<WorkerWithDpRank, DcCkfRankReplacement> = HashMap::new();
+        let mut waiters = Vec::new();
+        let mut payload_weight = 0usize;
+        let mut pending = pending.into_iter();
+        let mut batch_error: Option<String> = None;
+        if states.try_reserve(pending.len()).is_err() || waiters.try_reserve(pending.len()).is_err()
+        {
+            batch_error = Some(
+                KvDcRelayError::Build(
+                    dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
+                )
+                .to_string(),
+            );
+        }
+        for item in pending.by_ref() {
+            if batch_error.is_some() {
+                break;
+            }
+            let replacement = item.replacement;
+            let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
+            if states.contains_key(&member) {
+                // A duplicate rank in one window means the earlier entry is already being
+                // installed; failing only the later waiter keeps the anomaly rank-local.
+                let _ = item.response.send(Err(KvDcRelayError::InvalidTreeDump {
+                    worker_id: replacement.worker_id,
+                    dp_rank: replacement.dp_rank,
+                    message: format!(
+                        "replacement batch contains the same rank more than once (publisher {})",
+                        replacement.publisher_id
+                    ),
+                }
+                .to_string()));
+                continue;
+            }
+            let weight = replacement
+                .events
+                .iter()
+                .map(event_payload_weight)
+                .fold(0usize, usize::saturating_add);
+            match replacement_state(
+                replacement.worker_id,
+                replacement.dp_rank,
+                replacement.events,
+            ) {
+                Ok(state) => {
+                    states.insert(member, state);
+                    payload_weight = payload_weight.saturating_add(weight);
+                    waiters.push(item.response);
+                }
+                Err(error @ KvDcRelayError::Build(_)) => {
+                    let error = error.to_string();
+                    let _ = item.response.send(Err(error.clone()));
+                    batch_error = Some(error);
+                }
+                Err(error) => {
+                    let _ = item.response.send(Err(error.to_string()));
+                }
+            }
+        }
+        if let Some(error) = batch_error {
+            for item in pending {
+                let _ = item.response.send(Err(error.clone()));
+            }
+            for response_tx in waiters {
+                let _ = response_tx.send(Err(error.clone()));
+            }
+            return;
+        }
+        if states.is_empty() {
+            return;
+        }
         let batch_result = match self.rebuild_permit.acquire().await {
             Ok(_permit) => self
                 .handle
-                .replace_ranks(replacements)
+                .replace_rank_states(states, payload_weight)
                 .await
                 .map_err(|error| error.to_string()),
             Err(_) => Err(KvDcRelayError::ShuttingDown.to_string()),
         };
-        for response_tx in responses {
+        for response_tx in waiters {
             let response = match &batch_result {
                 Ok(()) => Ok(()),
                 Err(error) => Err(error.clone()),
@@ -835,7 +903,7 @@ enum ActorCommand {
         _payload_permit: OwnedSemaphorePermit,
     },
     ReplaceRanks {
-        replacements: Vec<RankReplacement>,
+        states: HashMap<WorkerWithDpRank, DcCkfRankReplacement>,
         _payload_permit: OwnedSemaphorePermit,
         response: oneshot::Sender<Result<(), KvDcRelayError>>,
     },
@@ -1053,26 +1121,38 @@ async fn run_actor(
                 }
             }
             ActorCommand::ReplaceRanks {
-                replacements,
+                states,
                 _payload_permit: _,
                 response,
             } => {
                 #[cfg(feature = "ckf-diagnostics")]
                 let rebuild_started = Instant::now();
-                let result = replacement_batch_states(replacements)
-                    .and_then(|states| state.replace_ranks(states).map_err(Into::into))
-                    .and_then(|publication| {
-                        if let Some(batch) = publication {
-                            publish_batch(batch, &mut publisher, &diagnostics)?;
-                        } else {
-                            diagnostics.record_no_publication();
-                        }
-                        Ok(())
-                    });
+                let omissions_before = state.lifetime_capacity_omissions();
+                let result =
+                    state
+                        .replace_ranks(states)
+                        .map_err(Into::into)
+                        .and_then(|publication| {
+                            if let Some(batch) = publication {
+                                publish_batch(batch, &mut publisher, &diagnostics)?;
+                            } else {
+                                diagnostics.record_no_publication();
+                            }
+                            Ok(())
+                        });
                 #[cfg(feature = "ckf-diagnostics")]
                 diagnostics.record_rebuild(rebuild_started);
                 // The whole cold-start batch is built off-side. A pre-swap failure leaves every
                 // prior rank unchanged; the strong responses all observe the same atomic result.
+                let replacement_omissions = state
+                    .lifetime_capacity_omissions()
+                    .saturating_sub(omissions_before);
+                if replacement_omissions > 0 {
+                    tracing::warn!(
+                        replacement_omissions,
+                        "KV DC Relay omitted capacity-exhausted blocks while installing rank replacements; service continues"
+                    );
+                }
                 let _ = response.send(result);
             }
             ActorCommand::ResetRank {
@@ -1206,39 +1286,6 @@ fn replacement_state(
         })?;
     }
     Ok(replacement)
-}
-
-fn replacement_batch_states(
-    replacements: Vec<RankReplacement>,
-) -> Result<HashMap<WorkerWithDpRank, DcCkfRankReplacement>, KvDcRelayError> {
-    let mut states_by_rank = HashMap::new();
-    states_by_rank
-        .try_reserve(replacements.len())
-        .map_err(|_| {
-            KvDcRelayError::Build(
-                dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
-            )
-        })?;
-    for replacement in replacements {
-        let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
-        if states_by_rank.contains_key(&member) {
-            return Err(KvDcRelayError::InvalidTreeDump {
-                worker_id: replacement.worker_id,
-                dp_rank: replacement.dp_rank,
-                message: format!(
-                    "replacement batch contains the same rank more than once (publisher {})",
-                    replacement.publisher_id
-                ),
-            });
-        }
-        let state = replacement_state(
-            replacement.worker_id,
-            replacement.dp_rank,
-            replacement.events,
-        )?;
-        states_by_rank.insert(member, state);
-    }
-    Ok(states_by_rank)
 }
 
 fn publish_batch(
@@ -1797,7 +1844,10 @@ mod tests {
         let capacity = event_failure_point(KvCacheEventError::CapacityExhausted).disposition();
         assert_eq!(capacity.action, CkfFailureAction::ContinueCapacityOmission);
         assert_eq!(capacity.domain, CkfFailureDomain::ProducerCore);
-        assert_eq!(capacity.commit, CkfCommitState::KnownUnchanged);
+        assert_eq!(
+            capacity.commit,
+            CkfCommitState::ExactCommittedPhysicalOmitted
+        );
         assert_eq!(capacity.recovery_domain, None);
 
         let allocation = event_failure_point(KvCacheEventError::AllocationFailed).disposition();

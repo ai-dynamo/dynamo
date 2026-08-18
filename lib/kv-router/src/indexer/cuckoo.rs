@@ -19,9 +19,8 @@ mod tests;
 pub use adapter::*;
 pub use canonical::CanonicalSequenceBlockHash;
 pub use dc::{
-    DcCkfAggregationStats, DcCkfEventOutcome, DcCkfFormatIdentity, DcCkfFormatIdentityError,
-    DcCkfMemoryStats, DcCkfPublicationBatch, DcCkfPublicationStats, DcCkfRankReplacement,
-    DcCkfState, DcCkfStats,
+    DcCkfAggregationStats, DcCkfEventOutcome, DcCkfFormatIdentity, DcCkfMemoryStats,
+    DcCkfPublicationBatch, DcCkfPublicationStats, DcCkfRankReplacement, DcCkfState, DcCkfStats,
 };
 pub use failure::{
     CkfCommitState, CkfFailureAction, CkfFailureDisposition, CkfFailureDomain, CkfFailurePoint,

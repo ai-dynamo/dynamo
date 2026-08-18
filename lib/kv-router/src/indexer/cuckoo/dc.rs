@@ -40,18 +40,6 @@ pub struct DcCkfFormatIdentity {
     slots_per_bucket: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum DcCkfFormatIdentityError {
-    #[error("unsupported CKF format version {actual} (expected {expected})")]
-    FormatVersion { expected: u16, actual: u16 },
-    #[error("unsupported CKF fingerprint width {actual} (expected {expected})")]
-    FingerprintBits { expected: u8, actual: u8 },
-    #[error("unsupported CKF slots per bucket {actual} (expected {expected})")]
-    SlotsPerBucket { expected: u8, actual: u8 },
-    #[error("CKF bucket count {0} is not a power of two greater than one")]
-    BucketCount(usize),
-}
-
 impl DcCkfFormatIdentity {
     pub(super) const fn new(seed: u64, bucket_count: usize) -> Self {
         Self {
@@ -61,43 +49,6 @@ impl DcCkfFormatIdentity {
             fingerprint_bits: FINGERPRINT_BITS,
             slots_per_bucket: SLOTS_PER_BUCKET,
         }
-    }
-
-    pub fn try_from_parts(
-        format_version: u16,
-        seed: u64,
-        bucket_count: usize,
-        fingerprint_bits: u8,
-        slots_per_bucket: u8,
-    ) -> Result<Self, DcCkfFormatIdentityError> {
-        if format_version != FORMAT_VERSION {
-            return Err(DcCkfFormatIdentityError::FormatVersion {
-                expected: FORMAT_VERSION,
-                actual: format_version,
-            });
-        }
-        if fingerprint_bits != FINGERPRINT_BITS {
-            return Err(DcCkfFormatIdentityError::FingerprintBits {
-                expected: FINGERPRINT_BITS,
-                actual: fingerprint_bits,
-            });
-        }
-        if slots_per_bucket != SLOTS_PER_BUCKET {
-            return Err(DcCkfFormatIdentityError::SlotsPerBucket {
-                expected: SLOTS_PER_BUCKET,
-                actual: slots_per_bucket,
-            });
-        }
-        if bucket_count < 2 || !bucket_count.is_power_of_two() {
-            return Err(DcCkfFormatIdentityError::BucketCount(bucket_count));
-        }
-        Ok(Self {
-            format_version,
-            seed,
-            bucket_count,
-            fingerprint_bits,
-            slots_per_bucket,
-        })
     }
 
     pub const fn format_version(&self) -> u16 {
@@ -217,7 +168,6 @@ pub struct DcCkfPublicationStats {
     physical_touches: u64,
     distinct_touched_buckets: u64,
     emitted_images: u64,
-    materialized_batches: u64,
     net_reverted_buckets: u64,
 }
 
@@ -236,10 +186,6 @@ impl DcCkfPublicationStats {
 
     pub const fn emitted_images(&self) -> u64 {
         self.emitted_images
-    }
-
-    pub const fn materialized_batches(&self) -> u64 {
-        self.materialized_batches
     }
 
     pub const fn net_reverted_buckets(&self) -> u64 {
@@ -383,8 +329,6 @@ impl DirtyWindow {
 #[derive(Debug)]
 struct PublicationWindow {
     dirty: DirtyWindow,
-    images: Vec<GlobalCkfBucketImage>,
-    materialization_enabled: bool,
     pending_events: usize,
 }
 
@@ -392,8 +336,6 @@ impl PublicationWindow {
     fn new(bucket_count: usize) -> Result<Self, CkfBuildError> {
         Ok(Self {
             dirty: DirtyWindow::new(bucket_count)?,
-            images: Vec::new(),
-            materialization_enabled: true,
             pending_events: 0,
         })
     }
@@ -407,7 +349,6 @@ struct DcCkfTelemetry {
     physical_touches: u64,
     distinct_touched_buckets: u64,
     emitted_images: u64,
-    materialized_batches: u64,
     net_reverted_buckets: u64,
 }
 
@@ -516,6 +457,10 @@ impl DcCkfRankReplacement {
 /// Exact and physical CKF state for one DC-local indexer pool.
 #[derive(Debug)]
 pub struct DcCkfState {
+    /// Per-source engine vocabulary. Lineage and ownership commit even when physical admission
+    /// is capacity-omitted, so CKF capacity does not bound this memory; the operative bound is
+    /// the source engine's own KV-cache block count, because the engine emits `Removed` when it
+    /// evicts and `clear_worker`/rank replacement drop a source wholesale.
     source_lineage: FxHashMap<
         WorkerWithDpRank,
         FxHashMap<ExternalSequenceBlockHash, CanonicalSequenceBlockHash>,
@@ -534,6 +479,10 @@ pub struct DcCkfState {
     store_scratch: StoreScratch,
     #[cfg(test)]
     fail_next_snapshot_allocation: bool,
+    #[cfg(test)]
+    fail_next_store_reserve: bool,
+    #[cfg(test)]
+    fail_replacement_install_after: Option<usize>,
 }
 
 impl DcCkfState {
@@ -557,6 +506,10 @@ impl DcCkfState {
             store_scratch: StoreScratch::default(),
             #[cfg(test)]
             fail_next_snapshot_allocation: false,
+            #[cfg(test)]
+            fail_next_store_reserve: false,
+            #[cfg(test)]
+            fail_replacement_install_after: None,
         })
     }
 
@@ -717,7 +670,13 @@ impl DcCkfState {
             .map_err(|_| KvCacheEventError::AllocationFailed)?;
         ordered_replacements.extend(replacements);
         ordered_replacements.sort_unstable_by_key(|(member, _)| *member);
-        for (member, rank_replacement) in ordered_replacements {
+        // The index feeds the test-only install failpoint; release builds discard it.
+        #[allow(clippy::unused_enumerate_index)]
+        for (_index, (member, rank_replacement)) in ordered_replacements.into_iter().enumerate() {
+            #[cfg(test)]
+            if self.fail_replacement_install_after == Some(_index) {
+                return Err(KvCacheEventError::AllocationFailed);
+            }
             replacement.install_replacement(member, rank_replacement)?;
         }
 
@@ -726,11 +685,6 @@ impl DcCkfState {
             .publication
             .dirty
             .try_reserve(self.format.bucket_count)?;
-        replacement
-            .publication
-            .images
-            .try_reserve(self.format.bucket_count)
-            .map_err(|_| KvCacheEventError::AllocationFailed)?;
         for (bucket, published) in self.publication.dirty.touched_with_originals() {
             if replacement.filter.load_bucket(bucket) != published {
                 replacement.publication.dirty.mark(bucket, published);
@@ -759,8 +713,6 @@ impl DcCkfState {
             .saturating_add(replacement.telemetry.physical_touches);
         replacement.telemetry.distinct_touched_buckets = self.telemetry.distinct_touched_buckets;
         replacement.telemetry.emitted_images = self.telemetry.emitted_images;
-        replacement.telemetry.materialized_batches = self.telemetry.materialized_batches;
-        replacement.publication.materialization_enabled = self.publication.materialization_enabled;
         replacement.telemetry.net_reverted_buckets = self.telemetry.net_reverted_buckets;
         *self = replacement;
         Ok(self.drain_publication())
@@ -768,11 +720,6 @@ impl DcCkfState {
 
     pub fn flush(&mut self) -> Option<DcCkfPublicationBatch> {
         self.drain_publication()
-    }
-
-    /// Controls whether publication boundaries materialize bucket-image payloads.
-    pub fn set_publication_materialization_enabled(&mut self, enabled: bool) {
-        self.publication.materialization_enabled = enabled;
     }
 
     pub fn has_pending_publication(&self) -> bool {
@@ -829,7 +776,6 @@ impl DcCkfState {
                 physical_touches: self.telemetry.physical_touches,
                 distinct_touched_buckets: self.telemetry.distinct_touched_buckets,
                 emitted_images: self.telemetry.emitted_images,
-                materialized_batches: self.telemetry.materialized_batches,
                 net_reverted_buckets: self.telemetry.net_reverted_buckets,
             },
             memory: DcCkfMemoryStats {
@@ -844,6 +790,13 @@ impl DcCkfState {
                 insertion_scratch_capacity: self.insertion_scratch.capacity(),
             },
         }
+    }
+
+    /// Lifetime count of physical admissions omitted for capacity, including omissions that
+    /// happen while installing rank replacements. Exposed unconditionally so ingest hosts can
+    /// surface recovery omissions the way they surface live ones.
+    pub const fn lifetime_capacity_omissions(&self) -> u64 {
+        self.telemetry.capacity_failures
     }
 
     pub fn member_block_count(&self, worker: WorkerWithDpRank) -> usize {
@@ -903,6 +856,11 @@ impl DcCkfState {
             && scratch.reoffered.is_empty()
         {
             return Ok(0);
+        }
+        #[cfg(test)]
+        if self.fail_next_store_reserve {
+            self.fail_next_store_reserve = false;
+            return Err(KvCacheEventError::AllocationFailed);
         }
 
         scratch
@@ -1239,45 +1197,40 @@ impl DcCkfState {
             return None;
         }
         let distinct_touched = self.publication.dirty.buckets.len() as u64;
-        let mut emitted_images = 0u64;
-        self.publication.images.clear();
+        let mut emitted_images = 0usize;
         for (index, &bucket) in self.publication.dirty.buckets.iter().enumerate() {
-            let value = self.filter.load_bucket(bucket).0;
-            if value != self.publication.dirty.originals[index] {
-                emitted_images = emitted_images.saturating_add(1);
-                if self.publication.materialization_enabled {
-                    self.publication
-                        .images
-                        .push(GlobalCkfBucketImage::new(bucket, value));
-                }
+            if self.filter.load_bucket(bucket).0 != self.publication.dirty.originals[index] {
+                emitted_images += 1;
             }
         }
-        // Publication transfers ownership only while a consumer lease needs payloads. Keeping the
-        // scratch buffer in the disabled path avoids a fresh allocation at every boundary. Defer
-        // pooling or shared payloads until the non-local transport and fanout shape are fixed and
-        // profiles show that allocation or copying is material.
-        let images = self
-            .publication
-            .materialization_enabled
-            .then(|| std::mem::take(&mut self.publication.images));
+        // The dirty scratch is reserved for worst-case rollback (candidates * (max_kicks + 1)
+        // touches), so the payload is materialized into an exact-size vector in a second pass
+        // instead of letting that capacity escape into the fan-out queue with the batch.
+        let images = (emitted_images > 0).then(|| {
+            let mut images = Vec::with_capacity(emitted_images);
+            for (index, &bucket) in self.publication.dirty.buckets.iter().enumerate() {
+                let value = self.filter.load_bucket(bucket).0;
+                if value != self.publication.dirty.originals[index] {
+                    images.push(GlobalCkfBucketImage::new(bucket, value));
+                }
+            }
+            images
+        });
         self.publication.dirty.clear();
         self.telemetry.distinct_touched_buckets = self
             .telemetry
             .distinct_touched_buckets
             .saturating_add(distinct_touched);
-        self.telemetry.emitted_images =
-            self.telemetry.emitted_images.saturating_add(emitted_images);
+        self.telemetry.emitted_images = self
+            .telemetry
+            .emitted_images
+            .saturating_add(emitted_images as u64);
         self.telemetry.net_reverted_buckets = self
             .telemetry
             .net_reverted_buckets
-            .saturating_add(distinct_touched.saturating_sub(emitted_images));
+            .saturating_add(distinct_touched.saturating_sub(emitted_images as u64));
         self.publication.pending_events = 0;
-        let images = images?;
-        if images.is_empty() {
-            return None;
-        }
-        self.telemetry.materialized_batches = self.telemetry.materialized_batches.saturating_add(1);
-        Some(DcCkfPublicationBatch { images })
+        Some(DcCkfPublicationBatch { images: images? })
     }
 
     fn reserve_publication_scratch(
@@ -1289,17 +1242,7 @@ impl DcCkfState {
                 .bucket_count
                 .saturating_sub(self.publication.dirty.buckets.len()),
         );
-        self.publication.dirty.try_reserve(maximum_new_touches)?;
-        let maximum_images = self
-            .publication
-            .dirty
-            .buckets
-            .len()
-            .saturating_add(maximum_new_touches);
-        self.publication
-            .images
-            .try_reserve(maximum_images)
-            .map_err(|_| KvCacheEventError::AllocationFailed)
+        self.publication.dirty.try_reserve(maximum_new_touches)
     }
 
     fn current_occupied_bucket_count(&self) -> usize {
@@ -1408,27 +1351,20 @@ fn prepare_store(
 fn replacement_from_lineage(
     lineage: &FxHashMap<ExternalSequenceBlockHash, CanonicalSequenceBlockHash>,
 ) -> Result<DcCkfRankReplacement, KvCacheEventError> {
-    let mut ordered = Vec::new();
-    ordered
-        .try_reserve(lineage.len())
-        .map_err(|_| KvCacheEventError::AllocationFailed)?;
-    ordered.extend(
-        lineage
-            .iter()
-            .map(|(&external, &canonical)| (external, canonical)),
-    );
-    ordered.sort_unstable();
-
+    // Retained lineage is trusted state copied straight into the off-side rebuild. Admission
+    // order does not need canonicalizing: publication ships absolute bucket images taken from
+    // the final filter, so consumer parity is order-independent, and replay equivalence is
+    // logical rather than byte-level (`replay_churn_requires_logical_and_membership_not_byte_parity`).
     let mut replacement = DcCkfRankReplacement::new();
     replacement
         .source_lineage
-        .try_reserve(ordered.len())
+        .try_reserve(lineage.len())
         .map_err(|_| KvCacheEventError::AllocationFailed)?;
     replacement
         .canonical_candidates
-        .try_reserve(ordered.len())
+        .try_reserve(lineage.len())
         .map_err(|_| KvCacheEventError::AllocationFailed)?;
-    for (external, canonical) in ordered {
+    for (&external, &canonical) in lineage {
         replacement.source_lineage.insert(external, canonical);
         replacement.canonical_candidates.push(canonical);
     }
@@ -2257,26 +2193,96 @@ mod tests {
     }
 
     #[test]
-    fn disabled_publication_materialization_survives_rank_replacement() {
+    fn valid_sibling_before_conflicting_remap_commits_nothing() {
         let worker = WorkerWithDpRank::new(1, 0);
-        let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
-        state.set_publication_materialization_enabled(false);
+        let mut state = DcCkfState::new(CkfConfig::new(64)).unwrap();
+        assert!(
+            state
+                .apply_event(stored(worker, 1, &[7]))
+                .first_error()
+                .is_none()
+        );
+        state.barrier_snapshot().unwrap();
+        let lineage_before = state.source_lineage.clone();
+        let owners_before = state.canonical_owners.clone();
 
-        let first = state.apply_event(stored(worker, 1, &[7]));
-        assert!(first.publication_boundary());
-        assert!(first.publication().is_none());
-        assert!(state.stats().publication().emitted_images() > 0);
-        assert_eq!(state.stats().publication().materialized_batches(), 0);
+        // A valid new sibling precedes a remap of block 7's external id onto a different chain.
+        let conflict = stored_exact(
+            worker,
+            2,
+            None,
+            None,
+            &[
+                (external(8), LocalBlockHash(8)),
+                (external(7), LocalBlockHash(9)),
+            ],
+        );
+        let outcome = state.apply_event(conflict);
 
-        let recovered = state.replace_rank(worker, replacement(&[7])).unwrap();
-        assert!(recovered.is_none());
-        assert!(!state.publication.materialization_enabled);
-        assert_eq!(state.stats().publication().materialized_batches(), 0);
+        assert_eq!(
+            outcome.first_error(),
+            Some(&KvCacheEventError::InvalidBlockSequence)
+        );
+        assert_eq!(state.source_lineage, lineage_before);
+        assert_eq!(state.canonical_owners, owners_before);
+        assert!(!state.is_resident(&canonical_root(8)));
+        assert!(state.drain_publication().is_none());
+    }
 
-        let next = state.apply_event(stored_with_parent(worker, 2, 7, &[8]));
-        assert!(next.publication_boundary());
-        assert!(next.publication().is_none());
-        assert_eq!(state.stats().publication().materialized_batches(), 0);
+    #[test]
+    fn replacement_failure_after_valid_prefix_leaves_state_untouched() {
+        let existing = WorkerWithDpRank::new(1, 0);
+        let mut state = DcCkfState::new(CkfConfig::new(64)).unwrap();
+        assert!(
+            state
+                .apply_event(stored(existing, 1, &[7]))
+                .first_error()
+                .is_none()
+        );
+        state.barrier_snapshot().unwrap();
+        let lineage_before = state.source_lineage.clone();
+        let owners_before = state.canonical_owners.clone();
+
+        let mut replacements = HashMap::new();
+        replacements.insert(WorkerWithDpRank::new(2, 0), replacement(&[11]));
+        replacements.insert(WorkerWithDpRank::new(3, 0), replacement(&[13]));
+        state.fail_replacement_install_after = Some(1);
+
+        let error = state.replace_ranks(replacements).unwrap_err();
+        assert_eq!(error, KvCacheEventError::AllocationFailed);
+        assert_eq!(state.source_lineage, lineage_before);
+        assert_eq!(state.canonical_owners, owners_before);
+        assert!(state.is_resident(&canonical_root(7)));
+        assert!(!state.is_resident(&canonical_root(11)));
+        assert!(!state.is_resident(&canonical_root(13)));
+        assert!(state.drain_publication().is_none());
+    }
+
+    #[test]
+    fn store_reserve_failure_commits_nothing() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let mut state = DcCkfState::new(CkfConfig::new(64)).unwrap();
+        assert!(
+            state
+                .apply_event(stored(worker, 1, &[7]))
+                .first_error()
+                .is_none()
+        );
+        state.barrier_snapshot().unwrap();
+        let lineage_before = state.source_lineage.clone();
+        let owners_before = state.canonical_owners.clone();
+        state.fail_next_store_reserve = true;
+
+        let outcome = state.apply_event(stored(worker, 2, &[8, 9]));
+
+        assert_eq!(
+            outcome.first_error(),
+            Some(&KvCacheEventError::AllocationFailed)
+        );
+        assert_eq!(state.source_lineage, lineage_before);
+        assert_eq!(state.canonical_owners, owners_before);
+        assert!(!state.is_resident(&canonical_root(8)));
+        assert!(state.drain_publication().is_none());
     }
 
     #[test]

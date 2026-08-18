@@ -274,8 +274,9 @@ impl LocalCkfAdapter {
     }
 
     /// Apply one actor-serialized event and synchronously hand any resulting publication to the
-    /// bounded ingestion FIFO. Capacity exhaustion remains the event's observable pre-commit
-    /// omission; it neither retires the lease nor starts snapshot recovery.
+    /// bounded ingestion FIFO. Capacity exhaustion commits exact lineage and ownership while
+    /// omitting only the physical admission; it neither retires the lease nor starts snapshot
+    /// recovery.
     pub fn apply_event(
         &mut self,
         event: RouterEvent,

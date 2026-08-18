@@ -163,7 +163,8 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         }
 
         // NOTE: Exhausting this bounded kick search does not prove the table is full. Roll back
-        // every speculative write so the caller can treat it as a pre-commit capacity omission.
+        // every speculative write so the caller can omit only the physical admission while its
+        // exact lineage and ownership stay committed.
         self.rollback(scratch);
         Err(KvCacheEventError::CapacityExhausted)
     }
