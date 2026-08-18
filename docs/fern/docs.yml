@@ -96,6 +96,9 @@ redirects:
     destination: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/sweeper/planner-goodput-per-gpu-sweep"
   - source: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/spica/router-end-to-end-latency-sweep"
     destination: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/sweeper/router-end-to-end-latency-sweep"
+  # The Dynamo integration guide moved to the standalone AISimulate repository.
+  - source: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/sweeper/dynamo-integration"
+    destination: "https://github.com/ai-dynamo/aisimulate/blob/main/docs/sweeper/dynamo-integration.md"
   # Reference variant-to-section redirects.
   - source: "/dynamo/dev/reference/releases/release-history"
     destination: "/dynamo/dev/reference/releases"

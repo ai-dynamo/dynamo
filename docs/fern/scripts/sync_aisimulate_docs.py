@@ -29,7 +29,6 @@ DOCUMENTS = (
     "sweep-config-provider.md",
 )
 DYNAMO_OWNED_DOCUMENTS = (
-    "dynamo-integration.md",
     "glm-5-fp8-pareto-sweep.md",
     "planner-goodput-per-gpu-sweep.md",
     "router-end-to-end-latency-sweep.md",
