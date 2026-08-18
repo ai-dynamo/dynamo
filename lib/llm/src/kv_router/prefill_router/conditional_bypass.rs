@@ -52,9 +52,7 @@ fn resolve_request_decode_pin(
 }
 
 fn has_explicit_prefill_pin(routing: Option<&RoutingHints>) -> bool {
-    routing.is_some_and(|routing| {
-        routing.prefill_worker_id.is_some() || routing.backend_instance_id.is_some()
-    })
+    routing.is_some_and(|routing| routing.prefill_worker_id.is_some())
 }
 
 fn decode_gate_allows_bypass(
@@ -494,8 +492,8 @@ mod tests {
     }
 
     #[test]
-    fn backend_and_prefill_targets_are_explicit_prefill_pins() {
-        assert!(has_explicit_prefill_pin(Some(&RoutingHints {
+    fn only_prefill_targets_are_explicit_prefill_pins() {
+        assert!(!has_explicit_prefill_pin(Some(&RoutingHints {
             backend_instance_id: Some(7),
             ..Default::default()
         })));
