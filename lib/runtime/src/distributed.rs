@@ -907,6 +907,16 @@ mod effective_config_tests {
     /// The startup log reports `discovery_backend`, `request_plane` and `event_plane`.
     /// Pin what `from_settings` actually resolves for each, so the logged values cannot
     /// drift away from the configuration they claim to describe.
+    ///
+    /// Deliberately does not touch `NATS_SERVER`. `from_settings` reads it to compute
+    /// `nats_enabled`, but so does `transports::nats::test_client_options_builder`, and
+    /// that test sets it through figment's `Jail`. `Jail` serialises against other
+    /// `Jail` users and `temp_env` against other `temp_env` users, so the two do not
+    /// serialise against each other and could interleave in this binary. The three
+    /// variables below are read only on the paths these cases drive, so leaving
+    /// `NATS_SERVER` alone removes the overlap without reaching into an unrelated test.
+    /// The cost is that the default case no longer asserts NATS stays off, since that
+    /// is the one assertion which needs the variable absent.
     #[test]
     fn from_settings_resolves_the_values_the_startup_log_reports() {
         // Default: no env set at all.
@@ -915,7 +925,6 @@ mod effective_config_tests {
                 ("DYN_DISCOVERY_BACKEND", None::<&str>),
                 ("DYN_REQUEST_PLANE", None),
                 ("DYN_EVENT_PLANE", None),
-                ("NATS_SERVER", None),
             ],
             || {
                 let cfg = DistributedConfig::from_settings();
@@ -930,8 +939,6 @@ mod effective_config_tests {
                 // not the derived Debug name.
                 assert_eq!(cfg.event_transport_kind.to_string(), "zmq");
                 assert_eq!(cfg.request_plane.to_string(), "tcp");
-                // ZMQ event plane + TCP request plane + no NATS_SERVER => no NATS client.
-                assert!(cfg.nats_config.is_none());
             },
         );
 
@@ -941,7 +948,6 @@ mod effective_config_tests {
                 ("DYN_DISCOVERY_BACKEND", Some("kubernetes")),
                 ("DYN_REQUEST_PLANE", None),
                 ("DYN_EVENT_PLANE", None),
-                ("NATS_SERVER", None),
             ],
             || {
                 let cfg = DistributedConfig::from_settings();
@@ -958,12 +964,14 @@ mod effective_config_tests {
                 ("DYN_DISCOVERY_BACKEND", None::<&str>),
                 ("DYN_REQUEST_PLANE", None),
                 ("DYN_EVENT_PLANE", Some("nats")),
-                ("NATS_SERVER", None),
             ],
             || {
                 let cfg = DistributedConfig::from_settings();
                 assert_eq!(cfg.event_transport_kind, EventTransportKind::Nats);
                 assert_eq!(cfg.event_transport_kind.to_string(), "nats");
+                // Holds whatever NATS_SERVER is doing: a NATS event plane turns
+                // `nats_enabled` on by itself, so this case is unaffected by the
+                // interleaving described above.
                 assert!(cfg.nats_config.is_some());
             },
         );
