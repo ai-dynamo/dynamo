@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: AISimulate CLI Design
-subtitle: Draft public command, configuration, and output contract for simulation and recommendation
+subtitle: Draft public command, configuration, and output contract for prediction and recommendation
 ---
 
 This document proposes one public command-line interface (CLI) for AISimulate prediction and
@@ -13,7 +13,7 @@ Sweeper while keeping execution-stack details out of the configuration schema.
 
 The design covers:
 
-- The `aisimulate simulate` and `aisimulate recommend` commands.
+- The `aisimulate predict` and `aisimulate recommend` commands.
 - Their command-line flags and precedence rules.
 - The shared YAML schema and recommendation-only extensions.
 - Search-domain syntax and validation.
@@ -22,23 +22,24 @@ The design covers:
 
 The design does not cover:
 
-- Python APIs, `ReplaySpec`, runners, factories, or adapters.
-- How the `engine` and `dynamo` stacks execute a simulation.
+- Python APIs, `ReplaySpec`, runner/factory implementation internals, or adapter internals beyond the
+  stack-discovery contract.
+- How the `engine` and `dynamo` stacks execute a prediction.
 - AIConfigurator (AIC), Planner, router, optimizer, worker-pool, caching, or timeout internals.
 - Compatibility shims, migration code, or implementation sequencing.
 - Online replay. Both commands are offline-only in version 1.
 
 ## Commands
 
-### Simulate
+### Predict
 
 Predict the behavior of one concrete deployment configuration:
 
 ```bash
-aisimulate simulate --config simulation.yaml
+aisimulate predict --config prediction.yaml
 ```
 
-`simulate` accepts only concrete configuration values. It rejects search domains and the
+`predict` accepts only concrete configuration values. It rejects search domains and the
 recommendation-only `optimization` and `optimizer` sections.
 
 ### Recommend
@@ -49,22 +50,25 @@ Search a configuration space and recommend concrete deployment configurations:
 aisimulate recommend --config recommendation.yaml
 ```
 
-`recommend` accepts the complete simulation schema plus search domains, `optimization`, and
+`recommend` accepts the complete prediction schema plus search domains, `optimization`, and
 `optimizer`. Every recommended YAML file is a concrete configuration that can be passed directly to
-`aisimulate simulate`.
+`aisimulate predict`.
+
+The `predict` verb is intentional: one pinned configuration predicts serving behavior, while
+`recommend` searches configurations. `simulate` is not a public version 1 command name.
 
 ### Common Options
 
 | Option | Type | Default | Meaning |
 |---|---|---:|---|
 | `-c`, `--config PATH` | path | Required | Input YAML file. |
-| `--stack engine\|dynamo` | enum | `engine` | Execution stack. This selection is CLI-only and is never written into YAML. |
+| `--stack NAME` | string | `engine` | Built-in or discovered execution stack. This selection is CLI-only and is never written into YAML. |
 | `--set PATH=YAML_VALUE` | repeatable assignment | None | Override an existing configuration path after loading YAML. |
 | `--output-dir PATH` | path | `./aisimulate-output` | Directory for durable results. |
 | `--overwrite` | flag | `false` | Replace known AISimulate output files in an existing output directory. |
 | `--format table\|json` | enum | `table` | Standard-output presentation. It does not change durable output files. |
 
-`simulate` also accepts:
+`predict` also accepts:
 
 | Option | Type | Default | Meaning |
 |---|---|---:|---|
@@ -73,12 +77,26 @@ aisimulate recommend --config recommendation.yaml
 The CLI deliberately does not expose field-specific flags such as `--request-per-second` or
 `--num-workers`. YAML is the authoritative semantic configuration surface.
 
+### Stack Discovery
+
+The `engine` runner factory ships with AISimulate. Optional stacks are discovered through the
+`aisimulate.runner_factories` Python entry-point group; the `ai-dynamo` package registers `dynamo`.
+Entry-point names are the accepted `--stack` values and must be unique.
+
+If a requested optional stack is not installed, the CLI exits with code `2` before loading the
+configuration and reports an actionable error:
+
+```text
+stack 'dynamo' is unavailable; install the matching packages with:
+uv pip install aisimulate ai-dynamo
+```
+
 ## Presets and Default Ranges
 
-The reference tables below use four core columns:
+The reference tables below use five columns:
 
 - **Knob** is the complete YAML path.
-- **Default** is the concrete value used by `simulate` when the knob is omitted.
+- **Default** is the concrete value used by `predict` when the knob is omitted.
 - **Default Range** is the recommendation domain used when preset search is disabled. `x` means the
   knob is non-sweepable and rejects any domain. `-` means the knob is sweepable, but its default
   domain is the singleton concrete default. Any displayed `choices` or `range` is searched by
@@ -123,7 +141,7 @@ default range. An omitted `-` knob uses the singleton concrete default. An `x` k
 rejects a domain. The Sweeper evaluates the Cartesian product and rejects infeasible concrete
 combinations. A preset and independent domains cannot be active on the same object.
 
-Preset controls are recommendation-only. `simulation.resolved.yaml` and recommended simulation YAMLs
+Preset controls are recommendation-only. `prediction.resolved.yaml` and recommended prediction YAMLs
 contain only the expanded concrete knobs.
 
 If the optional `router` or `planner` section is absent, that component stays fixed at its concrete
@@ -223,8 +241,8 @@ Cartesian product before feasibility filtering.
 `--set` uses a dot-separated path and parses its value as YAML:
 
 ```bash
-aisimulate simulate \
-  --config simulation.yaml \
+aisimulate predict \
+  --config prediction.yaml \
   --set traffic.load.requests_per_second=16 \
   --set engine.workers.aggregated.parallelism.replicas=4
 ```
@@ -259,7 +277,7 @@ optimizer: {}
 
 The command determines the document type. There is no top-level `kind` or stack field.
 
-| Section | `simulate` | `recommend` | Purpose |
+| Section | `predict` | `recommend` | Purpose |
 |---|---|---|---|
 | `traffic` | Optional | Optional | Request source, load shape, and stopping condition. Uses the default synthetic request traffic when omitted. |
 | `engine` | Required | Required | Model, hardware, backend, topology, and worker roles. |
@@ -297,7 +315,7 @@ traffic:
     output_tokens: 128
   load:
     type: concurrency
-    concurrency: 50
+    concurrency: 10
   stop:
     requests: 100
 ```
@@ -306,6 +324,9 @@ The default source contains independent requests with fixed input sequence lengt
 sequence length (OSL); it does not sample token-length distributions or create sessions. A supplied
 `traffic` mapping does not merge recursively with this example. Once `traffic` is present, its normal
 source, load, and stop validation applies.
+
+The default run uses `100` requests at concurrency `10`, or 10 times the active concurrency, following
+the current SA convention.
 
 ### Traffic Fields
 
@@ -324,13 +345,13 @@ source, load, and stop validation applies.
 | `traffic.source.format` | `mooncake` | `x` | `-` | See [Trace Format Compatibility](#trace-format-compatibility). |
 | `traffic.source.block_size` | `512`; embedded for `dynamo` | `x` | `-` | Positive. |
 | `traffic.load.type` | `concurrency` | `x` | `-` | Synthetic: `concurrency`, `poisson`, `constant_rate`, or `kv_capacity_fraction`; trace: `trace_timestamps` or `concurrency`. |
-| `traffic.load.concurrency` | `50` | `-` | `-` | Positive integer; explicit domains are allowed in `recommend`. |
+| `traffic.load.concurrency` | `10` | `-` | `-` | Positive integer; explicit domains are allowed in `recommend`. |
 | `traffic.load.requests_per_second` | `null` | `-` | `-` | Positive; synthetic request open-loop load only. |
 | `traffic.load.sessions_per_second` | `null` | `-` | `-` | Positive; synthetic session open-loop load only. |
 | `traffic.load.seed` | `42` | `x` | `-` | Nonnegative; `poisson` only. |
 | `traffic.load.fraction` | `null` | `-` | `-` | Positive finite number; `kv_capacity_fraction` only and may exceed `1`. |
 | `traffic.load.speedup` | `1` | `-` | `-` | Positive; trace timestamp load only. |
-| `traffic.stop.requests` | `100` for default traffic | `x` | `-` | Positive integer; synthetic request source only. |
+| `traffic.stop.requests` | `100` for default traffic | `x` | `-` | Positive integer; 10× default concurrency; synthetic request source only. |
 | `traffic.stop.requests_per_load_unit` | `null` | `x` | `-` | Positive; synthetic request source only. |
 | `traffic.stop.sessions` | `null` | `x` | `-` | Positive integer; synthetic session source only. |
 | `traffic.stop.sessions_per_load_unit` | `null` | `x` | `-` | Positive; synthetic session source only. |
@@ -411,7 +432,7 @@ count as new load arrivals. `requests_per_second` schedules independent single r
 In a recommendation input, source type, token fields, session shape, and stopping condition stay
 concrete. Only `traffic.load` rows whose Default Range is not `x` can be search domains. A
 `kv_capacity_fraction` recommendation is materialized as a concrete `concurrency` load in each
-recommended simulation YAML.
+recommended prediction YAML.
 
 ### Trace Source
 
@@ -504,7 +525,7 @@ input grows cumulatively by each assistant response and tool output. Because the
 first-session arrival timestamps, it requires `load.type: concurrency` and rejects `speedup`.
 
 > [!NOTE]
-> `max_virtual_time_seconds` limits the total simulated virtual time of one simulation or recommendation
+> `max_virtual_time_seconds` limits the total simulated virtual time of one prediction or recommendation
 > candidate. It is not a separate processing-time limit for each path in `traffic.source.paths`, and it
 > is not a real wall-clock timeout. The limit is a soft scheduling cutoff: events at the cutoff are
 > processed, replay stops before the first event after the cutoff, and requests still in flight can be
@@ -580,10 +601,10 @@ engine:
 | `engine.workers.<role>.startup_seconds` | `0` | `x` | `-` | Nonnegative. |
 | `engine.kv_transfer.bytes_per_token` | `auto` | `x` | `-` | Positive when concrete; disaggregated mode only. |
 | `engine.kv_transfer.bandwidth_gb_per_second` | `null` | `x` | `-` | Positive when set; `null` disables transfer delay. |
-| `engine.kv_transfer.timing_mode` | `full_prompt` | `x` | `-` | `full_prompt` or `destination_missing`; disaggregated mode only. |
+| `engine.kv_transfer.timing_mode` | `destination_missing` | `x` | `-` | `full_prompt` or `destination_missing`; disaggregated mode only. |
 
 `engine.hardware: auto` is valid only in `recommend` and requires the single hardware identifier under
-`optimization.hardware`. Every recommended simulation YAML replaces `auto` with that concrete
+`optimization.hardware`. Every recommended prediction YAML replaces `auto` with that concrete
 identifier. All worker roles in aggregated or disaggregated mode use the same hardware.
 
 An aggregated configuration uses `workers.aggregated`. A disaggregated configuration uses
@@ -615,7 +636,7 @@ engine:
       scheduler: {max_batched_tokens: 8192, max_sequences: 256}
       kv_cache:
         block_size: 64
-        prefix_caching: false
+        prefix_caching: true
         capacity: {type: default, memory_fraction: 0.9}
       timing: {type: default}
       startup_seconds: 0
@@ -648,22 +669,23 @@ candidate GPU count is the sum of the prefill and decode worker counts.
 
 `full_prompt` charges transfer for the complete prompt KV footprint. `destination_missing` charges
 only the prompt KV not already present at the selected decode worker. `kv_transfer` is rejected for
-aggregated mode. Its fields can be concrete or recommendation domains under the same rules as other
-Engine fields.
+aggregated mode. All `kv_transfer` fields are concrete-only; their Default Range is `x`, and
+`recommend` rejects domains on them.
 
 ## Router
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
 | `router.policy` | `round_robin` | `{choices: [round_robin, kv_router]}` | `-` | `round_robin` or `kv_router`. |
-| `router.prefill_load_model.type` | `none` | `{choices: [none, aic]}` | `-` | `aic` is KV-router-only. |
+| `router.prefill_load_model.type` | `none` | `{choices: [none, aic]}` | `-` | `aic` is the current legacy Router identifier and is KV-router-only. |
 | `router.overlap_score_credit` | `1.0` | `{choices: [0.0, 0.5, 1.0]}` | `-` | Finite, nonnegative, and KV-router-only. |
 | `router.prefill_load_scale` | `1.0` | `{choices: [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]}` | `-` | Finite, nonnegative, and KV-router-only. |
 | `router.temperature` | `0.0` | `{choices: [0.0, 0.2, 0.5, 1.0]}` | `-` | Finite, nonnegative, and KV-router-only. |
 
 `round_robin` requires `prefill_load_model.type: none` and has no KV-router-only knobs. The
 `kv_router` policy may use either load model. Production-only Router fields remain outside the version
-1 contract.
+1 contract. Replacing the legacy `aic` load-model name with an implementation-neutral public name is
+deferred until the Router exposes that name.
 
 ## Planner
 
@@ -674,13 +696,13 @@ planner:
 
 | Knob | Default | Default Range | Preset | Rules |
 |---|---:|---|---|---|
-| `planner.scaling_policy.preset` | `default` in `recommend` | `{choices: [disabled, throughput_180_5, throughput_600_5, load_180_5, load_180_10, hybrid_180_5, hybrid_600_5]}` | `-` | Built-in preset choices, complete mapping list, `false`, or `{}`. |
+| `planner.scaling_policy.preset` | `default` in `recommend` | `{choices: [disabled, throughput_180_5, throughput_600_5, load_180_5, load_180_10, hybrid_180_5, hybrid_600_5]}` | `-` | Throughput and hybrid presets require `planner.target: sla` plus TTFT/ITL thresholds. |
 | `planner.fpm_sampling.preset` | `default` in `recommend` | `{choices: [small, default, large, fine]}` | `-` | Built-in preset choices, complete mapping list, `false`, or `{}`. |
 | `planner.load_sensitivity.preset` | `default` in `recommend` | `{choices: [aggressive, default, conservative]}` | `-` | Built-in preset choices, complete mapping list, `false`, or `{}`. |
 | `planner.load_predictor.preset` | `default` in `recommend` | `{choices: [constant_last, arima_raw, arima_log1p, prophet_w20_raw, prophet_w20_log1p, prophet_w50_raw, prophet_w50_log1p, kalman_default_raw, kalman_default_log1p, kalman_reactive_raw, kalman_reactive_log1p]}` | `-` | Interval-level predictor pre-sweep candidates; complete mapping list, `false`, or `{}`. |
 | `planner.policy` | `disabled` | `{choices: [disabled, planner]}` | `-` | `disabled` or `planner`. |
 | `planner.target` | `throughput` | `x` | `-` | Derived from `optimization.target` in `recommend`. |
-| `planner.enable_throughput_scaling` | `true` | `{choices: [false, true]}` | `scaling_policy` | Planner policy only. |
+| `planner.enable_throughput_scaling` | `true` | `{choices: [false, true]}` | `scaling_policy` | `true` requires `planner.target: sla` plus TTFT/ITL thresholds. |
 | `planner.enable_load_scaling` | `false` | `{choices: [false, true]}` | `scaling_policy` | Planner policy only. |
 | `planner.throughput_adjustment_interval_seconds` | `180` | `{choices: [180, 600]}` | `scaling_policy` | Positive; throughput scaling only. |
 | `planner.load_adjustment_interval_seconds` | `5` | `{choices: [5, 10]}` | `scaling_policy` | Positive and shorter than throughput interval when used. |
@@ -702,7 +724,7 @@ planner:
 
 Planner has four independent preset sub-items rather than one whole-Planner preset. Each named or
 custom mapping covers every knob in exactly one sub-item. The nested `*.preset` selectors disappear
-after materialization; expanded knobs are written directly under `planner` in concrete simulation
+after materialization; expanded knobs are written directly under `planner` in concrete prediction
 YAML.
 
 `scaling_policy`, `fpm_sampling`, and `load_sensitivity` are composed as independent main-search
@@ -710,14 +732,19 @@ dimensions. `load_predictor` is different: its candidates run in a pre-sweep for
 throughput-adjustment interval, and the winning predictor mapping is materialized into the candidate.
 
 `planner.policy`, `planner.target`, `planner.max_num_gpus`, and the three runtime minimum-worker knobs
-are not covered by a preset. `simulate` may set a concrete target and otherwise uses `throughput`. In
+are not covered by a preset. `predict` may set a concrete target and otherwise uses `throughput`. In
 `recommend`, target is derived: throughput targets and Pareto map to `throughput`, `ttft` and
 `e2e_latency` map to `latency`, and goodput targets map to `sla`.
+
+Throughput-based Planner scaling is legal only for the `sla` target with concrete
+`evaluation.sla.ttft_ms` and `evaluation.sla.itl_ms`. For `throughput`, `latency`, or `load` Planner
+targets, the adapter rejects any scaling-policy preset or custom mapping that enables throughput
+scaling before search begins.
 
 Planner runtime limits and recommendation candidate GPU constraints are separate:
 
 - `planner.max_num_gpus`, `min_workers`, `prefill_min_workers`, and `decode_min_workers` constrain
-  runtime scaling during one simulated candidate run.
+  runtime scaling during one predicted candidate run.
 - `optimization.constraints` constrains which static candidate deployments the recommender evaluates.
 
 When `planner.policy: disabled` or the `disabled` scaling-policy preset is selected, no Planner
@@ -841,7 +868,7 @@ optimizer:
 | `optimizer.candidate_timeout_seconds` | `600` | `x` | `-` | Positive wall-clock limit per candidate. |
 | `optimizer.seed` | `42` | `x` | `-` | Nonnegative. |
 
-## Complete Simulation Example
+## Complete Prediction Example
 
 ```yaml
 traffic:
@@ -980,18 +1007,22 @@ infeasible trials from the trial ledger.
 
 Output controls are CLI-only. They never appear in an input or recommended YAML file.
 
-### Simulation Directory
+This CLI-focused revision defines artifact names and write behavior only. Field-level JSON schemas,
+`schema_version`, metric names and units, status/error records, and partial-failure payloads are
+deferred to a separate output-contract revision; they are not finalized by this document.
+
+### Prediction Directory
 
 ```text
 <output-dir>/
 ├── run.json
-├── simulation.resolved.yaml
+├── prediction.resolved.yaml
 ├── prediction.json
 └── requests.jsonl                 # only with --capture-per-request
 ```
 
 - `run.json` records command identity, stack, timestamps, status, and artifact names.
-- `simulation.resolved.yaml` is the validated concrete input after `--set` overrides and defaults.
+- `prediction.resolved.yaml` is the validated concrete input after `--set` overrides and defaults.
 - `prediction.json` contains aggregate predicted metrics and configuration-independent units.
 - `requests.jsonl` contains one record per request when explicitly enabled.
 
@@ -1016,9 +1047,9 @@ Output controls are CLI-only. They never appear in an input or recommended YAML 
   when unavailable.
 - `recommendations/index.json` provides rank or Pareto membership, objective values, constraints,
   and the corresponding YAML file.
-- Each numbered YAML is a concrete simulation config. It excludes `optimization`, `optimizer`, and
+- Each numbered YAML is a concrete prediction config. It excludes `optimization`, `optimizer`, and
   `preset`, contains no domains or `auto` values, and can be passed directly to
-  `aisimulate simulate`.
+  `aisimulate predict`.
 
 For scalar optimization, `index.json` orders all feasible candidates from best to worst. For Pareto
 optimization, it lists the complete nondominated front in a deterministic display order; that order
@@ -1039,7 +1070,7 @@ one JSON value for shell automation. Durable artifact formats do not change with
 
 | Exit Code | Meaning |
 |---:|---|
-| `0` | Successful simulation or recommendation. |
+| `0` | Successful prediction or recommendation. |
 | `1` | Execution failure or a completed recommendation with no feasible candidate. |
 | `2` | CLI syntax, YAML parsing, schema, domain, override, or unsupported-combination error. |
 | `130` | Interrupted by the user. |
@@ -1067,8 +1098,8 @@ The new interface conceptually replaces the existing entry points:
 
 | Existing Surface | New Surface |
 |---|---|
-| `python -m aisimulate.replay` | `aisimulate simulate --stack engine` |
-| `python -m dynamo.replay` | `aisimulate simulate --stack dynamo` |
+| `python -m aisimulate.replay` | `aisimulate predict --stack engine` |
+| `python -m dynamo.replay` | `aisimulate predict --stack dynamo` |
 | Engine-backed Sweeper wrapper | `aisimulate recommend --stack engine` |
 | Dynamo-backed Sweeper wrapper | `aisimulate recommend --stack dynamo` |
 | `python -m aisimulate.sweeper` validation entry point | `aisimulate recommend` validation before execution |
