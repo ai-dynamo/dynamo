@@ -52,7 +52,7 @@ spec:
             value: '1'
           - name: VLLM_USE_V2_MODEL_RUNNER
             value: '0'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+          image: nvcr.io/nvstaging/nim/shreyasm:dynamo-main-bf7542-vllm-nightly-65b7662-arm64-nvbug6608287
           imagePullPolicy: IfNotPresent
           name: main
           securityContext:
@@ -172,20 +172,33 @@ spec:
           - name: NCCL_MNNVL_ENABLE
             value: '1'
           - name: NCCL_NVLS_ENABLE
+            value: '0'
+          # Force MNNVL path for MC collective; works with NCCL_NVLS_ENABLE=0 on GB200.
+          - name: MC_FORCE_MNNVL
             value: '1'
-          - name: NCCL_P2P_LEVEL
-            value: NVL
+          # Ring + LL128 outperforms default TREE_LL for TP=16 on GB200 NVL72.
+          - name: NCCL_ALGO
+            value: Ring
+          - name: NCCL_PROTO
+            value: LL128
           - name: NCCL_SOCKET_IFNAME
             value: eth0
           - name: GLOO_SOCKET_IFNAME
             value: eth0
           - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
-            value: '3600'
+            value: '1800'
           - name: NVIDIA_GDRCOPY
             value: '1'
-          - name: PYTORCH_ALLOC_CONF
-            value: expandable_segments:True
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+          - name: PYTORCH_CUDA_ALLOC_CONF
+            value: expandable_segments:False
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: ETCD_LEASE_TTL
+            value: '120'
+          # Disables cuDNN for Conv2d in MoonViT patch-embed; prevents cudnnCreate crash on GB200 (nvbug 6608287).
+          - name: GP_DISABLE_CUDNN
+            value: '1'
+          image: nvcr.io/nvstaging/nim/shreyasm:dynamo-main-bf7542-vllm-nightly-65b7662-arm64-nvbug6608287
           imagePullPolicy: IfNotPresent
           name: main
           resources:
