@@ -186,14 +186,23 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 			return Gates{}, err
 		}
 	}
-	if gates.Grove, err = resolve(config.Orchestrators.Grove.Enabled,
-		detectOptionalAPIAvailability(ctx, mgr.GetConfig(), "grove.io", "", ""),
+	groveAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "grove.io", "", "")
+	if err != nil {
+		return Gates{}, err
+	}
+	if gates.Grove, err = resolve(config.Orchestrators.Grove.Enabled, groveAvailable,
 		"Grove is explicitly enabled in config but the Grove API group was not detected in the cluster"); err != nil {
 		return Gates{}, err
 	}
 
-	lwsAvailable := detectOptionalAPIAvailability(ctx, mgr.GetConfig(), "leaderworkerset.x-k8s.io", "", "")
-	volcanoAvailable := detectOptionalAPIAvailability(ctx, mgr.GetConfig(), "scheduling.volcano.sh", "", "")
+	lwsAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "leaderworkerset.x-k8s.io", "", "")
+	if err != nil {
+		return Gates{}, err
+	}
+	volcanoAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "scheduling.volcano.sh", "", "")
+	if err != nil {
+		return Gates{}, err
+	}
 	if ptr.Deref(config.Orchestrators.LWS.Enabled, lwsAvailable && volcanoAvailable) {
 		if !lwsAvailable {
 			return Gates{}, fmt.Errorf("LWS is explicitly enabled in config but the LWS API group was not detected in the cluster")
@@ -211,24 +220,34 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		gates.VolcanoScheduler = true
 	}
 
-	if gates.KaiScheduler, err = resolve(config.Orchestrators.KaiScheduler.Enabled,
-		detectOptionalAPIAvailability(ctx, mgr.GetConfig(), "scheduling.run.ai", "", ""),
+	kaiSchedulerAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "scheduling.run.ai", "", "")
+	if err != nil {
+		return Gates{}, err
+	}
+	if gates.KaiScheduler, err = resolve(config.Orchestrators.KaiScheduler.Enabled, kaiSchedulerAvailable,
 		"Kai-scheduler is explicitly enabled in config but the scheduling.run.ai API group was not detected in the cluster"); err != nil {
 		return Gates{}, err
 	}
-	if gates.DRA, err = resolve(config.DRA.Enabled,
-		detectOptionalAPIAvailability(
-			ctx,
-			mgr.GetConfig(),
-			resourcev1.SchemeGroupVersion.Group,
-			resourcev1.SchemeGroupVersion.Version,
-			"",
-		),
+	draAvailable, err := detectAPIAvailability(
+		ctx,
+		mgr.GetConfig(),
+		resourcev1.SchemeGroupVersion.Group,
+		resourcev1.SchemeGroupVersion.Version,
+		"",
+	)
+	if err != nil {
+		return Gates{}, err
+	}
+	if gates.DRA, err = resolve(config.DRA.Enabled, draAvailable,
 		"DRA is explicitly enabled in config but the resource.k8s.io/v1 API was not detected in the cluster (requires Kubernetes 1.34+)"); err != nil {
 		return Gates{}, err
 	}
 	if config.ServiceMesh.IsEnabled() {
-		if gates.Istio, err = resolve(config.ServiceMesh.Enabled, DetectIstioDestinationRuleAvailability(ctx, mgr.GetConfig()),
+		istioAvailable, detectErr := DetectIstioDestinationRuleAvailability(ctx, mgr.GetConfig())
+		if detectErr != nil {
+			return Gates{}, detectErr
+		}
+		if gates.Istio, err = resolve(config.ServiceMesh.Enabled, istioAvailable,
 			"service mesh is explicitly enabled in config but the networking.istio.io DestinationRule API was not detected in the cluster"); err != nil {
 			return Gates{}, err
 		}
@@ -243,8 +262,8 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 }
 
 // DetectInferencePoolAvailability checks whether the Gateway API Inference Extension is registered.
-func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectOptionalAPIAvailability(ctx, mgr.GetConfig(), "inference.networking.k8s.io", "", "")
+func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) (bool, error) {
+	return detectAPIAvailability(ctx, mgr.GetConfig(), "inference.networking.k8s.io", "", "")
 }
 
 // detectAPIAvailability reports whether an API group, version, or resource is discoverable.
@@ -304,17 +323,6 @@ func detectAPIAvailability(ctx context.Context, cfg *rest.Config, group, version
 	return false, nil
 }
 
-// detectOptionalAPIAvailability degrades discovery errors to unavailable for optional integrations.
-func detectOptionalAPIAvailability(ctx context.Context, cfg *rest.Config, group, version, resource string) bool {
-	available, err := detectAPIAvailability(ctx, cfg, group, version, resource)
-	if err != nil {
-		log.FromContext(ctx).Error(err, "API availability detection failed",
-			"group", group, "version", version, "resource", resource)
-		return false
-	}
-	return available
-}
-
 // resolve uses auto-detection when unset, disables on false, and requires availability on true.
 func resolve(configured *bool, available bool, unavailableMessage string) (bool, error) {
 	if configured == nil {
@@ -330,8 +338,8 @@ func resolve(configured *bool, available bool, unavailableMessage string) (bool,
 }
 
 // DetectIstioDestinationRuleAvailability checks whether DestinationRule is registered.
-func DetectIstioDestinationRuleAvailability(ctx context.Context, cfg *rest.Config) bool {
-	return detectOptionalAPIAvailability(ctx, cfg, "networking.istio.io", "v1beta1", "destinationrules")
+func DetectIstioDestinationRuleAvailability(ctx context.Context, cfg *rest.Config) (bool, error) {
+	return detectAPIAvailability(ctx, cfg, "networking.istio.io", "v1beta1", "destinationrules")
 }
 
 func apiGroupServesVersion(apiGroups *metav1.APIGroupList, groupName, version string) bool {
