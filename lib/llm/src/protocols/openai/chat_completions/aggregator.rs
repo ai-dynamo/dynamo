@@ -83,6 +83,13 @@ struct DeltaChoice {
     content_parts: Vec<dynamo_protocols::types::ChatCompletionResponseContentPart>,
 }
 
+fn suppress_tool_call_output(choice: &mut DeltaChoice) {
+    choice.tool_calls = None;
+    if choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls) {
+        choice.finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
+    }
+}
+
 impl Default for DeltaAggregator {
     /// Provides a default implementation for `DeltaAggregator` by calling [`DeltaAggregator::new`].
     fn default() -> Self {
@@ -353,6 +360,16 @@ impl DeltaAggregator {
             }
         }
 
+        // This is both a defense-in-depth check for structured deltas and a
+        // prerequisite for whole-response decoders such as Harmony: clear any
+        // already-structured calls before parsing so the decoder can still
+        // inspect ordinary text below.
+        if parsing_options.suppress_tool_calls {
+            for choice in aggregator.choices.values_mut() {
+                suppress_tool_call_output(choice);
+            }
+        }
+
         if let Some(parser) = parsing_options.tool_call_parser.as_deref() {
             for choice in aggregator.choices.values_mut() {
                 if choice
@@ -456,6 +473,16 @@ impl DeltaAggregator {
                         choice.text.push_str(&tail);
                     }
                 }
+            }
+        }
+
+        // A retained whole-response parser may discover a syntactically valid
+        // call while removing model-internal channel markup. Parser activation
+        // is not permission to expose that call; enforce the request policy
+        // again after aggregate parsing.
+        if parsing_options.suppress_tool_calls {
+            for choice in aggregator.choices.values_mut() {
+                suppress_tool_call_output(choice);
             }
         }
 
@@ -2013,7 +2040,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_harmony_aggregate_zero_call_drops_internal_analysis() {
+    async fn test_disabled_harmony_aggregate_drops_internal_analysis() {
         let annotated_delta = create_test_delta(
             0,
             r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#,
@@ -2026,7 +2053,8 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
         let result = DeltaAggregator::apply(
             stream,
-            ParsingOptions::new(Some("harmony".to_string()), None),
+            ParsingOptions::new(Some("harmony".to_string()), None)
+                .with_tool_call_parsing_enabled(false),
         )
         .await;
 
@@ -2034,6 +2062,33 @@ mod tests {
         let response = result.unwrap();
         let choice = &response.inner.choices[0];
         assert_eq!(choice.message.content, None);
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disabled_harmony_aggregate_suppresses_parsed_tool_call() {
+        let annotated_delta = create_test_delta(
+            0,
+            r#"<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"Paris"}<|call|>"#,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::ToolCalls),
+            None,
+            None,
+        );
+
+        let response = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![annotated_delta])),
+            ParsingOptions::new(Some("harmony".to_string()), None)
+                .with_tool_call_parsing_enabled(false),
+        )
+        .await
+        .expect("Harmony decoding should succeed");
+        let choice = &response.inner.choices[0];
+
         assert!(choice.message.tool_calls.is_none());
         assert_eq!(
             choice.finish_reason,

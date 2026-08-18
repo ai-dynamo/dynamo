@@ -22,8 +22,10 @@ impl OpenAIPreprocessor {
     /// Whether this request permits model output to be interpreted as tool calls.
     ///
     /// A configured parser describes the model's wire format; it does not grant
-    /// every request permission to return tool calls. Assistant-output constraints
-    /// take precedence for auto choice, matching native vLLM's request handling.
+    /// every request permission to return tool calls. Permission depends only on
+    /// whether the request supplies tools and whether `tool_choice` forbids them.
+    /// Assistant-output constraints apply to assistant content and do not revoke
+    /// an `auto` request's ability to choose a tool call.
     pub(crate) fn tool_call_parsing_enabled(request: &NvCreateChatCompletionRequest) -> bool {
         if request.inner.tools.as_ref().is_none_or(Vec::is_empty) {
             return false;
@@ -39,9 +41,7 @@ impl OpenAIPreprocessor {
             ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_) => {
                 true
             }
-            ChatCompletionToolChoiceOption::Auto => {
-                !has_explicit_guided_decoding(request) && !has_response_format_constraint(request)
-            }
+            ChatCompletionToolChoiceOption::Auto => true,
         }
     }
 
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_constraints_disable_only_auto_tool_parsing() {
+    fn assistant_constraints_do_not_revoke_auto_tool_permission() {
         let constraints = [
             json!({"response_format": {"type": "json_object"}}),
             json!({
@@ -277,7 +277,7 @@ mod tests {
             auto.as_object_mut()
                 .unwrap()
                 .extend(constraint.as_object().unwrap().clone());
-            assert!(!OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+            assert!(OpenAIPreprocessor::tool_call_parsing_enabled(&request(
                 auto
             )));
 
