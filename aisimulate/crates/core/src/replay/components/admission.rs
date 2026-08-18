@@ -73,7 +73,7 @@ impl<Metadata> ReplayReadyArrival<Metadata> {
 
 enum AdmissionSource {
     Requests(VecDeque<DirectRequest>),
-    Workload(WorkloadDriver),
+    Workload(Box<WorkloadDriver>),
 }
 
 pub(crate) struct AdmissionQueue<Metadata = NoReplayMetadata> {
@@ -91,7 +91,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
         }
     }
 
-    pub(crate) fn new_workload(driver: WorkloadDriver, mode: ReplayMode) -> Self {
+    pub(crate) fn new_workload(driver: Box<WorkloadDriver>, mode: ReplayMode) -> Self {
         Self {
             source: AdmissionSource::Workload(driver),
             mode,

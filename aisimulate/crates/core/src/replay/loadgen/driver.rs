@@ -771,9 +771,9 @@ impl WorkloadDriver {
                     next_play: 0,
                 })
                 .collect();
-            for play_index in 0..plays.len() {
+            for (play_index, play) in plays.iter_mut().enumerate() {
                 let lane_index = play_index % lane_count;
-                plays[play_index].lane_index = Some(lane_index);
+                play.lane_index = Some(lane_index);
                 lanes[lane_index].plays.push(play_index);
             }
         }
@@ -1218,14 +1218,13 @@ impl WorkloadDriver {
             }
             return Ok(());
         };
-        if is_agentic {
-            if self
+        if is_agentic
+            && self
                 .agentic_settling
                 .insert(request_uuid, resolution.session_index)
                 .is_some()
-            {
-                bail!("agentic request {request_uuid} received duplicate causal terminal");
-            }
+        {
+            bail!("agentic request {request_uuid} received duplicate causal terminal");
         }
         self.apply_resolution(resolution, now_ms);
         Ok(())

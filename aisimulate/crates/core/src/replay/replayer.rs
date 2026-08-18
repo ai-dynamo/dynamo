@@ -205,7 +205,7 @@ impl ReplayScalingPolicy for ScalingPolicyBoundary {
 #[doc(hidden)]
 pub enum ReplayRuntimeInput {
     Requests(VecDeque<DirectRequest>),
-    Workload(WorkloadDriver),
+    Workload(Box<WorkloadDriver>),
 }
 
 /// Built-in engine-only composition: Round-robin placement and fixed capacity.

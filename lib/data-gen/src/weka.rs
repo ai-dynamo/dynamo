@@ -987,7 +987,7 @@ fn normalized_hashes(
     used: &mut HashMap<u64, String>,
 ) -> Result<Vec<u64>> {
     let full_blocks = request.input_length / block_size;
-    let has_partial = request.input_length % block_size != 0;
+    let has_partial = !request.input_length.is_multiple_of(block_size);
     let mut result = Vec::with_capacity(full_blocks + usize::from(has_partial));
     for block_index in 0..full_blocks {
         let identity = request.hash_ids.get(block_index).map_or_else(
