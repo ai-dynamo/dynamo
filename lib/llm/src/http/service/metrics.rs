@@ -542,6 +542,7 @@ pub enum ErrorType {
 /// Track response-specific metrics
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
+    request_stats: Option<super::engine_stats::RequestStats>,
     model: String,
     // Per-model metric handles cached for the request. Most are resolved at construction;
     // ITL is resolved lazily on its first observation so requests that never produce ITL
@@ -1648,6 +1649,7 @@ impl ResponseMetricCollector {
             .with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
+            request_stats: None,
             model,
             output_tokens_counter,
             time_to_first_token,
@@ -1682,6 +1684,27 @@ impl ResponseMetricCollector {
             decode_dp_rank: None,
             decode_worker_type: None,
             decode_itl_gauge: None,
+        }
+    }
+
+    pub(super) fn attach_request_stats(
+        &mut self,
+        stats: super::engine_stats::EngineStats,
+        request_id: &str,
+        correlation_id: Option<String>,
+        model: &str,
+    ) {
+        self.request_stats = Some(super::engine_stats::RequestStats::new(
+            stats,
+            request_id,
+            correlation_id,
+            model,
+        ));
+    }
+
+    fn observe_request_stats(&mut self, input_tokens: usize, generated_tokens: usize) {
+        if let Some(request) = self.request_stats.as_mut() {
+            request.observe(input_tokens, generated_tokens);
         }
     }
 
@@ -2051,6 +2074,7 @@ fn observe_llm_metrics(
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
 ) {
+    response_collector.observe_request_stats(metrics.input_tokens, metrics.chunk_tokens);
     response_collector.observe_current_osl(metrics.output_tokens);
     response_collector.observe_cached_tokens(metrics.cached_tokens);
     response_collector.observe_multimodal_metrics(
