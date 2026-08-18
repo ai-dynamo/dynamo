@@ -494,9 +494,6 @@ def _prepare_request(
             isinstance(request, dict) and request.get("thinking") is not None
         ),
     )
-    # Don't let an absent top-level field clobber a nested reasoning_effort.
-    if request_for_sampling.reasoning_effort is None:
-        chat_template_kwargs.setdefault("reasoning_effort", None)
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (
