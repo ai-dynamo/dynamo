@@ -55,10 +55,10 @@ def _config(
     adapters = {
         "dynamo.planner": {
             "search_space": {
-                "scaling_policy": [scaling_policy],
-                "fpm_sampling": ["default"],
-                "load_sensitivity": ["default"],
-                "load_predictor_candidates": ["constant_last"],
+                "scaling_policy": {"preset": [scaling_policy]},
+                "fpm_sampling": {"preset": ["default"]},
+                "load_sensitivity": {"preset": ["default"]},
+                "load_predictor": {"preset": ["constant_last"]},
             }
         }
     }

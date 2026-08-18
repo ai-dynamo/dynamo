@@ -44,11 +44,11 @@
 //! ## Usage Flow
 //!
 //! 1.  **Create/Allocate Layout**: A block layout (e.g., [`FullyContiguous`]) is created or allocated,
-//!     ensuring its underlying storage is NIXL-compatible (e.g., using [`SystemStorage`] that implements
+//!     ensuring its underlying storage is NIXL-compatible (e.g., using `SystemStorage` that implements
 //!     [`NixlRegisterableStorage`]).
-//! 2.  **Register with NIXL**: The [`nixl_register`] method from the [`NixlLayout`] trait is called on the
+//! 2.  **Register with NIXL**: The `nixl_register` method from the [`NixlLayout`] trait is called on the
 //!     layout instance with a [`NixlAgent`].
-//! 3.  **Serialize**: The [`serialize`] method from [`ToSerializedNixlBlockLayout`] is used to get a
+//! 3.  **Serialize**: The `serialize` method from [`ToSerializedNixlBlockLayout`] is used to get a
 //!     [`SerializedNixlBlockLayout`].
 //! 4.  **Transmit**: The [`SerializedNixlBlockLayout`] (or its byte representation) is sent to another
 //!     process/node.

@@ -519,6 +519,7 @@ where
                     endpoint.clone(),
                     indexer.clone(),
                     membership_watch,
+                    block_size,
                     model_name.clone().unwrap_or_else(|| "unknown".to_string()),
                     worker_role,
                     kv_event_source_requirement,

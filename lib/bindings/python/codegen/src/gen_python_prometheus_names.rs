@@ -51,27 +51,7 @@ impl<'a> PythonGenerator<'a> {
         // Generate simple classes with constants as class attributes
         for (idx, module_name) in module_names.iter().enumerate() {
             let module = &self.modules[module_name.as_str()];
-            lines.push(format!("class {}:", module_name));
-
-            // Use doc comment from module if available
-            if !module.doc_comment.is_empty() {
-                let first_line = module.doc_comment.lines().next().unwrap_or("").trim();
-                if !first_line.is_empty() {
-                    lines.push(format!("    \"\"\"{}\"\"\"", first_line));
-                }
-            }
-
-            if !module.constants.is_empty() {
-                lines.push("".to_string());
-                for constant in &module.constants {
-                    if !constant.doc_comment.is_empty() {
-                        for comment_line in constant.doc_comment.lines() {
-                            lines.push(format!("    # {}", comment_line));
-                        }
-                    }
-                    lines.push(format!("    {} = \"{}\"", constant.name, constant.value));
-                }
-            }
+            render_class(module, 0, &mut lines);
 
             // PEP 8 / black requires two blank lines between top-level class definitions,
             // but no trailing blank lines at end of file.
@@ -85,6 +65,82 @@ impl<'a> PythonGenerator<'a> {
         lines.push("".to_string());
 
         lines.join("\n")
+    }
+}
+
+/// Black's line limit, from `pyproject.toml` (`line-length = 88`). The generator matches
+/// it so its output is already canonical and `cargo run` alone reproduces the checked-in
+/// file; keep the two in sync if the repo ever changes the limit.
+const MAX_LINE_LEN: usize = 88;
+
+/// Emit one `NAME = "value"` assignment, wrapping in parentheses exactly the way black
+/// does when the single-line form would exceed `MAX_LINE_LEN`. Comments are left alone —
+/// black does not reflow them, and flake8 has `E501` in `extend-ignore`.
+fn push_assignment(body_pad: &str, name: &str, value: &str, lines: &mut Vec<String>) {
+    let single = format!("{}{} = \"{}\"", body_pad, name, value);
+    if single.chars().count() <= MAX_LINE_LEN {
+        lines.push(single);
+        return;
+    }
+    lines.push(format!("{}{} = (", body_pad, name));
+    lines.push(format!("{}    \"{}\"", body_pad, value));
+    lines.push(format!("{})", body_pad));
+}
+
+/// Render one Rust module as a Python class, recursing into nested `pub mod` so
+/// `transport::tcp::ERRORS_TOTAL` becomes `transport.tcp.ERRORS_TOTAL`. `depth` is the
+/// nesting level; each level adds four spaces of indentation.
+fn render_class(module: &ModuleDef, depth: usize, lines: &mut Vec<String>) {
+    let pad = "    ".repeat(depth);
+    let body_pad = "    ".repeat(depth + 1);
+
+    lines.push(format!("{}class {}:", pad, module.name));
+
+    // Use doc comment from module if available
+    let mut wrote_body = false;
+    if !module.doc_comment.is_empty() {
+        let first_line = module.doc_comment.lines().next().unwrap_or("").trim();
+        if !first_line.is_empty() {
+            lines.push(format!("{}\"\"\"{}\"\"\"", body_pad, first_line));
+            wrote_body = true;
+        }
+    }
+
+    // The blank separator is emitted only when something already sits in the body.
+    // Emitting it unconditionally puts a blank line directly under a docstring-free
+    // `class X:` header, which black then deletes — so the generator alone could not
+    // reproduce its own checked-in artifact and every regeneration needed a second
+    // formatting pass.
+    if !module.constants.is_empty() {
+        if wrote_body {
+            lines.push(String::new());
+        }
+        wrote_body = true;
+        for constant in &module.constants {
+            if !constant.doc_comment.is_empty() {
+                for comment_line in constant.doc_comment.lines() {
+                    lines.push(format!("{}# {}", body_pad, comment_line));
+                }
+            }
+            push_assignment(&body_pad, &constant.name, &constant.value, lines);
+        }
+    }
+
+    // Nested classes go after the constants, separated by one blank line each — PEP 8
+    // uses a single blank line between nested definitions, not two.
+    for child in &module.submodules {
+        if wrote_body {
+            lines.push(String::new());
+        }
+        render_class(child, depth + 1, lines);
+        wrote_body = true;
+    }
+
+    // A module with no doc comment, no constants and no submodules would otherwise emit
+    // `class X:` with an empty body, which is a syntax error rather than the
+    // silently-empty class this generator used to produce.
+    if !wrote_body {
+        lines.push(format!("{}pass", body_pad));
     }
 }
 
@@ -166,16 +222,7 @@ fn main() -> Result<()> {
     module_names.sort();
     for name in module_names.iter() {
         let module = &parser.modules[name.as_str()];
-        println!(
-            "  - {}: {} constants{}",
-            name,
-            module.constants.len(),
-            if module.is_macro_generated {
-                " (macro-generated)"
-            } else {
-                ""
-            }
-        );
+        print_module_summary(module, 0);
     }
 
     println!("\nGenerating Python prometheus_names module...");
@@ -195,6 +242,26 @@ fn main() -> Result<()> {
     println!("\nSuccess! Python module ready for import.");
 
     Ok(())
+}
+
+/// Print one module and its nested modules, indented by nesting level. Nested modules are
+/// listed explicitly so a run that emits an empty parent class is visible in the log —
+/// the flat listing reported `transport: 0 constants` while silently dropping five names.
+fn print_module_summary(module: &ModuleDef, depth: usize) {
+    println!(
+        "  {}- {}: {} constants{}",
+        "  ".repeat(depth),
+        module.name,
+        module.constants.len(),
+        if module.is_macro_generated {
+            " (macro-generated)"
+        } else {
+            ""
+        }
+    );
+    for child in &module.submodules {
+        print_module_summary(child, depth + 1);
+    }
 }
 
 fn print_usage() {
@@ -227,4 +294,86 @@ EXAMPLES:
     cargo run -p dynamo-codegen --bin gen-python-prometheus-names -- --output /tmp/test.py
 "#
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_codegen::prometheus_parser::PrometheusParser;
+
+    /// End-to-end: parse Rust source, generate the Python module, then actually import it
+    /// with `python3` and read the attributes back. This is the only test that proves the
+    /// whole chain — recursion, nested-class indentation, and black-canonical formatting —
+    /// produces a module where `transport.tcp.ERRORS_TOTAL` resolves. Asserting on the
+    /// rendered text instead would pass even if the indentation made `tcp` a sibling of
+    /// `transport` rather than a member.
+    #[test]
+    fn generated_module_exposes_nested_metric_names() {
+        let parser = PrometheusParser::parse_file(
+            r#"
+/// Transport-specific metrics (TCP / NATS)
+pub mod transport {
+    pub mod tcp {
+        pub const ERRORS_TOTAL: &str = "tcp_errors_total";
+    }
+}
+
+pub mod frontend_service {
+    pub const REQUESTS_TOTAL: &str = "requests_total";
+    pub mod operation {
+        pub const TOKENIZE: &str = "tokenize";
+    }
+}
+
+pub mod empty_module {}
+"#,
+        )
+        .expect("source should parse");
+
+        let code = PythonGenerator::new(&parser).generate_python_file();
+
+        // Unique per process so concurrent test binaries cannot collide on the path.
+        let path =
+            std::env::temp_dir().join(format!("dynamo_prometheus_names_{}.py", std::process::id()));
+        std::fs::write(&path, &code).expect("write generated module");
+
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(format!(
+                "import importlib.util as u;                  s = u.spec_from_file_location('gen', r'{}');                  m = u.module_from_spec(s); s.loader.exec_module(m);                  print(m.transport.tcp.ERRORS_TOTAL);                  print(m.frontend_service.REQUESTS_TOTAL);                  print(m.frontend_service.operation.TOKENIZE)",
+                path.display()
+            ))
+            .output()
+            .expect("python3 should be available to import the generated module");
+
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            out.status.success(),
+            "generated module failed to import:\n{}\n--- generated ---\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            code
+        );
+        let values: Vec<&str> = std::str::from_utf8(&out.stdout)
+            .expect("utf8 stdout")
+            .lines()
+            .collect();
+        assert_eq!(
+            values,
+            vec!["tcp_errors_total", "requests_total", "tokenize"],
+            "nested and flat names must both resolve as attributes"
+        );
+
+        // The generator must emit canonical black output on its own; a stray blank line
+        // under a docstring-free header, or an over-long assignment left unwrapped, would
+        // mean `cargo run` alone could not reproduce the checked-in file.
+        assert!(
+            !code.contains("class tcp:\n\n"),
+            "no blank line belongs directly under a docstring-free class header:\n{code}"
+        );
+        assert!(
+            code.contains("class empty_module:\n    pass"),
+            "a module with no body must emit `pass`, not a syntax error:\n{code}"
+        );
+    }
 }

@@ -9,7 +9,7 @@ subtitle: Install and compose Planner, Router, and Dynamo Replay with AI Simulat
 > **Experimental.** The AI Simulate and replay dependency split is still in progress.
 
 AI Simulate's Sweeper core does not depend on Dynamo. Dynamo owns its optional Planner and Router
-sweep configuration providers and the transitional `DynamoReplayRunnerFactory`.
+sweep configuration providers and `DynamoReplayRunnerFactory`.
 
 ## Install
 
@@ -73,18 +73,49 @@ adapters:
       overlap_score_credit: [0.0, 0.5, 1.0]
   dynamo.planner:
     search_space:
-      scaling_policy: [disabled, load_180_5]
-      fpm_sampling: [default]
-      load_sensitivity: [default]
+      scaling_policy:
+        preset: [disabled, load_180_5]
+      fpm_sampling:
+        preset: [default]
+      load_sensitivity:
+        preset: [default]
 ```
+
+> [!WARNING]
+> The legacy flat Planner preset lists remain accepted for backward compatibility but emit a
+> `FutureWarning`. They will be removed after the 1.5 release. Nest each list under its sub-item's
+> `preset` field.
+
+Each Planner preset sub-item owns a complete knob set:
+
+| Sub-item | Knobs covered by every preset |
+|---|---|
+| `scaling_policy` | Throughput/load enablement and both adjustment intervals |
+| `fpm_sampling` | Maximum FPM samples and sample-bucket size |
+| `load_sensitivity` | Scale-down sensitivity and minimum observations |
+| `load_predictor` | Predictor family, log transform, Prophet window, and all Kalman parameters |
+
+Named presets and custom mappings are validated against the complete sub-item. The provider fills
+family defaults for conditionally inactive predictor knobs before validation.
 
 The Planner provider derives load-predictor parameters from all configured scaling intervals during
 `generate_search_space`. Enabled candidates materialize a concrete `PlannerConfig` runtime hook.
 The Router provider materializes either round-robin behavior without a hook or a concrete KV-router
 hook.
 
-## Replay Refactor Coordination
+## Replay Composition
 
-Replay is being decoupled in parallel. Backend-only Sweeper will compose with Dynamo-free Replay;
-Sweeper with Dynamo hooks will compose with Dynamo Replay. This branch keeps
-`DynamoReplayRunnerFactory` as the transitional boundary so the two refactors can land independently.
+`DynamoReplayRunnerFactory` converts each serializable `ReplaySpec` into an invocation of the
+shared AI Simulate Replayer. It resolves materialized Planner and Router hooks into Dynamo-owned
+scaling and placement policies, while the Replayer continues to own traffic execution and report
+generation.
+
+| Load | No Planner hook | Dynamo Planner hook |
+|---|---|---|
+| Mooncake trace | Replayer with no scaling | Replayer with the selected Planner scaling policy |
+| Synthetic traffic | Replayer with no scaling | Replayer with the selected Planner scaling policy |
+
+The runner passes trace, fixed, or KV-load-derived closed-loop concurrency through
+`ReplaySpec.concurrency`. It applies a goodput SLA only when `goal.sla` is configured; this SLA is
+independent of the Planner's scaling SLA. A `dynamo.router:placement_policy@1` hook selects the
+Dynamo placement policy. Without that hook, the Replayer uses its built-in round-robin policy.

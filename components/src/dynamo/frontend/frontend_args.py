@@ -314,7 +314,9 @@ class FrontendArgGroup(ArgGroup):
         )
 
         # Router options (shared with dynamo.router)
-        RouterArgGroup().add_arguments(parser)
+        RouterArgGroup(
+            default_router_mode="round-robin", include_frontend_only=True
+        ).add_arguments(parser)
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup().add_arguments(parser)

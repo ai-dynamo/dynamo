@@ -10,7 +10,11 @@ import pytest
 from aisimulate.sweeper.config import SmartSearchConfig
 from aisimulate.sweeper.kv_estimate import NoPerfDatabase
 from aisimulate.sweeper.model_hw import NoViableParallelConfig
-from aisimulate.sweeper.parallel_enum import ParallelShape, ReplicaParallelConfig
+from aisimulate.sweeper.parallel_enum import (
+    DisaggParallelConfig,
+    ParallelShape,
+    ReplicaParallelConfig,
+)
 from aisimulate.sweeper.replay import RunnerCapabilities
 from aisimulate.sweeper.search_space import branch_knob_choices, enumerate_branches
 
@@ -19,6 +23,11 @@ TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
 _AGG_CFG = ReplicaParallelConfig(
     ParallelShape(tp=1, dp=1, moe_tp=1, moe_ep=1), replicas=1
 )
+_DISAGG_DP1_CFG = DisaggParallelConfig(prefill=_AGG_CFG, decode=_AGG_CFG)
+_DP8_CFG = ReplicaParallelConfig(
+    ParallelShape(tp=1, dp=8, moe_tp=1, moe_ep=8), replicas=1
+)
+_DISAGG_DP8_CFG = DisaggParallelConfig(prefill=_AGG_CFG, decode=_DP8_CFG)
 
 
 def _config(**search_overrides) -> SmartSearchConfig:
@@ -93,7 +102,7 @@ def test_runner_incompatible_backend_is_removed_before_perf_lookup(monkeypatch):
         max_seq_len=None,
     ):
         calls.append((deployment_mode, backend))
-        return [_AGG_CFG]
+        return [_DISAGG_DP1_CFG]
 
     monkeypatch.setattr(
         "aisimulate.sweeper.search_space.parallel_configs_for", fake_parallel_configs
@@ -111,7 +120,47 @@ def test_runner_incompatible_backend_is_removed_before_perf_lookup(monkeypatch):
 
     assert calls == [("disagg", "vllm")]
     assert branch.knob_choices["backend"] == ["vllm"]
-    assert branch.supported_backends[_AGG_CFG] == frozenset({"vllm"})
+    assert branch.supported_backends[_DISAGG_DP1_CFG] == frozenset({"vllm"})
+
+
+def test_runner_prunes_disaggregated_attention_dp_before_sampling(monkeypatch):
+    monkeypatch.setattr(
+        "aisimulate.sweeper.search_space.parallel_configs_for",
+        lambda *args, **kwargs: [_DISAGG_DP1_CFG, _DISAGG_DP8_CFG],
+    )
+    config = _config(
+        deployment_mode=["disagg"],
+        backend=["vllm"],
+        gpu_budget=16,
+    )
+
+    (branch,) = enumerate_branches(
+        config,
+        runner_capabilities=_capabilities(("vllm", "disagg")),
+    )
+
+    assert branch.parallel_configs == (_DISAGG_DP1_CFG,)
+    assert _DISAGG_DP8_CFG not in branch.supported_backends
+
+
+def test_runner_can_advertise_disaggregated_attention_dp(monkeypatch):
+    monkeypatch.setattr(
+        "aisimulate.sweeper.search_space.parallel_configs_for",
+        lambda *args, **kwargs: [_DISAGG_DP1_CFG, _DISAGG_DP8_CFG],
+    )
+    config = _config(
+        deployment_mode=["disagg"],
+        backend=["vllm"],
+        gpu_budget=16,
+    )
+    capabilities = RunnerCapabilities(
+        supported_backend_topologies=(("vllm", "disagg"),),
+        supports_disaggregated_attention_dp=True,
+    )
+
+    (branch,) = enumerate_branches(config, runner_capabilities=capabilities)
+
+    assert branch.parallel_configs == (_DISAGG_DP1_CFG, _DISAGG_DP8_CFG)
 
 
 def test_pinned_parallel_configs_replace_generated_menu():
