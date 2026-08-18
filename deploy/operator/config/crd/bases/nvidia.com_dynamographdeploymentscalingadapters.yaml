@@ -99,14 +99,38 @@ spec:
             status:
               description: DynamoGraphDeploymentScalingAdapterStatus defines the observed state of DynamoGraphDeploymentScalingAdapter
               properties:
+                actualReplicas:
+                  description: ActualReplicas is the replica count observed in DGD service status.
+                  format: int32
+                  type: integer
+                committedReplicas:
+                  description: CommittedReplicas is the replica target durably admitted by the power budget.
+                  format: int32
+                  type: integer
                 lastScaleTime:
                   description: LastScaleTime is the last time the adapter scaled the target service.
                   format: date-time
                   type: string
+                pendingReason:
+                  description: |-
+                    PendingReason explains why RequestedReplicas has not been committed.
+                    Empty when the request and commitment agree.
+                  enum:
+                    - BudgetExceeded
+                    - UnenforcedBaseline
+                    - UnsupportedTopology
+                    - UnqualifiedHardware
+                    - BelowMinimum
+                    - InvalidTarget
+                  type: string
                 replicas:
                   description: |-
-                    Replicas is the current number of replicas for the target service.
-                    This is synced from the DGD's service replicas and is required for the scale subresource.
+                    Replicas is the actual observed number of replicas for the target service.
+                    It is kept as an alias of ActualReplicas for the scale subresource.
+                  format: int32
+                  type: integer
+                requestedReplicas:
+                  description: RequestedReplicas is the complete-vector request submitted through spec.replicas.
                   format: int32
                   type: integer
                 selector:
@@ -212,15 +236,38 @@ spec:
                 DynamoGraphDeploymentScalingAdapterStatus defines the observed state of a
                 DynamoGraphDeploymentScalingAdapter.
               properties:
+                actualReplicas:
+                  description: actualReplicas is the replica count observed in DGD component status.
+                  format: int32
+                  type: integer
+                committedReplicas:
+                  description: committedReplicas is the replica target durably admitted by the power budget.
+                  format: int32
+                  type: integer
                 lastScaleTime:
                   description: lastScaleTime is the last time the adapter scaled the target component.
                   format: date-time
                   type: string
+                pendingReason:
+                  description: |-
+                    pendingReason explains why requestedReplicas has not been committed.
+                    Empty when the request and commitment agree.
+                  enum:
+                    - BudgetExceeded
+                    - UnenforcedBaseline
+                    - UnsupportedTopology
+                    - UnqualifiedHardware
+                    - BelowMinimum
+                    - InvalidTarget
+                  type: string
                 replicas:
                   description: |-
-                    replicas is the current number of replicas for the target component.
-                    This is synced from the DGD's component replicas and is required for
-                    the scale subresource.
+                    replicas is the actual observed number of replicas for the target component.
+                    It is kept as an alias of actualReplicas for the scale subresource.
+                  format: int32
+                  type: integer
+                requestedReplicas:
+                  description: requestedReplicas is the complete-vector request submitted through spec.replicas.
                   format: int32
                   type: integer
                 selector:

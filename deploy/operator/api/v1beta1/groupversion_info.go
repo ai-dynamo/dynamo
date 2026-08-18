@@ -39,6 +39,9 @@ var (
 	// DynamoGraphDeploymentRequestGVK is the v1beta1 DynamoGraphDeploymentRequest kind.
 	DynamoGraphDeploymentRequestGVK = GroupVersion.WithKind("DynamoGraphDeploymentRequest")
 
+	// DynamoGraphPowerBudgetGVK is the v1beta1 DynamoGraphPowerBudget kind.
+	DynamoGraphPowerBudgetGVK = GroupVersion.WithKind("DynamoGraphPowerBudget")
+
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme
 	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
 
@@ -56,6 +59,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&DynamoGraphDeploymentRequestList{},
 		&DynamoGraphDeploymentScalingAdapter{},
 		&DynamoGraphDeploymentScalingAdapterList{},
+		&DynamoGraphPowerBudget{},
+		&DynamoGraphPowerBudgetList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

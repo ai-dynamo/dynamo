@@ -91,9 +91,13 @@ func TestDGDSA_RoundTripFromV1beta1_FullStatus(t *testing.T) {
 			},
 		},
 		Status: v1beta1.DynamoGraphDeploymentScalingAdapterStatus{
-			Replicas:      5,
-			Selector:      "app=prefill,dgd=another-dgd",
-			LastScaleTime: &now,
+			Replicas:          2,
+			RequestedReplicas: 5,
+			CommittedReplicas: 3,
+			ActualReplicas:    2,
+			PendingReason:     v1beta1.DynamoGraphPowerBudgetPendingReasonBudgetExceeded,
+			Selector:          "app=prefill,dgd=another-dgd",
+			LastScaleTime:     &now,
 		},
 	}
 	got := dgdsaRoundTripFromV1beta1(t, src)
@@ -136,9 +140,13 @@ func TestDGDSA_RoundTripFromV1alpha1_FullStatus(t *testing.T) {
 			},
 		},
 		Status: DynamoGraphDeploymentScalingAdapterStatus{
-			Replicas:      5,
-			Selector:      "app=prefill,dgd=another-dgd",
-			LastScaleTime: &now,
+			Replicas:          2,
+			RequestedReplicas: 5,
+			CommittedReplicas: 3,
+			ActualReplicas:    2,
+			PendingReason:     DynamoGraphDeploymentScalingAdapterPendingReason("BudgetExceeded"),
+			Selector:          "app=prefill,dgd=another-dgd",
+			LastScaleTime:     &now,
 		},
 	}
 	got := dgdsaRoundTripFromV1alpha1(t, src)

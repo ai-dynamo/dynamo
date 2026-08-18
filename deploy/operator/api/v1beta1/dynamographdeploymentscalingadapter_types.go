@@ -58,10 +58,26 @@ type DynamoGraphDeploymentComponentRef struct {
 // DynamoGraphDeploymentScalingAdapterStatus defines the observed state of a
 // DynamoGraphDeploymentScalingAdapter.
 type DynamoGraphDeploymentScalingAdapterStatus struct {
-	// replicas is the current number of replicas for the target component.
-	// This is synced from the DGD's component replicas and is required for
-	// the scale subresource.
+	// replicas is the actual observed number of replicas for the target component.
+	// It is kept as an alias of actualReplicas for the scale subresource.
 	Replicas int32 `json:"replicas"`
+
+	// requestedReplicas is the complete-vector request submitted through spec.replicas.
+	// +optional
+	RequestedReplicas int32 `json:"requestedReplicas,omitempty"`
+
+	// committedReplicas is the replica target durably admitted by the power budget.
+	// +optional
+	CommittedReplicas int32 `json:"committedReplicas,omitempty"`
+
+	// actualReplicas is the replica count observed in DGD component status.
+	// +optional
+	ActualReplicas int32 `json:"actualReplicas,omitempty"`
+
+	// pendingReason explains why requestedReplicas has not been committed.
+	// Empty when the request and commitment agree.
+	// +optional
+	PendingReason DynamoGraphPowerBudgetPendingReason `json:"pendingReason,omitempty"`
 
 	// selector is a label selector string for the pods managed by this
 	// adapter. Required for HPA compatibility via the scale subresource.
