@@ -84,5 +84,22 @@ async fn try_recover_from_peer(
     }
 
     tracing::info!(total_events, "applied dump events from peer");
+    require_events(total_events)?;
     Ok(())
+}
+
+fn require_events(total_events: usize) -> Result<()> {
+    anyhow::ensure!(total_events > 0, "peer dump contained no index events");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_peer_dump_is_not_a_successful_recovery() {
+        assert!(require_events(0).is_err());
+        assert!(require_events(1).is_ok());
+    }
 }
