@@ -469,6 +469,7 @@ mod tests {
     }
 
     fn stored(event_id: u64, hash: u64) -> RouterEvent {
+        const EXTERNAL_MASK: u64 = 0xA17A_9E31_52C4_D607;
         RouterEvent::new(
             1,
             KvCacheEvent {
@@ -477,7 +478,7 @@ mod tests {
                     parent_hash: None,
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(hash),
+                        block_hash: ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK),
                         tokens_hash: LocalBlockHash(hash),
                         mm_extra_info: None,
                     }],
@@ -488,12 +489,13 @@ mod tests {
     }
 
     fn removed(event_id: u64, hash: u64) -> RouterEvent {
+        const EXTERNAL_MASK: u64 = 0xA17A_9E31_52C4_D607;
         RouterEvent::new(
             1,
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: vec![ExternalSequenceBlockHash(hash)],
+                    block_hashes: vec![ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK)],
                 }),
                 dp_rank: 0,
             },
@@ -571,8 +573,8 @@ mod tests {
         assert_ne!(adapter.indexer().ready_lanes(), 0);
         adapter.exact_consumer_drain().unwrap();
 
-        let unknown = adapter.apply_event(removed(100, omitted)).unwrap();
-        assert_eq!(unknown.unknown_removals, 1);
+        let omitted_removal = adapter.apply_event(removed(100, omitted)).unwrap();
+        assert_eq!(omitted_removal.unknown_removals, 0);
         assert_ne!(adapter.indexer().ready_lanes(), 0);
         for (offset, hash) in inserted.into_iter().enumerate() {
             adapter

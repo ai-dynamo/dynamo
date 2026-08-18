@@ -6,7 +6,8 @@ use rustc_hash::FxHashSet;
 
 use super::addressing::CkfAddressing;
 use super::bucket::{CuckooBucketStore, PackedBucket};
-use crate::protocols::{ExternalSequenceBlockHash, KvCacheEventError};
+use super::canonical::CanonicalSequenceBlockHash;
+use crate::protocols::KvCacheEventError;
 
 const SPLITMIX_INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -54,7 +55,7 @@ impl CuckooInsertionScratch {
 
 #[cfg(test)]
 pub(super) struct DcWriterState {
-    pub(super) resident: FxHashSet<ExternalSequenceBlockHash>,
+    pub(super) resident: FxHashSet<CanonicalSequenceBlockHash>,
     pub(super) rng: u64,
     pub(super) scratch: CuckooInsertionScratch,
 }
@@ -96,7 +97,7 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
     #[cfg(test)]
     pub(super) fn insert(
         &self,
-        hash: ExternalSequenceBlockHash,
+        hash: CanonicalSequenceBlockHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
         mut on_dirty: impl FnMut(DirtyBucket),
@@ -112,7 +113,7 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
     /// pre-mutation image without observing rolled-back insertions.
     pub(super) fn insert_with_originals(
         &self,
-        hash: ExternalSequenceBlockHash,
+        hash: CanonicalSequenceBlockHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
         mut on_touched: impl FnMut(usize, PackedBucket),
@@ -127,13 +128,13 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
 
     fn insert_inner(
         &self,
-        hash: ExternalSequenceBlockHash,
+        hash: CanonicalSequenceBlockHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
     ) -> Result<(), KvCacheEventError> {
         debug_assert!(self.store.bucket_count().is_power_of_two());
         scratch.clear();
-        let probe = self.addressing.prepare(hash.0);
+        let probe = self.addressing.prepare(hash.as_u64());
 
         if self.insert_into_empty(probe.bucket_a, probe.fingerprint, scratch)
             || self.insert_into_empty(probe.bucket_b, probe.fingerprint, scratch)
@@ -170,10 +171,10 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
     #[cfg(test)]
     pub(super) fn remove(
         &self,
-        hash: ExternalSequenceBlockHash,
+        hash: CanonicalSequenceBlockHash,
         mut on_dirty: impl FnMut(DirtyBucket),
     ) -> Result<(), KvCacheEventError> {
-        let probe = self.addressing.prepare(hash.0);
+        let probe = self.addressing.prepare(hash.as_u64());
         for bucket in [probe.bucket_a, probe.bucket_b] {
             let before = self.store.load_bucket(bucket);
             let Some(slot) = before.first(probe.fingerprint) else {
@@ -193,10 +194,10 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
 
     pub(super) fn remove_with_original(
         &self,
-        hash: ExternalSequenceBlockHash,
+        hash: CanonicalSequenceBlockHash,
         mut on_touched: impl FnMut(usize, PackedBucket),
     ) -> Result<(), KvCacheEventError> {
-        let probe = self.addressing.prepare(hash.0);
+        let probe = self.addressing.prepare(hash.as_u64());
         for bucket in [probe.bucket_a, probe.bucket_b] {
             let before = self.store.load_bucket(bucket);
             let Some(slot) = before.first(probe.fingerprint) else {

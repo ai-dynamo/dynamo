@@ -493,6 +493,7 @@ mod tests {
     }
 
     fn stored(event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
+        const EXTERNAL_MASK: u64 = 0x5A4E_D00D_7711_0202;
         KvCacheEvent {
             event_id,
             dp_rank,
@@ -502,7 +503,7 @@ mod tests {
                 blocks: hashes
                     .iter()
                     .map(|hash| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(*hash),
+                        block_hash: ExternalSequenceBlockHash(*hash ^ EXTERNAL_MASK),
                         tokens_hash: LocalBlockHash(*hash),
                         mm_extra_info: None,
                     })
@@ -512,6 +513,7 @@ mod tests {
     }
 
     fn removed(event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
+        const EXTERNAL_MASK: u64 = 0x5A4E_D00D_7711_0202;
         KvCacheEvent {
             event_id,
             dp_rank,
@@ -519,7 +521,7 @@ mod tests {
                 block_hashes: hashes
                     .iter()
                     .copied()
-                    .map(ExternalSequenceBlockHash)
+                    .map(|hash| ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK))
                     .collect(),
             }),
         }

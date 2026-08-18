@@ -13,7 +13,8 @@ pub enum CkfFailureDomain {
 /// What is known about the relevant domain at the point of failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CkfCommitState {
-    /// This operation made no authoritative write in the relevant domain.
+    /// The failed physical operation made no uncertain authoritative write in the relevant
+    /// domain. Deterministic exact metadata may still record an intentional lossy omission.
     KnownUnchanged,
     /// At least one authoritative write may have occurred and completion cannot be proven.
     Uncertain,

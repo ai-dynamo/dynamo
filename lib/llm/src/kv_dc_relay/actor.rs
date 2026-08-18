@@ -20,11 +20,13 @@ use dynamo_kv_router::indexer::cuckoo::DcCkfStats;
 use dynamo_kv_router::indexer::cuckoo::PublisherEmitOutcome;
 use dynamo_kv_router::indexer::cuckoo::{
     CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcCkfDelta, DcCkfDeltaSink,
-    DcCkfPublisher, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
+    DcCkfPublisher, DcCkfRankReplacement, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
 };
+#[cfg(test)]
+use dynamo_kv_router::protocols::ExternalSequenceBlockHash;
 use dynamo_kv_router::protocols::{
-    DpRank, ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent,
-    StorageTier, WorkerId, WorkerWithDpRank,
+    DpRank, KvCacheEventData, KvCacheEventError, RouterEvent, StorageTier, WorkerId,
+    WorkerWithDpRank,
 };
 #[cfg(feature = "ckf-diagnostics")]
 use parking_lot::Mutex;
@@ -1002,10 +1004,11 @@ async fn run_actor(
                 if let Some(error) = first_error {
                     let disposition = event_failure_point(error).disposition();
                     if disposition.action == CkfFailureAction::ContinueCapacityOmission {
-                        // NOTE: A bounded relocation miss is a pre-commit lossy-index omission.
-                        // Do not turn it into a lifecycle fault: the affected block is unchanged,
-                        // successful sibling blocks remain committed, a later Store may retry, and
-                        // an omitted hash's Remove remains a safe no-op.
+                        // NOTE: A bounded relocation miss is a deterministic physical-index
+                        // omission. Exact source lineage and ownership remain committed, while the
+                        // failed fingerprint is non-resident. Do not turn it into a lifecycle
+                        // fault: successful siblings remain committed, a new owner may retry
+                        // admission, and removal still resolves through source lineage.
                         capacity_omission_events = capacity_omission_events.saturating_add(1);
                         if capacity_omission_events == 1 {
                             tracing::warn!(
@@ -1057,8 +1060,8 @@ async fn run_actor(
             } => {
                 #[cfg(feature = "ckf-diagnostics")]
                 let rebuild_started = Instant::now();
-                let result = replacement_batch_hashes(replacements)
-                    .and_then(|hashes| state.replace_ranks(hashes).map_err(Into::into))
+                let result = replacement_batch_states(replacements)
+                    .and_then(|states| state.replace_ranks(states).map_err(Into::into))
                     .and_then(|publication| {
                         if let Some(batch) = publication {
                             publish_batch(batch, &mut publisher, &diagnostics)?;
@@ -1178,12 +1181,12 @@ async fn run_actor(
     }
 }
 
-fn replacement_hashes(
+fn replacement_state(
     worker_id: WorkerId,
     dp_rank: DpRank,
     events: Vec<RouterEvent>,
-) -> Result<HashSet<ExternalSequenceBlockHash>, KvDcRelayError> {
-    let mut hashes = HashSet::new();
+) -> Result<DcCkfRankReplacement, KvDcRelayError> {
+    let mut replacement = DcCkfRankReplacement::new();
     for event in events {
         if event.worker_id != worker_id || event.event.dp_rank != dp_rank {
             return Err(KvDcRelayError::InvalidTreeDump {
@@ -1202,23 +1205,36 @@ fn replacement_hashes(
                 message: "tree dump contains a non-Stored event".to_string(),
             });
         };
-        hashes.try_reserve(store.blocks.len()).map_err(|_| {
+        replacement
+            .push_store(&store)
+            .map_err(|error| match error {
+                KvCacheEventError::AllocationFailed => KvDcRelayError::Build(
+                    dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
+                ),
+                _ => KvDcRelayError::InvalidTreeDump {
+                    worker_id,
+                    dp_rank,
+                    message: format!("tree dump is not canonical replay order: {error}"),
+                },
+            })?;
+    }
+    Ok(replacement)
+}
+
+fn replacement_batch_states(
+    replacements: Vec<RankReplacement>,
+) -> Result<HashMap<WorkerWithDpRank, DcCkfRankReplacement>, KvDcRelayError> {
+    let mut states_by_rank = HashMap::new();
+    states_by_rank
+        .try_reserve(replacements.len())
+        .map_err(|_| {
             KvDcRelayError::Build(
                 dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
             )
         })?;
-        hashes.extend(store.blocks.into_iter().map(|block| block.block_hash));
-    }
-    Ok(hashes)
-}
-
-fn replacement_batch_hashes(
-    replacements: Vec<RankReplacement>,
-) -> Result<HashMap<WorkerWithDpRank, HashSet<ExternalSequenceBlockHash>>, KvDcRelayError> {
-    let mut hashes_by_rank = HashMap::new();
     for replacement in replacements {
         let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
-        if hashes_by_rank.contains_key(&member) {
+        if states_by_rank.contains_key(&member) {
             return Err(KvDcRelayError::InvalidTreeDump {
                 worker_id: replacement.worker_id,
                 dp_rank: replacement.dp_rank,
@@ -1228,14 +1244,14 @@ fn replacement_batch_hashes(
                 ),
             });
         }
-        let hashes = replacement_hashes(
+        let state = replacement_state(
             replacement.worker_id,
             replacement.dp_rank,
             replacement.events,
         )?;
-        hashes_by_rank.insert(member, hashes);
+        states_by_rank.insert(member, state);
     }
-    Ok(hashes_by_rank)
+    Ok(states_by_rank)
 }
 
 fn publish_batch(
@@ -1329,6 +1345,8 @@ mod tests {
         }
     }
 
+    const EXTERNAL_MASK: u64 = 0xBADC_0FFE_E0DD_F00D;
+
     fn scope(_name: &str) -> StreamScope {
         let dc_id = DcId::new(2);
         let domain = IndexerDomainId::new(
@@ -1358,7 +1376,7 @@ mod tests {
                         .iter()
                         .copied()
                         .map(|hash| KvCacheStoredBlockData {
-                            block_hash: ExternalSequenceBlockHash(hash),
+                            block_hash: ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK),
                             tokens_hash: LocalBlockHash(hash),
                             mm_extra_info: None,
                         })
@@ -1802,6 +1820,12 @@ mod tests {
         let source = event_failure_point(KvCacheEventError::OwnershipDegreeOverflow).disposition();
         assert_eq!(source.action, CkfFailureAction::RejectSource);
         assert_eq!(source.commit, CkfCommitState::KnownUnchanged);
+
+        let missing_parent =
+            event_failure_point(KvCacheEventError::ParentBlockNotFound).disposition();
+        assert_eq!(missing_parent.action, CkfFailureAction::RejectSource);
+        assert_eq!(missing_parent.domain, CkfFailureDomain::ProducerCore);
+        assert_eq!(missing_parent.commit, CkfCommitState::KnownUnchanged);
 
         let invariant =
             event_failure_point(KvCacheEventError::IndexerInvariantViolation).disposition();
