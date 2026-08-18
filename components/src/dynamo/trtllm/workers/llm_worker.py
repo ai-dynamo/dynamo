@@ -424,9 +424,9 @@ async def init_llm_worker(
                 f"Using existing event_buffer_max_size={existing} from kv_cache_config"
             )
         else:
-            current_kv_config[
-                "event_buffer_max_size"
-            ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            current_kv_config["event_buffer_max_size"] = (
+                DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            )
         event_buffer_max_size = int(current_kv_config["event_buffer_max_size"])
 
         # TRT-LLM enables block reuse by default; warn only when it is explicitly
@@ -892,8 +892,6 @@ async def init_llm_worker(
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
-            # Use model as fallback if served_model_name is not provided
-            model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [
                 (
                     prometheus_names.labels.MODEL,
