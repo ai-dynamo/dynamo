@@ -114,6 +114,8 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         },
         BackendOutput {
             token_ids: vec![1917],
@@ -131,6 +133,8 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         },
         BackendOutput {
             token_ids: vec![0],
@@ -157,6 +161,8 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         },
     ]
 }

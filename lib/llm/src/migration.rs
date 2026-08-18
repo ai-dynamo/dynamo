@@ -631,6 +631,8 @@ mod tests {
             completion_usage: None,
             engine_data: None,
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         })
     }
 

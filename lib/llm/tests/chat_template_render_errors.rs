@@ -76,6 +76,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         };
 
         Ok(ResponseStream::new(

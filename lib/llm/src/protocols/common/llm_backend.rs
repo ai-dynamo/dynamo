@@ -149,6 +149,23 @@ pub struct BackendOutput {
     /// consumed by the frontend and not surfaced to clients. See [`RoutingData`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
+
+    /// Reasoning text split out of [`Self::text`] by the frontend's reasoning
+    /// stage. Frontend-owned: engines never set it, and it is absent on the
+    /// wire, so an N-1 worker deserializes unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_text: Option<String>,
+
+    /// How many of this chunk's [`Self::token_ids`] the reasoning parser was
+    /// inside a reasoning span for. Written by the same stage that fills
+    /// [`Self::reasoning_text`], and summed into
+    /// `usage.completion_tokens_details.reasoning_tokens`.
+    ///
+    /// `None` means the count is unknown, either because no reasoning parser
+    /// is configured or because the parser does not report its state. Callers
+    /// must not read that as zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a

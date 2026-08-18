@@ -931,6 +931,37 @@ def _try_parse_json_array(text: str) -> list | None:
     return None
 
 
+def _think_marker_token_ids(
+    tokenizer, reasoning_parser: ReasoningParser | None
+) -> tuple[int, int] | None:
+    """Token ids of the detector's think delimiters, or None if uncountable.
+
+    Resolved exactly like sglang's scheduler resolves ``think_end_id``. Some
+    detectors delimit with multi-token markers (gpt-oss channel headers, for
+    one); those cannot be spotted in a stream of ids, so reasoning tokens go
+    unreported rather than being reported wrong.
+    """
+    detector = getattr(reasoning_parser, "detector", None)
+    if detector is None:
+        return None
+
+    marker_ids: list[int] = []
+    for marker in (
+        getattr(detector, "think_start_token", None),
+        getattr(detector, "think_end_token", None),
+    ):
+        if not marker:
+            return None
+        try:
+            encoded = tokenizer.encode(marker, add_special_tokens=False)
+        except (TypeError, ValueError):
+            return None
+        if len(encoded) != 1:
+            return None
+        marker_ids.append(encoded[0])
+    return marker_ids[0], marker_ids[1]
+
+
 class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
@@ -938,6 +969,7 @@ class SglangStreamingPostProcessor:
     - Incremental detokenization across tokenizer-safe boundaries
     - Reasoning content extraction via SGLang ReasoningParser
     - Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
+    - Reasoning token counting for ``usage.completion_tokens_details``
     """
 
     def __init__(
@@ -951,6 +983,7 @@ class SglangStreamingPostProcessor:
         tool_call_parser_name: str | None = None,
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
+        force_reasoning: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -972,6 +1005,22 @@ class SglangStreamingPostProcessor:
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
         self._eos_token_ids = set(eos_token_ids or [])
+
+        # Reasoning token accounting. The prompt already opened the block when
+        # force_reasoning is set, so no start marker will arrive in the output.
+        #
+        # Guided output is exempt. There the same bytes may resolve to a bare
+        # JSON tool call rather than reasoning, and that is decided from the
+        # text after the ids have gone past, so counting them would bill tool
+        # output as thinking. Report nothing instead, matching the Rust path,
+        # which also leaves guided requests uncounted.
+        self._think_marker_ids = (
+            None
+            if self._pending_guided_reasoning_parts is not None
+            else _think_marker_token_ids(tokenizer, reasoning_parser)
+        )
+        self._in_reasoning = force_reasoning
+        self._reasoning_tokens = 0
 
         # Keep a small, known-complete prompt suffix as decode context. Generated
         # tokens are promoted to context only after they decode without a
@@ -1000,6 +1049,36 @@ class SglangStreamingPostProcessor:
         while token_ids and token_ids[-1] in self._eos_token_ids:
             token_ids.pop()
         return token_ids
+
+    @property
+    def reasoning_tokens(self) -> int | None:
+        """Reasoning tokens seen so far, or None when nobody could count them."""
+        if self._think_marker_ids is None:
+            return None
+        return self._reasoning_tokens
+
+    def _count_reasoning_tokens(self, token_ids: list[int]) -> None:
+        """Tally reasoning tokens by scanning ids for the think delimiters.
+
+        Counting on the ids, not on the parsed text, because the two are not
+        aligned per flush: ``_incremental_decode`` holds ids back until their
+        bytes form a whole character.
+
+        Marker tokens count as reasoning, which is what sglang reports:
+        measured against SGLang 0.5.16 on Qwen3-0.6B, its ``reasoning_tokens``
+        equals the retokenized reasoning text plus 2, one for ``<think>`` and
+        one for ``</think>``. The Rust postprocessor agrees.
+        """
+        if self._think_marker_ids is None:
+            return
+        think_start_id, think_end_id = self._think_marker_ids
+        for token_id in token_ids:
+            if token_id == think_start_id:
+                self._in_reasoning = True
+            if self._in_reasoning:
+                self._reasoning_tokens += 1
+            if token_id == think_end_id:
+                self._in_reasoning = False
 
     def _tool_call_id(self, name: str, index: int) -> str:
         return _tool_call_id_for_parser(
@@ -1108,6 +1187,8 @@ class SglangStreamingPostProcessor:
         finish_reason = engine_response.get("finish_reason")
         if finish_reason is not None:
             token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
+
+        self._count_reasoning_tokens(token_ids)
 
         delta_text = (
             self._incremental_decode(token_ids, flush=finish_reason is not None)

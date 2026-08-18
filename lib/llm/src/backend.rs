@@ -399,6 +399,9 @@ impl
                     worker_trace_link: data.worker_trace_link,
                     engine_data: data.engine_data,
                     routing_data: data.routing_data,
+                    // Filled in later by the frontend's reasoning stage.
+                    reasoning_text: None,
+                    reasoning_tokens: None,
                 })
             })
         });

@@ -64,6 +64,24 @@ def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
     return cached_tokens if isinstance(cached_tokens, int) else None
 
 
+def _usage_with_reasoning_tokens(
+    usage: dict[str, Any], reasoning_tokens: int | None
+) -> dict[str, Any]:
+    """Add ``completion_tokens_details.reasoning_tokens`` to a worker usage dict.
+
+    Mirrors the Rust postprocessor, which this path bypasses, so both
+    ``--dyn-chat-processor`` values report the same field. The frontend parses
+    the reasoning, so its count wins over anything the worker sent; the field
+    stays absent when nobody counted, never a zero standing in for "unknown".
+    """
+    if reasoning_tokens is None:
+        return usage
+    details = usage.get("completion_tokens_details")
+    details = dict(details) if isinstance(details, dict) else {}
+    details["reasoning_tokens"] = reasoning_tokens
+    return {**usage, "completion_tokens_details": details}
+
+
 def _normalize_eos_token_ids(value: Any) -> list[int]:
     if isinstance(value, int) and not isinstance(value, bool):
         return [value]
@@ -599,6 +617,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
+            force_reasoning=pre.force_reasoning,
         )
 
         async for item in self._generate_and_stream(
@@ -657,6 +676,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
+            force_reasoning=preproc_result.force_reasoning,
         )
 
         async for item in self._generate_and_stream(
@@ -774,7 +794,9 @@ class SglangProcessor:
                             "object": "chat.completion.chunk",
                         }
                         if pending_usage:
-                            dynamo_out["usage"] = pending_usage
+                            dynamo_out["usage"] = _usage_with_reasoning_tokens(
+                                pending_usage, post.reasoning_tokens
+                            )
                             pending_usage = None
                         response_nvext: dict[str, Any] = {}
                         if stop_reason is not None and nvext_extra_field_requested(

@@ -58,6 +58,14 @@ pub struct DeltaGenerator {
     options: DeltaGeneratorOptions,
     /// Request tracker for per-request metrics (shared with PreprocessedRequest).
     tracker: Arc<RequestTracker>,
+    /// Reasoning tokens counted by the frontend's reasoning stage, summed over
+    /// chunks and choices. Kept apart from `usage` so a worker-supplied
+    /// `completion_tokens_details` cannot be mistaken for our own count; the
+    /// two are reconciled in `get_usage`. `None` means no one counted.
+    reasoning_tokens: Option<u32>,
+    /// Set when any chunk could not be attributed. A sum with a hole in it
+    /// looks authoritative and is not, so the whole request reports nothing.
+    reasoning_tokens_unusable: bool,
 }
 
 impl DeltaGenerator {
@@ -74,6 +82,8 @@ impl DeltaGenerator {
             emitted_role_choices: HashSet::new(),
             options,
             tracker,
+            reasoning_tokens: None,
+            reasoning_tokens_unusable: false,
         }
     }
 
@@ -229,6 +239,18 @@ impl DeltaGenerator {
     pub fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
         let mut usage = self.usage.clone();
         usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+        // The frontend parses the reasoning, so its count wins over anything a
+        // worker sent. Absent when nobody counted, never a zero standing in for
+        // "unknown".
+        if let Some(reasoning_tokens) = self
+            .reasoning_tokens
+            .filter(|_| !self.reasoning_tokens_unusable)
+        {
+            usage
+                .completion_tokens_details
+                .get_or_insert_default()
+                .reasoning_tokens = Some(reasoning_tokens);
+        }
         usage
     }
 }
@@ -301,9 +323,28 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         };
         let stop_reason = delta.stop_reason.clone();
 
+        // Sum across chunks and across choices, so the request-level reasoning
+        // count lines up with the request-level `completion_tokens` above.
+        match delta.reasoning_tokens {
+            Some(chunk_reasoning_tokens) => {
+                self.reasoning_tokens = Some(
+                    self.reasoning_tokens
+                        .unwrap_or(0)
+                        .saturating_add(chunk_reasoning_tokens),
+                );
+            }
+            None => self.reasoning_tokens_unusable = true,
+        }
+
         // Create the streaming response.
         let index = delta.index.unwrap_or(0);
+        let reasoning_text = delta.reasoning_text;
         let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+        if reasoning_text.is_some()
+            && let Some(choice) = stream_response.inner.choices.first_mut()
+        {
+            choice.delta.reasoning_content = reasoning_text;
+        }
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
@@ -478,6 +519,8 @@ mod tests {
             })),
             encoder_result: None,
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         }
     }
 
@@ -600,6 +643,8 @@ mod tests {
                 "prefill_compute_time_ms": 45.6
             })),
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         }
     }
 
@@ -812,6 +857,8 @@ mod tests {
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         };
 
         let response = generator

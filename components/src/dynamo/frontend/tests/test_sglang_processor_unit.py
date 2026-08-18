@@ -19,6 +19,7 @@ import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
+from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
@@ -3416,6 +3417,109 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         assert json.loads(tool_calls[0]["function"]["arguments"]) == {
             "city": "New York"
         }
+
+
+# ---------------------------------------------------------------------------
+# SglangStreamingPostProcessor: reasoning token counting
+# ---------------------------------------------------------------------------
+
+
+class TestReasoningTokenCounting:  # FRONTEND.9 — reasoning ↔ tool-call orchestration
+    """Test the reasoning token tally behind usage.completion_tokens_details."""
+
+    @staticmethod
+    def _drain(post, token_ids, batch=5):
+        for offset in range(0, len(token_ids), batch):
+            is_last = offset + batch >= len(token_ids)
+            post.process_output(
+                {
+                    "token_ids": token_ids[offset : offset + batch],
+                    "finish_reason": "stop" if is_last else None,
+                }
+            )
+
+    def test_thinking_stream_counts_reasoning_plus_both_markers(self, tokenizer):
+        """Matches SGLang 0.5.16: reasoning text retokenized, plus <think> and </think>."""
+        rp = ReasoningParser(model_type="qwen3", stream_reasoning=True)
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=rp
+        )
+        reasoning = "\nLet me think about this.\n"
+        text = f"<think>{reasoning}</think>\n\nThe answer is 42."
+
+        self._drain(post, tokenizer.encode(text))
+
+        expected = len(tokenizer.encode(reasoning, add_special_tokens=False)) + 2
+        assert post.reasoning_tokens == expected
+
+    def test_guided_json_output_reports_no_count(self, tokenizer):
+        """Guided output may resolve to a bare JSON tool call, not reasoning.
+
+        The resolution happens on the text, after the ids have gone past, so
+        counting them would bill tool output as thinking. Report nothing.
+        """
+        rp = ReasoningParser(model_type="qwen3", stream_reasoning=True)
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=rp,
+        )
+
+        self._drain(post, tokenizer.encode('[{"name": "get_weather"}]'))
+
+        assert post.reasoning_tokens is None
+
+    def test_prompt_opened_block_counts_from_the_first_token(self, tokenizer):
+        """force_reasoning means the prompt emitted <think>, so no start marker arrives."""
+        rp = ReasoningParser(
+            model_type="qwen3", stream_reasoning=True, force_reasoning=True
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=rp,
+            force_reasoning=True,
+        )
+        reasoning = "Short thought."
+        token_ids = tokenizer.encode(f"{reasoning}</think>Answer.")
+
+        self._drain(post, token_ids)
+
+        expected = len(tokenizer.encode(reasoning, add_special_tokens=False)) + 1
+        assert post.reasoning_tokens == expected
+
+    def test_unclosed_reasoning_counts_every_token(self, tokenizer):
+        """A stream that never emits </think> is reasoning all the way down."""
+        rp = ReasoningParser(model_type="qwen3", stream_reasoning=True)
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=rp
+        )
+        token_ids = tokenizer.encode("<think>Still thinking about it")
+
+        self._drain(post, token_ids)
+
+        assert post.reasoning_tokens == len(token_ids)
+
+    def test_absent_without_reasoning_parser(self, tokenizer):
+        """No parser means nobody counted, which is not the same as zero."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+
+        self._drain(post, tokenizer.encode("<think>a</think>b"))
+
+        assert post.reasoning_tokens is None
+
+    def test_absent_when_markers_are_not_single_tokens(self, tokenizer):
+        """Mistral's [THINK] is many Qwen tokens, so it cannot be found in the ids."""
+        rp = ReasoningParser(model_type="mistral", stream_reasoning=True)
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=rp
+        )
+
+        self._drain(post, tokenizer.encode("[THINK]a[/THINK]b"))
+
+        assert post.reasoning_tokens is None
 
 
 # ---------------------------------------------------------------------------

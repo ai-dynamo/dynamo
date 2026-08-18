@@ -374,6 +374,8 @@ mod tests {
             })),
             encoder_result: None,
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         }
     }
 
@@ -420,6 +422,8 @@ mod tests {
                 "prefill_compute_time_ms": 45.6
             })),
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         }
     }
 
@@ -696,6 +700,8 @@ mod tests {
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
             routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
         };
 
         let response = generator

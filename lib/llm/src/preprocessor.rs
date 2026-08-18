@@ -309,6 +309,56 @@ struct ReasoningState {
     choices: HashMap<u32, ChoiceReasoningState>,
 }
 
+/// What the reasoning stages should do for one request.
+///
+/// Reasoning is decided from the request and the deployment's runtime config,
+/// and more than one stage acts on that decision. Deriving it once keeps those
+/// stages from disagreeing about whether reasoning is on for this request.
+struct ReasoningPlan {
+    /// Parser to split reasoning with. `None` means do not split.
+    parser_name: Option<String>,
+    /// The chat template already emitted the start token, so the completion
+    /// begins inside the reasoning span.
+    prompt_injected_reasoning: bool,
+    /// Guided output may arrive as bare JSON. Inspect each choice's own first
+    /// non-whitespace byte before splitting it.
+    bypass_bare_guided_json: bool,
+    /// Strip this complete opener before splitting, because a bracket-prefixed
+    /// opener is indistinguishable from bare JSON until enough bytes arrive.
+    guided_start_token: Option<&'static str>,
+    /// Reasoning is off for this request, but the backend may still emit a
+    /// leading `<think>` that has to go.
+    strip_disabled_start: bool,
+}
+
+/// Append parser output to an optional text field, leaving it absent when
+/// there is nothing to add.
+fn append_reasoning_text(field: &mut Option<String>, extra: String) {
+    if extra.is_empty() {
+        return;
+    }
+    match field {
+        Some(existing) => existing.push_str(&extra),
+        None => *field = Some(extra),
+    }
+}
+
+impl ReasoningPlan {
+    /// Whether reasoning can be split at the backend boundary, where the token
+    /// ids are still in scope and the count is therefore exact.
+    ///
+    /// Guided output needs two extra text passes that only exist downstream: a
+    /// per-choice bare-JSON inspection, and stripping a complete opener that is
+    /// indistinguishable from JSON until enough bytes arrive. Those requests
+    /// keep the later stage and report no reasoning count, which is honest,
+    /// rather than a count taken from a different code path.
+    fn counts_upstream(&self) -> bool {
+        self.parser_name.is_some()
+            && !self.bypass_bare_guided_json
+            && self.guided_start_token.is_none()
+    }
+}
+
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
 /// consumed by `gather_mm_exact_routing_info`.
 #[derive(Debug, Clone, Copy)]
@@ -2628,63 +2678,35 @@ impl OpenAIPreprocessor {
         request: &NvCreateChatCompletionRequest,
         prompt_injected_reasoning: bool,
         uses_tool_call_structural_tag: bool,
+        reasoning_parsed_upstream: bool,
     ) -> anyhow::Result<
         impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     >
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
-        // parsers inspect the stream shape before deciding whether to parse it.
-        let is_guided_tool_choice = matches!(
-            request.inner.tool_choice,
-            Some(ChatCompletionToolChoiceOption::Required)
-                | Some(ChatCompletionToolChoiceOption::Named(_))
+        let plan = self.reasoning_plan(
+            request,
+            prompt_injected_reasoning,
+            uses_tool_call_structural_tag,
         );
-        let is_structured_response = Self::has_structured_response_format(request);
-        let is_guided_output = is_guided_tool_choice || is_structured_response;
-        let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
-        // Force parsers opt in by capability; prompt-seeded parsers opt in per request.
-        // Structural-tag tool formats do not use this guided-JSON detection path.
-        let inspect_force_reasoning_guided_output = is_guided_output
-            && !uses_tool_call_structural_tag
-            && Self::supports_reasoning_before_guided_json(reasoning_parser);
-        let inspect_prompt_injected_guided_output = is_guided_output
-            && prompt_injected_reasoning
-            && !uses_tool_call_structural_tag
-            && (Self::skips_guided_json_when_prompt_injected(reasoning_parser)
-                || (is_structured_response
-                    && Self::skips_structured_response_when_prompt_injected(reasoning_parser)));
-        let inspect_unsupported_structured_response_reasoning_gate = is_structured_response
-            && !uses_tool_call_structural_tag
-            && !Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
-        let bypass_reasoning_for_bare_guided_json = inspect_force_reasoning_guided_output
-            || inspect_prompt_injected_guided_output
-            || inspect_unsupported_structured_response_reasoning_gate;
-        // Preserve the legacy bypass for force-reasoning parsers not yet opted in.
-        let skip_reasoning_for_guided_json = is_guided_output
-            && !uses_tool_call_structural_tag
-            && Self::is_force_reasoning_parser(reasoning_parser)
-            && !inspect_force_reasoning_guided_output;
-
-        let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
-            self.runtime_config.reasoning_parser.as_deref(),
-            request.chat_template_args.as_ref(),
+        // The backend-boundary stage already split this request's reasoning.
+        // The caller decided that from the same plan; if the two ever disagree
+        // the request is parsed twice or not at all, so fail loudly in tests
+        // rather than drift silently.
+        // Only one direction is dangerous. If the caller ran the upstream stage
+        // for a request this plan says it cannot handle, BOTH stages skip and
+        // the reasoning is never split. The reverse is merely uncounted.
+        let parsed_upstream_for_excluded_request =
+            reasoning_parsed_upstream && !plan.counts_upstream();
+        debug_assert!(
+            !parsed_upstream_for_excluded_request,
+            "reasoning parsed upstream for a request the plan excludes"
         );
-
-        // Try to parse reasoning content only if parser is configured.
-        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
-            && !reasoning_disabled_by_request
-            && !skip_reasoning_for_guided_json;
-        let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
-            && Self::is_nemotron_force_reasoning(self.runtime_config.reasoning_parser.as_deref())
-            && !skip_reasoning_for_guided_json;
-        let guided_reasoning_start_token =
-            if should_parse_reasoning && bypass_reasoning_for_bare_guided_json {
-                Self::guided_json_reasoning_start_token(reasoning_parser)
-            } else {
-                None
-            };
+        let should_parse_reasoning = plan.parser_name.is_some() && !reasoning_parsed_upstream;
+        let bypass_reasoning_for_bare_guided_json = plan.bypass_bare_guided_json;
+        let should_strip_disabled_reasoning_start = plan.strip_disabled_start;
+        let guided_reasoning_start_token = plan.guided_start_token;
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
@@ -3769,6 +3791,325 @@ impl OpenAIPreprocessor {
         .fuse()
     }
 
+    /// Decide what the reasoning stages should do for one request.
+    ///
+    /// Derived once from the request and the deployment's runtime config so the
+    /// stage that splits reasoning and the strip-only branches cannot disagree
+    /// about whether reasoning is on.
+    fn reasoning_plan(
+        &self,
+        request: &NvCreateChatCompletionRequest,
+        prompt_injected_reasoning: bool,
+        uses_tool_call_structural_tag: bool,
+    ) -> ReasoningPlan {
+        // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
+        // parsers inspect the stream shape before deciding whether to parse it.
+        let is_guided_tool_choice = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+        let is_structured_response = Self::has_structured_response_format(request);
+        let is_guided_output = is_guided_tool_choice || is_structured_response;
+        let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
+        // Force parsers opt in by capability; prompt-seeded parsers opt in per request.
+        // Structural-tag tool formats do not use this guided-JSON detection path.
+        let inspect_force_reasoning_guided_output = is_guided_output
+            && !uses_tool_call_structural_tag
+            && Self::supports_reasoning_before_guided_json(reasoning_parser);
+        let inspect_prompt_injected_guided_output = is_guided_output
+            && prompt_injected_reasoning
+            && !uses_tool_call_structural_tag
+            && (Self::skips_guided_json_when_prompt_injected(reasoning_parser)
+                || (is_structured_response
+                    && Self::skips_structured_response_when_prompt_injected(reasoning_parser)));
+        let inspect_unsupported_structured_response_reasoning_gate = is_structured_response
+            && !uses_tool_call_structural_tag
+            && !Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
+        let bypass_bare_guided_json = inspect_force_reasoning_guided_output
+            || inspect_prompt_injected_guided_output
+            || inspect_unsupported_structured_response_reasoning_gate;
+        // Preserve the legacy bypass for force-reasoning parsers not yet opted in.
+        let skip_reasoning_for_guided_json = is_guided_output
+            && !uses_tool_call_structural_tag
+            && Self::is_force_reasoning_parser(reasoning_parser)
+            && !inspect_force_reasoning_guided_output;
+
+        let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
+            reasoning_parser,
+            request.chat_template_args.as_ref(),
+        );
+
+        // Try to parse reasoning content only if parser is configured.
+        let should_parse_reasoning = reasoning_parser.is_some()
+            && !reasoning_disabled_by_request
+            && !skip_reasoning_for_guided_json;
+        let strip_disabled_start = reasoning_disabled_by_request
+            && Self::is_nemotron_force_reasoning(reasoning_parser)
+            && !skip_reasoning_for_guided_json;
+        let guided_start_token = if should_parse_reasoning && bypass_bare_guided_json {
+            Self::guided_json_reasoning_start_token(reasoning_parser)
+        } else {
+            None
+        };
+
+        ReasoningPlan {
+            parser_name: should_parse_reasoning
+                .then(|| reasoning_parser.expect("checked above").to_string()),
+            prompt_injected_reasoning,
+            bypass_bare_guided_json,
+            guided_start_token,
+            strip_disabled_start,
+        }
+    }
+
+    /// Count how many of a chunk's tokens belong to the reasoning span.
+    ///
+    /// The parser must be fed whole chunks, so the split point is recovered
+    /// from the text it returned rather than by re-driving it. Marker bytes are
+    /// dropped from both outputs, so the boundary has to be anchored on the
+    /// content, which is the only run of bytes we can locate exactly.
+    ///
+    /// Marker tokens count as reasoning, which matches what SGLang reports:
+    /// measured against SGLang 0.5.16 on Qwen3-0.6B, its `reasoning_tokens`
+    /// equals the retokenized reasoning text plus 2, one for `<think>` and one
+    /// for `</think>`. Those tokens exist only because the model was reasoning.
+    ///
+    /// A token that crosses the boundary is charged to reasoning for the same
+    /// reason, and because a token cannot be split.
+    ///
+    /// Returns `None` when the split cannot be established exactly. Two reads
+    /// of the parser state describe the ends of a chunk, not its middle, so a
+    /// chunk holding more than one transition is not attributable. Callers must
+    /// report nothing rather than a plausible number.
+    fn reasoning_tokens_in_chunk(
+        token_count: u32,
+        tokens: &[crate::protocols::common::llm_backend::TokenType],
+        text_len: usize,
+        parsed: &dynamo_parsers::ParserResult,
+        was_in_reasoning: bool,
+        is_in_reasoning: bool,
+    ) -> Option<u32> {
+        match (was_in_reasoning, is_in_reasoning) {
+            // Outside the span at both ends. Reasoning text means the span
+            // opened AND closed inside this chunk, and two endpoint reads
+            // cannot say where.
+            (false, false) => parsed.reasoning_text.is_empty().then_some(0),
+            // Inside at both ends. Content text means the span closed and
+            // reopened, which the endpoints likewise cannot locate.
+            (true, true) => parsed.normal_text.is_empty().then_some(token_count),
+            // Left the span: content is the tail, so the boundary sits before
+            // the end marker and its tokens stay with the reasoning.
+            (true, false) => Self::tokens_before_offset(
+                token_count,
+                tokens,
+                text_len.saturating_sub(parsed.normal_text.len()),
+            ),
+            // Entered the span: content is the head, so the boundary sits
+            // before the start marker and its tokens join the reasoning.
+            (false, true) => {
+                Self::tokens_before_offset(token_count, tokens, parsed.normal_text.len())
+                    .map(|before| token_count - before)
+            }
+        }
+    }
+
+    /// Number of tokens that start before `offset` bytes into the chunk text.
+    ///
+    /// `None` when per-token text is unavailable. Some engines hand Dynamo an
+    /// already-decoded chunk, which leaves `tokens` empty while `token_ids`
+    /// is populated, and a byte offset cannot be mapped to a token without it.
+    ///
+    /// A `None` entry inside an otherwise populated list is a token whose bytes
+    /// did not render on their own. It contributes no bytes, matching how the
+    /// decoder builds the chunk text, so it never moves the boundary.
+    fn tokens_before_offset(
+        token_count: u32,
+        tokens: &[crate::protocols::common::llm_backend::TokenType],
+        offset: usize,
+    ) -> Option<u32> {
+        if tokens.len() as u32 != token_count {
+            return None;
+        }
+        let mut consumed = 0usize;
+        let mut count = 0u32;
+        for token in tokens {
+            if consumed >= offset {
+                break;
+            }
+            count += 1;
+            consumed += token.as_ref().map_or(0, String::len);
+        }
+        Some(count)
+    }
+
+    /// Split reasoning out of the backend stream and count the tokens it spans.
+    ///
+    /// This runs before `transform_postprocessor_stream`, where `token_ids[i]`
+    /// and `tokens[i]` are still aligned, which is the only point an exact
+    /// count is available. The parser sees the same bytes in the same calls as
+    /// it did downstream, so the text split is unchanged; only the accounting
+    /// is new.
+    ///
+    /// The parser still receives an empty token-id slice. Handing it the real
+    /// ids changes gpt_oss behavior, so that belongs in its own change.
+    fn parse_reasoning_from_backend_stream<S>(
+        stream: S,
+        parser_name: String,
+        prompt_injected_reasoning: bool,
+    ) -> impl Stream<Item = Annotated<BackendOutput>> + Send
+    where
+        S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
+    {
+        struct BackendChoiceReasoningState {
+            parser: Box<dyn ReasoningParser>,
+            /// Tokens the parser swallowed without emitting anything while
+            /// outside a reasoning span. They may turn out to be the start
+            /// marker, so hold them until the state resolves.
+            undecided_tokens: u32,
+        }
+
+        impl BackendChoiceReasoningState {
+            /// Reasoning tokens to charge this chunk, resolving anything the
+            /// parser was holding back.
+            ///
+            /// Held tokens are released onto the chunk that resolves them, so a
+            /// single chunk's number can exceed its own token count. Only the
+            /// per-request sum is reported, so that is accounting, not error.
+            ///
+            /// `None` means this chunk is not attributable, which poisons the
+            /// whole request: the caller reports no count at all rather than a
+            /// sum with a hole in it.
+            fn attribute(
+                &mut self,
+                token_count: u32,
+                tokens: &[crate::protocols::common::llm_backend::TokenType],
+                text_len: usize,
+                parsed: &dynamo_parsers::ParserResult,
+                was_in_reasoning: bool,
+                is_in_reasoning: bool,
+            ) -> Option<u32> {
+                let emitted_nothing =
+                    parsed.reasoning_text.is_empty() && parsed.normal_text.is_empty();
+                if !was_in_reasoning && !is_in_reasoning && emitted_nothing {
+                    // Still buffering a possible start marker. Undecided.
+                    self.undecided_tokens += token_count;
+                    return Some(0);
+                }
+
+                let counted = OpenAIPreprocessor::reasoning_tokens_in_chunk(
+                    token_count,
+                    tokens,
+                    text_len,
+                    parsed,
+                    was_in_reasoning,
+                    is_in_reasoning,
+                )?;
+                let held = std::mem::take(&mut self.undecided_tokens);
+                // Entering the span means the held bytes WERE the start marker,
+                // which counts as reasoning. Otherwise they were content.
+                if is_in_reasoning && !was_in_reasoning {
+                    Some(counted + held)
+                } else {
+                    Some(counted)
+                }
+            }
+        }
+
+        struct BackendReasoningState {
+            stream: Pin<Box<dyn Stream<Item = Annotated<BackendOutput>> + Send>>,
+            parser_name: String,
+            prompt_injected_reasoning: bool,
+            choices: HashMap<u32, BackendChoiceReasoningState>,
+        }
+
+        let state = BackendReasoningState {
+            stream: Box::pin(stream),
+            parser_name,
+            prompt_injected_reasoning,
+            choices: HashMap::new(),
+        };
+
+        stream::unfold(state, |mut state| async move {
+            let response = state.stream.next().await?;
+
+            let BackendReasoningState {
+                parser_name,
+                prompt_injected_reasoning,
+                choices,
+                ..
+            } = &mut state;
+            let parser_name = &*parser_name;
+            let prompt_injected_reasoning = *prompt_injected_reasoning;
+
+            let processed = response.map_data(|mut data| {
+                // Each choice keeps its own parser so interleaved `n > 1`
+                // output never shares reasoning state.
+                let choice_state = choices.entry(data.index.unwrap_or(0)).or_insert_with(|| {
+                    let mut parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
+                        parser_name,
+                    )) as Box<dyn ReasoningParser>;
+                    if prompt_injected_reasoning {
+                        parser.set_in_reasoning(true);
+                    }
+                    BackendChoiceReasoningState {
+                        parser,
+                        undecided_tokens: 0,
+                    }
+                });
+
+                let was_in_reasoning = choice_state.parser.in_reasoning();
+                match data.text.as_deref() {
+                    Some(text) => {
+                        let text_len = text.len();
+                        let parsed = choice_state
+                            .parser
+                            .parse_reasoning_streaming_incremental(text, &[]);
+                        if let (Some(was), Some(is)) =
+                            (was_in_reasoning, choice_state.parser.in_reasoning())
+                        {
+                            data.reasoning_tokens = choice_state.attribute(
+                                data.token_ids.len() as u32,
+                                &data.tokens,
+                                text_len,
+                                &parsed,
+                                was,
+                                is,
+                            );
+                        }
+                        data.reasoning_text =
+                            (!parsed.reasoning_text.is_empty()).then_some(parsed.reasoning_text);
+                        data.text = (!parsed.normal_text.is_empty()).then_some(parsed.normal_text);
+                    }
+                    // Tokens whose bytes did not render carry no text for the
+                    // parser, but they were still generated, so they belong to
+                    // whichever span is currently open.
+                    None => {
+                        if let Some(was) = was_in_reasoning {
+                            data.reasoning_tokens =
+                                Some(if was { data.token_ids.len() as u32 } else { 0 });
+                        }
+                    }
+                }
+
+                // No further chunk is coming for this choice, so release any
+                // bytes the parser is holding for a possible marker. Without
+                // this they never reach the client. The tokens that carried
+                // them are already counted, so the count is unaffected.
+                if data.finish_reason.is_some() {
+                    let flushed = choice_state.parser.finish_reasoning_stream();
+                    append_reasoning_text(&mut data.reasoning_text, flushed.reasoning_text);
+                    append_reasoning_text(&mut data.text, flushed.normal_text);
+                }
+
+                Ok(data)
+            });
+
+            Some((processed, state))
+        })
+        .fuse()
+    }
+
     // Motivation: when Nemotron reasoning is disabled by request flags, the
     // backend may still emit a leading <think>. Buffer the initial stream
     // bytes so split chunks like "<thi" + "nk>answer" are stripped cleanly.
@@ -4042,6 +4383,27 @@ impl
         // Extract context once
         let context = response_stream.context();
 
+        // Split reasoning here, before detokenized text loses its token ids, so
+        // the reasoning-token count is exact. Requests this stage cannot handle
+        // fall through to the later one and report no count.
+        let reasoning_plan = self.reasoning_plan(
+            &request,
+            prompt_injected_reasoning,
+            uses_tool_call_structural_tag,
+        );
+        let reasoning_parsed_upstream = reasoning_plan.counts_upstream();
+        let response_stream: Pin<Box<dyn Stream<Item = Annotated<BackendOutput>> + Send>> =
+            match reasoning_plan.parser_name.as_deref() {
+                Some(parser_name) if reasoning_parsed_upstream => {
+                    Box::pin(Self::parse_reasoning_from_backend_stream(
+                        response_stream,
+                        parser_name.to_string(),
+                        reasoning_plan.prompt_injected_reasoning,
+                    ))
+                }
+                _ => Box::pin(response_stream),
+            };
+
         // transform the postprocessor stream (no boxing yet) - detokenize
         let stream = Self::transform_postprocessor_stream_with_image_tokens(
             response_stream,
@@ -4059,6 +4421,7 @@ impl
             &request,
             prompt_injected_reasoning,
             uses_tool_call_structural_tag,
+            reasoning_parsed_upstream,
         )?;
         let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
@@ -4370,6 +4733,338 @@ mod tests {
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
         Role,
     };
+
+    fn token_texts(pieces: &[&str]) -> Vec<crate::protocols::common::llm_backend::TokenType> {
+        pieces.iter().map(|p| Some((*p).to_string())).collect()
+    }
+
+    fn parsed(reasoning: &str, normal: &str) -> dynamo_parsers::ParserResult {
+        dynamo_parsers::ParserResult {
+            reasoning_text: reasoning.to_string(),
+            normal_text: normal.to_string(),
+        }
+    }
+
+    fn count(
+        pieces: &[&str],
+        result: dynamo_parsers::ParserResult,
+        was: bool,
+        is: bool,
+    ) -> Option<u32> {
+        let tokens = token_texts(pieces);
+        let text_len: usize = pieces.iter().map(|p| p.len()).sum();
+        OpenAIPreprocessor::reasoning_tokens_in_chunk(
+            pieces.len() as u32,
+            &tokens,
+            text_len,
+            &result,
+            was,
+            is,
+        )
+    }
+
+    fn backend_chunk(pieces: &[&str]) -> Annotated<BackendOutput> {
+        let text: String = pieces.concat();
+        Annotated::from_data(BackendOutput {
+            token_ids: (0..pieces.len() as u32).collect(),
+            tokens: token_texts(pieces),
+            text: Some(text),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: None,
+            stop_reason: None,
+            index: Some(0),
+            completion_usage: None,
+            disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            engine_data: None,
+            routing_data: None,
+            reasoning_text: None,
+            reasoning_tokens: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn backend_reasoning_stage_splits_and_counts_a_qwen3_stream() {
+        // Qwen3 emits the opener itself, one token per chunk. Expect the split
+        // to match the old stage, and the count to match SGLang: one token of
+        // thinking text plus both markers is 3.
+        let chunks = vec![
+            backend_chunk(&["<think>"]),
+            backend_chunk(&["why"]),
+            backend_chunk(&["</think>"]),
+            backend_chunk(&["ans"]),
+        ];
+
+        let out: Vec<_> = OpenAIPreprocessor::parse_reasoning_from_backend_stream(
+            stream::iter(chunks),
+            "qwen3".to_string(),
+            false,
+        )
+        .collect()
+        .await;
+
+        let counts: Vec<Option<u32>> = out
+            .iter()
+            .map(|r| r.data.as_ref().unwrap().reasoning_tokens)
+            .collect();
+        assert_eq!(counts, vec![Some(1), Some(1), Some(1), Some(0)]);
+
+        let reasoning: String = out
+            .iter()
+            .filter_map(|r| r.data.as_ref().unwrap().reasoning_text.clone())
+            .collect();
+        let content: String = out
+            .iter()
+            .filter_map(|r| r.data.as_ref().unwrap().text.clone())
+            .collect();
+        assert_eq!(reasoning, "why");
+        assert_eq!(content, "ans");
+
+        let total: u32 = counts.iter().map(|c| c.unwrap_or(0)).sum();
+        assert_eq!(total, 3);
+    }
+
+    #[tokio::test]
+    async fn backend_reasoning_stage_flushes_held_bytes_at_finish() {
+        // The generation stops while the parser is holding a partial `</think>`.
+        // Those bytes are in no output until the parser is asked to flush, and
+        // nothing asked it before this change.
+        let mut last = backend_chunk(&["</thi"]);
+        last.data.as_mut().unwrap().finish_reason =
+            Some(crate::protocols::common::FinishReason::Length);
+        let chunks = vec![backend_chunk(&["<think>"]), backend_chunk(&["why"]), last];
+
+        let out: Vec<_> = OpenAIPreprocessor::parse_reasoning_from_backend_stream(
+            stream::iter(chunks),
+            "qwen3".to_string(),
+            false,
+        )
+        .collect()
+        .await;
+
+        let reasoning: String = out
+            .iter()
+            .filter_map(|r| r.data.as_ref().unwrap().reasoning_text.clone())
+            .collect();
+        assert_eq!(reasoning, "why</thi");
+    }
+
+    #[tokio::test]
+    async fn backend_reasoning_stage_counts_a_marker_split_across_chunks() {
+        // The opener straddles a chunk boundary, so the parser swallows "<t"
+        // and still reports it is outside the span. Charging that token to
+        // content would lose it: the total must still be 3, matching what
+        // SGLang reports for the same output.
+        let chunks = vec![
+            backend_chunk(&["<t"]),
+            backend_chunk(&["hink>why"]),
+            backend_chunk(&["</think>ans"]),
+        ];
+
+        let out: Vec<_> = OpenAIPreprocessor::parse_reasoning_from_backend_stream(
+            stream::iter(chunks),
+            "qwen3".to_string(),
+            false,
+        )
+        .collect()
+        .await;
+
+        let total: u32 = out
+            .iter()
+            .filter_map(|r| r.data.as_ref().unwrap().reasoning_tokens)
+            .sum();
+        assert_eq!(total, 3);
+
+        let reasoning: String = out
+            .iter()
+            .filter_map(|r| r.data.as_ref().unwrap().reasoning_text.clone())
+            .collect();
+        assert_eq!(reasoning, "why");
+    }
+
+    #[tokio::test]
+    async fn backend_reasoning_stage_starts_inside_an_injected_span() {
+        // The chat template already emitted the opener, so the completion has
+        // no opener token and the first chunk is already reasoning.
+        let chunks = vec![backend_chunk(&["why"]), backend_chunk(&["</think>", "ans"])];
+
+        let out: Vec<_> = OpenAIPreprocessor::parse_reasoning_from_backend_stream(
+            stream::iter(chunks),
+            "qwen3".to_string(),
+            true,
+        )
+        .collect()
+        .await;
+
+        let counts: Vec<Option<u32>> = out
+            .iter()
+            .map(|r| r.data.as_ref().unwrap().reasoning_tokens)
+            .collect();
+        assert_eq!(counts, vec![Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn reasoning_count_charges_whole_chunk_inside_a_span() {
+        assert_eq!(
+            count(&["a", "b", "c"], parsed("abc", ""), true, true),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn reasoning_count_charges_nothing_outside_a_span() {
+        assert_eq!(
+            count(&["a", "b", "c"], parsed("", "abc"), false, false),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn reasoning_count_buffered_tokens_still_belong_to_the_span() {
+        // The parser held everything back for a possible marker, so it returned
+        // no text at all. The tokens were still generated inside the span.
+        assert_eq!(count(&["</", "thi"], parsed("", ""), true, true), Some(2));
+    }
+
+    #[test]
+    fn reasoning_count_splits_the_chunk_that_leaves_the_span() {
+        // "why</think>ans" as 4 tokens; content is the 3-byte tail, so the
+        // first three tokens carry reasoning and marker bytes.
+        assert_eq!(
+            count(
+                &["why", "</think>", "a", "ns"],
+                parsed("why", "ans"),
+                true,
+                false
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn reasoning_count_charges_the_marker_token_to_reasoning() {
+        // A single token spanning "</think>ans" starts inside the span.
+        assert_eq!(
+            count(&["why", "</think>ans"], parsed("why", "ans"), true, false),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn reasoning_count_splits_the_chunk_that_enters_the_span() {
+        // "pre<think>why": content is the 3-byte head, so the opener token
+        // joins the reasoning. This is what makes the count match SGLang.
+        assert_eq!(
+            count(
+                &["pre", "<think>", "why"],
+                parsed("why", "pre"),
+                false,
+                true
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn reasoning_count_includes_a_generated_opener() {
+        // Qwen3 generates `<think>` as its first output token rather than the
+        // template pre-seeding it. Measured against SGLang 0.5.16, that token
+        // is counted, so a whole-chunk opener plus body is 2, not 1.
+        assert_eq!(
+            count(&["<think>", "why"], parsed("why", ""), false, true),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn reasoning_count_is_unknown_when_a_span_opens_and_closes_in_one_chunk() {
+        // Both endpoint reads say "outside", yet reasoning text came out, so
+        // the span opened AND closed inside this chunk. Two reads describe the
+        // ends, not the middle. Reporting 0 here would ship a zero count
+        // alongside populated reasoning content.
+        assert_eq!(
+            count(
+                &["<think>", "why", "</think>", "ans"],
+                parsed("why", "ans"),
+                false,
+                false
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn reasoning_count_is_unknown_when_a_span_closes_and_reopens() {
+        // Inside at both ends, but content came out, so the span closed and
+        // reopened. Charging the whole chunk would bill the content as
+        // reasoning.
+        assert_eq!(
+            count(
+                &["</think>", "MIDDLE", "<think>", "b"],
+                parsed("b", "MIDDLE"),
+                true,
+                true
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn reasoning_count_is_unknown_without_per_token_text() {
+        // Some engines hand Dynamo an already-decoded chunk: `token_ids` is
+        // populated and `tokens` is empty. A byte offset cannot be mapped to a
+        // token without per-token text, so a transition is not attributable.
+        assert_eq!(
+            OpenAIPreprocessor::reasoning_tokens_in_chunk(
+                4,
+                &[],
+                "why</think>ans".len(),
+                &parsed("why", "ans"),
+                true,
+                false,
+            ),
+            None
+        );
+        // A chunk with no transition still counts, because it needs no offset.
+        assert_eq!(
+            OpenAIPreprocessor::reasoning_tokens_in_chunk(
+                4,
+                &[],
+                "why".len(),
+                &parsed("why", ""),
+                true,
+                true,
+            ),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn reasoning_count_ignores_tokens_without_text() {
+        // A token whose bytes did not render contributes nothing to the chunk
+        // text, exactly as the decoder builds it, so it must not shift the
+        // boundary. Here it sits past the boundary and stays out of the count.
+        let tokens = vec![
+            Some("why".to_string()),
+            Some("</think>".to_string()),
+            None,
+            Some("ans".to_string()),
+        ];
+        assert_eq!(
+            OpenAIPreprocessor::reasoning_tokens_in_chunk(
+                tokens.len() as u32,
+                &tokens,
+                "why</think>ans".len(),
+                &parsed("why", "ans"),
+                true,
+                false,
+            ),
+            Some(2)
+        );
+    }
 
     fn chat_stream_chunk(
         index: u32,

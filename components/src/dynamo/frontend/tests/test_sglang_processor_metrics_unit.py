@@ -134,6 +134,9 @@ def _install_sglang_stubs(install_module):
 
 
 class _PostProcessor:
+    def __init__(self, reasoning_tokens=None):
+        self.reasoning_tokens = reasoning_tokens
+
     def process_output(self, mapped_response):
         return {
             "index": 0,
@@ -218,6 +221,58 @@ def test_stream_emits_llm_metrics_annotation(module_stubs):
         "output_tokens": 3,
         "chunk_tokens": 3,
         "cached_tokens": 4,
+    }
+
+
+def test_stream_reports_reasoning_tokens_in_usage(module_stubs):
+    # The Rust postprocessor is bypassed here, so this path has to attach
+    # reasoning_tokens itself or the field would exist on one chat processor
+    # and vanish on the other.
+    module = _load_processor_module(module_stubs)
+    completion_usage = {
+        "prompt_tokens": 10,
+        "completion_tokens": 9,
+        "total_tokens": 19,
+        "completion_tokens_details": {"accepted_prediction_tokens": 1},
+    }
+    processor = module.SglangProcessor(
+        tokenizer=None,
+        routed_engine=FakeRoutedEngine(
+            items=[
+                {
+                    "token_ids": [101, 102, 103],
+                    "finish_reason": "stop",
+                    "completion_usage": completion_usage,
+                }
+            ]
+        ),
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+        eos_token_ids=None,
+    )
+
+    async def collect():
+        return [
+            item
+            async for item in processor._generate_and_stream(
+                "req-reasoning",
+                {"model": "test-model"},
+                {},
+                list(range(10)),
+                _PostProcessor(reasoning_tokens=7),
+            )
+        ]
+
+    items = asyncio.run(collect())
+    usage = next(item["data"]["usage"] for item in items if "data" in item)
+
+    assert usage["completion_tokens_details"] == {
+        "accepted_prediction_tokens": 1,
+        "reasoning_tokens": 7,
+    }
+    # The worker's dict is left alone; the count is added to a copy.
+    assert completion_usage["completion_tokens_details"] == {
+        "accepted_prediction_tokens": 1
     }
 
 
