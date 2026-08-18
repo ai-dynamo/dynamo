@@ -42,6 +42,12 @@ class TestSharedStateIdentity(unittest.TestCase):
             power_agent._managed_gpu_indices, managed_state.managed_gpu_indices
         )
 
+    def test_managed_gpu_uuid_by_index_is_shared_object(self):
+        self.assertIs(
+            power_agent._managed_gpu_uuid_by_index,
+            managed_state.managed_gpu_uuid_by_index,
+        )
+
     def test_previously_managed_is_shared_object(self):
         self.assertIs(power_agent._previously_managed, managed_state.previously_managed)
 
@@ -64,11 +70,13 @@ class TestActuatorWritesVisibleToShutdown(unittest.TestCase):
 
     def setUp(self):
         managed_state.managed_gpu_indices.clear()
+        managed_state.managed_gpu_uuid_by_index.clear()
         managed_state.previously_managed.clear()
         power_agent._shutdown.clear()
 
     def tearDown(self):
         managed_state.managed_gpu_indices.clear()
+        managed_state.managed_gpu_uuid_by_index.clear()
         managed_state.previously_managed.clear()
         power_agent._shutdown.clear()
 
@@ -143,8 +151,16 @@ class TestOrphanReloadKeepsAlias(unittest.TestCase):
 
         with patch.object(
             power_agent,
-            "_read_managed_gpus_state",
-            return_value=({"GPU-x"}, True),
+            "_read_managed_state",
+            return_value=(
+                {
+                    "version": managed_state.STATE_VERSION,
+                    "managed": {
+                        "GPU-x": managed_state.static_ownership_record(),
+                    },
+                },
+                True,
+            ),
         ):
             with patch.object(power_agent, "_persist_managed_gpus"):
                 power_agent._restore_orphaned_gpus_on_startup(actuator)

@@ -92,12 +92,13 @@ class TestHappyPath(_LoadTestBase):
         result = self._load_no_warn(json.dumps({"managed_uuids": []}))
         self.assertEqual(result, set())
 
-    def test_missing_managed_uuids_key_returns_empty_set(self):
-        # An object without `managed_uuids` is treated as "nothing
-        # managed yet" — same as if the file didn't exist. Preserves
-        # the pre-fix behaviour where `.get(..., [])` defaulted.
-        result = self._load_no_warn(json.dumps({"other_key": "value"}))
+    def test_versionless_foreign_schema_is_inconclusive(self):
+        # Only the actual Phase 1 shape is migratable. Treating an arbitrary
+        # object as conclusively empty could make shutdown restore a live
+        # transactional cap when a v2 document lost its version field.
+        result, logs = self._load(json.dumps({"other_key": "value"}))
         self.assertEqual(result, set())
+        self.assertIn("INCONCLUSIVE", "\n".join(logs))
 
 
 # ---------------------------------------------------------------------------
@@ -176,10 +177,9 @@ class TestMalformedJson(_LoadTestBase):
         self.assertEqual(result, set())
         self.assertTrue(any("JSONDecodeError" in line for line in output))
 
-    def test_empty_file_returns_empty_and_warns(self):
-        result, output = self._load("")
+    def test_empty_file_is_valid_first_boot(self):
+        result = self._load_no_warn("")
         self.assertEqual(result, set())
-        self.assertTrue(any("JSONDecodeError" in line for line in output))
 
 
 # ---------------------------------------------------------------------------

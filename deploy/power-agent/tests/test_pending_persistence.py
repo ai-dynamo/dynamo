@@ -22,9 +22,12 @@ at the TOP of every reconcile cycle, BEFORE the Kubernetes pod list, so they
 retry even during an apiserver outage (the retry touches only the state volume).
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import managed_state
 import power_agent
 from power_agent import (
     PowerAgent,
@@ -41,7 +44,9 @@ class _PendingTestBase(unittest.TestCase):
     def setUp(self):
         power_agent._previously_managed.clear()
         power_agent._managed_gpu_indices.clear()
+        power_agent._managed_gpu_uuid_by_index.clear()
         power_agent._pending_acquisition.clear()
+        power_agent._pending_transactional_acquisition.clear()
         power_agent._pending_retirement.clear()
         self._persist_patch = patch("power_agent._persist_managed_gpus")
         self.persist = self._persist_patch.start()
@@ -50,7 +55,9 @@ class _PendingTestBase(unittest.TestCase):
         self._persist_patch.stop()
         power_agent._previously_managed.clear()
         power_agent._managed_gpu_indices.clear()
+        power_agent._managed_gpu_uuid_by_index.clear()
         power_agent._pending_acquisition.clear()
+        power_agent._pending_transactional_acquisition.clear()
         power_agent._pending_retirement.clear()
 
 
@@ -142,6 +149,81 @@ class TestAcquisitionThenRetirementWhilePersistUnavailable(_PendingTestBase):
         self.assertEqual(power_agent._previously_managed, set())
         self.assertEqual(power_agent._pending_retirement, set())
         self.assertEqual(power_agent._pending_acquisition, set())
+
+    def test_release_cancels_pending_transaction_even_without_memory_membership(self):
+        ownership = {
+            "controlMode": managed_state.TRANSACTIONAL_CONTROL_MODE,
+            "dgdUID": "dgd-old",
+            "component": "decode",
+            "podUID": "pod-old",
+            "allocationID": "pod-old/main/GPU-A",
+            "targetWatts": 350,
+        }
+        power_agent._pending_transactional_acquisition["GPU-A"] = ownership
+
+        _commit_release(MagicMock(), 0, "GPU-A")
+        _flush_pending_acquisitions()
+
+        self.assertNotIn("GPU-A", power_agent._pending_transactional_acquisition)
+        self.persist.assert_not_called()
+
+
+class TestMixedTransactionalPersistence(unittest.TestCase):
+    def setUp(self):
+        power_agent._previously_managed.clear()
+        power_agent._managed_gpu_indices.clear()
+        power_agent._managed_gpu_uuid_by_index.clear()
+        power_agent._pending_acquisition.clear()
+        power_agent._pending_transactional_acquisition.clear()
+        power_agent._pending_retirement.clear()
+
+    def tearDown(self):
+        power_agent._previously_managed.clear()
+        power_agent._managed_gpu_indices.clear()
+        power_agent._managed_gpu_uuid_by_index.clear()
+        power_agent._pending_acquisition.clear()
+        power_agent._pending_transactional_acquisition.clear()
+        power_agent._pending_retirement.clear()
+
+    def test_static_whole_file_write_preserves_pending_transaction_at_shutdown(self):
+        ownership = {
+            "controlMode": managed_state.TRANSACTIONAL_CONTROL_MODE,
+            "dgdUID": "dgd-1",
+            "component": "decode",
+            "podUID": "pod-1",
+            "allocationID": "pod-1/main/GPU-transactional",
+            "targetWatts": 350,
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_path = Path(temporary_directory) / "managed.json"
+            with patch.object(power_agent, "_MANAGED_STATE_PATH", str(state_path)):
+                power_agent._previously_managed.update(
+                    {"GPU-static", "GPU-transactional"}
+                )
+                power_agent._pending_transactional_acquisition[
+                    "GPU-transactional"
+                ] = ownership
+                power_agent._persist_managed_gpus(power_agent._previously_managed)
+
+                durable = managed_state.load_managed_state(state_path)
+                self.assertEqual(durable["managed"]["GPU-transactional"], ownership)
+                self.assertEqual(
+                    durable["managed"]["GPU-static"]["controlMode"],
+                    managed_state.STATIC_CONTROL_MODE,
+                )
+
+                power_agent._managed_gpu_indices.update({0, 1})
+                actuator = MagicMock()
+                actuator.name = "nvml"
+                actuator.get_uuid.side_effect = {
+                    0: "GPU-static",
+                    1: "GPU-transactional",
+                }.__getitem__
+                power_agent._shutdown_cleanup(actuator)
+
+                retained = managed_state.load_managed_state(state_path)
+                self.assertEqual(retained["managed"], {"GPU-transactional": ownership})
+                actuator.restore_default.assert_called_once_with(0)
 
 
 class TestFlushRunsDuringK8sOutage(_PendingTestBase):

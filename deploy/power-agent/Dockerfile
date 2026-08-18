@@ -73,11 +73,17 @@ FROM ${DCGM_IMAGE} AS dcgm-vendor
 # (the *.py glob expands to nothing under `set -eux`, exit 1), which is
 # the correct failure mode — DcgmActuator's c_dcgmDeviceConfig_v2 usage
 # would crash mid-reconcile on 3.x bindings anyway.
+#
+# DCGM publishes the same sonames under the Debian multiarch directory for the
+# image architecture (for example x86_64-linux-gnu on H100/H200 nodes and
+# aarch64-linux-gnu on GB200 Grace nodes). Keep the build architecture-neutral
+# so the advertised multi-arch runtime can be qualified on every supported
+# hardware pool.
 RUN set -eux; \
     mkdir -p /vendor/dcgm-python /vendor/dcgm-lib; \
     cp -a /usr/share/datacenter-gpu-manager-4/bindings/python3/*.py \
         /vendor/dcgm-python/; \
-    cp -a /usr/lib/x86_64-linux-gnu/libdcgm.so* /vendor/dcgm-lib/
+    cp -a /usr/lib/*-linux-gnu/libdcgm.so* /vendor/dcgm-lib/
 
 # -----------------------------------------------------------------------------
 # Stage 2: runtime image
@@ -100,11 +106,14 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/opt/dcgm/python \
     LD_LIBRARY_PATH=/opt/dcgm/lib
 
-# Runtime deps. pynvml (NVML bindings), kubernetes (pod listing),
-# prometheus_client (metrics). pydcgm bindings are vendored below.
+# Runtime deps. pynvml (NVML bindings), kubernetes (Pod LIST/WATCH),
+# grpcio/protobuf (kubelet PodResources), prometheus_client (metrics).
+# pydcgm bindings are vendored below.
 RUN pip install --no-cache-dir \
     pynvml==12.0.* \
     kubernetes==30.* \
+    grpcio==1.83.* \
+    protobuf==7.35.* \
     prometheus-client==0.20.*
 
 COPY --from=dcgm-vendor /vendor/dcgm-python /opt/dcgm/python
@@ -115,7 +124,8 @@ WORKDIR /app
 # It MUST ship alongside power_agent.py / actuator.py — power_agent.py does
 # `import managed_state` at module load, so a missing file fails loudly at
 # startup with `ModuleNotFoundError: No module named 'managed_state'`.
-COPY power_agent.py actuator.py managed_state.py /app/
+COPY power_agent.py actuator.py managed_state.py pod_report.py \
+    podresources_identity.py podresources_api.py podresources_api_grpc.py /app/
 
 USER 0
 

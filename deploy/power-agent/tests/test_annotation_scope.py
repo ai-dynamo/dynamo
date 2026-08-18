@@ -109,7 +109,10 @@ class TestReconcileScope(unittest.TestCase):
 
         # Cap write flows through the actuator at the annotated value.
         actuator.apply_cap.assert_called_once_with(
-            0, 480, expected_uuid=actuator.get_uuid.return_value
+            0,
+            480,
+            expected_uuid=actuator.get_uuid.return_value,
+            policy_outcome="annotated",
         )
 
 

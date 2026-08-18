@@ -236,7 +236,7 @@ class TestApplyCap(unittest.TestCase):
             with patch.object(power_agent, "pynvml", mock_nvml):
                 with patch("power_agent._persist_managed_gpus"):
                     result = actuator.apply_cap(0, 300)
-        self.assertEqual(result, 300)  # within constraints, no clamp
+        self.assertEqual(result.target_watts, 300)  # within constraints, no clamp
         mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
             "handle_0", 300_000
         )
@@ -257,7 +257,7 @@ class TestApplyCap(unittest.TestCase):
             with patch.object(power_agent, "pynvml", mock_nvml):
                 with patch("power_agent._persist_managed_gpus"):
                     result = actuator.apply_cap(0, 900)
-        self.assertEqual(result, 700)
+        self.assertEqual(result.target_watts, 700)
         mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
             "handle_0", 700_000
         )
@@ -307,7 +307,7 @@ class TestApplyCap(unittest.TestCase):
                     # 900 W is above max (700) → exactly one clamp.
                     result = actuator.apply_cap(0, 900)
 
-        self.assertEqual(result, 700)
+        self.assertEqual(result.target_watts, 700)
         # Single increment of cap_clamped_total{direction="max"}.
         max_clamp_increments = [
             call
@@ -321,6 +321,78 @@ class TestApplyCap(unittest.TestCase):
             f"increment; got {len(max_clamp_increments)}. "
             "The double-clamp bug is back.",
         )
+
+    def test_apply_cap_post_write_uuid_change_rejects_readback(self):
+        mock_nvml = MagicMock()
+        mock_nvml.NVMLError = Exception
+        mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "handle_0"
+        mock_nvml.nvmlDeviceGetPowerManagementLimitConstraints.return_value = (
+            100_000,
+            700_000,
+        )
+        mock_nvml.nvmlDeviceGetPowerManagementLimit.return_value = 300_000
+        mock_nvml.nvmlDeviceGetUUID.side_effect = [
+            b"GPU-A",  # entry identity
+            b"GPU-A",  # successful-write ownership bookkeeping
+            b"GPU-B",  # post-write readback identity
+            b"GPU-B",
+        ]
+        actuator = NvmlActuator(metrics=MagicMock())
+
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}), patch.object(
+            power_agent, "pynvml", mock_nvml
+        ), patch("power_agent._persist_managed_gpus"):
+            result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
+
+        self.assertEqual(result.write_outcome, "succeeded")
+        self.assertEqual(result.readback_outcome, "failed")
+        self.assertIsNone(result.enforced_cap_watts)
+
+    def test_apply_cap_readback_reuses_uuid_validated_handle(self):
+        """Index re-resolution must not supply another GPU's cap evidence."""
+        mock_nvml = MagicMock()
+        mock_nvml.NVMLError = Exception
+        mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "anchored-handle"
+        mock_nvml.nvmlDeviceGetPowerManagementLimitConstraints.return_value = (
+            100_000,
+            700_000,
+        )
+        mock_nvml.nvmlDeviceGetPowerManagementLimit.return_value = 300_000
+        mock_nvml.nvmlDeviceGetUUID.return_value = b"GPU-A"
+        actuator = NvmlActuator(metrics=MagicMock())
+
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}), patch.object(
+            power_agent, "pynvml", mock_nvml
+        ), patch("power_agent._persist_managed_gpus"):
+            result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
+
+        self.assertEqual(result.enforced_cap_watts, 300)
+        mock_nvml.nvmlDeviceGetHandleByIndex.assert_called_once_with(0)
+        mock_nvml.nvmlDeviceGetPowerManagementLimit.assert_called_once_with(
+            "anchored-handle"
+        )
+
+    def test_apply_cap_records_prevalidated_anchor_uuid(self):
+        """A successful write must not depend on another post-write UUID lookup."""
+        mock_nvml = MagicMock()
+        mock_nvml.NVMLError = Exception
+        mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "handle_0"
+        mock_nvml.nvmlDeviceGetPowerManagementLimitConstraints.return_value = (
+            100_000,
+            700_000,
+        )
+        mock_nvml.nvmlDeviceGetPowerManagementLimit.return_value = 300_000
+        mock_nvml.nvmlDeviceGetUUID.return_value = b"GPU-A"
+        actuator = NvmlActuator(metrics=MagicMock())
+
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}), patch.object(
+            power_agent, "pynvml", mock_nvml
+        ), patch("power_agent._record_managed_gpu_by_uuid") as record:
+            result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
+
+        self.assertEqual(result.write_outcome, "succeeded")
+        record.assert_called_once_with("GPU-A")
+        self.assertEqual(mock_nvml.nvmlDeviceGetUUID.call_count, 3)
 
 
 class TestRestoreDefault(unittest.TestCase):
@@ -339,7 +411,7 @@ class TestRestoreDefault(unittest.TestCase):
         )
 
     def test_restore_default_updates_applied_limit_gauge(self):
-        """The applied-limit gauge tracks what is LIVE on the GPU, so an NVML
+        """The configured-cap gauge tracks what is LIVE on the GPU, so an NVML
         restore to factory default must tick it too — apply ticks it via
         `_apply_cap`, and without this Prometheus would keep reporting the
         released cap."""
@@ -349,8 +421,8 @@ class TestRestoreDefault(unittest.TestCase):
         mock_nvml.nvmlDeviceGetPowerManagementDefaultLimit.return_value = 410_000
         with patch.dict("sys.modules", {"pynvml": mock_nvml}):
             NvmlActuator(metrics=metrics).restore_default(2)
-        metrics.applied_limit_watts.labels.assert_called_with(gpu="2")
-        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(410)
+        metrics.configured_cap_watts.labels.assert_called_with(gpu="2")
+        metrics.configured_cap_watts.labels.return_value.set.assert_called_with(410)
 
 
 class TestScanUuidIndexMap(unittest.TestCase):
@@ -462,8 +534,8 @@ class TestRestoreDefaultByUuid(unittest.TestCase):
                 result = NvmlActuator(metrics=metrics).restore_default_by_uuid("GPU-a")
         self.assertIsNone(result)
         mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_not_called()
-        metrics.applied_limit_watts.labels.assert_called_with(gpu="0")
-        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(700)
+        metrics.configured_cap_watts.labels.assert_called_with(gpu="0")
+        metrics.configured_cap_watts.labels.return_value.set.assert_called_with(700)
 
     def test_returns_none_when_uuid_absent_on_clean_scan(self):
         mock_nvml = self._nvml(

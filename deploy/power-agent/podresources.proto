@@ -1,0 +1,39 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package v1;
+
+// Wire-compatible subset of kubelet's podresources.v1 API used by the Power
+// Agent. Unknown fields in the upstream response are intentionally ignored.
+service PodResourcesLister
+{
+  rpc List(ListPodResourcesRequest) returns (ListPodResourcesResponse) {}
+}
+
+message ListPodResourcesRequest {}
+
+message ListPodResourcesResponse
+{
+  repeated PodResources pod_resources = 1;
+}
+
+message PodResources
+{
+  string name = 1;
+  string namespace = 2;
+  repeated ContainerResources containers = 3;
+}
+
+message ContainerResources
+{
+  string name = 1;
+  repeated ContainerDevices devices = 2;
+}
+
+message ContainerDevices
+{
+  string resource_name = 1;
+  repeated string device_ids = 2;
+}

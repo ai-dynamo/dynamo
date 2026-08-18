@@ -204,15 +204,17 @@ class TestApplyCap(unittest.TestCase):
         self.assertIn(2, power_agent._managed_gpu_indices)
 
     def test_updates_applied_limit_gauge(self):
-        """metrics.applied_limit_watts.labels(gpu=...).set(watts) must be called."""
+        """metrics.configured_cap_watts.labels(gpu=...).set(watts) must be called."""
         mock_nvml = _make_nvml()
         handle = MagicMock()
         metrics = MagicMock()
         with patch.object(power_agent, "pynvml", mock_nvml):
             with patch("power_agent._persist_managed_gpus"):
                 _apply_cap(handle, 1, 450, metrics)
-        metrics.applied_limit_watts.labels.assert_called_once_with(gpu="1")
-        metrics.applied_limit_watts.labels.return_value.set.assert_called_once_with(450)
+        metrics.configured_cap_watts.labels.assert_called_once_with(gpu="1")
+        metrics.configured_cap_watts.labels.return_value.set.assert_called_once_with(
+            450
+        )
 
     def test_nvml_error_increments_failure_counter_and_does_not_raise(self):
         mock_nvml = _make_nvml()
@@ -222,7 +224,7 @@ class TestApplyCap(unittest.TestCase):
         with patch.object(power_agent, "pynvml", mock_nvml):
             _apply_cap(handle, 0, 300, metrics)  # must not propagate
         metrics.apply_failures_total.inc.assert_called_once()
-        metrics.applied_limit_watts.labels.assert_not_called()
+        metrics.configured_cap_watts.labels.assert_not_called()
 
     def test_nvml_error_does_not_add_to_managed_indices(self):
         mock_nvml = _make_nvml()

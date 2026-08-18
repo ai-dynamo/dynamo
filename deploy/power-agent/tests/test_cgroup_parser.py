@@ -14,7 +14,7 @@ Covers all QoS × driver × runtime combinations:
 import unittest
 from unittest.mock import mock_open, patch
 
-from power_agent import _extract_pod_uid_from_cgroup
+from power_agent import _extract_container_id_from_cgroup, _extract_pod_uid_from_cgroup
 
 
 class TestCgroupParser(unittest.TestCase):
@@ -117,6 +117,29 @@ class TestCgroupParser(unittest.TestCase):
         )
         uid = self._parse(content)
         self.assertEqual(uid, "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
+
+    def test_extracts_main_containerd_id_from_systemd_scope(self):
+        container_id = "a" * 64
+        content = (
+            "0::/kubepods.slice/kubepods-podcafe0001_dead_0002_beef_0003.slice/"
+            f"cri-containerd-{container_id}.scope\n"
+        )
+        with patch("builtins.open", mock_open(read_data=content)):
+            self.assertEqual(_extract_container_id_from_cgroup(12345), container_id)
+
+    def test_extracts_crio_id_from_cgroupfs(self):
+        container_id = "b" * 64
+        content = (
+            "0::/kubepods/burstable/podcafe0001-dead-0002-beef-0003/"
+            f"crio-{container_id}\n"
+        )
+        with patch("builtins.open", mock_open(read_data=content)):
+            self.assertEqual(_extract_container_id_from_cgroup(12345), container_id)
+
+    def test_rejects_non_runtime_cgroup_tail(self):
+        content = "0::/kubepods.slice/kubepods-podcafe.slice/not-a-container.scope\n"
+        with patch("builtins.open", mock_open(read_data=content)):
+            self.assertIsNone(_extract_container_id_from_cgroup(12345))
 
 
 if __name__ == "__main__":
