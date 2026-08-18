@@ -108,6 +108,8 @@ To make that possible, a prefill worker running `NixlPushConnector` publishes it
 
 vLLM gives each data-parallel rank its own NIXL side channel, at `VLLM_NIXL_SIDE_CHANNEL_PORT` plus the rank index. A Dynamo worker registers one address, so it can only advertise push coordinates when it fronts exactly one rank.
 
+vLLM also names the NIXL agent per rank: the engine ID is `<base>_dp<rank>` whenever `--data-parallel-size` is greater than 1 or the rank is non-zero, and the unsuffixed base ID otherwise — so tensor- or expert-parallel deployments with a single rank keep the base ID. Dynamo mirrors that derivation when it advertises. Publishing the wrong form is not a loud failure: the peer rejects the handshake with `Remote NIXL agent engine ID mismatch` and the transfer falls back.
+
 This is satisfied by every deployment except vLLM's *internal* DP load balancing with `--data-parallel-size` greater than 1, where a single worker process fronts all ranks:
 
 | Deployment | Ranks per worker | Advertises |
