@@ -157,18 +157,6 @@ func SetupDynamoCheckpoint(mgr ctrl.Manager, opts SetupOptions) error {
 	return nil
 }
 
-func SetupPodSnapshot(mgr ctrl.Manager, opts SetupOptions) error {
-	if err := (&PodSnapshotReconciler{
-		Client:        mgr.GetClient(),
-		Config:        opts.Config,
-		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorder("snapshot"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
-	}
-	return nil
-}
-
 func SetupFailoverCascade(mgr ctrl.Manager) error {
 	if err := (&failoverCascadeReconciler{
 		Client:   mgr.GetClient(),

@@ -7,6 +7,13 @@ ARG BASE_IMAGE="library/golang"
 ARG BASE_IMAGE_TAG="1.26.3"
 FROM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
+# go.mod requires go >= 1.26.5, ahead of this image's shipped 1.26.3. The
+# official image sets GOTOOLCHAIN=local, so override it to auto so `go`
+# fetches the required toolchain over the module proxy at build time
+# instead of depending on the exact BASE_IMAGE_TAG patch version being
+# pre-cached by the registry mirror.
+ENV GOTOOLCHAIN=auto
+
 # Docker buildx automatically provides these
 ARG TARGETOS=linux
 ARG TARGETARCH
@@ -21,12 +28,10 @@ WORKDIR /workspace
 
 # Copy go mod and sum files first for better layer caching
 COPY go.mod go.sum ./
-COPY --from=snapshot go.mod go.sum /snapshot/
 RUN go mod download
 
 # Copy source code
 COPY . .
-COPY --from=snapshot . /snapshot/
 
 # Lint stage
 FROM base AS linter

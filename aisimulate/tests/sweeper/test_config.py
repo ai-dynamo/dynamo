@@ -171,7 +171,10 @@ def test_legacy_router_fields_point_to_adapter_migration(field):
     ],
 )
 def test_legacy_kvbm_fields_are_deprecated_without_migration(field):
-    with pytest.raises(ValidationError, match="native G2 replaces KVBM"):
+    with pytest.raises(
+        ValidationError,
+        match="not supported by the AISimulate engine and replay path",
+    ):
         SmartSearchConfig(
             search_space=_search_space(**{field: 1}),
             workload=_workload(),
