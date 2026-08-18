@@ -434,6 +434,7 @@ func generateSingleDCD(
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
 		return nil, err
 	}
+
 	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
 		delete(deployment.Annotations, annotationKey)
 	}

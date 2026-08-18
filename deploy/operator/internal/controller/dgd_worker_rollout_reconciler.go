@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 
@@ -29,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -36,6 +38,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/powerbudget"
 )
 
 type workerGenerationHashes struct {
@@ -1453,6 +1456,8 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	oldWorkerComponentReplicas := make(map[string]int32)
 	oldWorkerDCDReplicas := make(map[string]int32)
 	newWorkerReplicas := make(map[string]int32)
+	currentOldWorkerReplicas := make(map[string]int32)
+	currentNewWorkerReplicas := make(map[string]int32)
 
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
@@ -1474,8 +1479,10 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		} else if !apierrors.IsNotFound(err) {
 			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
 		}
+		currentNewWorkerReplicas[componentName] = newState.Spec
 
 		oldState := oldStates[componentName]
+		currentOldWorkerReplicas[componentName] = oldState.Spec
 		annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, spec)
 		strategy := deploymentStrategyFromAnnotations(annotations)
 
@@ -1532,12 +1539,208 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			"newTarget", newTarget)
 	}
 
-	return dynamo.RollingUpdateContext{
+	rollingUpdateCtx := dynamo.RollingUpdateContext{
 		NewWorkerHash:                      newWorkerHash,
 		OldWorkerReplicaTargetsByComponent: oldWorkerComponentReplicas,
 		OldWorkerReplicaTargetsByDCD:       oldWorkerDCDReplicas,
 		NewWorkerReplicaTargetsByComponent: newWorkerReplicas,
-	}, nil
+	}
+	if dgd.Annotations[nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation] !=
+		nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence {
+		return rollingUpdateCtx, nil
+	}
+
+	// Persist aggregate surge watts before any returned target can reach a DCD.
+	reserved, err := r.reserveTransactionalRolloutExtras(
+		ctx,
+		dgd,
+		rollingUpdateCtx,
+		currentOldWorkerReplicas,
+		currentNewWorkerReplicas,
+	)
+	if err != nil {
+		return dynamo.RollingUpdateContext{}, err
+	}
+	if reserved {
+		return rollingUpdateCtx, nil
+	}
+	logger.Info("Holding rollout target increases until power reservation is available")
+	return clampRolloutTargetIncreases(
+		rollingUpdateCtx,
+		oldDCDsByComponent,
+		currentNewWorkerReplicas,
+	), nil
+}
+
+func (r *dgdWorkerRolloutReconciler) reserveTransactionalRolloutExtras(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	rollingUpdateCtx dynamo.RollingUpdateContext,
+	currentOldWorkerReplicas map[string]int32,
+	currentNewWorkerReplicas map[string]int32,
+) (bool, error) {
+	dgpb := &nvidiacomv1beta1.DynamoGraphPowerBudget{}
+	key := types.NamespacedName{Namespace: dgd.Namespace, Name: dgd.Name}
+	if err := r.Get(ctx, key, dgpb); err != nil {
+		return false, fmt.Errorf("read DynamoGraphPowerBudget %s for rollout reservation: %w", key, err)
+	}
+	owner := metav1.GetControllerOf(dgpb)
+	if owner == nil || owner.UID != dgd.UID || dgpb.Status.DGDUID != string(dgd.UID) {
+		return false, fmt.Errorf("DynamoGraphPowerBudget %s is not bound to DGD UID %q", key, dgd.UID)
+	}
+
+	additionalWatts, currentRolloutExtraVisible, err := additionalRolloutExtraWatts(
+		dgpb,
+		rollingUpdateCtx,
+		currentOldWorkerReplicas,
+		currentNewWorkerReplicas,
+	)
+	if err != nil {
+		return false, err
+	}
+	// Applying plus rollout watts with no currently visible extra capacity is a
+	// durable peak floor. Reuse it after a pre-child-write restart and between
+	// rollout waves. If any current extra is visible, the aggregate may be
+	// consumed by that capacity (including an exact or U_c charge), so none of it
+	// is safe to treat as surplus.
+	if dgpb.Status.Phase == nvidiacomv1beta1.DynamoGraphPowerBudgetPhaseApplying &&
+		!currentRolloutExtraVisible && dgpb.Status.Ledger.RolloutExtraWatts > 0 {
+		if dgpb.Status.Ledger.RolloutExtraWatts >= additionalWatts {
+			return true, nil
+		}
+		additionalWatts -= dgpb.Status.Ledger.RolloutExtraWatts
+	}
+	spec, err := powerbudget.NewSpec(dgpb.Spec)
+	if err != nil {
+		return false, err
+	}
+	decision, err := powerbudget.AdmitRolloutExtraReservation(
+		spec,
+		dgpb.Status.Ledger,
+		additionalWatts,
+		powerbudget.AdmissionState{
+			Phase:             dgpb.Status.Phase,
+			TopologySupported: !dgd.HasAnyMultinodeComponent() && !dgdHasCheckpointConfiguration(dgd),
+			HardwareQualified: dgpb.Status.Phase != nvidiacomv1beta1.DynamoGraphPowerBudgetPhaseUnqualified,
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("evaluate rollout-extra reservation: %w", err)
+	}
+	if !decision.Accepted {
+		log.FromContext(ctx).Info(
+			"Transactional rollout reservation remains pending",
+			"dgd", dgd.Name,
+			"reason", decision.PendingReason,
+			"additionalRolloutExtraWatts", additionalWatts,
+		)
+		return false, nil
+	}
+
+	desiredLedger := powerbudget.NewLedgerStatus(decision.Ledger)
+	if desiredLedger == dgpb.Status.Ledger {
+		return true, nil
+	}
+	before := dgpb.DeepCopy()
+	dgpb.Status.Ledger = desiredLedger
+	dgpb.Status.Phase = nvidiacomv1beta1.DynamoGraphPowerBudgetPhaseApplying
+	if _, err := powerbudget.EncodeStatusSnapshot(dgpb.Status); err != nil {
+		return false, fmt.Errorf("validate rollout-extra reservation: %w", err)
+	}
+	if err := r.Status().Patch(
+		ctx,
+		dgpb,
+		client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}),
+	); err != nil {
+		return false, fmt.Errorf("persist rollout-extra reservation: %w", err)
+	}
+	return true, nil
+}
+
+func additionalRolloutExtraWatts(
+	dgpb *nvidiacomv1beta1.DynamoGraphPowerBudget,
+	rollingUpdateCtx dynamo.RollingUpdateContext,
+	currentOldWorkerReplicas map[string]int32,
+	currentNewWorkerReplicas map[string]int32,
+) (int64, bool, error) {
+	componentStatus := make(map[string]nvidiacomv1beta1.DynamoGraphPowerBudgetComponentStatus, len(dgpb.Status.Components))
+	for _, component := range dgpb.Status.Components {
+		if _, exists := componentStatus[component.Name]; exists {
+			return 0, false, fmt.Errorf("duplicate power-budget component %q", component.Name)
+		}
+		componentStatus[component.Name] = component
+	}
+	if len(componentStatus) != len(dgpb.Status.CommittedReplicaTargets) {
+		return 0, false, fmt.Errorf("power-budget components do not match committed rollout targets")
+	}
+
+	var totalWatts int64
+	currentRolloutExtraVisible := false
+	for componentName, committed := range dgpb.Status.CommittedReplicaTargets {
+		component, found := componentStatus[componentName]
+		if !found || committed < 0 || component.PhysicalGPUsPerReplica < 1 || component.InGateBoundWattsPerGPU < 1 {
+			return 0, false, fmt.Errorf("invalid rollout reservation inputs for component %q", componentName)
+		}
+		currentOld := int64(currentOldWorkerReplicas[componentName])
+		currentNew := int64(currentNewWorkerReplicas[componentName])
+		proposedOld := int64(rollingUpdateCtx.OldWorkerReplicaTargetsByComponent[componentName])
+		proposedNew := int64(rollingUpdateCtx.NewWorkerReplicaTargetsByComponent[componentName])
+		if currentOld < 0 || currentNew < 0 || proposedOld < 0 || proposedNew < 0 {
+			return 0, false, fmt.Errorf("negative rollout target for component %q", componentName)
+		}
+
+		// The child reconciler writes the new DCD before scaling old DCDs. A
+		// target reduction does not immediately remove running or terminating
+		// Pods, so begin with the larger of declared targets and observed physical
+		// occupancy, then add every target increase that can materialize first.
+		currentTarget := currentOld + currentNew
+		observedOccupancy := int64(component.ReplicaStatus.Replicas) + int64(component.TerminatingReplicas)
+		if observedOccupancy < 0 {
+			return 0, false, fmt.Errorf("negative observed rollout occupancy for component %q", componentName)
+		}
+		baselineOccupancy := max(currentTarget, observedOccupancy)
+		peakTarget := baselineOccupancy + max(int64(0), proposedOld-currentOld) +
+			max(int64(0), proposedNew-currentNew)
+		currentExtraReplicas := max(int64(0), baselineOccupancy-int64(committed))
+		currentRolloutExtraVisible = currentRolloutExtraVisible || currentExtraReplicas > 0
+		peakExtraReplicas := max(int64(0), peakTarget-int64(committed))
+		additionalExtraReplicas := max(int64(0), peakExtraReplicas-currentExtraReplicas)
+		extraGPUs := additionalExtraReplicas * int64(component.PhysicalGPUsPerReplica)
+		if extraGPUs > 0 && extraGPUs > math.MaxInt64/component.InGateBoundWattsPerGPU {
+			return 0, false, fmt.Errorf("rollout reservation overflows for component %q", componentName)
+		}
+		componentWatts := extraGPUs * component.InGateBoundWattsPerGPU
+		if totalWatts > math.MaxInt64-componentWatts {
+			return 0, false, fmt.Errorf("aggregate rollout reservation overflows")
+		}
+		totalWatts += componentWatts
+	}
+	return totalWatts, currentRolloutExtraVisible, nil
+}
+
+func clampRolloutTargetIncreases(
+	rollingUpdateCtx dynamo.RollingUpdateContext,
+	oldDCDsByComponent map[string][]*nvidiacomv1beta1.DynamoComponentDeployment,
+	currentNewWorkerReplicas map[string]int32,
+) dynamo.RollingUpdateContext {
+	for componentName, dcds := range oldDCDsByComponent {
+		var safeTotal int32
+		for i := range dcds {
+			current := ptr.Deref(dcds[i].Spec.Replicas, int32(1))
+			proposed := rollingUpdateCtx.OldWorkerReplicaTargetsByDCD[dcds[i].Name]
+			safe := min(current, proposed)
+			rollingUpdateCtx.OldWorkerReplicaTargetsByDCD[dcds[i].Name] = safe
+			safeTotal += safe
+		}
+		rollingUpdateCtx.OldWorkerReplicaTargetsByComponent[componentName] = safeTotal
+	}
+	for componentName, proposed := range rollingUpdateCtx.NewWorkerReplicaTargetsByComponent {
+		rollingUpdateCtx.NewWorkerReplicaTargetsByComponent[componentName] = min(
+			proposed,
+			currentNewWorkerReplicas[componentName],
+		)
+	}
+	return rollingUpdateCtx
 }
 
 // mergeWorkerComponentStatuses merges old worker component statuses into the existing component statuses.

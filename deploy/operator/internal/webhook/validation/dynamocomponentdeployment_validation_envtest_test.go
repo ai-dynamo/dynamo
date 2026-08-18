@@ -1132,6 +1132,31 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment:    betaDCDForAdmission(nil),
 		},
 		{
+			name: "v1beta1 DGD controller owner cannot be removed",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.OwnerReferences = []metav1.OwnerReference{dcdAdmissionDGDOwnerReference()}
+			}),
+			deployment: betaDCDForAdmission(nil),
+			wantWebhookErrs: []string{
+				"metadata.ownerReferences: Forbidden: DynamoGraphDeployment controller owner reference is immutable",
+			},
+		},
+		{
+			name: "v1beta1 DGD controller owner cannot be retyped",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.OwnerReferences = []metav1.OwnerReference{dcdAdmissionDGDOwnerReference()}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				owner := dcdAdmissionDGDOwnerReference()
+				owner.Kind = "ConfigMap"
+				owner.APIVersion = "v1"
+				dcd.OwnerReferences = []metav1.OwnerReference{owner}
+			}),
+			wantWebhookErrs: []string{
+				"metadata.ownerReferences: Forbidden: DynamoGraphDeployment controller owner reference is immutable",
+			},
+		},
+		{
 			name: "v1alpha1 backend framework update reaches and is rejected by the webhook",
 			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
@@ -1283,6 +1308,16 @@ func alphaDCDForAdmission(
 		mutate(dcd)
 	}
 	return dcd
+}
+
+func dcdAdmissionDGDOwnerReference() metav1.OwnerReference {
+	return metav1.OwnerReference{
+		APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+		Kind:       nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind,
+		Name:       "graph",
+		UID:        "dgd-uid",
+		Controller: k8sptr.To(true),
+	}
 }
 
 func alphaDCDWithSharedSpec(

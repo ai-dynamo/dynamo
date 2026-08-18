@@ -255,6 +255,7 @@ rules:
   - dynamographdeploymentrequests
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
+  - dynamographpowerbudgets
   - dynamomodels
   verbs:
   - create
@@ -271,6 +272,7 @@ rules:
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
+  - dynamographpowerbudgets/finalizers
   - dynamomodels/finalizers
   verbs:
   - update
@@ -282,6 +284,7 @@ rules:
   - dynamographdeploymentrequests/status
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
+  - dynamographpowerbudgets/status
   - dynamomodels/status
   verbs:
   - get

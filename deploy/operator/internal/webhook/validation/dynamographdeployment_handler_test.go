@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8sptr "k8s.io/utils/ptr"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -117,6 +118,61 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 	})
 }
 
+func TestTransactionalAnnotationsImmutable(t *testing.T) {
+	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator")
+	createCtx := dgdAdmissionContext(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+	updateCtx := dgdAdmissionContext(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+	annotate := func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		dgd.Annotations = map[string]string{
+			nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation: nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence,
+			nvidiacomv1beta1.DynamoGraphGPUPowerBudgetAnnotation:   "2400",
+			nvidiacomv1beta1.DynamoGraphPowerMinEndpointAnnotation: "2",
+		}
+	}
+
+	valid := newBetaDGDForValidation()
+	annotate(valid)
+	if _, err := handler.ValidateCreate(createCtx, valid); err != nil {
+		t.Fatalf("ValidateCreate() transactional annotations error = %v", err)
+	}
+
+	missingFloor := newBetaDGDForValidation()
+	annotate(missingFloor)
+	delete(missingFloor.Annotations, nvidiacomv1beta1.DynamoGraphPowerMinEndpointAnnotation)
+	if _, err := handler.ValidateCreate(createCtx, missingFloor); err == nil || !strings.Contains(err.Error(), "required when transactional power control is configured") {
+		t.Fatalf("ValidateCreate() missing floor error = %v, want required", err)
+	}
+
+	for _, key := range []string{
+		nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation,
+		nvidiacomv1beta1.DynamoGraphGPUPowerBudgetAnnotation,
+		nvidiacomv1beta1.DynamoGraphPowerMinEndpointAnnotation,
+	} {
+		t.Run("change "+key, func(t *testing.T) {
+			oldDGD := newBetaDGDForValidation()
+			annotate(oldDGD)
+			newDGD := oldDGD.DeepCopy()
+			if key == nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation {
+				for annotation := range newDGD.Annotations {
+					delete(newDGD.Annotations, annotation)
+				}
+			} else {
+				newDGD.Annotations[key] = "3"
+			}
+			if _, err := handler.ValidateUpdate(updateCtx, oldDGD, newDGD); err == nil || !strings.Contains(err.Error(), "field is immutable") {
+				t.Fatalf("ValidateUpdate() error = %v, want annotation immutability", err)
+			}
+		})
+	}
+
+	oldDGD := newBetaDGDForValidation()
+	newDGD := oldDGD.DeepCopy()
+	annotate(newDGD)
+	if _, err := handler.ValidateUpdate(updateCtx, oldDGD, newDGD); err == nil || !strings.Contains(err.Error(), "field is immutable") {
+		t.Fatalf("ValidateUpdate() add mode error = %v, want annotation immutability", err)
+	}
+}
+
 func TestDynamoGraphDeploymentHandlerValidateDelete(t *testing.T) {
 	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "")
 	ctx := dgdAdmissionContext(admissionv1.Delete, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
@@ -156,6 +212,88 @@ func TestDynamoGraphDeploymentHandlerRegisterWithManager(t *testing.T) {
 		if pattern != tc.wantPattern {
 			t.Fatalf("registered pattern for %q = %q, want %q", tc.path, pattern, tc.wantPattern)
 		}
+	}
+}
+
+func TestNoDGPBWebhook(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := nvidiacomv1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add v1beta1 scheme: %v", err)
+	}
+
+	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
+	mgr := &fakeManager{scheme: scheme, webhookServer: server}
+	handler := NewDynamoGraphDeploymentHandler(mgr, "")
+	if err := handler.RegisterWithManager(mgr, features.Defaults()); err != nil {
+		t.Fatalf("RegisterWithManager() error = %v", err)
+	}
+
+	for _, path := range []string{
+		"/validate/nvidia.com/v1beta1/dynamographpowerbudgets",
+		"/mutate/nvidia.com/v1beta1/dynamographpowerbudgets",
+		"/validate-nvidia-com-v1beta1-dynamographpowerbudget",
+		"/mutate-nvidia-com-v1beta1-dynamographpowerbudget",
+	} {
+		request := httptest.NewRequest("POST", path, nil)
+		_, pattern := server.WebhookMux().Handler(request)
+		if pattern != "" {
+			t.Fatalf("DGPB webhook registered for %q as %q", path, pattern)
+		}
+	}
+}
+
+func TestNoV1Alpha1Webhook(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := nvidiacomv1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add v1beta1 scheme: %v", err)
+	}
+	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
+	mgr := &fakeManager{scheme: scheme, webhookServer: server}
+	if err := NewDynamoGraphDeploymentHandler(mgr, "").RegisterWithManager(mgr, features.Defaults()); err != nil {
+		t.Fatalf("RegisterWithManager() error = %v", err)
+	}
+	request := httptest.NewRequest("POST", "/validate-nvidia-com-v1alpha1-dynamographdeployment", nil)
+	if _, pattern := server.WebhookMux().Handler(request); pattern != "" {
+		t.Fatalf("v1alpha1 DGD webhook registered as %q", pattern)
+	}
+}
+
+func TestCheckpointIncompatible(t *testing.T) {
+	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "")
+	ctx := dgdAdmissionContext(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+	transactionalDGD := func() *nvidiacomv1beta1.DynamoGraphDeployment {
+		dgd := newBetaDGDForValidation()
+		dgd.Annotations = map[string]string{
+			nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation: nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence,
+			nvidiacomv1beta1.DynamoGraphGPUPowerBudgetAnnotation:   "2400",
+			nvidiacomv1beta1.DynamoGraphPowerMinEndpointAnnotation: "1",
+		}
+		return dgd
+	}
+
+	for _, tc := range []struct {
+		name       string
+		checkpoint *nvidiacomv1beta1.ComponentCheckpointConfig
+		wantError  bool
+	}{
+		{name: "enabled", checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}, wantError: true},
+		{name: "checkpointRef", checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{CheckpointRef: k8sptr.To("saved")}, wantError: true},
+		{name: "disabled", checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dgd := transactionalDGD()
+			dgd.GetComponentByName("worker").Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: tc.checkpoint}
+			_, err := handler.ValidateCreate(ctx, dgd)
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "spec.components[1].experimental.checkpoint: Forbidden") {
+					t.Fatalf("ValidateCreate() error = %v, want hub checkpoint incompatibility", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateCreate() disabled checkpoint error = %v", err)
+			}
+		})
 	}
 }
 

@@ -327,6 +327,327 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 	}
 }
 
+func TestDGDSARequestOnly(t *testing.T) {
+	t.Log("Register the storage API and create distinct requested, committed, and actual targets")
+	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("add v1beta1 to scheme: %v", err)
+	}
+	requested := int32(5)
+	committed := int32(3)
+	actual := int32(2)
+	adapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-worker", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
+			Replicas: requested,
+			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+				Name:          "test-dgd",
+				ComponentName: "worker",
+			},
+		},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			Annotations: map[string]string{
+				v1beta1.DynamoGraphPowerControlModeAnnotation: v1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence,
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName:  "worker",
+				ComponentType:  v1beta1.ComponentTypeWorker,
+				Replicas:       ptr.To(committed),
+				ScalingAdapter: nil,
+			}},
+		},
+		Status: v1beta1.DynamoGraphDeploymentStatus{
+			Components: map[string]v1beta1.ComponentReplicaStatus{
+				"worker": {Replicas: actual},
+			},
+		},
+	}
+	dgpb := &v1beta1.DynamoGraphPowerBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: dgd.Name, Namespace: dgd.Namespace},
+		Status: v1beta1.DynamoGraphPowerBudgetStatus{
+			CommittedReplicaTargets: map[string]int32{"worker": committed},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(adapter, dgd, dgpb).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeploymentScalingAdapter{}).
+		Build()
+	reconciler := &DynamoGraphDeploymentScalingAdapterReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme.Scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+
+	t.Log("Defer single-adapter status until the complete-vector reconciler publishes a bounded reason")
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Name: adapter.Name, Namespace: adapter.Namespace,
+	}})
+	if err != nil {
+		t.Fatalf("reconcile transactional adapter: %v", err)
+	}
+	deferredAdapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(adapter), deferredAdapter); err != nil {
+		t.Fatalf("read deferred adapter: %v", err)
+	}
+	if deferredAdapter.Status != (v1beta1.DynamoGraphDeploymentScalingAdapterStatus{}) {
+		t.Fatalf("single-adapter reconcile published an empty pending row: %+v", deferredAdapter.Status)
+	}
+	deferredAdapter.Status.RequestedReplicas = requested
+	deferredAdapter.Status.CommittedReplicas = committed
+	deferredAdapter.Status.ActualReplicas = actual
+	deferredAdapter.Status.Replicas = actual
+	deferredAdapter.Status.PendingReason = v1beta1.DynamoGraphPowerBudgetPendingReasonBudgetExceeded
+	if err := fakeClient.Status().Update(context.Background(), deferredAdapter); err != nil {
+		t.Fatalf("publish complete-vector pending reason: %v", err)
+	}
+
+	t.Log("Reconcile actual capacity without mirroring the pending request into the DGD")
+	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Name: adapter.Name, Namespace: adapter.Namespace,
+	}})
+	if err != nil {
+		t.Fatalf("reconcile reasoned transactional adapter: %v", err)
+	}
+
+	t.Log("Verify requested, committed, and actual targets remain distinct and status reports actual")
+	updatedAdapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(adapter), updatedAdapter); err != nil {
+		t.Fatalf("read adapter: %v", err)
+	}
+	updatedDGD := &v1beta1.DynamoGraphDeployment{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), updatedDGD); err != nil {
+		t.Fatalf("read DGD: %v", err)
+	}
+	updatedDGPB := &v1beta1.DynamoGraphPowerBudget{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(dgpb), updatedDGPB); err != nil {
+		t.Fatalf("read DGPB: %v", err)
+	}
+	if updatedAdapter.Spec.Replicas != requested {
+		t.Fatalf("requested replicas = %d, want %d", updatedAdapter.Spec.Replicas, requested)
+	}
+	if got := updatedDGPB.Status.CommittedReplicaTargets["worker"]; got != committed {
+		t.Fatalf("committed replicas = %d, want %d", got, committed)
+	}
+	if got := ptr.Deref(updatedDGD.GetComponentByName("worker").Replicas, int32(1)); got != committed {
+		t.Fatalf("committed DGD target = %d, want %d", got, committed)
+	}
+	if updatedAdapter.Status.Replicas != actual {
+		t.Fatalf("adapter status replicas = %d, want actual %d", updatedAdapter.Status.Replicas, actual)
+	}
+	if updatedAdapter.Status.RequestedReplicas != requested ||
+		updatedAdapter.Status.CommittedReplicas != committed ||
+		updatedAdapter.Status.ActualReplicas != actual {
+		t.Fatalf("adapter transactional status = %+v, want requested=%d committed=%d actual=%d",
+			updatedAdapter.Status, requested, committed, actual)
+	}
+	if updatedAdapter.Status.PendingReason != v1beta1.DynamoGraphPowerBudgetPendingReasonBudgetExceeded {
+		t.Fatalf("adapter pending reason = %q, want BudgetExceeded", updatedAdapter.Status.PendingReason)
+	}
+	if updatedAdapter.Status.LastScaleTime != nil {
+		t.Fatalf("request-only reconcile unexpectedly set lastScaleTime: %v", updatedAdapter.Status.LastScaleTime)
+	}
+
+	t.Log("Keep the prior decision tuple when a newer request arrives")
+	updatedAdapter.Spec.Replicas = 1
+	if err := fakeClient.Update(context.Background(), updatedAdapter); err != nil {
+		t.Fatalf("publish replacement request: %v", err)
+	}
+	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Name: adapter.Name, Namespace: adapter.Namespace,
+	}})
+	if err != nil {
+		t.Fatalf("reconcile replacement request: %v", err)
+	}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(adapter), updatedAdapter); err != nil {
+		t.Fatalf("read adapter after replacement request: %v", err)
+	}
+	if updatedAdapter.Status.RequestedReplicas != requested ||
+		updatedAdapter.Status.CommittedReplicas != committed ||
+		updatedAdapter.Status.PendingReason != v1beta1.DynamoGraphPowerBudgetPendingReasonBudgetExceeded {
+		t.Fatalf("replacement request rebound stale decision: %+v", updatedAdapter.Status)
+	}
+}
+
+func TestDGDSAPreservesZeroSeedBelowMinimum(t *testing.T) {
+	t.Log("Create the vector-authoritative all-zero bootstrap rejection")
+	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("add v1beta1 to scheme: %v", err)
+	}
+	adapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-worker", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
+			Replicas: 0,
+			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+				Name: "test-dgd", ComponentName: "worker",
+			},
+		},
+		Status: v1beta1.DynamoGraphDeploymentScalingAdapterStatus{
+			RequestedReplicas: 0,
+			CommittedReplicas: 0,
+			PendingReason:     v1beta1.DynamoGraphPowerBudgetPendingReasonUnenforcedBaseline,
+		},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			Annotations: map[string]string{
+				v1beta1.DynamoGraphPowerControlModeAnnotation: v1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence,
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, Replicas: ptr.To(int32(0)),
+			}},
+		},
+		Status: v1beta1.DynamoGraphDeploymentStatus{
+			Components: map[string]v1beta1.ComponentReplicaStatus{"worker": {Replicas: 0}},
+		},
+	}
+	dgpb := &v1beta1.DynamoGraphPowerBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: dgd.Name, Namespace: dgd.Namespace},
+		Status: v1beta1.DynamoGraphPowerBudgetStatus{
+			Phase:                   v1beta1.DynamoGraphPowerBudgetPhaseInitializing,
+			CommittedReplicaTargets: map[string]int32{"worker": 0},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(adapter, dgd, dgpb).
+		WithStatusSubresource(
+			&v1beta1.DynamoGraphDeploymentScalingAdapter{},
+			&v1beta1.DynamoGraphPowerBudget{},
+		).
+		Build()
+	reconciler := &DynamoGraphDeploymentScalingAdapterReconciler{
+		Client: fakeClient, Scheme: scheme.Scheme, Recorder: events.NewFakeRecorder(10),
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(adapter)})
+	if err != nil {
+		t.Fatalf("reconcile zero bootstrap status: %v", err)
+	}
+	storedAdapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(adapter), storedAdapter); err != nil {
+		t.Fatalf("read zero bootstrap adapter: %v", err)
+	}
+	if storedAdapter.Status.PendingReason != v1beta1.DynamoGraphPowerBudgetPendingReasonUnenforcedBaseline {
+		t.Fatalf("zero durability-boundary reason = %q, want UnenforcedBaseline", storedAdapter.Status.PendingReason)
+	}
+
+	t.Log("Preserve the exact BelowMinimum reason after full-vector evaluation")
+	storedAdapter.Status.PendingReason = v1beta1.DynamoGraphPowerBudgetPendingReasonBelowMinimum
+	if err := fakeClient.Status().Update(context.Background(), storedAdapter); err != nil {
+		t.Fatalf("publish zero bootstrap admission reason: %v", err)
+	}
+	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(adapter)})
+	if err != nil {
+		t.Fatalf("reconcile evaluated zero bootstrap status: %v", err)
+	}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(adapter), storedAdapter); err != nil {
+		t.Fatalf("read evaluated zero bootstrap adapter: %v", err)
+	}
+	if storedAdapter.Status.PendingReason != v1beta1.DynamoGraphPowerBudgetPendingReasonBelowMinimum {
+		t.Fatalf("evaluated zero bootstrap reason = %q, want BelowMinimum", storedAdapter.Status.PendingReason)
+	}
+
+	t.Log("Clear the old reason after a normal request becomes the accepted commitment")
+	storedAdapter.Spec.Replicas = 2
+	if err := fakeClient.Update(context.Background(), storedAdapter); err != nil {
+		t.Fatalf("publish accepted request: %v", err)
+	}
+	storedDGPB := &v1beta1.DynamoGraphPowerBudget{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(dgpb), storedDGPB); err != nil {
+		t.Fatalf("read power budget before acceptance: %v", err)
+	}
+	storedDGPB.Status.Phase = v1beta1.DynamoGraphPowerBudgetPhaseApplying
+	storedDGPB.Status.CommittedReplicaTargets["worker"] = 2
+	if err := fakeClient.Status().Update(context.Background(), storedDGPB); err != nil {
+		t.Fatalf("publish accepted commitment: %v", err)
+	}
+	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(adapter)})
+	if err != nil {
+		t.Fatalf("reconcile accepted request status: %v", err)
+	}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(adapter), storedAdapter); err != nil {
+		t.Fatalf("read accepted adapter: %v", err)
+	}
+	if storedAdapter.Status.PendingReason != "" || storedAdapter.Status.RequestedReplicas != 2 ||
+		storedAdapter.Status.CommittedReplicas != 2 {
+		t.Fatalf("accepted request retained stale reason: %+v", storedAdapter.Status)
+	}
+}
+
+func TestStaticDGDSAUnchanged(t *testing.T) {
+	t.Log("Create a static DGD whose adapter requests a larger target")
+	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("add v1beta1 to scheme: %v", err)
+	}
+	adapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-worker", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
+			Replicas: 5,
+			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+				Name:          "test-dgd",
+				ComponentName: "worker",
+			},
+		},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName:  "worker",
+				ComponentType:  v1beta1.ComponentTypeWorker,
+				Replicas:       ptr.To(int32(2)),
+				ScalingAdapter: &v1beta1.ScalingAdapter{},
+			}},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(adapter, dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeploymentScalingAdapter{}).
+		Build()
+	reconciler := &DynamoGraphDeploymentScalingAdapterReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme.Scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+
+	t.Log("Reconcile through the Phase 1 direct adapter propagation path")
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(adapter)})
+	if err != nil {
+		t.Fatalf("reconcile static adapter: %v", err)
+	}
+
+	t.Log("Verify the static DGD target and Scale status both follow the request")
+	storedDGD := &v1beta1.DynamoGraphDeployment{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), storedDGD); err != nil {
+		t.Fatalf("read static DGD: %v", err)
+	}
+	if got := ptr.Deref(storedDGD.GetComponentByName("worker").Replicas, int32(1)); got != 5 {
+		t.Fatalf("static DGD replicas = %d, want 5", got)
+	}
+	storedAdapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(adapter), storedAdapter); err != nil {
+		t.Fatalf("read static adapter: %v", err)
+	}
+	if storedAdapter.Status.Replicas != 5 || storedAdapter.Status.LastScaleTime == nil {
+		t.Fatalf("static adapter status = %+v, want replicas=5 and lastScaleTime", storedAdapter.Status)
+	}
+	if storedAdapter.Status.RequestedReplicas != 5 || storedAdapter.Status.CommittedReplicas != 5 ||
+		storedAdapter.Status.ActualReplicas != 5 || storedAdapter.Status.PendingReason != "" {
+		t.Fatalf("static adapter compatibility status = %+v, want requested=committed=actual=5", storedAdapter.Status)
+	}
+}
+
 func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_NotFound(t *testing.T) {
 	// Register custom types with the scheme
 	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {

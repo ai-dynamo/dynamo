@@ -3738,7 +3738,7 @@ func TestDGDWorkerPodEventPredicate(t *testing.T) {
 	assert.False(t, pred.Delete(event.DeleteEvent{Object: unrelated}), "unmanaged pods must be ignored")
 	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: failed}), "transition to Failed can unblock a drain")
 	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: succeeded}), "transition to Succeeded can unblock a drain")
-	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: deleting}), "deletion timestamp alone does not make a pod terminal")
+	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: deleting}), "deletion timestamp changes power-budget termination accounting")
 	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: failed, ObjectNew: succeeded}), "terminal-to-terminal transitions are irrelevant")
 	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: moved}), "selector changes move the pod between drain memberships")
 	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: unrelated, ObjectNew: running}), "becoming a managed worker pod changes drain membership")

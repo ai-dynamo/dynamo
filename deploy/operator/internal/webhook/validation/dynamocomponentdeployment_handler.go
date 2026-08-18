@@ -19,14 +19,19 @@ package validation
 
 import (
 	"context"
+	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -41,7 +46,10 @@ const (
 
 // DynamoComponentDeploymentHandler is a handler for validating DynamoComponentDeployment resources.
 // It is a thin wrapper around DynamoComponentDeploymentValidator.
-type DynamoComponentDeploymentHandler struct{}
+type DynamoComponentDeploymentHandler struct {
+	reader            client.Reader
+	operatorPrincipal string
+}
 
 // dynamoComponentDeploymentV1Alpha1Handler keeps the previous endpoint available
 // during the v1alpha1-to-v1beta1 admission migration. It converts the spoke
@@ -51,8 +59,14 @@ type dynamoComponentDeploymentV1Alpha1Handler struct {
 }
 
 // NewDynamoComponentDeploymentHandler creates a new handler for DynamoComponentDeployment Webhook.
-func NewDynamoComponentDeploymentHandler() *DynamoComponentDeploymentHandler {
-	return &DynamoComponentDeploymentHandler{}
+func NewDynamoComponentDeploymentHandler(
+	reader client.Reader,
+	operatorPrincipal string,
+) *DynamoComponentDeploymentHandler {
+	return &DynamoComponentDeploymentHandler{
+		reader:            reader,
+		operatorPrincipal: operatorPrincipal,
+	}
 }
 
 // ValidateCreate validates a DynamoComponentDeployment create request.
@@ -119,8 +133,66 @@ func (h *DynamoComponentDeploymentHandler) validateUpdate(
 		return nil, err
 	}
 
+	canModifyReplicas, err := h.canModifyReplicas(ctx, oldDeployment, newDeployment)
+	if err != nil {
+		return nil, err
+	}
+
 	validator := NewDynamoComponentDeploymentValidator()
-	return validator.ValidateUpdate(ctx, oldDeployment, newDeployment, runtimeVersionValidationSourceForRequest(ctx, expectedGVK))
+	return validator.ValidateUpdate(
+		ctx,
+		oldDeployment,
+		newDeployment,
+		canModifyReplicas,
+		runtimeVersionValidationSourceForRequest(ctx, expectedGVK),
+	)
+}
+
+// canModifyReplicas preserves standalone/static DCD behavior while making a
+// transactional DGD-owned worker replica change operator-only.
+func (h *DynamoComponentDeploymentHandler) canModifyReplicas(
+	ctx context.Context,
+	oldDCD, newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+) (bool, error) {
+	oldReplicas := ptr.Deref(oldDCD.Spec.Replicas, int32(1))
+	newReplicas := ptr.Deref(newDCD.Spec.Replicas, int32(1))
+	if oldReplicas == newReplicas {
+		return true, nil
+	}
+	if !dynamo.IsWorkerComponent(string(oldDCD.Spec.ComponentType)) &&
+		!dynamo.IsWorkerComponent(string(newDCD.Spec.ComponentType)) {
+		return true, nil
+	}
+
+	owner := dgdControllerOwnerReference(oldDCD.OwnerReferences)
+	if owner == nil {
+		owner = dgdControllerOwnerReference(newDCD.OwnerReferences)
+	}
+	if owner == nil {
+		return true, nil
+	}
+	if h.reader == nil {
+		return false, fmt.Errorf("read owning DynamoGraphDeployment: webhook reader is not configured")
+	}
+
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	key := types.NamespacedName{Namespace: oldDCD.Namespace, Name: owner.Name}
+	if err := h.reader.Get(ctx, key, dgd); err != nil {
+		return false, fmt.Errorf("read owning DynamoGraphDeployment %s: %w", key, err)
+	}
+	if dgd.UID != owner.UID {
+		return false, fmt.Errorf("owning DynamoGraphDeployment %s UID does not match controller reference", key)
+	}
+	if dgd.Annotations[nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation] !=
+		nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence {
+		return true, nil
+	}
+
+	request, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return false, nil
+	}
+	return internalwebhook.CanModifyDGDReplicas(h.operatorPrincipal, request.UserInfo, true), nil
 }
 
 // ValidateDelete validates a DynamoComponentDeployment delete request.

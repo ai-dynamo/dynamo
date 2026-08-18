@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 
 	"emperror.dev/errors"
@@ -255,6 +256,17 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		}
 	}
 
+	// Apply the transactional power gate only after every command-rendering step.
+	powerGateInputs, err := r.powerGateInputs(ctx, dcd, componentType, role)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to resolve transactional power gate")
+	}
+	if powerGateInputs != nil {
+		if err := dynamo.ApplyPowerGate(podSpec, *powerGateInputs); err != nil {
+			return nil, errors.Wrap(err, "failed to apply transactional power gate")
+		}
+	}
+
 	if len(podSpec.Containers) == 0 {
 		return nil, errors.New("no containers found in base pod spec")
 	}
@@ -303,6 +315,157 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		},
 		Spec: *podSpec,
 	}, nil
+}
+
+// powerGateInputs resolves immutable gate identity and bounds from the
+// owning DGD and its DGPB. Unenrolled DGDs retain the static deployment path.
+func (r *dcdWorkloadRenderer) powerGateInputs(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	componentType string,
+	role dynamo.Role,
+) (*dynamo.PowerGateInputs, error) {
+	// Require the direct DGD controller identity before consulting its policy.
+	dgdOwner := metav1.GetControllerOf(dcd)
+	if !isDGDControllerReference(dgdOwner) {
+		return nil, nil
+	}
+
+	// Use the immutable parent enrollment annotation as the sole mode authority.
+	key := types.NamespacedName{Namespace: dcd.Namespace, Name: dgdOwner.Name}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	if err := r.reader.Get(ctx, key, dgd); err != nil {
+		return nil, fmt.Errorf("read owning DynamoGraphDeployment %s: %w", key, err)
+	}
+	if dgd.UID != dgdOwner.UID {
+		return nil, fmt.Errorf("DynamoGraphDeployment %s UID %q does not match owner UID %q", key, dgd.UID, dgdOwner.UID)
+	}
+	if dgd.Annotations[nvidiacomv1beta1.DynamoGraphPowerControlModeAnnotation] !=
+		nvidiacomv1beta1.DynamoGraphPowerControlModeTransactionalReplicaFence {
+		return nil, nil
+	}
+
+	// In transactional mode the immutable parent, not the mutable child DCD,
+	// decides whether this workload is a power-managed worker. Bind the DCD's
+	// immutable resource name to exactly one parent component before trusting
+	// any child classification fields.
+	parentComponent, err := parentComponentForDCD(dgd, dcd)
+	if err != nil {
+		return nil, err
+	}
+	componentName := parentComponent.ComponentName
+	if dcd.Spec.ComponentType != parentComponent.ComponentType ||
+		dynamo.GetDCDComponentName(dcd) != componentName {
+		return nil, fmt.Errorf(
+			"transactional DynamoComponentDeployment %s/%s does not match parent component %q",
+			dcd.Namespace,
+			dcd.Name,
+			componentName,
+		)
+	}
+	if !dynamo.IsWorkerComponent(string(parentComponent.ComponentType)) {
+		if componentType != string(parentComponent.ComponentType) {
+			return nil, fmt.Errorf(
+				"transactional DynamoComponentDeployment %s/%s workload type %q does not match nonworker parent component %q",
+				dcd.Namespace,
+				dcd.Name,
+				componentType,
+				componentName,
+			)
+		}
+		return nil, nil
+	}
+	if !dynamo.IsWorkerComponent(componentType) {
+		return nil, fmt.Errorf(
+			"transactional DynamoComponentDeployment %s/%s does not match power-managed parent component %q",
+			dcd.Namespace,
+			dcd.Name,
+			componentName,
+		)
+	}
+
+	// The one DGPB is named after its owning DGD and is mandatory once enrolled.
+	dgpb := &nvidiacomv1beta1.DynamoGraphPowerBudget{}
+	if err := r.reader.Get(ctx, key, dgpb); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil, fmt.Errorf("transactional DynamoGraphPowerBudget %s is not available", key)
+		}
+		return nil, fmt.Errorf("read DynamoGraphPowerBudget %s: %w", key, err)
+	}
+
+	// Bind the rendered workload to the same exact DGD generation on both objects.
+	dgpbOwner := metav1.GetControllerOf(dgpb)
+	if !isDGDControllerReference(dgpbOwner) ||
+		dgpbOwner.Name != dgdOwner.Name ||
+		dgpbOwner.UID != dgdOwner.UID ||
+		dgpb.Status.DGDUID != string(dgdOwner.UID) {
+		return nil, fmt.Errorf("DynamoGraphPowerBudget %s does not match DGD UID %q", key, dgdOwner.UID)
+	}
+	if role != dynamo.RoleMain {
+		return nil, fmt.Errorf("DynamoGraphPowerBudget %s cannot gate unsupported role %q", key, role)
+	}
+
+	// Resolve exactly one bounded component row for the main-container allocation.
+	var matched *nvidiacomv1beta1.DynamoGraphPowerBudgetComponentStatus
+	for index := range dgpb.Status.Components {
+		if dgpb.Status.Components[index].Name != componentName {
+			continue
+		}
+		if matched != nil {
+			return nil, fmt.Errorf("DynamoGraphPowerBudget %s has duplicate component %q", key, componentName)
+		}
+		matched = &dgpb.Status.Components[index]
+	}
+	if matched == nil || matched.PhysicalGPUsPerReplica < 1 || matched.InGateBoundWattsPerGPU < 1 {
+		return nil, fmt.Errorf("DynamoGraphPowerBudget %s lacks complete bounds for component %q", key, componentName)
+	}
+
+	return &dynamo.PowerGateInputs{
+		DGDUID:                   string(dgdOwner.UID),
+		Component:                componentName,
+		ExpectedPhysicalGPUCount: matched.PhysicalGPUsPerReplica,
+		InGateBoundWattsPerGPU:   matched.InGateBoundWattsPerGPU,
+	}, nil
+}
+
+func parentComponentForDCD(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, error) {
+	var matched *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	for index := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[index]
+		baseName := dynamo.GetDCDResourceName(dgd, component.ComponentName, "")
+		if dcd.Name != baseName && !hasDCDWorkerHashSuffix(dcd.Name, baseName) {
+			continue
+		}
+		if matched != nil {
+			return nil, fmt.Errorf("DynamoComponentDeployment %s/%s matches multiple parent components", dcd.Namespace, dcd.Name)
+		}
+		matched = component
+	}
+	if matched == nil {
+		return nil, fmt.Errorf("DynamoComponentDeployment %s/%s does not match an owning DGD component", dcd.Namespace, dcd.Name)
+	}
+	return matched, nil
+}
+
+func hasDCDWorkerHashSuffix(name, baseName string) bool {
+	if len(name) != len(baseName)+9 || !strings.HasPrefix(name, baseName+"-") {
+		return false
+	}
+	for _, character := range name[len(baseName)+1:] {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return false
+		}
+	}
+	return true
+}
+
+func isDGDControllerReference(owner *metav1.OwnerReference) bool {
+	return owner != nil &&
+		owner.Kind == nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind &&
+		strings.HasPrefix(owner.APIVersion, nvidiacomv1beta1.GroupVersion.Group+"/")
 }
 
 func (r *dcdWorkloadRenderer) generateService(
