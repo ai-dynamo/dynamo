@@ -20,6 +20,7 @@ import math
 import re
 import struct
 import time
+import wave
 from copy import deepcopy
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -2351,10 +2352,24 @@ class I2VPayload(VideoGenerationPayload):
 
 @dataclass
 class AudioSpeechPayload(BasePayload):
-    """Payload for /v1/audio/speech endpoint."""
+    """Payload for /v1/audio/speech endpoint.
+
+    The byte-count check alone passes on a WAV that carries a header and a
+    fraction of a second of silence, which is what a broken decoder or a
+    mis-assembled chunk stream produces. Set the waveform expectations below to
+    assert the audio is actually as long and as loud as the request implies;
+    they apply to WAV responses (binary or base64) and are skipped for URL
+    responses.
+    """
 
     endpoint: str = "/v1/audio/speech"
     timeout: int = 300
+    # Minimum decoded duration in seconds; 0 disables the check.
+    min_duration_s: float = 0.0
+    # Minimum RMS amplitude, normalized to [0, 1]; 0 disables the check.
+    min_rms: float = 0.0
+    # Expected sample rate in Hz; None disables the check.
+    expected_sample_rate: Optional[int] = None
 
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
@@ -2365,6 +2380,7 @@ class AudioSpeechPayload(BasePayload):
                 f"Audio response too small ({len(audio_bytes)} bytes), "
                 f"likely not valid audio"
             )
+            self._validate_waveform(audio_bytes)
             return f"binary_audio_{len(audio_bytes)}_bytes"
         result = response.json()
         assert (
@@ -2378,4 +2394,50 @@ class AudioSpeechPayload(BasePayload):
         if "url" in entry and entry["url"]:
             return entry["url"]
         assert entry.get("b64_json"), "Audio response b64_json is empty"
+        self._validate_waveform(base64.b64decode(entry["b64_json"]))
         return "b64_audio_returned"
+
+    def _validate_waveform(self, audio_bytes: bytes) -> None:
+        """Assert the decoded WAV meets the configured expectations."""
+        if (
+            self.min_duration_s <= 0
+            and self.min_rms <= 0
+            and self.expected_sample_rate is None
+        ):
+            return
+
+        with wave.open(BytesIO(audio_bytes), "rb") as wav:
+            sample_rate = wav.getframerate()
+            frame_count = wav.getnframes()
+            sample_width = wav.getsampwidth()
+            channels = wav.getnchannels()
+            frames = wav.readframes(frame_count)
+
+        if self.expected_sample_rate is not None:
+            assert sample_rate == self.expected_sample_rate, (
+                f"Expected {self.expected_sample_rate} Hz audio, "
+                f"got {sample_rate} Hz"
+            )
+
+        duration_s = frame_count / sample_rate if sample_rate else 0.0
+        assert duration_s >= self.min_duration_s, (
+            f"Audio is {duration_s:.3f}s, shorter than the expected minimum "
+            f"{self.min_duration_s:.3f}s ({frame_count} frames at {sample_rate} Hz)"
+        )
+
+        if self.min_rms <= 0:
+            return
+
+        assert sample_width == 2, (
+            f"RMS check supports 16-bit PCM only, got {sample_width * 8}-bit "
+            f"audio; drop min_rms for this payload"
+        )
+        sample_count = len(frames) // 2
+        assert sample_count > 0, "Decoded WAV carries no samples"
+        samples = struct.unpack(f"<{sample_count}h", frames[: sample_count * 2])
+        rms = math.sqrt(sum(s * s for s in samples) / sample_count) / 32768.0
+        assert rms >= self.min_rms, (
+            f"Audio RMS {rms:.5f} is below the expected minimum {self.min_rms:.5f}; "
+            f"the waveform is silent or near-silent "
+            f"({duration_s:.3f}s, {channels}ch at {sample_rate} Hz)"
+        )

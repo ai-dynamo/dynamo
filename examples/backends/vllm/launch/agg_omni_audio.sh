@@ -1,6 +1,27 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated vLLM-Omni text-to-speech. Defaults to Qwen3-TTS; --model also
+# selects Nemotron Audex, which runs a 2-stage pipeline (stage 0 thinker emits
+# <speechcodec_N> tokens, stage 1 code2wav decodes them to a 16 kHz mono
+# waveform):
+#
+#   ./agg_omni_audio.sh --model nvidia/Nemotron-Labs-Audex-2B
+#
+# Audex has a single built-in voice, so it rejects `voice`/`ref_audio`/
+# `ref_text` rather than silently synthesizing something else, and it is the
+# only audio model here that accepts `cfg_scale` (omit or 1.0 to decode
+# unguided). The curl footer below adapts to the selected model.
+#
+# The 30B-A3B needs an explicit stage config, because both Audex checkpoints
+# report model_type nemotron_labs_audex and auto-detection would otherwise pick
+# the 2B-tuned yaml. vLLM-Omni ships that config, so resolve it from the
+# installed package rather than hardcoding a site-packages path:
+#
+#   AUDEX_30B_CFG=$(python -c 'import pathlib, vllm_omni; print(pathlib.Path(vllm_omni.__file__).parent / "deploy/audex_tts_30b.yaml")')
+#   ./agg_omni_audio.sh --model nvidia/Nemotron-Labs-Audex-30B-A3B \
+#       --stage-configs-path "$AUDEX_30B_CFG"
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
@@ -9,7 +30,7 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-MODEL="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+MODEL="${MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
 
 # Parse command line arguments
 EXTRA_ARGS=()
@@ -29,6 +50,20 @@ done
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 print_launch_banner --no-curl "Launching vLLM-Omni Audio/TTS (1 GPU)" "$MODEL" "$HTTP_PORT"
+# Audex rejects 'voice', so print the request body it actually accepts: the
+# Qwen3-TTS footer would hand the user a request that fails with HTTP 400.
+if [[ "$MODEL" == *[Aa]udex* ]]; then
+print_curl_footer <<CURL
+  curl -X POST http://localhost:${HTTP_PORT}/v1/audio/speech \\
+    -H 'Content-Type: application/json' \\
+    -d '{
+      "input": "Hey, this is generated using Dynamo!",
+      "model": "${MODEL}",
+      "cfg_scale": 1.5
+    }' \\
+    -o dynamo-audio.wav
+CURL
+else
 print_curl_footer <<CURL
   curl -X POST http://localhost:${HTTP_PORT}/v1/audio/speech \\
     -H 'Content-Type: application/json' \\
@@ -40,6 +75,7 @@ print_curl_footer <<CURL
     }' \\
     -o dynamo-audio.wav
 CURL
+fi
 
 
 python -m dynamo.frontend &
@@ -48,8 +84,9 @@ FRONTEND_PID=$!
 sleep 2
 
 echo "Starting Omni Audio worker..."
-# Upstream qwen3_tts stage configs still use a 65536 stage-1 max_model_len.
-# vLLM 0.19 validates that against the model config unless we opt in here.
+# Upstream qwen3_tts stage configs still use a 65536 stage-1 max_model_len, and
+# the audex stage configs likewise declare a stage-1 max_model_len above what
+# the model config reports. vLLM 0.19 validates that unless we opt in here.
 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm.omni \

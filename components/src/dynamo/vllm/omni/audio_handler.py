@@ -425,6 +425,11 @@ class AudioGenerationHandler:
             # Guidance sharpens the distribution, so the unguided default
             # temperature adds excess sampling noise (vLLM-Omni measures a CER
             # win for 0.05 over 0.1 at cfg 1.5).
+            #
+            # That measurement is 2B-tuned: vLLM-Omni's audex_tts_30b.yaml
+            # records 0.1 as the 30B-A3B's best guided temperature. Applying
+            # 0.05 to both sizes matches vLLM-Omni's own behavior, which treats
+            # a size-aware value as a known follow-up rather than a defect.
             stage0.temperature = 0.05
 
         extra_args.update(

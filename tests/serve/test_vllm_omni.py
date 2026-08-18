@@ -197,6 +197,43 @@ vllm_omni_configs = {
             ),
         ],
     ),
+    "omni_audex": VLLMOmniConfig(
+        name="omni_audex",
+        directory=vllm_dir,
+        # Audex shares the audio launch script; only the model differs.
+        script_name="agg_omni_audio.sh",
+        script_args=["--model", "nvidia/Nemotron-Labs-Audex-2B"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+        ],
+        model="nvidia/Nemotron-Labs-Audex-2B",
+        request_payloads=[
+            AudioSpeechPayload(
+                body={
+                    "model": "nvidia/Nemotron-Labs-Audex-2B",
+                    "input": "Hey, this is generated using Dynamo!",
+                    # Audex is the only audio model that takes cfg_scale, and it
+                    # travels as a top-level protocol field: unknown fields are
+                    # dropped silently, so a plumbing regression would leave
+                    # guidance unapplied without failing the request.
+                    "cfg_scale": 1.5,
+                },
+                repeat_count=1,
+                # Stage 1 emits cumulative waveform snapshots, the first of
+                # which is empty. Mis-assembling that stream yields a short or
+                # silent WAV that still parses, so check the waveform itself:
+                # this prompt decodes to ~2.3s at rms ~0.055.
+                min_duration_s=1.0,
+                min_rms=0.01,
+                expected_sample_rate=16000,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     # Known flake (post-merge): URL check fails after 600s with "StageDiffusionProc
     # died during handshake (exit code 143)" — the diffusion child process is
     # SIGTERM'd before the handshake completes. Bumping the timeout will not fix this;
