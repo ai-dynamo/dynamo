@@ -49,10 +49,9 @@ type groveWorkloadRenderer struct {
 // grovePodCliqueSetRender couples the desired PCS and rendered DGD to the
 // exact observation used to decide compatibility and the worker hash suffix.
 type grovePodCliqueSetRender struct {
-	existing               *grovev1alpha1.PodCliqueSet
-	desired                *grovev1alpha1.PodCliqueSet
-	renderDeployment       *nvidiacomv1beta1.DynamoGraphDeployment
-	workerHashSuffixNeeded bool
+	existing         *grovev1alpha1.PodCliqueSet
+	desired          *grovev1alpha1.PodCliqueSet
+	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment
 }
 
 func newGroveWorkloadRenderer(
@@ -106,10 +105,9 @@ func (r *groveWorkloadRenderer) Render(
 		return nil, err
 	}
 	return &grovePodCliqueSetRender{
-		existing:               existingPodCliqueSet,
-		desired:                desired,
-		renderDeployment:       renderDeployment,
-		workerHashSuffixNeeded: workerHashSuffixNeeded,
+		existing:         existingPodCliqueSet,
+		desired:          desired,
+		renderDeployment: renderDeployment,
 	}, nil
 }
 
