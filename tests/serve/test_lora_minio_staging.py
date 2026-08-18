@@ -28,7 +28,16 @@ from pytest_httpserver import HTTPServer
 
 from tests.serve.lora_utils import MinioLoraConfig, MinioService
 
-pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+# The tests run in well under a second against a loopback server, but a
+# regression puts the upload back on the CRT path, which addresses real S3 and
+# lets botocore's retry loop stall on an unreachable endpoint. The marker caps
+# that at a fast failure rather than a hung pre-merge job.
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(60),
+]
 
 BUCKET = "my-loras"
 LORA_NAME = "test-org/test-lora"
@@ -117,7 +126,12 @@ def _force_crt_optimized_host(monkeypatch: pytest.MonkeyPatch) -> None:
     # Confirm boto3 really does resolve to the CRT client under that patch,
     # rather than letting the test pass vacuously on a boto3/awscrt combination
     # that would never have taken the failing branch.
-    from boto3.s3.transfer import TransferConfig, _should_use_crt
+    # _should_use_crt is boto3-private, so a rename skips rather than raising
+    # ImportError, which would take the two negative controls down with it.
+    try:
+        from boto3.s3.transfer import TransferConfig, _should_use_crt
+    except ImportError:
+        pytest.skip("boto3 no longer exposes _should_use_crt under that name")
 
     if not _should_use_crt(TransferConfig()):
         pytest.skip("boto3 does not select the CRT transfer client in this environment")
