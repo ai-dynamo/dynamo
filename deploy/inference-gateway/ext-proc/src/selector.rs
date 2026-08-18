@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 
 use dynamo_kv_router::config::{KvRouterConfig, kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::RoutingConstraints;
@@ -24,6 +24,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::epp_standalone_config::EppStandaloneConfig;
+use crate::peer_discovery::PeerPorts;
 
 const DEFAULT_ROUTING_GROUP: &str = "default";
 
@@ -81,9 +82,8 @@ pub struct Selector {
     /// `Drop` tears down its core + replica-sync tasks.
     cancel: CancellationToken,
     reconcile_state: Mutex<ReconcileState>,
-    /// Peer-discovery readiness in replicated mode: `None` when replication is
-    /// disabled (single replica, always ready), or `Some(flag)` that latches
-    /// `true` once the initial peer-set sync completes. ANDed into EPP health.
+    /// Replication-bootstrap readiness: initial peer discovery plus KV-index
+    /// recovery, or authoritative no-peer bootstrap. Latched once initialized.
     peer_ready: Option<Arc<AtomicBool>>,
 }
 
@@ -97,6 +97,37 @@ struct ReconcileState {
     /// including `Incomplete` and partially failed upserts. Stale detection must
     /// cover this set rather than only the schedulable convergence cache.
     tracked_worker_ids: HashSet<u64>,
+}
+
+struct ReplicationConfig {
+    service_name: String,
+    ports: PeerPorts,
+}
+
+struct StartupCancellation {
+    cancel: CancellationToken,
+    armed: bool,
+}
+
+impl StartupCancellation {
+    fn new(cancel: CancellationToken) -> Self {
+        Self {
+            cancel,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartupCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel.cancel();
+        }
+    }
 }
 
 impl Selector {
@@ -119,27 +150,43 @@ impl Selector {
         Self::new_with_kv_router_config(cfg, kv_router_config_from_dynamo_env()).await
     }
 
-    /// Build a selection service using the custom policy compiled into this EPP image.
-    pub(crate) async fn build_selection_service_with_worker_selection_policy_factory(
+    /// Build a selector using the custom policy compiled into this EPP image.
+    pub(crate) async fn new_with_worker_selection_policy_factory(
         cfg: &EppStandaloneConfig,
         kv_router_config: KvRouterConfig,
         factory: WorkerSelectionPolicyFactory,
-    ) -> Result<SelectionService> {
-        Self::build_selection_service(cfg, kv_router_config, Some(factory)).await
+    ) -> Result<Self> {
+        Self::new_with_optional_factory(cfg, kv_router_config, Some(factory)).await
     }
 
     async fn new_with_kv_router_config(
         cfg: &EppStandaloneConfig,
         kv_router_config: KvRouterConfig,
     ) -> Result<Self> {
-        let service = Self::build_selection_service(cfg, kv_router_config, None).await?;
-        Self::from_service(cfg, service).await
+        Self::new_with_optional_factory(cfg, kv_router_config, None).await
+    }
+
+    async fn new_with_optional_factory(
+        cfg: &EppStandaloneConfig,
+        kv_router_config: KvRouterConfig,
+        factory: Option<WorkerSelectionPolicyFactory>,
+    ) -> Result<Self> {
+        let replication = Self::replication(cfg).await?;
+        let service = Self::build_selection_service(
+            cfg,
+            kv_router_config,
+            factory,
+            replication.as_ref().map(|config| config.ports.replica_sync),
+        )
+        .await?;
+        Self::from_service_with_replication(cfg, Arc::new(service), replication).await
     }
 
     async fn build_selection_service(
         cfg: &EppStandaloneConfig,
         kv_router_config: KvRouterConfig,
         factory: Option<WorkerSelectionPolicyFactory>,
+        replica_sync_port: Option<u16>,
     ) -> Result<SelectionService> {
         // If queueing is enabled, we need to validate that the max_num_batched_tokens is set.
         // Done once at startup to avoid validating on every reconcile.
@@ -151,10 +198,9 @@ impl Selector {
         let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(cfg.selector_threads)
             .resolved_worker_selection_policy_factory(factory);
-        let replication = Self::replication(cfg).await?;
 
-        if let Some((_, peer_sync_port)) = &replication {
-            builder = builder.replica_sync(*peer_sync_port, Vec::new());
+        if let Some(peer_sync_port) = replica_sync_port {
+            builder = builder.replica_sync(peer_sync_port, Vec::new());
         }
 
         builder
@@ -173,26 +219,43 @@ impl Selector {
             .queueing_enabled(&cfg.model_name)
             .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
         Self::validate_queueing_requirements(cfg, queueing_enabled)?;
-        let replication = match &cfg.peer_service {
-            Some(name) => Some((
-                name.clone(),
-                service.replica_sync_port().ok_or_else(|| {
-                    anyhow!(
-                        "DYN_EPP_PEER_SERVICE requires a prebuilt SelectionService with replica sync enabled"
-                    )
-                })?,
-            )),
-            None => None,
+        let prebuilt_replica_sync_port = if cfg.peer_service.is_some() {
+            let replica_sync_port = service.replica_sync_port().ok_or_else(|| {
+                anyhow!(
+                    "DYN_EPP_PEER_SERVICE requires a prebuilt SelectionService with replica sync enabled"
+                )
+            })?;
+            if !service.list_workers(None, None).is_empty() {
+                anyhow::bail!(
+                    "replicated prebuilt SelectionService must have an empty worker catalog before \
+                     KV-index recovery"
+                );
+            }
+            Some(replica_sync_port)
+        } else {
+            None
         };
+        let replication = Self::replication(cfg).await?;
+        if let Some(replication) = &replication {
+            let replica_sync_port = prebuilt_replica_sync_port
+                .ok_or_else(|| anyhow!("replicated prebuilt SelectionService was not validated"))?;
+            if replica_sync_port != replication.ports.replica_sync {
+                anyhow::bail!(
+                    "prebuilt SelectionService replica-sync port {replica_sync_port} does not match \
+                     EndpointSlice port {}",
+                    replication.ports.replica_sync
+                );
+            }
+        }
         Self::from_service_with_replication(cfg, service, replication).await
     }
 
-    async fn replication(cfg: &EppStandaloneConfig) -> Result<Option<(String, u16)>> {
+    async fn replication(cfg: &EppStandaloneConfig) -> Result<Option<ReplicationConfig>> {
         match &cfg.peer_service {
-            Some(name) => Ok(Some((
-                name.clone(),
-                crate::peer_discovery::resolve_replica_sync_port(&cfg.namespace, name).await?,
-            ))),
+            Some(name) => Ok(Some(ReplicationConfig {
+                service_name: name.clone(),
+                ports: crate::peer_discovery::resolve_peer_ports(&cfg.namespace, name).await?,
+            })),
             None => Ok(None),
         }
     }
@@ -200,11 +263,12 @@ impl Selector {
     async fn from_service_with_replication(
         cfg: &EppStandaloneConfig,
         service: Arc<SelectionService>,
-        replication: Option<(String, u16)>,
+        replication: Option<ReplicationConfig>,
     ) -> Result<Self> {
         let cancel = CancellationToken::new();
+        let mut startup = StartupCancellation::new(cancel.clone());
 
-        let peer_ready = if let Some((service_name, peer_sync_port)) = replication {
+        let peer_ready = if let Some(replication) = replication {
             // In replicated mode, we need to exclude ourselves from the peer set which requires the POD_IP
             let self_ip = std::env::var("POD_IP")
                 .ok()
@@ -216,14 +280,24 @@ impl Selector {
                          via the downward API (fieldRef status.podIP) so this replica can \
                          exclude itself from its peer set"
                     )
-                })?;
+                })?
+                .parse::<std::net::IpAddr>()
+                .context("POD_IP must be a valid IPv4 or IPv6 address")?;
+            crate::peer_http::spawn(
+                service.clone(),
+                replication.ports.selection_http,
+                self_ip,
+                cancel.clone(),
+            )
+            .await?;
             Some(
                 crate::peer_discovery::spawn(
                     service.clone(),
                     &cfg.namespace,
-                    &service_name,
-                    peer_sync_port,
-                    self_ip,
+                    &replication.service_name,
+                    replication.ports.replica_sync,
+                    replication.ports.selection_http,
+                    self_ip.to_string(),
                     cancel.clone(),
                 )
                 .await?,
@@ -231,6 +305,8 @@ impl Selector {
         } else {
             None
         };
+
+        startup.disarm();
 
         tracing::info!(
             replicated = peer_ready.is_some(),
@@ -474,6 +550,14 @@ models:
         }
     }
 
+    fn free_tcp_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("reserve test port")
+            .local_addr()
+            .expect("read test port")
+            .port()
+    }
+
     /// Minimal single-replica config (no peer service, so no cluster access).
     /// `max_num_batched_tokens` is set so `Selector::new` never fails its
     /// fast-fail check regardless of the ambient router policy.
@@ -580,6 +664,7 @@ models:
                     Box::new(FirstEligiblePicker),
                 )
             })),
+            None,
         )
         .await
         .expect("custom selection service should build");
@@ -900,6 +985,31 @@ models:
             error
                 .to_string()
                 .contains("SelectionService with replica sync enabled"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prebuilt_service_rejects_existing_workers_before_recovery() {
+        let service = SelectionServiceBuilder::new(KvRouterConfig::default())
+            .indexer_threads(1)
+            .replica_sync(free_tcp_port(), Vec::new())
+            .build()
+            .await
+            .expect("replica-sync selection service should build");
+        service
+            .upsert_worker(Selector::worker_request(&incomplete_registration(1)))
+            .await
+            .expect("incomplete worker should still enter the catalog");
+
+        let mut cfg = test_config();
+        cfg.peer_service = Some("does-not-exist".to_string());
+        let error = Selector::from_service(&cfg, service)
+            .await
+            .err()
+            .expect("prebuilt service with workers must be rejected");
+        assert!(
+            error.to_string().contains("empty worker catalog"),
             "{error}"
         );
     }
