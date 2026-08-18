@@ -1130,7 +1130,14 @@ class HandlerBase(BaseGenerativeHandler):
             if default_max_tokens is not None:
                 sampling_params.max_tokens = default_max_tokens
 
-        if is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name]):
+        # PREFILL forces max_tokens=1 above but must still apply the rest of
+        # the stop conditions (native TRT-LLM context_only overrides only
+        # max_tokens). Without this, TRT-LLM could stop on EOS at that single
+        # forced token and skip the KV handoff to decode entirely.
+        if (
+            is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name])
+            or self.disaggregation_mode == DisaggregationMode.PREFILL
+        ):
             apply_stop_conditions_to_sampling_params(
                 sampling_params, request["stop_conditions"]
             )
@@ -1362,6 +1369,10 @@ class HandlerBase(BaseGenerativeHandler):
 
                         # Yield the chunk to the client and update the token
                         # count for this output choice.
+                        #
+                        # Stays a yield under push egress: this hop is
+                        # pure-Python generator delegation on one thread. Only
+                        # the outermost hop into Rust pushes.
                         yield out
                         output_tokens_per_choice[output_idx] = next_total_toks
 

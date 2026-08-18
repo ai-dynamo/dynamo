@@ -23,11 +23,11 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 func TestProjectedPodSupportsControllerContract(t *testing.T) {
@@ -116,7 +116,8 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, pod.Name, snapshot.Spec.Source.PodRef.Name)
 		assert.Equal(t, pod.UID, snapshot.Spec.Source.PodRef.UID)
-		require.NoError(t, validateSourcePod(snapshot, pod))
+		// Source-pod validation (scheduled, UID match) is the external
+		// Snapshot operator's PodSnapshot reconciler's responsibility, not this controller's.
 	})
 
 	t.Run("model", func(t *testing.T) {

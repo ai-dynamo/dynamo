@@ -795,7 +795,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// will log a warning but not return an error (double free is allowed).
     ///
     /// This also performs the underlying prefill-complete cleanup via
-    /// [`ActiveSequences::free`], so callers do not need to call
+    /// `ActiveSequences::free`, so callers do not need to call
     /// [`Self::mark_prefill_completed`] before freeing a completed request.
     pub fn free(&self, request_id: &RequestId, decay_now: Instant) -> Result<(), SequenceError> {
         match self.mutate_request_worker_prompt_state(

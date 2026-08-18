@@ -598,6 +598,184 @@ impl ResponseService for TcpStreamServer {
     }
 }
 
+/// First retry delay applied after an `AcceptFailure::Exhaustion`.
+const ACCEPT_BACKOFF_INITIAL_DELAY: Duration = Duration::from_millis(5);
+/// Ceiling the retry delay saturates at, so the listener keeps polling often
+/// enough to notice recovery while no longer spinning.
+const ACCEPT_BACKOFF_MAX_DELAY: Duration = Duration::from_secs(1);
+/// Minimum wall-clock interval between two emitted exhaustion summaries.
+const ACCEPT_BACKOFF_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How the listener loop must treat a failed `accept()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptFailure {
+    /// The process or the host is out of file descriptors or kernel memory
+    /// — see `AcceptBackoff::classify` for the exact errno set. Retrying
+    /// immediately cannot succeed, so the loop must back off.
+    Exhaustion,
+    /// Anything else — a per-connection error that the client is expected to
+    /// retry. Keeps the historical warn-and-retry-immediately behavior.
+    Ordinary,
+}
+
+/// What the caller should do about one exhaustion failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AcceptBackoffAction {
+    /// How long to sleep before calling `accept()` again.
+    delay: Duration,
+    /// `Some(n)` when the caller should emit one summary line, where `n` is the
+    /// number of failures suppressed since the previous emission. `None` means
+    /// this failure is inside the current rate-limit window and must stay silent.
+    log_suppressed: Option<u64>,
+}
+
+/// Bounded exponential retry policy for the accept loop, kept deliberately pure:
+/// it reads no clock, performs no I/O and never sleeps. The caller supplies the
+/// current `Instant` and performs the sleep, which is what lets the retry
+/// schedule and the log-rate decision be unit-tested without reproducing the
+/// host's file-descriptor limit. Vocabulary mirrors `transports::etcd::connector`'s
+/// `BackoffState`.
+#[derive(Debug)]
+struct AcceptBackoff {
+    initial_delay: Duration,
+    max_delay: Duration,
+    log_interval: Duration,
+    current_delay: Duration,
+    suppressed: u64,
+    last_log_at: Option<std::time::Instant>,
+    /// Whether the loop is currently inside an exhaustion episode — the flag
+    /// `record_success` checks to tell a real recovery from an ordinary
+    /// steady-state accept.
+    in_backoff: bool,
+}
+
+impl Default for AcceptBackoff {
+    fn default() -> Self {
+        Self {
+            initial_delay: ACCEPT_BACKOFF_INITIAL_DELAY,
+            max_delay: ACCEPT_BACKOFF_MAX_DELAY,
+            log_interval: ACCEPT_BACKOFF_LOG_INTERVAL,
+            current_delay: ACCEPT_BACKOFF_INITIAL_DELAY,
+            suppressed: 0,
+            last_log_at: None,
+            in_backoff: false,
+        }
+    }
+}
+
+impl AcceptBackoff {
+    /// Classify an `accept()` error. Only descriptor or kernel-memory exhaustion
+    /// gets the backoff treatment; everything else stays on the pre-existing
+    /// path so genuinely unexpected failures are not hidden or slowed down.
+    fn classify(err: &std::io::Error) -> AcceptFailure {
+        #[cfg(unix)]
+        {
+            // `std::io::ErrorKind` has no stable variant for these errnos, so
+            // the raw value is the portable-with-cfg way to recognize them.
+            // `EMFILE`/`ENFILE` are descriptor exhaustion; `ENOBUFS`/`ENOMEM`
+            // are kernel out-of-memory for the socket. All four make an
+            // immediate retry deterministic, so they get the backoff path.
+            if matches!(
+                err.raw_os_error(),
+                Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM)
+            ) {
+                return AcceptFailure::Exhaustion;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = err;
+        }
+        AcceptFailure::Ordinary
+    }
+
+    /// Record one exhaustion failure and return the delay to sleep plus the
+    /// rate-limited logging decision. The delay doubles per consecutive failure
+    /// and saturates at `max_delay`.
+    fn record_exhaustion(&mut self, now: std::time::Instant) -> AcceptBackoffAction {
+        self.in_backoff = true;
+
+        let delay = self.current_delay;
+        self.current_delay = self.current_delay.saturating_mul(2).min(self.max_delay);
+
+        let due = match self.last_log_at {
+            None => true,
+            Some(prev) => now.saturating_duration_since(prev) >= self.log_interval,
+        };
+
+        let log_suppressed = if due {
+            self.last_log_at = Some(now);
+            Some(std::mem::take(&mut self.suppressed))
+        } else {
+            self.suppressed += 1;
+            None
+        };
+
+        AcceptBackoffAction {
+            delay,
+            log_suppressed,
+        }
+    }
+
+    /// Record a successful accept. `Some(suppressed)` only when this success
+    /// both ended an exhaustion episode and the shared log-rate window allows
+    /// a line — so a listener flapping at the descriptor ceiling cannot emit
+    /// an unbounded stream of recovery lines, and a suppressed recovery keeps
+    /// its count for the next emission rather than discarding it. The clock
+    /// arrives as a closure, not an `Instant`, so the steady-state accept
+    /// (every ordinary connection) hits the early return below without
+    /// reading a clock at all.
+    fn record_success(&mut self, now: impl FnOnce() -> std::time::Instant) -> Option<u64> {
+        if !self.in_backoff {
+            return None;
+        }
+        self.current_delay = self.initial_delay;
+        self.in_backoff = false;
+        let now = now();
+
+        let due = match self.last_log_at {
+            None => true,
+            Some(prev) => now.saturating_duration_since(prev) >= self.log_interval,
+        };
+        if !due {
+            return None;
+        }
+        self.last_log_at = Some(now);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
+
+/// Apply the accept-loop error policy to one failed `accept()`. Returns the
+/// delay that was actually slept — `Duration::ZERO` for ordinary errors, which
+/// keep the historical immediate-retry behavior.
+async fn handle_accept_error(err: &std::io::Error, backoff: &mut AcceptBackoff) -> Duration {
+    match AcceptBackoff::classify(err) {
+        AcceptFailure::Ordinary => {
+            // the client should retry, so we don't need to abort
+            tracing::warn!(error = %err, "failed to accept tcp connection");
+            // Gated like the sibling in `handle_connection`: an unconditional
+            // stderr write here doubles the log volume of any accept-error storm.
+            #[cfg(debug_assertions)]
+            eprintln!("failed to accept tcp connection: {}", err);
+            Duration::ZERO
+        }
+        AcceptFailure::Exhaustion => {
+            crate::metrics::transport_metrics::TCP_ACCEPT_BACKOFF_TOTAL.inc();
+            let action = backoff.record_exhaustion(std::time::Instant::now());
+            if let Some(suppressed) = action.log_suppressed {
+                tracing::warn!(
+                    error = %err,
+                    retry_delay_ms = action.delay.as_millis() as u64,
+                    suppressed_failures = suppressed,
+                    "tcp accept failed: out of file descriptors or kernel memory; backing off before retry"
+                );
+            }
+            time::sleep(action.delay).await;
+            action.delay
+        }
+    }
+}
+
 // Type aliases for boxed split halves used throughout the nested handlers below.
 type BoxRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
@@ -637,6 +815,8 @@ async fn tcp_listener(
         }
     };
 
+    let mut accept_backoff = AcceptBackoff::default();
+
     loop {
         // todo - add instrumentation
         // todo - add counter for all accepted connections
@@ -644,11 +824,17 @@ async fn tcp_listener(
         // todo - add counter for incoming bytes
         // todo - add counter for outgoing bytes
         let (stream, _addr) = match listener.accept().await {
-            Ok((stream, _addr)) => (stream, _addr),
+            Ok((stream, _addr)) => {
+                if let Some(suppressed) = accept_backoff.record_success(std::time::Instant::now) {
+                    tracing::warn!(
+                        suppressed_failures = suppressed,
+                        "tcp accept recovered from resource exhaustion"
+                    );
+                }
+                (stream, _addr)
+            }
             Err(e) => {
-                // the client should retry, so we don't need to abort
-                tracing::warn!("failed to accept tcp connection: {e}");
-                eprintln!("failed to accept tcp connection: {}", e);
+                handle_accept_error(&e, &mut accept_backoff).await;
                 continue;
             }
         };
@@ -2309,6 +2495,139 @@ mod tests {
         assert!(
             matches!(ctrl, ControlMessage::Stop),
             "context.stop() should emit Stop, got {ctrl:?}"
+        );
+    }
+
+    // ---- accept-loop backoff under resource exhaustion (issue #11822) ----
+
+    #[cfg(unix)]
+    fn emfile_error() -> std::io::Error {
+        std::io::Error::from_raw_os_error(libc::EMFILE)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accept_backoff_classifies_all_exhaustion_errnos() {
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+            let err = std::io::Error::from_raw_os_error(errno);
+            assert_eq!(
+                AcceptBackoff::classify(&err),
+                AcceptFailure::Exhaustion,
+                "errno {errno} must classify as exhaustion"
+            );
+        }
+        // Ordinary errors stay on the immediate-retry path.
+        let ordinary = std::io::Error::from(std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(AcceptBackoff::classify(&ordinary), AcceptFailure::Ordinary,);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accept_backoff_grows_resets_and_rate_limits() {
+        let mut backoff = AcceptBackoff::default();
+        let now = std::time::Instant::now();
+
+        // Delay doubles per consecutive failure and saturates at the ceiling.
+        let delays: Vec<Duration> = (0..12)
+            .map(|_| backoff.record_exhaustion(now).delay)
+            .collect();
+        assert!(delays[0] > Duration::ZERO);
+        let sat = delays
+            .iter()
+            .position(|d| *d == ACCEPT_BACKOFF_MAX_DELAY)
+            .expect("delay reaches the ceiling");
+        for pair in delays[..=sat].windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "delay must grow: {:?} -> {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(delays[sat..].iter().all(|d| *d == ACCEPT_BACKOFF_MAX_DELAY));
+
+        // A successful accept resets the schedule to the initial delay.
+        backoff.record_success(|| now);
+        assert_eq!(
+            backoff.record_exhaustion(now).delay,
+            ACCEPT_BACKOFF_INITIAL_DELAY,
+        );
+
+        // The summary is rate-limited: one emission per interval, carrying the
+        // count of failures suppressed since the previous one.
+        let t0 = std::time::Instant::now();
+        let mut backoff = AcceptBackoff::default();
+        let emitted: Vec<Option<u64>> = (0..50)
+            .map(|_| backoff.record_exhaustion(t0).log_suppressed)
+            .collect();
+        assert_eq!(emitted.iter().filter(|e| e.is_some()).count(), 1);
+        assert_eq!(emitted[0], Some(0));
+
+        let t1 = t0 + ACCEPT_BACKOFF_LOG_INTERVAL + Duration::from_millis(1);
+        assert_eq!(
+            backoff.record_exhaustion(t1).log_suppressed,
+            Some(49),
+            "next emission reports every failure suppressed since the last one",
+        );
+
+        // Recovery shares the rate-limit window with the failure summary, so a
+        // flapping listener cannot emit a recovery line per accept.
+        let mut backoff = AcceptBackoff::default();
+        let t0 = std::time::Instant::now();
+        assert_eq!(backoff.record_exhaustion(t0).log_suppressed, Some(0));
+        backoff.record_exhaustion(t0);
+        backoff.record_exhaustion(t0);
+        assert_eq!(
+            backoff.record_success(|| t0),
+            None,
+            "recovery inside the log window must not emit",
+        );
+        backoff.record_exhaustion(t0);
+        assert_eq!(
+            backoff.record_success(|| t0 + ACCEPT_BACKOFF_LOG_INTERVAL),
+            Some(3),
+            "after the window elapses the recovery emits with the rolled-forward count",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn accept_backoff_socket_recovers_after_injected_exhaustion() {
+        use crate::metrics::transport_metrics::TCP_ACCEPT_BACKOFF_TOTAL;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let mut backoff = AcceptBackoff::default();
+        let counter_before = TCP_ACCEPT_BACKOFF_TOTAL.get();
+
+        let started = std::time::Instant::now();
+        let mut expected_total = Duration::ZERO;
+        for _ in 0..3 {
+            expected_total += handle_accept_error(&emfile_error(), &mut backoff).await;
+        }
+        assert!(expected_total >= ACCEPT_BACKOFF_INITIAL_DELAY * 3);
+        assert!(
+            started.elapsed() >= expected_total,
+            "the accept loop must sleep, not spin; elapsed {:?}",
+            started.elapsed(),
+        );
+        assert!(TCP_ACCEPT_BACKOFF_TOTAL.get() >= counter_before + 3.0);
+
+        let client = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await });
+        let (accepted, _peer) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("listener should still accept after backing off")
+            .expect("accept should succeed");
+        let _client = client.await.expect("client task").expect("client connect");
+        drop(accepted);
+
+        backoff.record_success(std::time::Instant::now);
+        assert_eq!(
+            backoff.record_exhaustion(std::time::Instant::now()).delay,
+            ACCEPT_BACKOFF_INITIAL_DELAY,
         );
     }
 }

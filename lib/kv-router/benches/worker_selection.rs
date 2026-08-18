@@ -265,5 +265,66 @@ fn custom_worker_selection(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, worker_selection, custom_worker_selection);
+fn default_policy_wrapper(c: &mut Criterion) {
+    let config = KvRouterConfig {
+        router_temperature: 0.0,
+        ..Default::default()
+    };
+    let mut group = c.benchmark_group("default_policy_wrapper");
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    for worker_count in [2, 32, 1_024] {
+        let (workers, request) = fixture(worker_count);
+        let direct = DefaultWorkerSelector::new(Some(config.clone()), "prefill");
+        let policy = WorkerSelectionPolicy::default(config.clone(), "prefill");
+        group.throughput(Throughput::Elements(worker_count as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("direct", worker_count),
+            &worker_count,
+            |b, _| {
+                b.iter(|| {
+                    black_box(
+                        direct
+                            .select_worker(
+                                black_box(&workers),
+                                black_box(&request),
+                                request.eligibility(),
+                                black_box(16),
+                            )
+                            .unwrap(),
+                    )
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("policy", worker_count),
+            &worker_count,
+            |b, _| {
+                b.iter(|| {
+                    black_box(
+                        policy
+                            .select_worker(
+                                black_box(&workers),
+                                black_box(&request),
+                                request.eligibility(),
+                                black_box(16),
+                            )
+                            .unwrap(),
+                    )
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    worker_selection,
+    custom_worker_selection,
+    default_policy_wrapper
+);
 criterion_main!(benches);
