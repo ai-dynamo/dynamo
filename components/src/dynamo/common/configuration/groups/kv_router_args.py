@@ -329,11 +329,13 @@ class KvRouterArgGroup(ArgGroup):
                 "[EXPERIMENTAL] KV Router: Apply cost-function weights tuned for "
                 "aggregate agentic workloads. On the frontend, this implies "
                 "--router-mode kv. "
-                "This preset sets overlap_score_credit=2, prefill_load_scale=4, "
-                "and decode_active_request_weight=64 block-equivalents per active "
-                "request. Queueing and cache-tracking controls retain their normal "
-                "defaults. These weights were validated with 16-token router blocks; "
-                "the active-request weight may need retuning for other block sizes."
+                "This preset takes precedence over the corresponding individual CLI "
+                "options and environment variables, clears the deprecated overlap-score "
+                "weight, and sets overlap_score_credit=2, prefill_load_scale=4, and "
+                "decode_active_request_weight=64 block-equivalents per active request. "
+                "Queueing and cache-tracking controls retain their normal defaults. "
+                "These weights were validated with 16-token router blocks; the "
+                "active-request weight may need retuning for other block sizes."
             ),
         )
         add_argument(
