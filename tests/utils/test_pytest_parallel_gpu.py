@@ -11,6 +11,8 @@ the VRAM-aware ordering beats the legacy timeout-sorted first-fit. No GPU or
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from tests.utils.pytest_parallel_gpu import (
@@ -19,7 +21,7 @@ from tests.utils.pytest_parallel_gpu import (
     _select_launches,
     _TestEntry,
 )
-from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN
+from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN, write_test_meta
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -43,8 +45,19 @@ def _gpu(
     )
 
 
-def _t(name: str, profiled: float, timeout: float = 600.0) -> _TestEntry:
-    return _TestEntry(id=name, name=name, profiled_gib=profiled, timeout=timeout)
+def _t(
+    name: str,
+    profiled: float,
+    timeout: float = 600.0,
+    required_gpus: int = 1,
+) -> _TestEntry:
+    return _TestEntry(
+        id=name,
+        name=name,
+        profiled_gib=profiled,
+        timeout=timeout,
+        required_gpus=required_gpus,
+    )
 
 
 def _select(pending, gpus, *, num_slots, running_count=0, actual_free=None):
@@ -57,6 +70,26 @@ def _select(pending, gpus, *, num_slots, running_count=0, actual_free=None):
         num_slots=num_slots,
         running_count=running_count,
     )
+
+
+def test_gpu_marker_is_serialized_for_scheduler(tmp_path):
+    class Marker:
+        args = (3.7,)
+        kwargs = {}
+
+    class Item:
+        nodeid = "test_file.py::test_dp"
+
+        def get_closest_marker(self, name):
+            if name in {"gpu_2", "profiled_vram_gib"}:
+                return Marker()
+            return None
+
+    write_test_meta([Item()], str(tmp_path))
+
+    metadata_path = next(tmp_path.glob("*.json"))
+    metadata = json.loads(metadata_path.read_text())
+    assert metadata[Item.nodeid]["required_gpus"] == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -91,7 +124,7 @@ def test_pairs_large_with_small_on_one_gpu():
 
     launches = _select(pending, gpus, num_slots=8)
 
-    assert launches == [(0, 0), (1, 0)]
+    assert launches == [(0, (0,)), (1, (0,))]
 
 
 def test_first_test_uses_full_card_then_multi_proc_margin():
@@ -102,7 +135,7 @@ def test_first_test_uses_full_card_then_multi_proc_margin():
 
     launches = _select(pending, gpus, num_slots=8)
 
-    assert launches == [(0, 0)]
+    assert launches == [(0, (0,))]
 
 
 def test_multi_gpu_spreads_then_packs():
@@ -113,7 +146,28 @@ def test_multi_gpu_spreads_then_packs():
 
     launches = _select(pending, gpus, num_slots=8)
 
-    assert launches == [(0, 0), (1, 1), (2, 1)]
+    assert launches == [(0, (0,)), (1, (1,)), (2, (1,))]
+
+
+def test_gpu_2_test_is_assigned_two_visible_gpus():
+    gpus = {0: _gpu(0, 24.0), 1: _gpu(1, 24.0), 2: _gpu(2, 24.0)}
+    pending = [_t("dp", 3.7, required_gpus=2)]
+
+    launches = _select(pending, gpus, num_slots=1)
+
+    assert launches == [(0, (0, 1))]
+
+
+def test_gpu_2_test_waits_until_two_gpus_fit():
+    gpus = {
+        0: _gpu(0, 24.0),
+        1: _gpu(1, 24.0, budget_used=19.0, running_count=1),
+    }
+    pending = [_t("dp", 3.7, required_gpus=2)]
+
+    launches = _select(pending, gpus, num_slots=2, running_count=1)
+
+    assert launches == []
 
 
 # --------------------------------------------------------------------------- #
@@ -127,7 +181,7 @@ def test_zero_vram_fillers_bypass_budget():
 
     launches = _select(pending, gpus, num_slots=8, running_count=1)
 
-    assert launches == [(0, 0), (1, 0)]
+    assert launches == [(0, (0,)), (1, (0,))]
 
 
 def test_slot_cap_is_global():
@@ -148,7 +202,7 @@ def test_actual_usage_gate_blocks_when_live_vram_exceeds_budget():
     pending = [_t("big", 13.0)]
 
     # Budget gate alone (actual_free defaults to total - budget = 22): launches.
-    assert _select(pending, gpus, num_slots=8) == [(0, 0)]
+    assert _select(pending, gpus, num_slots=8) == [(0, (0,))]
 
     # Only 5 GiB actually free => 17 GiB live-used; 17 + 13 = 30 > 22 cap -> the
     # actual-usage gate blocks the launch the budget gate would have allowed.
@@ -170,7 +224,7 @@ def test_reservation_keeps_room_for_blocked_high_priority_test():
 
     launches = _select(pending, gpus, num_slots=8, running_count=1)
 
-    assert launches == [(1, 0)]  # only one 3.8 backfill; room held for the 12
+    assert launches == [(1, (0,))]  # only one 3.8 backfill; room held for the 12
 
 
 def test_blocked_test_launches_once_occupant_frees():
@@ -183,7 +237,7 @@ def test_blocked_test_launches_once_occupant_frees():
 
     # 12 fits (19-3.8=15.2) and is highest priority; the extra 3.8 no longer fits
     # (19-15.8=3.2<3.8).
-    assert launches == [(0, 0)]
+    assert launches == [(0, (0,))]
 
 
 # --------------------------------------------------------------------------- #
@@ -297,12 +351,20 @@ def _simulate_makespan(tests, *, num_slots, gpus_total, order_key, select) -> fl
             running_count=len(running),
         )
         if sel:
-            for idx, gi in sorted(sel, key=lambda x: x[0], reverse=True):
+            for idx, assignment in sorted(sel, key=lambda x: x[0], reverse=True):
                 t = pending.pop(idx)
-                gpu_states[gi].budget_used += t.profiled_gib
-                gpu_states[gi].running_count += 1
+                assigned_gpus = (
+                    assignment if isinstance(assignment, tuple) else (assignment,)
+                )
+                for gi in assigned_gpus:
+                    gpu_states[gi].budget_used += t.profiled_gib
+                    gpu_states[gi].running_count += 1
                 running.append(
-                    {"finish": now + t.runtime, "profiled": t.profiled_gib, "gpu": gi}
+                    {
+                        "finish": now + t.runtime,
+                        "profiled": t.profiled_gib,
+                        "gpus": assigned_gpus,
+                    }
                 )
             continue
         assert running, "deadlock: pending tests but nothing running"
@@ -310,8 +372,9 @@ def _simulate_makespan(tests, *, num_slots, gpus_total, order_key, select) -> fl
         still = []
         for r in running:
             if r["finish"] <= now:
-                gpu_states[r["gpu"]].budget_used -= r["profiled"]
-                gpu_states[r["gpu"]].running_count -= 1
+                for gi in r["gpus"]:
+                    gpu_states[gi].budget_used -= r["profiled"]
+                    gpu_states[gi].running_count -= 1
             else:
                 still.append(r)
         running = still

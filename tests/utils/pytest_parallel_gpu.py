@@ -26,6 +26,7 @@ A 10-second cooldown between launches avoids the vLLM profiling race
 from __future__ import annotations
 
 import argparse
+import itertools
 import os
 import subprocess
 import sys
@@ -62,8 +63,9 @@ class _TestEntry:
     requested_trtllm_kv_tokens: int | None = None
     requested_trtllm_vram_gib: float | None = None
     skip_reason: str | None = None
+    required_gpus: int = 1
     w_id: int = 0
-    assigned_gpu: int | None = None
+    assigned_gpus: tuple[int, ...] = ()
     retries: int = 0
 
     @property
@@ -337,15 +339,15 @@ def _select_launches(
     actual_free: dict[int, float],
     num_slots: int,
     running_count: int,
-) -> list[tuple[int, int]]:
-    """Pick which pending tests to launch this pass, and on which GPU.
+) -> list[tuple[int, tuple[int, ...]]]:
+    """Pick which pending tests to launch this pass, and on which GPUs.
 
     Pure (no NVML / no subprocesses): the caller passes the live per-GPU budget
     state and the actual free VRAM (from nvidia-smi). ``pending`` must already be
     in scheduling-priority order (VRAM tests by longest est_duration / largest
     VRAM first, zero-VRAM fillers last -- see the sort in ``run_parallel``).
 
-    Returns a list of ``(pending_index, gpu_index)`` to launch now, honoring:
+    Returns ``(pending_index, gpu_indices)`` pairs to launch now, honoring:
 
       * ``num_slots`` -- global cap on concurrently running subprocesses.
       * Per-GPU VRAM budget with two independent gates (same as before): a test
@@ -377,7 +379,7 @@ def _select_launches(
     # capped at cap - required so the reserved test still fits once occupants free.
     reserved_req: dict[int, float] = {}
     backfill_added: dict[int, float] = {}
-    to_launch: list[tuple[int, int]] = []
+    to_launch: list[tuple[int, tuple[int, ...]]] = []
 
     def _cap(gi: int) -> float:
         # First test on an idle GPU may use the whole card; once it hosts 2+,
@@ -390,57 +392,68 @@ def _select_launches(
             break
 
         # Zero-VRAM filler: no budget impact, just needs a free slot. Place on
-        # the least-loaded GPU for balance; never reserves and is never blocked.
+        # the least-loaded GPUs for balance; never reserves and is never blocked.
         if test.profiled_gib <= 0:
-            gi = min(gpu_states, key=lambda g: tentative[g].count)
-            to_launch.append((idx, gi))
-            tentative[gi].count += 1
+            gpu_group = tuple(
+                sorted(gpu_states, key=lambda gi: tentative[gi].count)[
+                    : test.required_gpus
+                ]
+            )
+            to_launch.append((idx, gpu_group))
+            for gi in gpu_group:
+                tentative[gi].count += 1
             continue
 
-        # VRAM test: best-fit on the GPU with the most free budget that passes
-        # both gates and respects any reservation.
-        best_gi: int | None = None
+        # VRAM test: find the best set of GPUs that all pass both budget gates
+        # and respect existing reservations. ``profiled_gib`` is a per-GPU
+        # request for multi-GPU tests.
+        candidates = itertools.combinations(gpu_states, test.required_gpus)
+        best_gpus: tuple[int, ...] | None = None
         best_avail = -1.0
-        for gi, gs in gpu_states.items():
-            ts = tentative[gi]
-            cap = _cap(gi)
-            avail = cap - ts.budget
-            if avail < test.profiled_gib:
-                continue  # reserved-budget gate
-            actual_used = gs.total_gib - ts.free
-            if actual_used + test.profiled_gib > cap:
-                continue  # actual-usage gate (catches init-time spikes)
-            if gi in reserved_req and (
-                backfill_added[gi] + test.profiled_gib > cap - reserved_req[gi]
-            ):
-                continue  # would crowd out the reserved higher-priority test
-            if avail > best_avail:
-                best_gi, best_avail = gi, avail
+        for gpu_group in candidates:
+            group_avail = 0.0
+            for gi in gpu_group:
+                gs = gpu_states[gi]
+                ts = tentative[gi]
+                cap = _cap(gi)
+                avail = cap - ts.budget
+                if avail < test.profiled_gib:
+                    break  # reserved-budget gate
+                actual_used = gs.total_gib - ts.free
+                if actual_used + test.profiled_gib > cap:
+                    break  # actual-usage gate (catches init-time spikes)
+                if gi in reserved_req and (
+                    backfill_added[gi] + test.profiled_gib > cap - reserved_req[gi]
+                ):
+                    break  # would crowd out a reserved higher-priority test
+                group_avail += avail
+            else:
+                if group_avail > best_avail:
+                    best_gpus, best_avail = gpu_group, group_avail
 
-        if best_gi is not None:
-            to_launch.append((idx, best_gi))
-            tentative[best_gi].budget += test.profiled_gib
-            tentative[best_gi].free -= test.profiled_gib
-            tentative[best_gi].count += 1
-            if best_gi in reserved_req:
-                backfill_added[best_gi] += test.profiled_gib
+        if best_gpus is not None:
+            to_launch.append((idx, best_gpus))
+            for gi in best_gpus:
+                tentative[gi].budget += test.profiled_gib
+                tentative[gi].free -= test.profiled_gib
+                tentative[gi].count += 1
+                if gi in reserved_req:
+                    backfill_added[gi] += test.profiled_gib
             continue
 
-        # Blocked: reserve the GPU where this test is closest to fitting (most
-        # free budget), unless that GPU is already held for an even-higher-
-        # priority test. Keep scanning -- smaller tests may still fit elsewhere
-        # or backfill under the reservation, and fillers keep filling slots.
-        cand: int | None = None
-        cand_avail = -1.0
-        for gi in gpu_states:
-            if gi in reserved_req:
-                continue
-            a = _cap(gi) - tentative[gi].budget
-            if a > cand_avail:
-                cand, cand_avail = gi, a
-        if cand is not None:
-            reserved_req[cand] = test.profiled_gib
-            backfill_added[cand] = 0.0
+        # Blocked: reserve the required number of GPUs where this test is
+        # closest to fitting. Lower-priority work may only backfill below the
+        # reservation on each card.
+        unreserved = [gi for gi in gpu_states if gi not in reserved_req]
+        if len(unreserved) >= test.required_gpus:
+            closest = sorted(
+                unreserved,
+                key=lambda gi: _cap(gi) - tentative[gi].budget,
+                reverse=True,
+            )[: test.required_gpus]
+            for gi in closest:
+                reserved_req[gi] = test.profiled_gib
+                backfill_added[gi] = 0.0
 
     return to_launch
 
@@ -492,8 +505,7 @@ def run_parallel(
     for gi in gpu_indices:
         if gi not in gpu_by_idx:
             _print(
-                f"ERROR: GPU{gi} not found "
-                f"(available: {[g['index'] for g in gpus]})"
+                f"ERROR: GPU{gi} not found (available: {[g['index'] for g in gpus]})"
             )
             return 1
         total = gpu_by_idx[gi]["total_mib"] / 1024.0
@@ -518,6 +530,7 @@ def run_parallel(
                 requested_trtllm_kv_tokens=m.get("requested_trtllm_kv_tokens"),
                 requested_trtllm_vram_gib=m.get("requested_trtllm_vram_gib"),
                 skip_reason=m.get("skip_reason"),
+                required_gpus=m.get("required_gpus", 1),
             )
         )
 
@@ -525,6 +538,16 @@ def run_parallel(
     # validate KV markers or consume GPU budget.
     skipped_tests = [t for t in tests if t.skip_reason is not None]
     tests = [t for t in tests if t.skip_reason is None]
+
+    too_many_gpus = [t for t in tests if t.required_gpus > len(gpu_states)]
+    if too_many_gpus:
+        _print(
+            f"ERROR: {len(too_many_gpus)} test(s) require more than the "
+            f"{len(gpu_states)} visible GPU(s):"
+        )
+        for test in too_many_gpus:
+            _print(f"  {test.name} (requires {test.required_gpus})")
+        return 1
 
     # Scheduling priority (highest first):
     #   1. VRAM tests (profiled_gib > 0) before zero-VRAM fillers, so the
@@ -559,7 +582,7 @@ def run_parallel(
         )
         for t in no_kv:
             _print(f"  {t.name}")
-        _print("\nAdd the appropriate marker via profile_pytest.py, " "then rerun.")
+        _print("\nAdd the appropriate marker via profile_pytest.py, then rerun.")
         return 1
 
     # Identify tests in metadata that exceed the VRAM budget
@@ -636,7 +659,7 @@ def run_parallel(
     # --- Report skip-marked tests immediately (like xdist SKIPPED) ---
     completed: list[_CompletedTest] = []
     for test in skipped_tests:
-        _print(f"[w{test.w_id}] {test.name} SKIPPED" f" - {test.skip_reason}")
+        _print(f"[w{test.w_id}] {test.name} SKIPPED - {test.skip_reason}")
         completed.append(
             _CompletedTest(
                 test=test,
@@ -667,7 +690,9 @@ def run_parallel(
             gs = gpu_states[gi]
             actual = _get_gpu_used_gib(gi)
             workers = sorted(
-                w for w, run_info in running.items() if run_info.test.assigned_gpu == gi
+                w
+                for w, run_info in running.items()
+                if gi in run_info.test.assigned_gpus
             )
             wstr = ", ".join(
                 f"w{w}({int(now - running[w].start_time)}s)" for w in workers
@@ -681,7 +706,7 @@ def run_parallel(
     def _launch_test(test: _TestEntry, env_base: dict) -> _RunningTest:
         """Build env, spawn subprocess, start output streamer thread."""
         env = env_base.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(test.assigned_gpu)
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, test.assigned_gpus))
         if test.requested_sglang_kv_tokens is not None:
             env["_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS"] = str(
                 int(test.requested_sglang_kv_tokens)
@@ -777,7 +802,7 @@ def run_parallel(
                 duration = now - run_info.start_time
                 passed = rc == 0
                 test = run_info.test
-                gi = test.assigned_gpu
+                assigned_gpus = test.assigned_gpus
 
                 # Detect retryable init errors (profiling race, OOM at startup)
                 if not passed and test.retries < _MAX_RETRIES:
@@ -795,11 +820,11 @@ def run_parallel(
                             f"[w{w_id}] retrying ({test.retries}/{_MAX_RETRIES})"
                             f" — {matched_marker}"
                         )
-                        if gi is not None:
+                        for gi in assigned_gpus:
                             gpu_states[gi].budget_used -= test.profiled_gib
                             gpu_states[gi].running_count -= 1
                         del running[w_id]
-                        test.assigned_gpu = None
+                        test.assigned_gpus = ()
                         pending.insert(0, test)
                         continue
 
@@ -837,11 +862,11 @@ def run_parallel(
                     status = "FAILED"
 
                 if skipped:
-                    _print(f"[w{w_id}] {test.name} SKIPPED" f" - {skip_reason}")
+                    _print(f"[w{w_id}] {test.name} SKIPPED - {skip_reason}")
                 else:
                     _print(f"[w{w_id}] {test.name} {status} [{duration:.0f}s]")
 
-                if gi is not None:
+                for gi in assigned_gpus:
                     gpu_states[gi].budget_used -= test.profiled_gib
                     gpu_states[gi].running_count -= 1
                 completed.append(
@@ -887,16 +912,16 @@ def run_parallel(
             # Pop from pending in reverse to preserve indices, then reverse
             # back so highest-priority tests launch first.
             batch: list[_TestEntry] = []
-            for pending_idx, assigned_gpu in reversed(to_launch):
+            for pending_idx, assigned_gpus in reversed(to_launch):
                 entry = pending.pop(pending_idx)
-                entry.assigned_gpu = assigned_gpu
+                entry.assigned_gpus = assigned_gpus
                 batch.append(entry)
             batch.reverse()
 
             for entry in batch:
                 w_id = entry.w_id
-                gi = entry.assigned_gpu
-                assert gi is not None
+                assigned_gpus = entry.assigned_gpus
+                assert assigned_gpus
                 is_vllm = (
                     entry.requested_vllm_kv_cache_bytes is not None
                     and entry.profiled_gib > 0
@@ -905,23 +930,29 @@ def run_parallel(
                 # Per-GPU vLLM stagger — only between vLLM tests on the
                 # same GPU.  Tests on different GPUs launch simultaneously.
                 if is_vllm:
-                    last_t = last_vllm_launch.get(gi, 0)
+                    last_t = max(
+                        (last_vllm_launch.get(gi, 0) for gi in assigned_gpus),
+                        default=0,
+                    )
                     wait = _VLLM_LAUNCH_STAGGER_S - (time.monotonic() - last_t)
                     if wait > 0:
                         time.sleep(wait)
 
-                gpu_states[gi].budget_used += entry.profiled_gib
-                gpu_states[gi].running_count += 1
+                for gi in assigned_gpus:
+                    gpu_states[gi].budget_used += entry.profiled_gib
+                    gpu_states[gi].running_count += 1
                 run_info = _launch_test(entry, env_base)
                 running[w_id] = run_info
 
                 if is_vllm:
-                    last_vllm_launch[gi] = time.monotonic()
+                    for gi in assigned_gpus:
+                        last_vllm_launch[gi] = time.monotonic()
 
                 retry_str = f" (retry {entry.retries})" if entry.retries else ""
+                gpu_label = ",".join(str(gi) for gi in assigned_gpus)
                 _print(
                     f"[w{w_id}] {entry.name} "
-                    f"(GPU{gi}, profiled={entry.profiled_gib:.1f} GiB, "
+                    f"(GPU{gpu_label}, profiled={entry.profiled_gib:.1f} GiB each, "
                     f"{_fmt_req(entry)}) RUNNING{retry_str}"
                 )
 
@@ -973,9 +1004,7 @@ def run_parallel(
             timeout = int(test.timeout)
             retries = test.retries
             retry_str = f" ({retries} retries)" if retries else ""
-            _print(
-                f"PASSED [w{w_id}] {test.name} " f"[{duration}s/{timeout}s]{retry_str}"
-            )
+            _print(f"PASSED [w{w_id}] {test.name} [{duration}s/{timeout}s]{retry_str}")
         else:
             duration = int(c.duration)
             timeout = int(test.timeout)

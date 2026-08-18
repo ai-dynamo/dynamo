@@ -132,7 +132,7 @@ def effective_cpu_budget() -> int:
 
 
 def write_test_meta(items, dest_dir: str | None = None) -> None:
-    """Serialize profiled_vram_gib, timeout, and KV cache markers to JSON.
+    """Serialize GPU count, VRAM, timeout, and KV cache markers to JSON.
 
     Called from pytest_collection_modifyitems so the GPU orchestrator can
     read test metadata without re-collecting.
@@ -140,6 +140,10 @@ def write_test_meta(items, dest_dir: str | None = None) -> None:
     test_meta: dict[str, dict] = {}
     for item in items:
         meta: dict = {}
+        for required_gpus in range(8, 1, -1):
+            if item.get_closest_marker(f"gpu_{required_gpus}"):
+                meta["required_gpus"] = required_gpus
+                break
         profiled_mark = item.get_closest_marker("profiled_vram_gib")
         if profiled_mark and profiled_mark.args:
             meta["profiled_vram_gib"] = profiled_mark.args[0]
