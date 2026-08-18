@@ -72,10 +72,31 @@ adapters:
       overlap_score_credit: [0.0, 0.5, 1.0]
   dynamo.planner:
     search_space:
-      scaling_policy: [disabled, load_180_5]
-      fpm_sampling: [default]
-      load_sensitivity: [default]
+      scaling_policy:
+        preset: [disabled, load_180_5]
+      fpm_sampling:
+        preset: [default]
+      load_sensitivity:
+        preset: [default]
 ```
+
+<Warning>
+The legacy flat Planner preset lists remain accepted for backward compatibility but emit a
+`FutureWarning`. They will be removed after the 1.5 release. Nest each list under its sub-item's
+`preset` field.
+</Warning>
+
+Each Planner preset sub-item owns a complete knob set:
+
+| Sub-item | Knobs covered by every preset |
+|---|---|
+| `scaling_policy` | Throughput/load enablement and both adjustment intervals |
+| `fpm_sampling` | Maximum FPM samples and sample-bucket size |
+| `load_sensitivity` | Scale-down sensitivity and minimum observations |
+| `load_predictor` | Predictor family, log transform, Prophet window, and all Kalman parameters |
+
+Named presets and custom mappings are validated against the complete sub-item. The provider fills
+family defaults for conditionally inactive predictor knobs before validation.
 
 The Planner provider derives load-predictor parameters from all configured scaling intervals during
 `generate_search_space`. Enabled candidates materialize a concrete `PlannerConfig` runtime hook.
