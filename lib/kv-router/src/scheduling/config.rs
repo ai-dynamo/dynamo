@@ -592,6 +592,8 @@ struct KvRouterConfigSerde {
     router_queue_policy: RouterQueuePolicy,
     use_remote_indexer: bool,
     serve_indexer: bool,
+    #[serde(default)]
+    enable_session_prefix_index: bool,
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
@@ -638,6 +640,7 @@ impl Default for KvRouterConfigSerde {
             router_queue_policy: config.router_queue_policy,
             use_remote_indexer: config.use_remote_indexer,
             serve_indexer: config.serve_indexer,
+            enable_session_prefix_index: config.enable_session_prefix_index,
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
@@ -780,6 +783,14 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub serve_indexer: bool,
 
+    /// Enable the session-aware logical prefix index. When true the router
+    /// keeps a per-session record of the block chains each session has matched,
+    /// which survives engine eviction of the underlying blocks. Off by default:
+    /// it costs memory proportional to tracked session lineage and nothing in
+    /// the routing decision consumes it yet.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub enable_session_prefix_index: bool,
+
     /// Multiplier for shared cache hits when scoring workers (0.0 to 1.0).
     /// Blocks available in the shared cache are less valuable than device-local blocks
     /// because they need to be fetched. A value of 0.5 means each shared cache hit
@@ -882,6 +893,7 @@ impl Default for KvRouterConfig {
             router_queue_policy: RouterQueuePolicy::default(),
             use_remote_indexer: false,
             serve_indexer: false,
+            enable_session_prefix_index: false,
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
@@ -945,6 +957,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_queue_policy: compat.router_queue_policy,
             use_remote_indexer: compat.use_remote_indexer,
             serve_indexer: compat.serve_indexer,
+            enable_session_prefix_index: compat.enable_session_prefix_index,
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
@@ -1955,6 +1968,29 @@ worker_selection:
     }
 
     #[test]
+    fn session_prefix_index_flag_defaults_off_and_survives_the_wire() {
+        assert!(!KvRouterConfig::default().enable_session_prefix_index);
+
+        // Absent from the wire is the off state, so an older writer that never
+        // heard of the flag still deserializes into a working config.
+        let from_legacy: KvRouterConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!from_legacy.enable_session_prefix_index);
+
+        let enabled = KvRouterConfig {
+            enable_session_prefix_index: true,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(
+            encoded.get("enable_session_prefix_index"),
+            Some(&serde_json::json!(true)),
+            "an explicitly enabled flag must be carried on the wire"
+        );
+        let decoded: KvRouterConfig = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.enable_session_prefix_index);
+    }
+
+    #[test]
     fn kv_router_config_preserves_v1_3_wire_compatibility() {
         let _: KvRouterConfig = serde_json::from_value(serde_json::json!({
             "durable_kv_events": false,
@@ -1975,6 +2011,7 @@ worker_selection:
             "conditional_disagg_eff_isl_ratio_threshold",
             "conditional_disagg_prefill_busy_threshold",
             "conditional_disagg_decode_busy_threshold",
+            "enable_session_prefix_index",
         ] {
             assert!(value.get(post_v1_3_field).is_none(), "{post_v1_3_field}");
         }
