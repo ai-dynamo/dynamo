@@ -54,7 +54,7 @@ async def test_snapshot_lifecycle_returns_paused_after_restore_sentinel(
         assert await lifecycle is True
         assert controller.resumed is False
         assert not (tmp_path / READY_FOR_SNAPSHOT_FILE).exists()
-        assert not (tmp_path / RESTORE_COMPLETE_FILE).exists()
+        assert (tmp_path / RESTORE_COMPLETE_FILE).read_text(encoding="utf-8") == "done"
     finally:
         if not lifecycle.done():
             lifecycle.cancel()
