@@ -170,7 +170,14 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 	var err error
 	// Enable Checkpoint only when explicitly configured and its external API dependency is available.
 	if config.Checkpoint.Enabled {
-		podSnapshotAvailable, detectErr := detectPodSnapshotAvailability(ctx, mgr.GetConfig())
+		podSnapshotResource := snapshotv1alpha1.GroupVersion.WithResource("podsnapshots")
+		podSnapshotAvailable, detectErr := detectAPIAvailability(
+			ctx,
+			mgr.GetConfig(),
+			podSnapshotResource.Group,
+			podSnapshotResource.Version,
+			podSnapshotResource.Resource,
+		)
 		if detectErr != nil {
 			return Gates{}, detectErr
 		}
@@ -179,13 +186,14 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 			return Gates{}, err
 		}
 	}
-	if gates.Grove, err = resolve(config.Orchestrators.Grove.Enabled, detectAPIGroup(ctx, mgr, "grove.io", ""),
+	if gates.Grove, err = resolve(config.Orchestrators.Grove.Enabled,
+		detectOptionalAPIAvailability(ctx, mgr.GetConfig(), "grove.io", "", ""),
 		"Grove is explicitly enabled in config but the Grove API group was not detected in the cluster"); err != nil {
 		return Gates{}, err
 	}
 
-	lwsAvailable := detectAPIGroup(ctx, mgr, "leaderworkerset.x-k8s.io", "")
-	volcanoAvailable := detectAPIGroup(ctx, mgr, "scheduling.volcano.sh", "")
+	lwsAvailable := detectOptionalAPIAvailability(ctx, mgr.GetConfig(), "leaderworkerset.x-k8s.io", "", "")
+	volcanoAvailable := detectOptionalAPIAvailability(ctx, mgr.GetConfig(), "scheduling.volcano.sh", "", "")
 	if ptr.Deref(config.Orchestrators.LWS.Enabled, lwsAvailable && volcanoAvailable) {
 		if !lwsAvailable {
 			return Gates{}, fmt.Errorf("LWS is explicitly enabled in config but the LWS API group was not detected in the cluster")
@@ -203,12 +211,19 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		gates.VolcanoScheduler = true
 	}
 
-	if gates.KaiScheduler, err = resolve(config.Orchestrators.KaiScheduler.Enabled, detectAPIGroup(ctx, mgr, "scheduling.run.ai", ""),
+	if gates.KaiScheduler, err = resolve(config.Orchestrators.KaiScheduler.Enabled,
+		detectOptionalAPIAvailability(ctx, mgr.GetConfig(), "scheduling.run.ai", "", ""),
 		"Kai-scheduler is explicitly enabled in config but the scheduling.run.ai API group was not detected in the cluster"); err != nil {
 		return Gates{}, err
 	}
 	if gates.DRA, err = resolve(config.DRA.Enabled,
-		detectAPIGroup(ctx, mgr, resourcev1.SchemeGroupVersion.Group, resourcev1.SchemeGroupVersion.Version),
+		detectOptionalAPIAvailability(
+			ctx,
+			mgr.GetConfig(),
+			resourcev1.SchemeGroupVersion.Group,
+			resourcev1.SchemeGroupVersion.Version,
+			"",
+		),
 		"DRA is explicitly enabled in config but the resource.k8s.io/v1 API was not detected in the cluster (requires Kubernetes 1.34+)"); err != nil {
 		return Gates{}, err
 	}
@@ -229,44 +244,75 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 
 // DetectInferencePoolAvailability checks whether the Gateway API Inference Extension is registered.
 func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIGroup(ctx, mgr, "inference.networking.k8s.io", "")
+	return detectOptionalAPIAvailability(ctx, mgr.GetConfig(), "inference.networking.k8s.io", "", "")
 }
 
-// detectPodSnapshotAvailability reports whether PodSnapshot is discoverable.
+// detectAPIAvailability reports whether an API group, version, or resource is discoverable.
+// An empty version checks only the group. An empty resource checks the group and optional version.
 // A nil cfg is supported and returns an error because discovery is unavailable.
-func detectPodSnapshotAvailability(ctx context.Context, cfg *rest.Config) (bool, error) {
+func detectAPIAvailability(ctx context.Context, cfg *rest.Config, group, version, resource string) (bool, error) {
 	logger := log.FromContext(ctx)
-	resource := snapshotv1alpha1.GroupVersion.WithResource("podsnapshots")
-	logValues := []any{"groupVersion", resource.GroupVersion().String(), "resource", resource.Resource}
+	logValues := []any{"group", group}
+	if version != "" {
+		logValues = append(logValues, "version", version)
+	}
+	if resource != "" {
+		logValues = append(logValues, "resource", resource)
+	}
 	if cfg == nil {
-		return false, errors.New("PodSnapshot API detection failed, no discovery client available")
+		return false, errors.New("API detection failed, no discovery client available")
+	}
+	if resource != "" && version == "" {
+		return false, errors.New("API resource detection requires a version")
 	}
 
 	// Create a client for direct API resource discovery.
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
-		return false, fmt.Errorf("create discovery client for PodSnapshot API detection: %w", err)
+		return false, fmt.Errorf("create API discovery client: %w", err)
 	}
 
+	// Group-only detection uses the server group index and optionally matches a served version.
+	if resource == "" {
+		apiGroups, err := discoveryClient.ServerGroups()
+		if err != nil {
+			return false, fmt.Errorf("list server API groups: %w", err)
+		}
+		available := apiGroupServesVersion(apiGroups, group, version)
+		logger.Info("API availability detected", append(logValues, "available", available)...)
+		return available, nil
+	}
 	// Query the exact group version and distinguish absence from discovery failures.
-	apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(resource.GroupVersion().String())
+	groupVersion := group + "/" + version
+	apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(groupVersion)
 	if apierrors.IsNotFound(err) {
-		logger.Info("API resource not available", logValues...)
+		logger.Info("API availability detected", append(logValues, "available", false)...)
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("discover PodSnapshot API resource: %w", err)
+		return false, fmt.Errorf("discover %s API resources: %w", groupVersion, err)
 	}
 
-	// Match the exact resource because other Dynamo APIs share this group version.
+	// Match the exact resource within the discovered group version.
 	for _, candidate := range apiResourceList.APIResources {
-		if candidate.Name == resource.Resource {
-			logger.Info("API resource is available", logValues...)
+		if candidate.Name == resource {
+			logger.Info("API availability detected", append(logValues, "available", true)...)
 			return true, nil
 		}
 	}
-	logger.Info("API resource not available", logValues...)
+	logger.Info("API availability detected", append(logValues, "available", false)...)
 	return false, nil
+}
+
+// detectOptionalAPIAvailability degrades discovery errors to unavailable for optional integrations.
+func detectOptionalAPIAvailability(ctx context.Context, cfg *rest.Config, group, version, resource string) bool {
+	available, err := detectAPIAvailability(ctx, cfg, group, version, resource)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "API availability detection failed",
+			"group", group, "version", version, "resource", resource)
+		return false
+	}
+	return available
 }
 
 // resolve uses auto-detection when unset, disables on false, and requires availability on true.
@@ -283,64 +329,9 @@ func resolve(configured *bool, available bool, unavailableMessage string) (bool,
 	return true, nil
 }
 
-func detectAPIGroup(ctx context.Context, mgr ctrl.Manager, groupName, version string) bool {
-	logger := log.FromContext(ctx)
-	logValues := []any{"group", groupName}
-	if version != "" {
-		logValues = append(logValues, "version", version)
-	}
-
-	cfg := mgr.GetConfig()
-	if cfg == nil {
-		logger.Info("detection failed, no discovery client available", logValues...)
-		return false
-	}
-
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
-	if err != nil {
-		logger.Error(err, "detection failed, could not create discovery client", logValues...)
-		return false
-	}
-	apiGroups, err := discoveryClient.ServerGroups()
-	if err != nil {
-		logger.Error(err, "detection failed, could not list server groups", logValues...)
-		return false
-	}
-	if apiGroupServesVersion(apiGroups, groupName, version) {
-		logger.Info("API group is available", logValues...)
-		return true
-	}
-	logger.Info("API group not available", logValues...)
-	return false
-}
-
 // DetectIstioDestinationRuleAvailability checks whether DestinationRule is registered.
 func DetectIstioDestinationRuleAvailability(ctx context.Context, cfg *rest.Config) bool {
-	logger := log.FromContext(ctx)
-	logValues := []any{"groupVersion", "networking.istio.io/v1beta1", "resource", "destinationrules"}
-	if cfg == nil {
-		logger.Info("detection failed, no discovery client available", logValues...)
-		return false
-	}
-
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
-	if err != nil {
-		logger.Error(err, "detection failed, could not create discovery client", logValues...)
-		return false
-	}
-	apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion("networking.istio.io/v1beta1")
-	if err != nil {
-		logger.Info("API resource not available", append(logValues, "error", err.Error())...)
-		return false
-	}
-	for _, resource := range apiResourceList.APIResources {
-		if resource.Name == "destinationrules" {
-			logger.Info("API resource is available", logValues...)
-			return true
-		}
-	}
-	logger.Info("API resource not available", logValues...)
-	return false
+	return detectOptionalAPIAvailability(ctx, cfg, "networking.istio.io", "v1beta1", "destinationrules")
 }
 
 func apiGroupServesVersion(apiGroups *metav1.APIGroupList, groupName, version string) bool {

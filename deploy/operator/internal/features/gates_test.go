@@ -105,7 +105,7 @@ func TestAPIGroupServesVersion(t *testing.T) {
 	}
 }
 
-func TestDetectPodSnapshotAvailability(t *testing.T) {
+func TestDetectAPIAvailabilityForResource(t *testing.T) {
 	tests := []struct {
 		name       string
 		statusCode int
@@ -153,14 +153,30 @@ func TestDetectPodSnapshotAvailability(t *testing.T) {
 			defer server.Close()
 
 			t.Log("Detect whether the exact PodSnapshot resource is available")
-			got, err := detectPodSnapshotAvailability(context.Background(), &rest.Config{Host: server.URL})
+			got, err := detectAPIAvailability(
+				context.Background(),
+				&rest.Config{Host: server.URL},
+				"nvidia.com",
+				"v1alpha1",
+				"podsnapshots",
+			)
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("detectPodSnapshotAvailability() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("detectAPIAvailability() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if got != tt.want {
-				t.Errorf("detectPodSnapshotAvailability() = %v, want %v", got, tt.want)
+				t.Errorf("detectAPIAvailability() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDetectAPIAvailabilityRequiresVersionForResource(t *testing.T) {
+	available, err := detectAPIAvailability(context.Background(), &rest.Config{}, "nvidia.com", "", "podsnapshots")
+	if err == nil {
+		t.Fatal("detectAPIAvailability() error = nil, want resource version validation error")
+	}
+	if available {
+		t.Error("detectAPIAvailability() = true, want false")
 	}
 }
 
