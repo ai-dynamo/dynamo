@@ -663,7 +663,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				Build()
 
 			logger := log.FromContext(ctx)
-			ready, reason, serviceStatus, classification, checkErr := CheckPodCliqueReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger, nil)
+			ready, reason, serviceStatus, classification, checkErr := CheckPodCliqueReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
 
 			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
@@ -951,7 +951,7 @@ func TestCheckPCSGReady(t *testing.T) {
 				Build()
 
 			logger := log.FromContext(ctx)
-			ready, reason, serviceStatus, classification, checkErr := CheckPCSGReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger, nil)
+			ready, reason, serviceStatus, classification, checkErr := CheckPCSGReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
 
 			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
@@ -1340,24 +1340,29 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 	)
 
 	tests := []struct {
-		name            string
-		activeNamespace bool
-		pcsAccepted     bool
-		childRevision   string
-		updateEnded     bool
-		childReady      bool
-		legacyPCS       bool
-		wantReady       bool
-		wantNamespace   string
+		name                       string
+		activeNamespace            bool
+		pcsAccepted                bool
+		childRevision              string
+		updateEnded                bool
+		childReady                 bool
+		legacyPCS                  bool
+		pcsObservedGenerationAhead bool
+		childGenerationStale       bool
+		wantReady                  bool
+		wantNamespace              string
 	}{
 		{name: "unaccepted suffixed PCS leaves a new worker namespace empty", childRevision: previousRevision},
-		{name: "unaccepted legacy PCS publishes the base namespace", legacyPCS: true, childRevision: previousRevision},
+		{name: "unaccepted legacy PCS preserves the previous worker namespace", legacyPCS: true, childRevision: previousRevision},
 		{name: "unaccepted PCS preserves the active worker namespace", activeNamespace: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted PCS with a previous child revision preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: previousRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted PCS with an unfinished child update preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, wantReady: true, wantNamespace: "active"},
-		{name: "stale accepted PCS revision publishes its rendered hash instead of the desired DGD hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
+		{name: "accepted PCS revision publishes its rendered hash instead of the desired DGD hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
+		{name: "PCS observation ahead of its generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, pcsObservedGenerationAhead: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
+		{name: "accepted PCS with a stale child generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, childGenerationStale: true, wantNamespace: "active"},
 		{name: "accepted completed PCS revision remains published after worker health loss", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, wantNamespace: acceptedHash},
-		{name: "accepted legacy PCS publishes the base namespace", pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true},
+		{name: "accepted legacy PCS with an unfinished child preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, childReady: true, wantReady: true, wantNamespace: "active"},
+		{name: "accepted legacy PCS publishes the base namespace", pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "base"},
 	}
 
 	for _, tt := range tests {
@@ -1409,9 +1414,16 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			if tt.pcsAccepted {
 				podCliqueSet.Status.ObservedGeneration = ptr.To(int64(1))
 			}
+			if tt.pcsObservedGenerationAhead {
+				podCliqueSet.Status.ObservedGeneration = ptr.To(int64(2))
+			}
 			completedAt := metav1.Now()
+			childGeneration := int64(1)
+			if tt.childGenerationStale {
+				childGeneration = 2
+			}
 			podClique := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, componentName), Namespace: dgd.Namespace, Generation: 1},
+				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, componentName), Namespace: dgd.Namespace, Generation: childGeneration},
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				Status: grovev1alpha1.PodCliqueStatus{
 					Replicas:                          1,
@@ -1437,13 +1449,10 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 
 			t.Log("Verify the published namespace")
 			wantNamespace := tt.wantNamespace
-			if wantNamespace != "" && wantNamespace != "active" {
-				wantNamespace = ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), wantNamespace)
-			} else if wantNamespace == "active" {
-				wantNamespace = ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), wantNamespace)
-			}
-			if tt.legacyPCS {
+			if wantNamespace == "base" {
 				wantNamespace = baseNamespace
+			} else if wantNamespace != "" {
+				wantNamespace = ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), wantNamespace)
 			}
 			if readiness.Ready != tt.wantReady {
 				t.Fatalf("EvaluateGroveReadiness().Ready = %t, want %t", readiness.Ready, tt.wantReady)
@@ -1619,24 +1628,30 @@ func TestGroveComponentRevisionStateHasCompletedAcceptedPCSRevision(t *testing.T
 	targetRevision := "target-revision"
 
 	tests := []struct {
-		name            string
-		finished        bool
-		updatedReplicas int32
-		want            bool
+		name               string
+		generationObserved bool
+		finished           bool
+		replicas           int32
+		updatedReplicas    int32
+		desiredReplicas    int32
+		want               bool
 	}{
-		{name: "completed component completes the PCS revision", finished: true, updatedReplicas: 1, want: true},
-		{name: "unfinished component keeps the PCS revision pending", finished: false, updatedReplicas: 1, want: false},
-		{name: "component with stale update count keeps the PCS revision pending", finished: true, updatedReplicas: 0, want: false},
+		{name: "completed component completes the PCS revision", generationObserved: true, finished: true, replicas: 1, updatedReplicas: 1, desiredReplicas: 1, want: true},
+		{name: "zero-replica component completes after its update ends", generationObserved: true, finished: true, want: true},
+		{name: "unobserved child generation keeps the PCS revision pending", finished: true, replicas: 1, updatedReplicas: 1, desiredReplicas: 1, want: false},
+		{name: "unfinished component keeps the PCS revision pending", generationObserved: true, finished: false, replicas: 1, updatedReplicas: 1, desiredReplicas: 1, want: false},
+		{name: "component with stale update count keeps the PCS revision pending", generationObserved: true, finished: true, replicas: 1, desiredReplicas: 1, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Evaluate the child revision state against the accepted PCS revision.")
 			state := groveComponentRevisionState{
+				generationObserved:     tt.generationObserved,
 				currentPCSRevisionHash: &targetRevision,
-				replicas:               1,
+				replicas:               tt.replicas,
 				updatedReplicas:        tt.updatedReplicas,
-				desiredReplicas:        1,
+				desiredReplicas:        tt.desiredReplicas,
 				updateEnded:            tt.finished,
 			}
 			completed := state.hasCompletedAcceptedPCSRevision(&targetRevision)
@@ -1792,7 +1807,7 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 				objs = append(objs, tt.podClique)
 			}
 			c := newFakeGroveClient(g, objs...)
-			ready, reason, _, classification, checkErr := CheckPodCliqueReady(ctx, c, testPodCliqueName, "default", log.FromContext(ctx), nil)
+			ready, reason, _, classification, checkErr := CheckPodCliqueReady(ctx, c, testPodCliqueName, "default", log.FromContext(ctx))
 			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
@@ -1899,7 +1914,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 				objs = append(objs, tt.pcsg)
 			}
 			c := newFakeGroveClient(g, objs...)
-			ready, reason, _, classification, checkErr := CheckPCSGReady(ctx, c, testPCSGName, "default", log.FromContext(ctx), nil)
+			ready, reason, _, classification, checkErr := CheckPCSGReady(ctx, c, testPCSGName, "default", log.FromContext(ctx))
 			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
@@ -1983,7 +1998,7 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 	t.Run("CheckPodCliqueReady returns error on non-NotFound get failure", func(t *testing.T) {
 		g := gomega.NewGomegaWithT(t)
 		c := newClient(g)
-		ready, _, _, classification, err := CheckPodCliqueReady(ctx, c, "test-pc", "default", logger, nil)
+		ready, _, _, classification, err := CheckPodCliqueReady(ctx, c, "test-pc", "default", logger)
 		g.Expect(err).To(gomega.HaveOccurred())
 		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
 		g.Expect(ready).To(gomega.BeFalse())
@@ -1994,7 +2009,7 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 	t.Run("CheckPCSGReady returns error on non-NotFound get failure", func(t *testing.T) {
 		g := gomega.NewGomegaWithT(t)
 		c := newClient(g)
-		ready, _, _, classification, err := CheckPCSGReady(ctx, c, "test-pcsg", "default", logger, nil)
+		ready, _, _, classification, err := CheckPCSGReady(ctx, c, "test-pcsg", "default", logger)
 		g.Expect(err).To(gomega.HaveOccurred())
 		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
 		g.Expect(ready).To(gomega.BeFalse())
