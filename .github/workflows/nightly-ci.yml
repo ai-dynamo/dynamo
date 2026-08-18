@@ -1322,7 +1322,14 @@ jobs:
   # (conclusion: null), so NGC/Artifactory failures never matched
   # `conclusion == "failure"` and were reported to nobody. A called workflow's
   # jobs belong to the same run, so once `release` is terminal they all are.
-  # Trade-off: the alert for test failures now waits for publication to finish.
+  # Trade-offs, both accepted: on `schedule` the alert for test failures now
+  # waits for publication to finish (tens of minutes). On `workflow_dispatch`
+  # with release=true it additionally waits on `manual-release-approval`, an
+  # environment-gated job that `release` needs — so the alert is deferred until
+  # a reviewer approves, bounded only by the environment's wait timer. That is
+  # tolerable because a dispatched run has a human watching it; the unattended
+  # cron, which is what this alert exists for, never hits that gate (the
+  # approval job is `skipped` on schedule).
   notify-slack:
     if: always()
     needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, deploy-cleanup, rust-tests, release]

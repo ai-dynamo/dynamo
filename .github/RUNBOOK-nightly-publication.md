@@ -16,8 +16,9 @@ publish artifacts.
 
 ## What paged you
 
-The nightly (`nightly-ci.yml`, cron `0 8 * * *` UTC = midnight PST) publishes via
-`release.yml`. Incidents come from one of two jobs:
+The nightly (`nightly-ci.yml`, cron `0 8 * * *` — **08:00 UTC**, which is 01:00 PDT in
+summer and 00:00 PST in winter) publishes via `release.yml`. Incidents come from one of
+two jobs:
 
 | `dedup_key` contains | Meaning |
 |---|---|
@@ -58,9 +59,9 @@ frontend, snapshot-agent, EFA variants) are fail-soft and only increment
 `stage-wheels-artifactory` extracts wheels from the runtime image and uploads them. A failure
 means `pip install` of the nightly wheels is broken for consumers.
 
-Usual causes: expired Artifactory token; the upload rejected (non-201); or the wheel-version
-verification tripping the UTC-midnight date-drift check — the nightly runs *at* 00:00 PST, so
-a run straddling UTC midnight can compute a `wheel_version` date that no longer matches.
+Usual causes: expired Artifactory token; the upload rejected (non-201); or the
+wheel-version verification failing because the wheel in the image does not carry the
+version `prepare-release` computed for this run.
 
 ### `GitLab release trigger` (severity: error)
 Artifacts **were** published successfully, but the downstream GitLab release-automation

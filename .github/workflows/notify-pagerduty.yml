@@ -144,12 +144,6 @@ jobs:
             exit 0
           fi
 
-          if [ -z "${PD_ROUTING_KEY:-}" ]; then
-            echo "::warning::PAGERDUTY_OPS_SUPPORT_ROUTING_KEY is not set — skipping PagerDuty event."
-            echo "Register it as a repository secret to enable Ops-Support paging."
-            exit 0
-          fi
-
           # --- severity mapping ------------------------------------------------
           # Aggregate severity is the max over the failing stages. A single
           # incident enumerates every failing stage rather than paging per stage,
@@ -284,6 +278,16 @@ jobs:
           if [ "${DRY_RUN}" = "true" ]; then
             echo "::notice::DRY RUN — payload below, not sent to PagerDuty."
             printf '%s' "${PAYLOAD}" | jq '.routing_key = "***"'
+            exit 0
+          fi
+
+          # Deliberately AFTER the dry-run branch: during phase 1 the secret does
+          # not exist yet, and an early guard would exit before printing anything
+          # — defeating the whole point of running in dry-run first. The dry-run
+          # output redacts the key regardless, so it needs no secret.
+          if [ -z "${PD_ROUTING_KEY:-}" ]; then
+            echo "::warning::PAGERDUTY_OPS_SUPPORT_ROUTING_KEY is not set — skipping PagerDuty event."
+            echo "Register it as a repository secret to enable Ops-Support paging."
             exit 0
           fi
 
