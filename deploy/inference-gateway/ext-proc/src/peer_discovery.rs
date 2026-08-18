@@ -7,8 +7,10 @@
 //! in-process [`SelectionService`] as sibling EPP replicas join or leave.
 
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -23,12 +25,23 @@ const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 /// Named Service/EndpointSlice port used for aggregated replica synchronization.
 pub const REPLICA_AGG_PORT_NAME: &str = "replica-agg";
 
-type Store = kube::runtime::reflector::Store<EndpointSlice>;
+/// Named Service/EndpointSlice port used for startup KV-index recovery.
+pub const SELECTION_HTTP_PORT_NAME: &str = "selection-http";
 
-/// Resolve the required aggregated replica-sync port from the peer Service's
-/// EndpointSlices. Every slice must expose the same named `replica-agg` port;
-/// missing or inconsistent ports fail EPP startup before replica sync is built.
-pub async fn resolve_replica_sync_port(namespace: &str, service_name: &str) -> Result<u16> {
+const INITIAL_RECOVERY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+const MAX_RECOVERY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PeerPorts {
+    pub(crate) replica_sync: u16,
+    pub(crate) selection_http: u16,
+}
+
+type Store = kube::runtime::reflector::Store<EndpointSlice>;
+type RecoveryAttempt<'a> = Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>>;
+
+/// Resolve both peer-plane ports from one authoritative EndpointSlice snapshot.
+pub(crate) async fn resolve_peer_ports(namespace: &str, service_name: &str) -> Result<PeerPorts> {
     use kube::{Api, Client, api::ListParams};
 
     let client = Client::try_default()
@@ -42,81 +55,83 @@ pub async fn resolve_replica_sync_port(namespace: &str, service_name: &str) -> R
             format!("listing EndpointSlices for EPP peer Service {namespace}/{service_name}")
         })?;
 
-    replica_sync_port(list.items.iter()).with_context(|| {
-        format!(
-            "resolving named port {REPLICA_AGG_PORT_NAME:?} for EPP peer Service \
-             {namespace}/{service_name}"
-        )
+    peer_ports(list.items.iter())
+        .with_context(|| format!("resolving peer ports for EPP Service {namespace}/{service_name}"))
+}
+
+fn peer_ports<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Result<PeerPorts> {
+    let slices: Vec<_> = slices.collect();
+    Ok(PeerPorts {
+        replica_sync: named_tcp_port(&slices, REPLICA_AGG_PORT_NAME)?,
+        selection_http: named_tcp_port(&slices, SELECTION_HTTP_PORT_NAME)?,
     })
 }
 
-fn replica_sync_port<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Result<u16> {
+fn named_tcp_port(slices: &[&EndpointSlice], port_name: &str) -> Result<u16> {
     let mut resolved = BTreeSet::new();
-    let mut slice_count = 0usize;
 
     for slice in slices {
-        slice_count += 1;
         let slice_name = slice.metadata.name.as_deref().unwrap_or("<unnamed>");
         let mut matches = slice
             .ports
             .as_deref()
             .unwrap_or_default()
             .iter()
-            // Only a TCP `replica-agg` port satisfies the contract: the replica
-            // plane binds and dials `tcp://`. Kubernetes defaults `protocol` to
-            // TCP when absent, so treat `None` as TCP and reject explicit
-            // UDP/SCTP rather than let a mismatched port through.
-            .filter(|port| {
-                port.name.as_deref() == Some(REPLICA_AGG_PORT_NAME)
-                    && port
-                        .protocol
-                        .as_deref()
-                        .is_none_or(|protocol| protocol.eq_ignore_ascii_case("TCP"))
-            });
+            .filter(|port| port.name.as_deref() == Some(port_name));
         let endpoint_port = matches.next().with_context(|| {
             format!(
                 "EndpointSlice {slice_name} does not expose named port \
-                 {REPLICA_AGG_PORT_NAME:?}"
+                 {port_name:?}"
             )
         })?;
         anyhow::ensure!(
             matches.next().is_none(),
-            "EndpointSlice {slice_name} exposes named port {REPLICA_AGG_PORT_NAME:?} more than once"
+            "EndpointSlice {slice_name} exposes named port {port_name:?} more than once"
+        );
+        anyhow::ensure!(
+            endpoint_port
+                .protocol
+                .as_deref()
+                .is_none_or(|protocol| protocol.eq_ignore_ascii_case("TCP")),
+            "EndpointSlice {slice_name} named port {port_name:?} must use TCP"
         );
         let raw_port = endpoint_port.port.with_context(|| {
-            format!(
-                "EndpointSlice {slice_name} named port {REPLICA_AGG_PORT_NAME:?} has no port number"
-            )
+            format!("EndpointSlice {slice_name} named port {port_name:?} has no port number")
         })?;
         let port = u16::try_from(raw_port).with_context(|| {
             format!(
-                "EndpointSlice {slice_name} named port {REPLICA_AGG_PORT_NAME:?} has invalid port {raw_port}"
+                "EndpointSlice {slice_name} named port {port_name:?} has invalid port {raw_port}"
             )
         })?;
         anyhow::ensure!(
             port > 0,
-            "named port {REPLICA_AGG_PORT_NAME:?} must be greater than zero"
+            "named port {port_name:?} must be greater than zero"
         );
         resolved.insert(port);
     }
 
-    anyhow::ensure!(slice_count > 0, "peer Service has no EndpointSlices");
+    anyhow::ensure!(!slices.is_empty(), "peer Service has no EndpointSlices");
     anyhow::ensure!(
         resolved.len() == 1,
-        "named port {REPLICA_AGG_PORT_NAME:?} resolves to inconsistent ports {resolved:?}"
+        "named port {port_name:?} resolves to inconsistent ports {resolved:?}"
     );
-    Ok(*resolved.first().expect("validated one resolved port"))
+    resolved
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("named port {port_name:?} did not resolve"))
 }
 
 /// Starts peer discovery for the EPP's own Kubernetes Service, keeping
 /// replica-sync peers registered on `service` and excluding `self_ip`.
 ///
-/// Returns a readiness flag that becomes `true` after the initial reconciliation.
+/// This call does not return until initial KV-index recovery succeeds or the
+/// authoritative sibling set is empty. The dump server must already be bound.
 pub async fn spawn(
     service: Arc<SelectionService>,
     namespace: &str,
     service_name: &str,
     sync_port: u16,
+    selection_http_port: u16,
     self_ip: String,
     cancel: CancellationToken,
 ) -> Result<Arc<AtomicBool>> {
@@ -133,12 +148,13 @@ pub async fn spawn(
     let writer = reflector::store::Writer::default();
     let store = writer.as_reader();
     let reflect = reflector::reflector(writer, watcher(slices, cfg_watch).default_backoff());
-    let (changes_tx, changes_rx) = watch::channel(0u64);
+    let (changes_tx, mut changes_rx) = watch::channel(0u64);
 
     tracing::info!(
         %namespace,
         service = %service_name,
         sync_port,
+        selection_http_port,
         %self_ip,
         "Starting EPP peer EndpointSlice watch (embedded replication)"
     );
@@ -174,66 +190,150 @@ pub async fn spawn(
         }
     });
 
-    let peer_ready = Arc::new(AtomicBool::new(false));
-
-    tokio::spawn(reconcile_loop(
-        service,
-        store,
-        sync_port,
-        self_ip,
-        changes_rx,
-        cancel,
-        peer_ready.clone(),
-    ));
-    Ok(peer_ready)
-}
-
-/// React to EndpointSlice changes: diff the live sibling set against the peers
-/// currently registered and apply the delta. Exits when `cancel` fires or the
-/// change channel closes.
-async fn reconcile_loop(
-    service: Arc<SelectionService>,
-    store: Store,
-    sync_port: u16,
-    self_ip: String,
-    mut changes_rx: watch::Receiver<u64>,
-    cancel: CancellationToken,
-    peer_ready: Arc<AtomicBool>,
-) {
     // Block on the first authoritative LIST before the initial reconcile so we
     // never latch readiness on an empty snapshot. The reflector retries watch
     // errors with backoff, so this resolves once the LIST lands; a writer drop
     // (watch task gone) means we can't sync, so bail without latching.
     tokio::select! {
-        _ = cancel.cancelled() => return,
+        _ = cancel.cancelled() => anyhow::bail!("EPP peer discovery cancelled before initial LIST"),
         result = store.wait_until_ready() => {
-            if result.is_err() {
-                tracing::warn!(
-                    "EPP peer EndpointSlice writer dropped before initial LIST; \
-                     peer discovery never became ready"
-                );
-                return;
-            }
+            result.context("EPP peer EndpointSlice writer dropped before initial LIST")?;
         }
     }
 
     let mut known: BTreeSet<String> = BTreeSet::new();
-    reconcile_once(&service, &store, sync_port, &self_ip, &mut known).await;
-    // Set readiness to true after the initial reconciliation.
-    // Subsequent transient watch failures keep the last-known peers and must not clear it.
-    peer_ready.store(true, Ordering::Release);
-    tracing::info!("EPP peer discovery initial sync complete");
+    // InitDone generated the snapshot we just consumed; do not mistake it for a
+    // peer change after the first failed recovery attempt.
+    changes_rx.borrow_and_update();
+    recover_initial_index(
+        &service,
+        &store,
+        sync_port,
+        selection_http_port,
+        &self_ip,
+        &mut known,
+        &mut changes_rx,
+        &cancel,
+        INITIAL_RECOVERY_BACKOFF,
+        MAX_RECOVERY_BACKOFF,
+    )
+    .await?;
 
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            changed = changes_rx.changed() => {
-                if changed.is_err() {
-                    break;
+    let peer_ready = Arc::new(AtomicBool::new(true));
+    tracing::info!("EPP peer discovery and KV-index bootstrap complete");
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                changed = changes_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
                 }
             }
+            reconcile_once(&service, &store, sync_port, &self_ip, &mut known).await;
         }
-        reconcile_once(&service, &store, sync_port, &self_ip, &mut known).await;
+    });
+    Ok(peer_ready)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_initial_index(
+    service: &SelectionService,
+    store: &Store,
+    sync_port: u16,
+    selection_http_port: u16,
+    self_ip: &str,
+    known: &mut BTreeSet<String>,
+    changes_rx: &mut watch::Receiver<u64>,
+    cancel: &CancellationToken,
+    initial_backoff: std::time::Duration,
+    max_backoff: std::time::Duration,
+) -> Result<()> {
+    recover_initial_index_with_attempt(
+        service,
+        store,
+        sync_port,
+        selection_http_port,
+        self_ip,
+        known,
+        changes_rx,
+        cancel,
+        initial_backoff,
+        max_backoff,
+        |service, peers| Box::pin(service.recover_indexer_from_peers(peers)),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_initial_index_with_attempt<F>(
+    service: &SelectionService,
+    store: &Store,
+    sync_port: u16,
+    selection_http_port: u16,
+    self_ip: &str,
+    known: &mut BTreeSet<String>,
+    changes_rx: &mut watch::Receiver<u64>,
+    cancel: &CancellationToken,
+    initial_backoff: std::time::Duration,
+    max_backoff: std::time::Duration,
+    mut recover: F,
+) -> Result<()>
+where
+    F: for<'a> FnMut(&'a SelectionService, &'a [String]) -> RecoveryAttempt<'a>,
+{
+    let mut backoff = initial_backoff;
+
+    loop {
+        reconcile_once(service, store, sync_port, self_ip, known).await;
+        let peers = recovery_peer_urls(store, self_ip, selection_http_port);
+        if peers.is_empty() {
+            tracing::info!("No sibling EPP peers found; bootstrapping an empty KV index");
+            return Ok(());
+        }
+
+        let attempt = recover(service, &peers);
+        tokio::pin!(attempt);
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                anyhow::bail!("EPP peer discovery cancelled during KV-index recovery")
+            }
+            changed = changes_rx.changed() => {
+                changed.context("EPP peer EndpointSlice watch ended during KV-index recovery")?;
+                backoff = initial_backoff;
+                continue;
+            }
+            result = &mut attempt => result,
+        };
+
+        match result {
+            Ok(true) => return Ok(()),
+            Ok(false) => tracing::warn!(
+                retry_ms = backoff.as_millis(),
+                "No reachable EPP peer dump; retrying KV-index recovery"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                retry_ms = backoff.as_millis(),
+                "EPP peer KV-index recovery failed; retrying"
+            ),
+        }
+
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                anyhow::bail!("EPP peer discovery cancelled during KV-index recovery")
+            }
+            changed = changes_rx.changed() => {
+                changed.context("EPP peer EndpointSlice watch ended during KV-index recovery")?;
+                backoff = initial_backoff;
+            }
+            _ = tokio::time::sleep(backoff) => {
+                backoff = backoff.saturating_mul(2).min(max_backoff);
+            }
+        }
     }
 }
 
@@ -275,6 +375,44 @@ fn live_peer_ips(store: &Store, self_ip: &str) -> BTreeSet<String> {
     ips
 }
 
+/// Recovery prefers an already-serving sibling, but falls back to not-ready
+/// siblings so same-generation replicas can bootstrap during a full surge.
+fn recovery_peer_urls(store: &Store, self_ip: &str, port: u16) -> Vec<String> {
+    let want_ipv6 = is_ipv6(self_ip);
+    let mut preferred = BTreeSet::new();
+    let mut fallback = BTreeSet::new();
+
+    for slice in store.state() {
+        if !matches_address_family(&slice.address_type, want_ipv6) {
+            continue;
+        }
+        for endpoint in &slice.endpoints {
+            let is_preferred = endpoint.conditions.as_ref().is_some_and(|conditions| {
+                conditions.ready == Some(true) || conditions.serving == Some(true)
+            });
+            for address in &endpoint.addresses {
+                if address.is_empty() || address == self_ip {
+                    continue;
+                }
+                if is_preferred {
+                    preferred.insert(address.clone());
+                } else {
+                    fallback.insert(address.clone());
+                }
+            }
+        }
+    }
+    for address in &preferred {
+        fallback.remove(address);
+    }
+
+    preferred
+        .into_iter()
+        .chain(fallback)
+        .map(|ip| format!("http://{}", authority(&ip, port)))
+        .collect()
+}
+
 /// Format `host:port`, bracketing IPv6 literals (`fd00::1` -> `[fd00::1]`) so the
 /// resulting `tcp://` endpoint stays valid on dual-stack clusters.
 fn authority(ip: &str, port: u16) -> String {
@@ -289,6 +427,14 @@ fn is_ipv6(ip: &str) -> bool {
     ip.contains(':')
 }
 
+fn matches_address_family(address_type: &str, want_ipv6: bool) -> bool {
+    match address_type {
+        address_type if address_type.eq_ignore_ascii_case("IPv4") => !want_ipv6,
+        address_type if address_type.eq_ignore_ascii_case("IPv6") => want_ipv6,
+        _ => false,
+    }
+}
+
 /// Collects peer IPs for the requested address family. Includes not-ready peers
 /// and terminating peers that are still serving to preserve synchronization
 /// while they start or drain.
@@ -298,7 +444,7 @@ fn peer_ips<'a>(
 ) -> BTreeSet<String> {
     let mut ips = BTreeSet::new();
     for slice in slices {
-        if slice.address_type.eq_ignore_ascii_case("IPv6") != want_ipv6 {
+        if !matches_address_family(&slice.address_type, want_ipv6) {
             continue;
         }
         // Replica-sync membership follows EndpointSlice membership, not traffic
@@ -317,8 +463,17 @@ fn peer_ips<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use super::*;
+    use axum::{
+        Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get,
+    };
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort};
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::sync::Notify;
 
     fn slice_with(ips: &[&str], terminating: bool, address_type: &str) -> EndpointSlice {
         EndpointSlice {
@@ -347,6 +502,29 @@ mod tests {
             ..Default::default()
         }]);
         slice
+    }
+
+    fn slice_with_peer_ports(replica_sync: i32, selection_http: i32) -> EndpointSlice {
+        let mut slice = slice_with(&["10.0.0.1"], false, "IPv4");
+        slice.metadata.name = Some("epp-peers-abc".to_string());
+        slice.ports = Some(vec![
+            EndpointPort {
+                name: Some(REPLICA_AGG_PORT_NAME.to_string()),
+                port: Some(replica_sync),
+                ..Default::default()
+            },
+            EndpointPort {
+                name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
+                port: Some(selection_http),
+                ..Default::default()
+            },
+        ]);
+        slice
+    }
+
+    fn parse_named_port(slices: &[EndpointSlice], port_name: &str) -> Result<u16> {
+        let slices: Vec<_> = slices.iter().collect();
+        named_tcp_port(&slices, port_name)
     }
 
     #[test]
@@ -413,6 +591,15 @@ mod tests {
     }
 
     #[test]
+    fn peer_ips_rejects_fqdn_addresses() {
+        let slices = [slice_with(&["epp.example.test"], false, "FQDN")];
+        assert!(peer_ips(slices.iter(), false).is_empty());
+        assert!(
+            recovery_peer_urls(&store_from_slices(slices.to_vec()), "10.0.0.9", 9093).is_empty()
+        );
+    }
+
+    #[test]
     fn authority_brackets_ipv6_only() {
         assert_eq!(authority("10.0.0.1", 9092), "10.0.0.1:9092");
         assert_eq!(authority("fd00::1", 9092), "[fd00::1]:9092");
@@ -424,13 +611,33 @@ mod tests {
             slice_with_replica_port(Some(9092)),
             slice_with_replica_port(Some(9092)),
         ];
-        assert_eq!(replica_sync_port(slices.iter()).unwrap(), 9092);
+        assert_eq!(
+            parse_named_port(&slices, REPLICA_AGG_PORT_NAME).unwrap(),
+            9092
+        );
+    }
+
+    #[test]
+    fn resolves_selection_http_named_port() {
+        let slices = [
+            slice_with_peer_ports(9092, 9093),
+            slice_with_peer_ports(9092, 9093),
+        ];
+        assert_eq!(
+            peer_ports(slices.iter()).unwrap(),
+            PeerPorts {
+                replica_sync: 9092,
+                selection_http: 9093,
+            }
+        );
     }
 
     #[test]
     fn rejects_missing_replica_agg_named_port() {
         let slices = [slice_with(&["10.0.0.1"], false, "IPv4")];
-        let error = replica_sync_port(slices.iter()).unwrap_err().to_string();
+        let error = parse_named_port(&slices, REPLICA_AGG_PORT_NAME)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains(REPLICA_AGG_PORT_NAME));
     }
 
@@ -440,7 +647,9 @@ mod tests {
             slice_with_replica_port(Some(9092)),
             slice_with_replica_port(Some(9093)),
         ];
-        let error = replica_sync_port(slices.iter()).unwrap_err().to_string();
+        let error = parse_named_port(&slices, REPLICA_AGG_PORT_NAME)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("inconsistent ports"));
     }
 
@@ -460,11 +669,19 @@ mod tests {
     fn accepts_absent_or_tcp_replica_agg_protocol() {
         // Absent protocol defaults to TCP in Kubernetes; explicit TCP is fine.
         assert_eq!(
-            replica_sync_port([slice_with_replica_port_protocol(None)].iter()).unwrap(),
+            parse_named_port(
+                &[slice_with_replica_port_protocol(None)],
+                REPLICA_AGG_PORT_NAME
+            )
+            .unwrap(),
             9092
         );
         assert_eq!(
-            replica_sync_port([slice_with_replica_port_protocol(Some("TCP"))].iter()).unwrap(),
+            parse_named_port(
+                &[slice_with_replica_port_protocol(Some("TCP"))],
+                REPLICA_AGG_PORT_NAME
+            )
+            .unwrap(),
             9092
         );
     }
@@ -475,10 +692,88 @@ mod tests {
         // tcp://, so treating it as valid would be a silent transport mismatch.
         // With no TCP match left, resolution fails with the "does not expose"
         // error naming the port.
-        let error = replica_sync_port([slice_with_replica_port_protocol(Some("UDP"))].iter())
-            .unwrap_err()
-            .to_string();
+        let error = parse_named_port(
+            &[slice_with_replica_port_protocol(Some("UDP"))],
+            REPLICA_AGG_PORT_NAME,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains(REPLICA_AGG_PORT_NAME));
+    }
+
+    #[test]
+    fn rejects_invalid_named_tcp_ports() {
+        let cases = [
+            (
+                "missing number",
+                vec![EndpointPort {
+                    name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
+                    port: None,
+                    ..Default::default()
+                }],
+            ),
+            (
+                "zero",
+                vec![EndpointPort {
+                    name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
+                    port: Some(0),
+                    ..Default::default()
+                }],
+            ),
+            (
+                "out of range",
+                vec![EndpointPort {
+                    name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
+                    port: Some(65_536),
+                    ..Default::default()
+                }],
+            ),
+            (
+                "udp",
+                vec![EndpointPort {
+                    name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
+                    port: Some(9093),
+                    protocol: Some("UDP".to_string()),
+                    ..Default::default()
+                }],
+            ),
+            (
+                "duplicate",
+                vec![
+                    EndpointPort {
+                        name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
+                        port: Some(9093),
+                        ..Default::default()
+                    },
+                    EndpointPort {
+                        name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
+                        port: Some(9094),
+                        ..Default::default()
+                    },
+                ],
+            ),
+        ];
+
+        for (name, ports) in cases {
+            let mut slice = slice_with(&["10.0.0.1"], false, "IPv4");
+            slice.metadata.name = Some(name.to_string());
+            slice.ports = Some(ports);
+            assert!(
+                parse_named_port(&[slice], SELECTION_HTTP_PORT_NAME).is_err(),
+                "case {name} must fail"
+            );
+        }
+
+        let slices = [
+            slice_with_peer_ports(9092, 9093),
+            slice_with_peer_ports(9092, 9094),
+        ];
+        assert!(
+            parse_named_port(&slices, SELECTION_HTTP_PORT_NAME)
+                .unwrap_err()
+                .to_string()
+                .contains("inconsistent ports")
+        );
     }
 
     fn free_tcp_port() -> u16 {
@@ -503,6 +798,428 @@ mod tests {
         }
         writer.apply_watcher_event(&watcher::Event::InitDone);
         store
+    }
+
+    fn recovery_slice(ip: &str, ready: Option<bool>, serving: Option<bool>) -> EndpointSlice {
+        EndpointSlice {
+            address_type: "IPv4".to_string(),
+            endpoints: vec![Endpoint {
+                addresses: vec![ip.to_string()],
+                conditions: Some(EndpointConditions {
+                    ready,
+                    serving,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ports: Some(vec![
+                EndpointPort {
+                    name: Some(REPLICA_AGG_PORT_NAME.to_string()),
+                    port: Some(9092),
+                    ..Default::default()
+                },
+                EndpointPort {
+                    name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
+                    port: Some(9093),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        }
+    }
+
+    fn store_and_writer(
+        slices: Vec<EndpointSlice>,
+    ) -> (
+        Store,
+        kube::runtime::reflector::store::Writer<EndpointSlice>,
+    ) {
+        use kube::runtime::watcher;
+
+        let mut writer = kube::runtime::reflector::store::Writer::<EndpointSlice>::default();
+        let store = writer.as_reader();
+        writer.apply_watcher_event(&watcher::Event::Init);
+        for (index, mut slice) in slices.into_iter().enumerate() {
+            slice
+                .metadata
+                .name
+                .get_or_insert_with(|| format!("epp-peers-{index}"));
+            writer.apply_watcher_event(&watcher::Event::InitApply(slice));
+        }
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+        (store, writer)
+    }
+
+    fn start_recovery(
+        service: Arc<SelectionService>,
+        store: Store,
+        selection_http_port: u16,
+        changes_rx: watch::Receiver<u64>,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        tokio::spawn(async move {
+            let mut known = BTreeSet::new();
+            let mut changes_rx = changes_rx;
+            recover_initial_index(
+                &service,
+                &store,
+                9092,
+                selection_http_port,
+                "127.0.0.9",
+                &mut known,
+                &mut changes_rx,
+                &cancel,
+                Duration::from_millis(10),
+                Duration::from_millis(40),
+            )
+            .await
+        })
+    }
+
+    async fn recovery_service() -> Arc<SelectionService> {
+        use dynamo_kv_router::config::KvRouterConfig;
+        use dynamo_kv_router::services::selection::SelectionServiceBuilder;
+
+        Arc::new(
+            SelectionServiceBuilder::new(KvRouterConfig::default())
+                .indexer_threads(1)
+                .build()
+                .await
+                .expect("build selection service"),
+        )
+    }
+
+    #[derive(Clone)]
+    struct DumpGate {
+        requested: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    async fn gated_dump(State(gate): State<DumpGate>) -> Json<serde_json::Value> {
+        gate.requested.notify_one();
+        gate.release.notified().await;
+        Json(serde_json::json!({}))
+    }
+
+    #[derive(Clone)]
+    struct FlakyDump {
+        first_failed: Arc<Notify>,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    async fn flaky_dump(State(state): State<FlakyDump>) -> impl IntoResponse {
+        if state.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            state.first_failed.notify_one();
+            (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
+        } else {
+            Json(serde_json::json!({})).into_response()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initial_recovery_bootstraps_without_peer() {
+        let service = recovery_service().await;
+        let (store, _writer) = store_and_writer(Vec::new());
+        let (_changes_tx, mut changes_rx) = watch::channel(0u64);
+        let cancel = CancellationToken::new();
+        let mut known = BTreeSet::new();
+
+        recover_initial_index(
+            &service,
+            &store,
+            9092,
+            9093,
+            "127.0.0.9",
+            &mut known,
+            &mut changes_rx,
+            &cancel,
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+        )
+        .await
+        .expect("empty peer set must bootstrap immediately");
+        assert!(known.is_empty());
+
+        service.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recovery_uses_selection_http_port_from_endpoint_slice() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/dump", get(|| async { Json(serde_json::json!({})) })),
+            )
+            .await
+        });
+        let mut slice = recovery_slice("127.0.0.1", Some(true), Some(true));
+        slice.ports.as_mut().unwrap()[1].port = Some(i32::from(port));
+        let ports = peer_ports([&slice].into_iter()).expect("resolve peer ports");
+        let (store, _writer) = store_and_writer(vec![slice]);
+        let (_changes_tx, changes_rx) = watch::channel(0u64);
+        let service = recovery_service().await;
+        let cancel = CancellationToken::new();
+
+        start_recovery(
+            service.clone(),
+            store,
+            ports.selection_http,
+            changes_rx,
+            cancel.clone(),
+        )
+        .await
+        .expect("recovery task joins")
+        .expect("recovery must use the EndpointSlice HTTP port");
+
+        cancel.cancel();
+        server.abort();
+        service.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recovery_retries_unchanged_peer_until_reachable() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = FlakyDump {
+            first_failed: Arc::new(Notify::new()),
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let server = tokio::spawn({
+            let state = state.clone();
+            async move {
+                axum::serve(
+                    listener,
+                    Router::new()
+                        .route("/dump", get(flaky_dump))
+                        .with_state(state),
+                )
+                .await
+            }
+        });
+        let (store, _writer) =
+            store_and_writer(vec![recovery_slice("127.0.0.1", Some(true), Some(true))]);
+        let (_changes_tx, changes_rx) = watch::channel(0u64);
+        let service = recovery_service().await;
+        let cancel = CancellationToken::new();
+        let task = start_recovery(service.clone(), store, port, changes_rx, cancel.clone());
+
+        tokio::time::timeout(Duration::from_secs(3), state.first_failed.notified())
+            .await
+            .expect("first recovery request must fail");
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("unchanged peer must be retried")
+            .expect("recovery task joins")
+            .expect("second recovery succeeds");
+        assert_eq!(state.attempts.load(Ordering::SeqCst), 2);
+
+        cancel.cancel();
+        server.abort();
+        service.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_change_cancels_inflight_recovery_and_uses_new_peer() {
+        use kube::runtime::watcher;
+
+        struct DropSignal(Arc<Notify>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+
+        let port = 9093;
+        let old_ip = "192.0.2.10";
+        let new_ip = "192.0.2.11";
+        let old_slice = recovery_slice(old_ip, Some(true), Some(true));
+        let (store, mut writer) = store_and_writer(vec![old_slice]);
+        let (changes_tx, changes_rx) = watch::channel(0u64);
+        let service = recovery_service().await;
+        let cancel = CancellationToken::new();
+
+        let first_started = Arc::new(Notify::new());
+        let first_dropped = Arc::new(Notify::new());
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let attempt_number = Arc::new(AtomicUsize::new(0));
+        let task = tokio::spawn({
+            let service = service.clone();
+            let cancel = cancel.clone();
+            let first_started = first_started.clone();
+            let first_dropped = first_dropped.clone();
+            let attempts = attempts.clone();
+            let attempt_number = attempt_number.clone();
+            async move {
+                let mut known = BTreeSet::new();
+                let mut changes_rx = changes_rx;
+                recover_initial_index_with_attempt(
+                    &service,
+                    &store,
+                    9092,
+                    port,
+                    "192.0.2.99",
+                    &mut known,
+                    &mut changes_rx,
+                    &cancel,
+                    Duration::from_millis(10),
+                    Duration::from_millis(40),
+                    move |_service, peers| {
+                        let peers = peers.to_vec();
+                        attempts.lock().unwrap().push(peers.clone());
+                        let number = attempt_number.fetch_add(1, Ordering::SeqCst);
+                        let first_started = first_started.clone();
+                        let first_dropped = first_dropped.clone();
+                        Box::pin(async move {
+                            if number == 0 {
+                                let _drop_signal = DropSignal(first_dropped);
+                                first_started.notify_one();
+                                std::future::pending::<()>().await;
+                                unreachable!("the old recovery attempt must be cancelled");
+                            }
+                            Ok(peers == vec![format!("http://{new_ip}:{port}")])
+                        })
+                    },
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), first_started.notified())
+            .await
+            .expect("old recovery request must be in flight");
+        let mut replacement = recovery_slice(new_ip, Some(true), Some(true));
+        replacement.metadata.name = Some("epp-peers-0".to_string());
+        writer.apply_watcher_event(&watcher::Event::Apply(replacement));
+        changes_tx.send(1).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), first_dropped.notified())
+            .await
+            .expect("peer change must drop the old recovery future");
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("peer change must not wait for old HTTP timeout")
+            .expect("recovery task joins")
+            .expect("new peer dump completes recovery");
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![
+                vec![format!("http://{old_ip}:{port}")],
+                vec![format!("http://{new_ip}:{port}")],
+            ]
+        );
+
+        cancel.cancel();
+        service.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peers_disappearing_during_recovery_bootstraps() {
+        use kube::runtime::watcher;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let gate = DumpGate {
+            requested: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        };
+        let server = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                axum::serve(
+                    listener,
+                    Router::new()
+                        .route("/dump", get(gated_dump))
+                        .with_state(gate),
+                )
+                .await
+            }
+        });
+        let mut old_slice = recovery_slice("127.0.0.1", Some(true), Some(true));
+        old_slice.metadata.name = Some("epp-peers-0".to_string());
+        let (store, mut writer) = store_and_writer(vec![old_slice.clone()]);
+        let (changes_tx, changes_rx) = watch::channel(0u64);
+        let service = recovery_service().await;
+        let cancel = CancellationToken::new();
+        let task = start_recovery(service.clone(), store, port, changes_rx, cancel.clone());
+
+        tokio::time::timeout(Duration::from_secs(3), gate.requested.notified())
+            .await
+            .expect("old recovery request must be in flight");
+        writer.apply_watcher_event(&watcher::Event::Delete(old_slice));
+        changes_tx.send(1).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("empty peer set must bootstrap without waiting for old request")
+            .expect("recovery task joins")
+            .expect("empty peer set bootstraps");
+
+        cancel.cancel();
+        server.abort();
+        service.shutdown().await;
+    }
+
+    #[test]
+    fn recovery_candidate_order_does_not_change_replica_membership() {
+        let slice = EndpointSlice {
+            address_type: "IPv4".to_string(),
+            endpoints: vec![
+                Endpoint {
+                    addresses: vec!["10.0.0.2".to_string()],
+                    conditions: Some(EndpointConditions {
+                        ready: Some(false),
+                        serving: Some(false),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                Endpoint {
+                    addresses: vec!["10.0.0.3".to_string()],
+                    conditions: Some(EndpointConditions {
+                        ready: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let (store, _writer) = store_and_writer(vec![slice.clone()]);
+
+        assert_eq!(
+            peer_ips([&slice].into_iter(), false),
+            BTreeSet::from(["10.0.0.2".to_string(), "10.0.0.3".to_string()])
+        );
+        assert_eq!(
+            recovery_peer_urls(&store, "10.0.0.9", 9093),
+            vec![
+                "http://10.0.0.3:9093".to_string(),
+                "http://10.0.0.2:9093".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn recovery_peer_urls_bracket_ipv6() {
+        let slice = EndpointSlice {
+            address_type: "IPv6".to_string(),
+            endpoints: vec![Endpoint {
+                addresses: vec!["fd00::2".to_string()],
+                conditions: Some(EndpointConditions {
+                    ready: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (store, _writer) = store_and_writer(vec![slice]);
+        assert_eq!(
+            recovery_peer_urls(&store, "fd00::1", 9093),
+            vec!["http://[fd00::2]:9093".to_string()]
+        );
     }
 
     /// End-to-end at the reconcile boundary: a sibling that enters termination

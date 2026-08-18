@@ -345,14 +345,13 @@ async fn run_inner(
                         kv_router_config,
                         factory,
                     } => {
-                        let service =
-                            Selector::build_selection_service_with_worker_selection_policy_factory(
-                                &selector_cfg,
-                                *kv_router_config,
-                                factory,
-                            )
-                            .await?;
-                        crate::EppRouter::from_selection_service(selector_cfg, service).await?
+                        let selector = Selector::new_with_worker_selection_policy_factory(
+                            &selector_cfg,
+                            *kv_router_config,
+                            factory,
+                        )
+                        .await?;
+                        crate::EppRouter::from_built_selector(selector_cfg, selector).await?
                     }
                 }))
             } => router?,
@@ -408,7 +407,7 @@ async fn serve<P: crate::EndpointPicker>(
     // Continuously mirror readiness onto the health status. `is_ready()` is a
     // *live* signal that can flip both ways — standalone discovery clears it when
     // the InferencePool is deleted/invalid (nothing routable), and in replicated
-    // mode it stays false until the peer set finishes its initial sync. A latch
+    // mode it stays false until peer discovery and KV-index bootstrap finish. A latch
     // (set SERVING once) would strand those states, so a background task tracks
     // transitions and moves the health status in lock-step, dropping out of
     // SERVING when readiness drops and recovering when it returns. Health starts

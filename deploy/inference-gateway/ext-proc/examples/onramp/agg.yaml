@@ -213,6 +213,13 @@ metadata:
     app: dynamo-epp
 spec:
   replicas: 2
+  # During the first upgrade from an image without the peer dump endpoint, two
+  # new EPP Pods must start together so they can recover from each other.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 100%
   selector:
     matchLabels:
       app: dynamo-epp
@@ -282,6 +289,9 @@ spec:
             # ZMQ replica-sync between EPP replicas (embedded replication).
             - name: replica-agg
               containerPort: 9092
+            # Internal HTTP dump endpoint for joining EPP KV-index recovery.
+            - name: selection-http
+              containerPort: 9093
           readinessProbe:
             grpc:
               port: 9003
@@ -295,7 +305,8 @@ spec:
               drop:
                 - ALL
 ---
-# GAIE calls the gRPC port. EPP replicas use `replica-agg` for load-state sync.
+# GAIE calls the gRPC port. EPP replicas use `replica-agg` for lifecycle sync
+# and `selection-http` for startup KV-index recovery.
 apiVersion: v1
 kind: Service
 metadata:
@@ -311,6 +322,9 @@ spec:
     - name: replica-agg
       port: 9092
       targetPort: replica-agg
+    - name: selection-http
+      port: 9093
+      targetPort: selection-http
 ---
 # InferencePool selects the raw vLLM pods and delegates endpoint selection to
 # the EPP. The EPP reads this object (read-only) to learn the pod selector and

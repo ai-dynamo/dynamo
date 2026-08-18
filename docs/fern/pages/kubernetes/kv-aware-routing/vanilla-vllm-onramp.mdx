@@ -379,8 +379,8 @@ The model name, block size, event port, and maximum batched-token values in the 
 coherent configuration. Change them together when adapting another model or vLLM deployment.
 
 Create the replacement `dynamo-epp` Service with gRPC port `9002` and, for two replicas, the named
-`replica-agg` port. The complete ServiceAccount, RBAC, Deployment, and Service definitions are
-available in the
+`replica-agg` and `selection-http` ports. The complete ServiceAccount, RBAC, Deployment, and Service
+definitions are available in the
 [`agg.yaml` EPP resources](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
 
 ### Connect the InferencePool
@@ -460,9 +460,10 @@ show no selection, the route is bypassing the `InferencePool`.
 ## EPP Replication
 
 Each EPP replica has an in-process selector and KV index. When `DYN_EPP_PEER_SERVICE` is set, replicas
-watch their own Service's `EndpointSlice` resources and discover its named TCP `replica-agg` port.
-They synchronize admission, prefill-complete, and free events so active-load accounting converges
-across replicas.
+watch their own Service's `EndpointSlice` resources and discover its named TCP `replica-agg` and
+`selection-http` ports. The `replica-agg` port synchronizes admission, prefill-complete, and free
+events so active-load accounting converges across replicas. The internal `selection-http` port exposes
+`GET /dump` for KV-index recovery during startup.
 
 ```mermaid
 flowchart LR
@@ -474,14 +475,28 @@ flowchart LR
     Workers["Ready vLLM pods"] -. "KV events :5557<br/>independent index warm-up" .-> ReplicaA
     Workers -. "KV events :5557<br/>independent index warm-up" .-> ReplicaB
     ReplicaA <-->|"replica-agg :9092<br/>admission, prefill-complete, free"| ReplicaB
+    ReplicaA <-->|"selection-http :9093<br/>startup GET /dump"| ReplicaB
 ```
 
-Replica synchronization does not copy the full KV index to a new EPP. A new replica warms its index
-from live worker events and optional replay. For consistency details, see
+Before a joining or restarted EPP starts worker discovery, it recovers its KV index from a sibling's
+`GET /dump` endpoint. The EPP remains `NOT_SERVING` until recovery succeeds. If no sibling exists,
+the first EPP follows the normal worker-event and optional replay bootstrap path. If discovered peers
+are temporarily unreachable, recovery retries with backoff and retries immediately when peer membership
+changes.
+
+The `agg.yaml` example uses a rolling-update strategy with `maxUnavailable: 0` and `maxSurge: 100%`.
+During the first upgrade from an EPP image without `selection-http`, this lets two new Pods start
+together and recover from each other's already-bound dump endpoints. The surge can temporarily double
+the EPP Pod count, so make sure the cluster has capacity for it. Later rollouts recover from an existing
+ready replica.
+
+Recovery restores KV-index placement only. It does not restore active reservations or provide an atomic
+snapshot-plus-live-event handoff. Replica lifecycle synchronization and worker replay continue to converge
+state after startup. For consistency details, see
 [Standalone Selection Service](../../developer-guide/knowledge-base/modular-components/router/standalone-selection.md).
 
 For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVICE`, `POD_IP`, and the
-`replica-agg` Service port.
+`replica-agg` and `selection-http` container and Service ports.
 
 ## Standalone EPP Configuration Reference
 
