@@ -35,6 +35,8 @@ ckf-diagnostics = []
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []
+# S3 destination for the request-trace sink, reusing the existing object_store client.
+request-trace-s3 = []
 
 [[bench]]
 name = "tokenizer_simple"
@@ -88,6 +90,7 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 ipnet = { workspace = true }
+libc = { workspace = true }
 lru = { workspace = true }
 moka = { workspace = true }
 oneshot = { workspace = true }
@@ -210,6 +213,7 @@ llm-multimodal = { version = "=1.7.0", optional = true }
 llm-tokenizer = { version = "=1.4.1", optional = true }
 
 [dev-dependencies]
+dynamo-runtime = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 approx = "0.5"
 assert_matches = "1.5"

@@ -197,6 +197,7 @@ pub fn error_type_name(error_type: ErrorType) -> &'static str {
         ErrorType::Cancelled => "cancelled",
         ErrorType::ResourceExhausted => "resource_exhausted",
         ErrorType::Unavailable => "unavailable",
+        ErrorType::WorkerOverloaded => "worker_overloaded",
         ErrorType::Backend(BackendError::Unknown) => "backend_unknown",
         ErrorType::Backend(BackendError::InvalidArgument) => "backend_invalid_argument",
         ErrorType::Backend(BackendError::CannotConnect) => "backend_cannot_connect",
@@ -232,7 +233,7 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument) => {
             "rejected"
         }
-        ErrorType::ResourceExhausted => "rejected",
+        ErrorType::ResourceExhausted | ErrorType::WorkerOverloaded => "rejected",
         ErrorType::Unavailable => "unavailable",
         ErrorType::Cancelled | ErrorType::Backend(BackendError::Cancelled) => "cancelled",
         ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown) => "error",

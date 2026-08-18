@@ -274,7 +274,9 @@ async fn run_supervisor<H, O>(
                         stop_source(source, &observer).await;
                     }
                 }
-                Ok(DiscoveryEvent::Added(_)) | Ok(DiscoveryEvent::Removed(_)) => {}
+                Ok(DiscoveryEvent::Added(_))
+                | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
+                | Ok(DiscoveryEvent::Removed(_)) => {}
                 Err(error) => {
                     tracing::warn!(%error, topic, "direct-ZMQ discovery watch failed");
                     break;

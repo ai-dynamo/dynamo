@@ -45,6 +45,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -68,6 +69,7 @@ import (
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -77,6 +79,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	//+kubebuilder:scaffold:imports
@@ -151,6 +154,10 @@ func initCRDSchemes() {
 
 	utilruntime.Must(grovev1alpha1.AddToScheme(crdScheme))
 
+	// PodSnapshot/PodSnapshotContent are owned by github.com/ai-dynamo/snapshot; the
+	// operator only consumes them (creates/reads), it does not reconcile them.
+	utilruntime.Must(snapshotv1alpha1.AddToScheme(crdScheme))
+
 	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
 
 	utilruntime.Must(admissionregistrationv1.AddToScheme(crdScheme))
@@ -178,6 +185,7 @@ func main() {
 	var operatorVersion string
 	var operatorImage string
 	var operatorImagePullPolicy string
+	var dgdrDefaultImage string
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -189,6 +197,8 @@ func main() {
 	)
 	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
 		"Image pull policy for operator helper init containers")
+	flag.StringVar(&dgdrDefaultImage, "dgdr-default-image", "",
+		"Default DGDR profiler image, put into DGDR spec.image when unset; empty derives dynamo-planner:<operator-version>")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -277,11 +287,6 @@ func main() {
 	if restrictedNamespace != "" {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
-		}
-		// PodSnapshotContent is cluster-scoped, so DefaultNamespaces does not cover it.
-		// Register it cluster-wide explicitly so the PodSnapshotReconciler can watch it.
-		mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{
-			&nvidiacomv1alpha1.PodSnapshotContent{}: {},
 		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
 
@@ -510,7 +515,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("webhook-server", webhookServer.StartedChecker()); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -526,7 +531,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := registerWebhookHandlers(mgr, operatorCfg, runtimeConfig, operatorVersion, gates); err != nil {
+	if err := registerWebhookHandlers(
+		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, gates,
+	); err != nil {
 		setupLog.Error(err, "failed to register webhooks")
 		os.Exit(1)
 	}
@@ -586,6 +593,36 @@ func registerControllers(
 	operatorImage string,
 	operatorPullPolicy corev1.PullPolicy,
 ) error {
+	if operatorCfg.Namespace.Restricted == "" {
+		// The cluster-wide manager cache covers all namespaces. ExcludedNamespaces only filters
+		// business-controller events and does not narrow the cache used by the migrator.
+		migrator := &crdmigrator.CRDMigrator{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Config: map[client.Object]crdmigrator.ByObjectConfig{
+				&nvidiacomv1beta1.DynamoComponentDeployment{}: {
+					UseCache:                            true,
+					UseStatusForStorageVersionMigration: true,
+				},
+				&nvidiacomv1beta1.DynamoGraphDeployment{}: {
+					UseCache:                            true,
+					UseStatusForStorageVersionMigration: true,
+				},
+				&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}: {
+					UseCache:                            true,
+					UseStatusForStorageVersionMigration: true,
+				},
+				&nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}: {
+					UseCache:                            true,
+					UseStatusForStorageVersionMigration: true,
+				},
+			},
+		}
+		if err := migrator.SetupWithManager(mgr, ctrlcontroller.Options{MaxConcurrentReconciles: 1}); err != nil {
+			return fmt.Errorf("unable to create CRD migrator controller: %w", err)
+		}
+	}
+
 	setupOptions := controller.SetupOptions{
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,
@@ -633,12 +670,17 @@ func registerControllers(
 	if err := controller.SetupDynamoCheckpoint(mgr, setupOptions); err != nil {
 		return err
 	}
-	if err := controller.SetupPodSnapshot(mgr, setupOptions); err != nil {
-		return err
-	}
+	// PodSnapshot/PodSnapshotContent reconciliation is owned by the external
+	// Snapshot operator (github.com/ai-dynamo/snapshot).
 
 	if runtimeConfig.Gate.Enabled(features.Grove) {
 		if err := controller.SetupFailoverCascade(mgr); err != nil {
+			return err
+		}
+	}
+
+	if runtimeConfig.Gate.Enabled(features.Checkpoint) {
+		if err := controller.SetupGMSPodReplacement(mgr, setupOptions); err != nil {
 			return err
 		}
 	}
@@ -655,6 +697,7 @@ func registerWebhookHandlers(
 	operatorCfg *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
 	operatorVersion string,
+	dgdrDefaultImage string,
 	gate features.Gate,
 ) error {
 	var operatorPrincipal string
@@ -665,18 +708,11 @@ func registerWebhookHandlers(
 		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
 	}
 
-	// Temporary internal gate for GMS + Snapshot.
-	if gate.Enabled(features.GMSSnapshot) {
-		setupLog.Info(
-			"INTERNAL OVERRIDE: GMS + Snapshot admission rule disabled via env var; do NOT enable in production",
-			"envVar", features.GMSSnapshotEnvVar,
-		)
-	}
-
 	if err := webhooksetup.Setup(mgr, webhooksetup.Options{
 		Config:            operatorCfg,
 		RuntimeConfig:     runtimeConfig,
 		OperatorVersion:   operatorVersion,
+		DGDRDefaultImage:  dgdrDefaultImage,
 		OperatorPrincipal: operatorPrincipal,
 		Gate:              gate,
 	}); err != nil {

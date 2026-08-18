@@ -29,8 +29,8 @@
 #                      NOTICES section
 #   images:            list of image names this component ships in;
 #                      --native-image must match one of these
-#                      ("snapshot-agent" today; ucx/libfabric/etc.
-#                      added when framework runtimes wire native in)
+#                      (dynamo-planner, vllm-runtime today; more added as
+#                      framework runtimes wire native in)
 
 packages:
   # --- EFA (Elastic Fabric Adapter) components ---
@@ -60,11 +60,11 @@ packages:
   # NOTE: NIXL ships as the `nixl` Python wheel (attributed by the python
   # generator), so it is intentionally NOT duplicated here.
 
-  # LGPL media stack — built --disable-gpl in wheel_builder (h264_nvenc + libvpx)
-  # and copied into vllm/sglang runtime (container/templates/vllm_runtime.Dockerfile
-  # + sglang_runtime.Dockerfile). Replaces the purged GPL apt ffmpeg.
+  # LGPL media stack — built --disable-gpl in wheel_builder with libvpx (VP9) and
+  # no H.264 capability, then copied into the vLLM, SGLang, and TensorRT-LLM
+  # runtimes for the VP9 video-encode path.
   - name: ffmpeg
-    version: "8.1"
+    version: "8.1.2"
     license: LGPL-2.1-or-later
     source: https://ffmpeg.org/
     images:
@@ -72,9 +72,12 @@ packages:
       - vllm-runtime-efa
       - sglang-runtime
       - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
 
   - name: libvpx
-    # VP8/VP9 codec library, ffmpeg's only non-NVIDIA encoder dependency.
+    # VP8/VP9 codec library — the in-tree ffmpeg's only video encoder now that
+    # H.264/NVENC is removed. Shipped in every image that carries the ffmpeg libs.
     version: v1.14.1
     license: BSD-3-Clause
     source: https://chromium.googlesource.com/webm/libvpx
@@ -83,11 +86,13 @@ packages:
       - vllm-runtime-efa
       - sglang-runtime
       - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
 
   # UCX — Unified Communication X, built from source in wheel_builder and used by
   # the NIXL transport. Installed to /usr/local (no dpkg metadata).
   - name: UCX
-    version: v1.20.x
+    version: v1.21.0
     license: BSD-3-Clause
     source: https://github.com/openucx/ucx
     images:
@@ -113,7 +118,7 @@ packages:
   # etcd — coordination store, downloaded as a release binary in dynamo_base and
   # placed at /usr/local/bin (no apt metadata).
   - name: etcd
-    version: v3.5.30
+    version: v3.5.33
     license: Apache-2.0
     source: https://github.com/etcd-io/etcd
     images:
@@ -128,7 +133,7 @@ packages:
   # nats-server — messaging server, downloaded as a .deb in dynamo_base (dpkg -i
   # may not survive into the final runtime layer attribution reliably).
   - name: nats-server
-    version: v2.10.28
+    version: v2.12.14
     license: Apache-2.0
     source: https://github.com/nats-io/nats-server
     images:
@@ -150,33 +155,3 @@ packages:
     source: http://gondor.apana.org.au/~herbert/dash/
     images:
       - dynamo-planner
-
-  # CRIU, cuda-checkpoint, cuda-checkpoint-helper — from-source binaries the
-  # snapshot-agent builds/clones and copies into the distroful cuda-dl-base
-  # image. dpkg doesn't see them (not apt-installed); their license text is
-  # staged at /legal/<name>/... in agent_pre so the native generator inlines it.
-  - name: CRIU
-    version: criu-dev
-    license: GPL-2.0-only
-    source: https://github.com/checkpoint-restore/criu
-    license_text_path: /legal/CRIU/COPYING
-    images:
-      - snapshot-agent
-
-  - name: cuda-checkpoint
-    version: main
-    license: LicenseRef-NVIDIA-Proprietary
-    source: https://github.com/NVIDIA/cuda-checkpoint
-    license_text_path: /legal/cuda-checkpoint/LICENSE
-    images:
-      - snapshot-agent
-
-  - name: cuda-checkpoint-helper
-    # First-party: small C wrapper that calls cuLink/cuMemcpyAsync etc.
-    # to assist with cuda-checkpoint coordination. Source lives in
-    # deploy/snapshot/cmd/cuda-checkpoint-helper/main.c.
-    version: 1.0
-    license: Apache-2.0
-    source: https://github.com/ai-dynamo/dynamo
-    images:
-      - snapshot-agent

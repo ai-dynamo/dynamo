@@ -46,6 +46,7 @@ pub(crate) struct EndpointLocator {
     endpoint_id: EndpointId,
 }
 
+#[allow(dead_code)]
 impl EndpointLocator {
     pub(crate) fn new(dc_id: DcId, endpoint_id: EndpointId) -> Self {
         Self { dc_id, endpoint_id }
@@ -66,6 +67,7 @@ pub(crate) struct PoolBinding {
     kv_state_endpoint: Option<EndpointLocator>,
 }
 
+#[allow(dead_code)]
 impl PoolBinding {
     pub(crate) fn new(
         pool_id: PoolId,

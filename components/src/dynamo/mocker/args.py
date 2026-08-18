@@ -7,6 +7,10 @@ import os
 import tempfile
 from pathlib import Path
 
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    add_worker_router_arguments,
+)
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
@@ -25,26 +29,6 @@ def positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError(str(error)) from error
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"must be positive, got {parsed}")
-    return parsed
-
-
-def non_negative_int(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
-    if parsed < 0:
-        raise argparse.ArgumentTypeError(f"must be non-negative, got {parsed}")
-    return parsed
-
-
-def non_negative_float(value: str) -> float:
-    try:
-        parsed = float(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
-    if parsed < 0:
-        raise argparse.ArgumentTypeError(f"must be non-negative, got {parsed}")
     return parsed
 
 
@@ -255,13 +239,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Disable automatic prefix caching",
     )
     parser.add_argument(
-        "--g1-backend",
-        choices=["kvbm", "native"],
-        default="kvbm",
-        help="G1 manager for the shared vLLM/TRT-LLM scheduler (default: "
-        "kvbm). Use 'native' for the self-contained physical block-pool model.",
-    )
-    parser.add_argument(
         "--enable-chunked-prefill",
         action="store_true",
         dest="enable_chunked_prefill",
@@ -322,8 +299,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-perf-model",
         action="store_true",
         default=False,
-        help="Use direct AIC SDK calls for latency prediction. "
-        "Requires aiconfigurator SDK installed.",
+        help="Use aiconfigurator-core directly for latency prediction. "
+        "Requires aiconfigurator-core installed.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -601,69 +578,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
     )
     parser.add_argument(
-        "--num-g2-blocks",
-        type=non_negative_int,
-        default=None,
-        help="Enable KVBM mock offload with this many per-worker G2 host blocks. "
-        "Set to 0 to disable.",
-    )
-    parser.add_argument(
-        "--num-g3-blocks",
-        type=non_negative_int,
-        default=None,
-        help="Enable shared KVBM mock G3 with this many process-local shared blocks. "
-        "Set to 0 to disable.",
-    )
-    parser.add_argument(
-        "--enable-g4-storage",
-        action="store_true",
-        default=False,
-        help="Enable shared KVBM mock G4 object-storage simulation.",
-    )
-    parser.add_argument(
-        "--offload-batch-size",
-        type=non_negative_int,
-        default=None,
-        help="Batch size for the mock G1->G2 offload pipeline. Set to 0 to use the default.",
-    )
-    parser.add_argument(
-        "--bandwidth-g1-to-g2-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock G1->G2 offload bandwidth in GB/s.",
-    )
-    parser.add_argument(
-        "--bandwidth-g2-to-g1-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock G2->G1 onboard bandwidth in GB/s.",
-    )
-    parser.add_argument(
-        "--bandwidth-g2-to-g3-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock shared G2->G3 offload bandwidth in GB/s.",
-    )
-    parser.add_argument(
-        "--bandwidth-g3-to-g2-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock shared G3->G2 staging bandwidth in GB/s.",
-    )
-    parser.add_argument(
-        "--bandwidth-g2-to-g4-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock shared G2->G4 object offload bandwidth in GB/s.",
-    )
-    parser.add_argument(
-        "--bandwidth-g4-to-g2-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock shared G4->G2 object staging bandwidth in GB/s.",
-    )
-
-    parser.add_argument(
         "--stagger-delay",
         type=float,
         default=-1.0,
@@ -698,7 +612,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "for etcd/kubernetes).",
     )
 
+    # Same flags the frontend and engine backends expose, so a mocker can stand
+    # in for a real worker set when exercising per-role routing.
+    add_worker_router_arguments(parser)
+
     args = parser.parse_args(argv)
+    # Collect them into their own config object, matching the backends.
+    args.router_advertisement = WorkerRouterConfig.from_cli_args(args)
+
     validate_worker_type_args(args)
 
     # Validate num_workers

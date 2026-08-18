@@ -26,7 +26,11 @@ from tests.frontend.conftest import (
 from tests.frontend.test_request_tracing_logs import _send_chat_completions
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import DynamoFrontendProcess
-from tests.utils.otel import wait_for_engine_generate_count
+from tests.utils.otel import (
+    get_engine_generate_roles,
+    get_span_attribute,
+    wait_for_engine_generate_count,
+)
 
 pytest_plugins = ("tests.utils.otel_plugin",)
 
@@ -40,23 +44,6 @@ pytestmark = [
     pytest.mark.model(TEST_MODEL),
     pytest.mark.timeout(180),
 ]
-
-
-def _get_attr(span, key):
-    """Return the attribute value as a string, or None if absent.
-    Int/double values are stringified via `str()`."""
-    for attr in span.attributes:
-        if attr.key == key:
-            v = attr.value
-            if v.HasField("string_value"):
-                return v.string_value
-            if v.HasField("int_value"):
-                return str(v.int_value)
-            if v.HasField("double_value"):
-                return str(v.double_value)
-            if v.HasField("bool_value"):
-                return str(v.bool_value).lower()
-    return None
 
 
 def _send_chat_completions_with_headers(
@@ -158,11 +145,11 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
     # Verify auto-span attributes round-tripped through OTLP.
     span = eg_spans[0]
     assert (
-        _get_attr(span, "disagg_role") == "agg"
-    ), f"expected disagg_role=agg, got {_get_attr(span, 'disagg_role')!r}"
-    assert _get_attr(span, "model") is not None, "missing `model` attribute"
+        get_span_attribute(span, "disagg_role") == "agg"
+    ), f"expected disagg_role=agg, got {get_span_attribute(span, 'disagg_role')!r}"
+    assert get_span_attribute(span, "model") is not None, "missing `model` attribute"
     assert (
-        _get_attr(span, "input_tokens") is not None
+        get_span_attribute(span, "input_tokens") is not None
     ), "missing `input_tokens` attribute"
 
     same_trace = [s for s in collector.snapshot() if s.trace_id == span.trace_id]
@@ -170,9 +157,9 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
     assert route_spans, "missing frontend `router.route_request` span"
     route_span = route_spans[0]
     assert route_span.kind == trace_pb2.Span.SPAN_KIND_CLIENT
-    assert _get_attr(route_span, "request.attempt") == "0"
-    assert _get_attr(route_span, "migration.is_retry") == "false"
-    assert _get_attr(route_span, "request.outcome") == "success"
+    assert get_span_attribute(route_span, "request.attempt") == "0"
+    assert get_span_attribute(route_span, "migration.is_retry") == "false"
+    assert get_span_attribute(route_span, "request.outcome") == "success"
 
     worker_spans = [
         s
@@ -282,8 +269,8 @@ def test_client_cancellation_keeps_request_spans_unset(
     assert root.status.code == trace_pb2.Status.STATUS_CODE_UNSET
     assert route.status.code == trace_pb2.Status.STATUS_CODE_UNSET
     assert worker.status.code == trace_pb2.Status.STATUS_CODE_UNSET
-    assert _get_attr(root, "request.outcome") == "cancelled"
-    assert _get_attr(route, "request.outcome") == "cancelled"
+    assert get_span_attribute(root, "request.outcome") == "cancelled"
+    assert get_span_attribute(route, "request.outcome") == "cancelled"
     assert route.parent_span_id == root.span_id
     assert worker.parent_span_id == route.span_id
     assert any(
@@ -504,10 +491,7 @@ def test_disagg_decode_span_links_to_prefill_span(
                 # separate batch and can lag the parent.
                 deadline = time.monotonic() + 30.0
                 while time.monotonic() < deadline:
-                    roles = {
-                        _get_attr(s, "disagg_role")
-                        for s in collector.engine_generate_spans()
-                    }
+                    roles = get_engine_generate_roles(collector)
                     if {"prefill", "decode"}.issubset(roles) and collector.has_span(
                         "sample.tokens"
                     ):
@@ -517,7 +501,7 @@ def test_disagg_decode_span_links_to_prefill_span(
     eg_spans = collector.engine_generate_spans()
     # Single curl ⇒ at most one span per role; if there were retries the
     # last would win, which is fine for this regression test.
-    by_role = {_get_attr(s, "disagg_role"): s for s in eg_spans}
+    by_role = {get_span_attribute(s, "disagg_role"): s for s in eg_spans}
     assert (
         "prefill" in by_role
     ), f"no prefill engine.generate span; got roles {set(by_role)}"

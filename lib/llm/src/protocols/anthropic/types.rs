@@ -17,10 +17,11 @@ use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImageArgs,
     ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType, CompletionUsage,
-    FunctionName, FunctionObject, FunctionType, ImageUrl, ReasoningContent,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
+    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
+    ChatCompletionToolChoiceOption, ChatCompletionToolType, CompletionUsage, FunctionName,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
 };
 use uuid::Uuid;
 
@@ -110,7 +111,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         }
 
         // Convert tools
-        let tools = req.tools.as_ref().map(|t| convert_anthropic_tools(t));
+        let tools = req
+            .tools
+            .as_deref()
+            .map(convert_anthropic_tools)
+            .transpose()?;
 
         // Convert tool_choice
         let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
@@ -118,6 +123,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         // Convert stop_sequences -> stop
         let stop = req
             .stop_sequences
+            .filter(|sequences| !sequences.is_empty())
             .map(dynamo_protocols::types::Stop::StringArray);
 
         Ok(NvCreateChatCompletionRequest {
@@ -131,9 +137,15 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tools,
                 tool_choice,
                 stream: Some(true), // Always stream internally
+                // Request cumulative usage on every chunk (not just the final
+                // one) so the Anthropic stream converter can stamp an
+                // authoritative per-chunk usage triple onto each
+                // `content_block_delta` and still report a token count if the
+                // client aborts mid-stream. Mirrors the running-usage behaviour
+                // of the OpenAI DeltaGenerator.
                 stream_options: Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                     include_usage: true,
-                    continuous_usage_stats: false,
+                    continuous_usage_stats: true,
                 }),
                 ..Default::default()
             },
@@ -186,21 +198,10 @@ fn convert_user_blocks(
                 ));
             }
             AnthropicContentBlock::Image { source } => {
-                if source.source_type != "base64" {
-                    anyhow::bail!(
-                        "unsupported image source type {:?}; only base64 is supported",
-                        source.source_type
-                    );
-                }
                 has_image = true;
-                let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
-                let url = url::Url::parse(&data_uri)
-                    .map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
-                let image_url = ImageUrl::from(url.to_string());
-                let image_part = ChatCompletionRequestMessageContentPartImageArgs::default()
-                    .image_url(image_url)
-                    .build()?;
-                content_parts.push(image_part.into());
+                content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    convert_image(source)?,
+                ));
             }
             AnthropicContentBlock::ToolResult {
                 tool_use_id,
@@ -211,10 +212,14 @@ fn convert_user_blocks(
                 flush_user_content_parts(&mut content_parts, has_image, messages);
                 has_image = false;
 
-                let text = content.clone().map(|c| c.into_text()).unwrap_or_default();
+                let content = content
+                    .as_ref()
+                    .map(convert_tool_result_content)
+                    .transpose()?
+                    .unwrap_or_default();
                 messages.push(ChatCompletionRequestMessage::Tool(
                     ChatCompletionRequestToolMessage {
-                        content: ChatCompletionRequestToolMessageContent::Text(text),
+                        content,
                         tool_call_id: tool_use_id.clone(),
                     },
                 ));
@@ -234,6 +239,73 @@ fn convert_user_blocks(
     flush_user_content_parts(&mut content_parts, has_image, messages);
 
     Ok(())
+}
+
+fn convert_image(
+    source: &AnthropicImageSource,
+) -> Result<dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
+    if source.source_type != "base64" {
+        anyhow::bail!(
+            "unsupported image source type {:?}; only base64 is supported",
+            source.source_type
+        );
+    }
+
+    let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
+    let url =
+        url::Url::parse(&data_uri).map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
+    let image_url = ImageUrl::from(url.to_string());
+    let image = ChatCompletionRequestMessageContentPartImageArgs::default()
+        .image_url(image_url)
+        .build()?;
+    Ok(image)
+}
+
+fn convert_tool_result_content(
+    content: &ToolResultContent,
+) -> Result<ChatCompletionRequestToolMessageContent, anyhow::Error> {
+    let blocks = match content {
+        ToolResultContent::Text(text) => {
+            return Ok(ChatCompletionRequestToolMessageContent::Text(text.clone()));
+        }
+        ToolResultContent::Blocks(blocks) => blocks,
+    };
+
+    if blocks
+        .iter()
+        .any(|block| matches!(block, ToolResultContentBlock::Other(_)))
+    {
+        anyhow::bail!(
+            "unsupported Anthropic tool_result content block; only text and image are supported"
+        );
+    }
+
+    if !blocks
+        .iter()
+        .any(|block| matches!(block, ToolResultContentBlock::Image { .. }))
+    {
+        return Ok(ChatCompletionRequestToolMessageContent::Text(
+            content.clone().into_text(),
+        ));
+    }
+
+    let mut parts = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            ToolResultContentBlock::Text { text } => {
+                parts.push(ChatCompletionRequestToolMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                ));
+            }
+            ToolResultContentBlock::Image { source } => {
+                parts.push(ChatCompletionRequestToolMessageContentPart::ImageUrl(
+                    convert_image(source)?,
+                ));
+            }
+            ToolResultContentBlock::Other(_) => unreachable!("validated above"),
+        }
+    }
+    Ok(ChatCompletionRequestToolMessageContent::Array(parts))
 }
 
 /// Flush accumulated user content parts into a user message.
@@ -398,22 +470,17 @@ fn convert_assistant_blocks(
 }
 
 /// Convert Anthropic tools to ChatCompletionTools.
-fn convert_anthropic_tools(tools: &[AnthropicTool]) -> Vec<ChatCompletionTool> {
+fn convert_anthropic_tools(
+    tools: &[AnthropicTool],
+) -> Result<Vec<ChatCompletionTool>, anyhow::Error> {
     tools
         .iter()
-        .filter_map(|tool| {
-            // Server tools (web_search, bash, etc.) don't have input_schema
-            // and can't be meaningfully converted to OpenAI function tools.
-            // They are backend-specific and handled separately.
-            let schema = tool.input_schema.clone().or_else(|| {
-                tracing::debug!(
-                    tool_name = %tool.name,
-                    tool_type = ?tool.tool_type,
-                    "Skipping server tool in OpenAI conversion (no input_schema)"
-                );
-                None
+        .enumerate()
+        .map(|(tool_index, tool)| {
+            let schema = tool.input_schema.clone().ok_or_else(|| {
+                anyhow::anyhow!("tools[{tool_index}].input_schema: field required for client tools")
             })?;
-            Some(ChatCompletionTool {
+            Ok(ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
                     name: tool.name.clone(),
@@ -482,6 +549,11 @@ pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> Anthropi
     }
 }
 
+/// Generate an Anthropic-native `tool_use` id.
+pub(super) fn new_tool_use_id() -> String {
+    format!("toolu_{}", Uuid::new_v4().simple())
+}
+
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
@@ -510,8 +582,14 @@ pub fn chat_completion_to_anthropic_response(
             for tc in tool_calls {
                 let input: serde_json::Value =
                     serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+                let emitted_id = new_tool_use_id();
+                tracing::debug!(
+                    backend_id = %tc.id,
+                    emitted_id = %emitted_id,
+                    "minting Anthropic tool_use id"
+                );
                 content.push(AnthropicResponseContentBlock::ToolUse {
-                    id: tc.id,
+                    id: emitted_id,
                     name: tc.function.name,
                     input,
                 });
@@ -868,6 +946,12 @@ mod tests {
             container: None,
             output_config: None,
         };
+
+        let mut empty_req = req.clone();
+        empty_req.stop_sequences = Some(vec![]);
+        let empty_chat_req: NvCreateChatCompletionRequest = empty_req.try_into().unwrap();
+        assert!(empty_chat_req.inner.stop.is_none());
+        crate::engines::ValidateRequest::validate(&empty_chat_req).unwrap();
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.inner.stop.is_some());
@@ -1343,6 +1427,74 @@ mod tests {
             },
             _ => panic!("expected blocks"),
         }
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let ChatCompletionRequestMessage::Tool(tool) = &chat_req.inner.messages[0] else {
+            panic!("expected tool message");
+        };
+        assert_eq!(
+            tool.content,
+            ChatCompletionRequestToolMessageContent::Text("line 1line 2".into())
+        );
+    }
+
+    #[test]
+    fn test_tool_result_image_preserved() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": [
+                        {"type": "text", "text": "Screenshot captured"},
+                        {"type": "image", "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "aGVsbG8="
+                        }}
+                    ]
+                }]
+            }]
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let ChatCompletionRequestMessage::Tool(tool) = &chat_req.inner.messages[0] else {
+            panic!("expected tool message");
+        };
+        let ChatCompletionRequestToolMessageContent::Array(parts) = &tool.content else {
+            panic!("expected array content");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            ChatCompletionRequestToolMessageContentPart::Text(text)
+                if text.text == "Screenshot captured"
+        ));
+        let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[1] else {
+            panic!("expected image_url part");
+        };
+        assert_eq!(
+            image.image_url.as_ref().unwrap().url.as_str(),
+            "data:image/png;base64,aGVsbG8="
+        );
+    }
+
+    #[test]
+    fn test_tool_result_other_block_is_rejected() {
+        let content = ToolResultContent::Blocks(vec![ToolResultContentBlock::Other(
+            serde_json::json!({"type": "document"}),
+        )]);
+
+        let error = convert_tool_result_content(&content).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only text and image are supported")
+        );
     }
 
     #[test]

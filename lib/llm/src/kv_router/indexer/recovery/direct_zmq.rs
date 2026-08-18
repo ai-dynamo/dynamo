@@ -32,10 +32,10 @@ use super::{
         MismatchMetricScope, clear_mismatch_metric_on_cancellation, update_mismatch_metric,
         update_subscription_failure_metric,
     },
-    worker_query::{ReadyKvSource, WorkerQueryClient},
+    worker_query::WorkerQueryClient,
 };
 use crate::{
-    discovery::{KvSourceMembershipView, KvSourceMembershipWatch},
+    discovery::{KvSourceId, KvSourceMembershipView, KvSourceMembershipWatch},
     kv_router::metrics::{KvZmqIngressMetrics, RouterWorkerStatusMetrics},
 };
 
@@ -73,7 +73,7 @@ struct SourceTask {
 enum SourceState {
     Connecting,
     Preconnected { activate: oneshot::Sender<()> },
-    Active { bindings: HashSet<ReadyKvSource> },
+    Active { bindings: HashSet<KvSourceId> },
     Fenced,
 }
 
@@ -82,7 +82,7 @@ impl SourceState {
         matches!(self, Self::Preconnected { .. } | Self::Active { .. })
     }
 
-    fn active_bindings(&self) -> Option<&HashSet<ReadyKvSource>> {
+    fn active_bindings(&self) -> Option<&HashSet<KvSourceId>> {
         match self {
             Self::Active { bindings } => Some(bindings),
             _ => None,
@@ -416,7 +416,9 @@ async fn consume_scope(
                             ).await;
                         }
                     }
-                    Ok(DiscoveryEvent::Added(_)) | Ok(DiscoveryEvent::Removed(_)) => {}
+                    Ok(DiscoveryEvent::Added(_))
+                    | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
+                    | Ok(DiscoveryEvent::Removed(_)) => {}
                     Err(error) => {
                         tracing::error!(%error, %kv_state_endpoint, "Direct-ZMQ event-channel discovery failed");
                         break;
@@ -510,7 +512,7 @@ async fn reconcile_sources(
 
     let ready_publishers = current_ready
         .iter()
-        .map(|ready| ready.source_id.publisher_id)
+        .map(|ready| ready.publisher_id)
         .collect::<HashSet<_>>();
     for publisher_id in ready_publishers {
         let bindings = bindings_for_publisher(&current_ready, publisher_id);
@@ -577,30 +579,24 @@ async fn restart_source(
 fn ready_sources(
     view: &KvSourceMembershipView,
     sources: &HashMap<u64, SourceTask>,
-) -> HashSet<ReadyKvSource> {
+) -> HashSet<KvSourceId> {
     view.sources
-        .iter()
-        .filter_map(|(worker, status)| {
+        .values()
+        .filter_map(|status| {
             let source = status.active_source()?;
             let transport = sources.get(&source.publisher_id)?;
             if !transport.state.is_ready() {
                 return None;
             }
-            Some(ReadyKvSource {
-                source_id: source.source_id(),
-                lifecycle_generation: view.lifecycle_generation(worker).unwrap_or(0),
-            })
+            Some(source.source_id())
         })
         .collect()
 }
 
-fn bindings_for_publisher(
-    ready: &HashSet<ReadyKvSource>,
-    publisher_id: u64,
-) -> HashSet<ReadyKvSource> {
+fn bindings_for_publisher(ready: &HashSet<KvSourceId>, publisher_id: u64) -> HashSet<KvSourceId> {
     ready
         .iter()
-        .filter(|binding| binding.source_id.publisher_id == publisher_id)
+        .filter(|binding| binding.publisher_id == publisher_id)
         .cloned()
         .collect()
 }

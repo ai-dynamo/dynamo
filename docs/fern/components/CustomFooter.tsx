@@ -1,14 +1,1317 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /**
  * Custom footer for Dynamo docs (Fern native header/footer).
- * Site chrome CSS loads from main.css through docs.yml. Fern custom footer
- * components cannot import local modules.
+ *
+ * Site chrome CSS is delivered below as a page-level <style> block (NOT via
+ * the docs.yml `css:` field) so it survives the shared NVIDIA global theme,
+ * which replaces project `css` at publish (same fix as #11952; re-applied
+ * after the docs restructure moved styles back to main.css and production
+ * rendered unstyled). Inlined rather than imported because Fern custom
+ * footer components cannot import local modules.
+ *
+ * SITE_CSS mirrors docs/fern/main.css, which stays canonical and served via
+ * docs.yml `css:` (the server-rendered / no-JS baseline). Do not edit the
+ * block by hand: run `python3 docs/fern/scripts/sync_site_css.py` after
+ * changing main.css. Pre-commit enforces the mirror with `--check`.
  */
+// sync-site-css:begin (generated from ../main.css)
+const SITE_CSS = `
+/*!
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+ *
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
+ */
+
+/* Color themes for light and dark modes */
+:root {
+    /* Brand Colors */
+    --nv-color-green: #76B900;
+    --nv-color-green-2: #004B31;
+    --nv-color-black: #000000;
+    --nv-color-white: #FFFFFF;
+
+    /* Grey Scale - Light */
+    --nv-light-grey-1: #f7f7f7;
+    --nv-light-grey-2: #EEEEEE;
+    --nv-light-grey-3: #DDDDDD;
+    --nv-light-grey-4: #CCCCCC;
+    --nv-light-grey-5: #999999;
+
+    /* Grey Scale - Dark */
+    --nv-dark-grey-1: #111111;
+    --nv-dark-grey-2: #1A1A1A;
+    --nv-dark-grey-3: #222222;
+    --nv-dark-grey-4: #333333;
+    --nv-dark-grey-5: #666666;
+
+    /* Colors by Usage */
+    --nv-color-text: #000000;
+    --nv-color-bg-default: #FFFFFF;
+    --nv-color-bg-alt: #f7f7f7;
+    --nv-color-success: #76B900;
+    --nv-color-error: #f44336;
+
+    /* Theme-independent settings */
+    --rounded: 999px;
+}
+main {
+    min-height: calc(100vh - 200px);
+  }
+/* Typography - Headers */
+h1 {
+    font-size: 36px;
+    font-weight: 700;
+    line-height: 1.25em; /* 45px */
+}
+
+h2 {
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1.25em; /* 35px */
+}
+
+h3 {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1.25em; /* 30px */
+}
+
+h4 {
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.25em; /* 25px */
+}
+
+/* Typography - Paragraphs */
+.prose{
+    color: var(--nv-dark-grey-2) !important;
+}
+.dark .prose{
+    color: var(--nv-light-grey-2) !important;
+}
+p {
+    text-decoration-thickness: 3px;
+}
+.fern-mdx-link {
+    color: var(--tw-prose-body);
+    text-decoration-color: var(--accent);
+    font-weight: var(--font-weight-normal);
+}
+
+/* Light theme (default) */
+html:not([data-theme]),html[data-theme=light] {
+    --pst-color-background: #fff;
+    --pst-color-on-background: #fff;
+    --pst-color-shadow: #ccc;
+    --pst-color-heading: #000;
+    --pst-color-text-base: #1a1a1a;
+    --pst-color-text-muted: #666;
+    --pst-color-surface: #f7f7f7;
+    --pst-color-on-surface: #333;
+    --pst-color-primary: var(--nv-color-green-2);
+    --pst-color-table-row-hover-bg: var(--nv-color-green);
+    --pst-color-link: var(--pst-color-text-base);
+    --pst-color-link-hover: var(--pst-color-text-base);
+    --pst-color-inline-code: var(--pst-color-primary);
+    --pst-color-inline-code-links: var(--pst-color-primary);
+    --pst-color-secondary: var(--pst-color-primary);
+    --pst-color-secondary-bg: var(--nv-color-green);
+    --pst-color-accent: var(--nv-color-green);
+}
+
+/* Dark theme */
+html[data-theme=dark],
+html.dark,
+.dark {
+    --nv-color-text: #eeeeee;
+    --nv-color-bg-default: #111111;
+    --nv-color-bg-alt: #1a1a1a;
+    --pst-color-background: #111;
+    --pst-color-on-background: #000;
+    --pst-color-shadow: #000;
+    --pst-color-heading: #fff;
+    --pst-color-text-base: #eee;
+    --pst-color-text-muted: #999;
+    --pst-color-surface: #1a1a1a;
+    --pst-color-on-surface: #ddd;
+    --pst-color-primary: var(--nv-color-green);
+    --pst-color-table-row-hover-bg: var(--nv-color-green-2);
+    --pst-color-link: var(--pst-color-text-base);
+    --pst-color-link-hover: var(--pst-color-text-base);
+    --pst-color-inline-code: var(--pst-color-primary);
+    --pst-color-inline-code-links: var(--pst-color-primary);
+    --pst-color-secondary: var(--pst-color-primary);
+    --pst-color-secondary-bg: var(--nv-color-green-2);
+    --pst-color-accent: var(--nv-color-green);
+}
+
+/* Version selector styling */
+
+/* Fern simulates emphasis on active navigation labels with a text stroke.
+   NVIDIA Sans renders that stroke as a doubled glyph, so use font weight instead. */
+#fern-header [data-radix-collection-item][data-state="active"] > span,
+.fern-sidebar-link[data-state="active"] .fern-sidebar-link-title-inner {
+    -webkit-text-stroke: 0 !important;
+    font-weight: 600;
+}
+
+.fern-version-selector {
+    margin-inline-start: 0.5rem;
+    transform: none;
+}
+
+.fern-version-selector .version-dropdown-trigger {
+    outline: 1px solid var(--border, var(--grayscale-a5)) !important;
+    border-radius: 5px;
+    transition: box-shadow 0.3s ease, outline 0.3s ease;
+}
+
+.version-dropdown-trigger {
+    background-color: transparent !important;
+}
+
+.version-dropdown-trigger:hover {
+    box-shadow: 0 0 0 1px var(--nv-color-green) !important;
+}
+
+/* Sidebar styling */
+#fern-sidebar {
+    border-right: 1px solid var(--border, var(--grayscale-a5)) !important;
+    height: 100vh !important;
+}
+.fern-sidebar-link:not(:hover) {
+    background-color: transparent !important;
+}
+.fern-sidebar-link:hover {
+    background-color: rgba(118, 185, 0, 0.10) !important;
+}
+.dark .fern-sidebar-link:hover {
+    background-color: rgba(118, 185, 0, 0.16) !important;
+}
+.fern-sidebar-link {
+    position: relative;
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
+    border-radius: 0px !important;
+    &.nested {
+        padding-left: 1rem !important;
+    }
+}
+/* Section-level sidebar links (pages that have children) should match sidebar heading padding */
+.fern-sidebar-group > li > .fern-sidebar-link:has(+ .fern-sidebar-group) {
+    padding-left: 0.25rem !important;
+}
+/* User Guide variants use collapsible top-level sections. Keep those section
+   titles visually distinct. */
+#fern-sidebar:has(.fern-variant-selector)
+    .fern-sidebar-link.fern-sidebar-level-1:has(.expand-indicator)
+    .fern-sidebar-link-title {
+    font-weight: 600 !important;
+}
+/* Fern semibolds sections but not pages. Reference intentionally mixes both at
+   level 1, so use one weight for a consistent top-level hierarchy. */
+#fern-sidebar
+    .fern-sidebar-link.fern-sidebar-level-1[href*="/reference/"]
+    .fern-sidebar-link-title {
+    font-weight: 600 !important;
+}
+.fern-sidebar-group{
+    padding: 0 !important
+}
+#fern-sidebar-scroll-area{
+    padding-right: 0 !important
+}
+
+/* header styling */
+.fern-header-content{
+    padding-left: 18.5px;
+    margin-top: -5px;
+    margin-bottom: -5px;
+}
+#fern-header {
+    border-color: var(--border, var(--grayscale-a5)) !important;
+}
+@keyframes header-background-fade {
+    0% {
+      background-color: transparent;
+    }
+    100% {
+      background-color: var(--header-background);
+    }
+  }
+
+[data-theme=default]#fern-header {
+animation: header-background-fade linear;
+animation-timeline: scroll();
+animation-range: 0 50px;
+}
+.fern-header-navbar-links .fern-button{
+    background-color: transparent !important;
+}
+.fern-header-navbar-links > button{
+    background-color: transparent !important;
+}
+.fern-header-logo-container > div > div > a > img {
+    padding-right: 0;
+}
+
+/* Echo the hero wordmark with a compact semibold product name, without the
+   divider bars used by the previous header treatment. */
+.fern-header-logo-container .font-heading {
+    margin: 0 0 0 0.75rem !important;
+    padding: 0 !important;
+    border: 0 !important;
+    color: var(--grayscale-a12) !important;
+    font-size: 20px !important;
+    font-weight: 600 !important;
+    line-height: 1 !important;
+    letter-spacing: -0.035em;
+}
+@media (max-width: 1024px) {
+    .fern-header-logo-container .font-heading{
+        display: none !important;
+    }
+}
+/* Search bar styling */
+#fern-search-button{
+    background-color: transparent !important;
+    border-radius: var(--rounded);
+    transition: box-shadow 0.3s ease, outline 0.3s ease;
+}
+#fern-search-button:hover{
+    box-shadow: 0 0 0 1px var(--nv-color-green) !important;
+}
+#fern-search-button .fern-kbd{
+    display: none;
+}
+
+.fern-layout-footer-toolbar button{
+    background-color: transparent !important;
+    border-color: transparent !important;
+    padding-inline: 0px !important;
+}
+
+/* ========== Custom footer (native React component) – 1:1 with original ========== */
+.bd-footer {
+  border-top: 1px solid var(--border, var(--grayscale-a5)) !important;
+  font-family: NVIDIA, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+  font-size: 0.875rem;
+  padding: 2rem 0;
+  width: 100%;
+}
+.bd-footer * {
+  font-family: inherit;
+}
+.bd-footer__inner {
+  padding: 0 2rem;
+}
+.footer-items__start {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.footer-logos-container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 1rem;
+}
+.footer-brand {
+  display: inline-block;
+  text-decoration: none;
+}
+.footer-brand .logo__image {
+  height: 24px;
+  width: auto;
+  transition: opacity 0.2s ease;
+}
+.footer-brand:hover .logo__image {
+  opacity: 0.8;
+}
+.footer-brand-fern {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+/* Logo theme visibility – .dark is on ancestor in Fern */
+.only-light {
+  display: block;
+  filter: invert(1);
+}
+.only-dark {
+  display: none;
+}
+.dark .only-light {
+  display: none;
+}
+.dark .only-dark {
+  display: block;
+  filter: none;
+}
+.footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+  line-height: 1.65;
+  margin: 0;
+  padding: 0;
+}
+.footer-links a {
+  color: var(--grayscale-a11);
+  text-decoration: none;
+  transition: color 0.2s ease;
+  white-space: nowrap;
+}
+.pipe-separator {
+  color: var(--grayscale-a11);
+  white-space: nowrap;
+}
+.copyright {
+  color: var(--grayscale-a11);
+  font-size: 0.875rem;
+  line-height: 1.65;
+  margin: 0;
+}
+@media (max-width: 768px) {
+  .bd-footer { padding: 1.5rem 0; }
+  .bd-footer__inner { padding: 0 1.5rem; }
+  .footer-items__start { gap: 1rem; }
+  .footer-links { flex-direction: row; gap: 0.5rem 0.75rem; }
+  .footer-links a { white-space: normal; word-break: break-word; }
+}
+@media (max-width: 480px) {
+  .footer-links { gap: 0.5rem; }
+  .footer-links a { font-size: 0.8125rem; }
+  .copyright { font-size: 0.8125rem; }
+}
+/* Built with Fern link + tooltip */
+.built-with-fern-link {
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  text-decoration: none;
+  position: relative;
+}
+.built-with-fern-logo {
+  height: 1rem;
+  margin: 0;
+  transition: filter 150ms ease;
+}
+.built-with-fern-logo path { fill: var(--grayscale-a12); }
+.built-with-fern-link:hover .built-with-fern-logo { filter: saturate(1) opacity(1); }
+.built-with-fern-link:hover .built-with-fern-logo path:nth-child(2) { fill: #51C233; }
+.built-with-fern-tooltip {
+  position: absolute;
+  top: 50%;
+  right: calc(100%);
+  bottom: auto;
+  left: auto;
+  transform: translateY(-50%);
+  margin: 0;
+  margin-right: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background-color: #FFFFFF;
+  color: #000000;
+  font-size: 0.85rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--grayscale-a5);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 150ms ease;
+  transition-delay: 0s;
+  z-index: 50;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  width: max-content;
+}
+.built-with-fern-link:hover .built-with-fern-tooltip {
+  opacity: 1;
+  transition-delay: 0.75s;
+}
+.dark .built-with-fern-tooltip {
+  background-color: #000000;
+  color: #FFFFFF;
+}
+.built-with-fern-logo-dark { display: none; }
+.dark .built-with-fern-logo-light { display: none; }
+.dark .built-with-fern-logo-dark { display: block; }
+@media (prefers-color-scheme: dark) {
+  .built-with-fern-logo-light { display: none; }
+  .built-with-fern-logo-dark { display: block; }
+}
+
+/* Footer styling */
+.fern-footer-nav{
+    border-radius: var(--rounded);
+    background-color: transparent !important;
+    transition: box-shadow 0.3s ease, outline 0.3s ease;
+}
+/* Figure caption callouts */
+.fig-caption {
+    --callout-border: transparent !important;
+    --callout-icon-color: var(--grayscale-a8) !important;
+    background-color: var(--nv-light-grey-1) !important;
+    font-size: 0.875rem;
+}
+.dark .fig-caption {
+    background-color: var(--nv-dark-grey-2) !important;
+}
+.fig-caption p {
+    font-style: italic;
+    color: var(--tw-prose-body) !important;
+}
+
+/* Hide line numbers */
+.code-block-line-gutter {
+    display: none !important;
+}
+.fern-footer-prev h4, .fern-footer-next h4{
+    font-size: inherit !important;
+}
+/* The active page uses a persistent NVIDIA-green bar and the same subtle
+   green gradient treatment as active entries in the Blog navigation. */
+.fern-sidebar-link[data-state="active"]::before {
+    content: "";
+    position: absolute;
+    left: 0 !important;
+    bottom: 0 !important;
+    top: 0 !important;
+    width: 3px !important;
+    background-color: var(--nv-color-green) !important;
+}
+.fern-sidebar-link[data-state="active"] {
+    color: unset !important;
+    background: linear-gradient(
+        90deg,
+        rgba(118, 185, 0, 0.15),
+        rgba(118, 185, 0, 0.04)
+    ) !important;
+}
+.dark .fern-sidebar-link[data-state="active"] {
+    background: linear-gradient(
+        90deg,
+        rgba(118, 185, 0, 0.20),
+        rgba(118, 185, 0, 0.06)
+    ) !important;
+}
+
+.fern-selection-item .fern-selection-item-icon{
+    border-color: transparent !important;
+}
+/* Button styling */
+.fern-button{
+    border-radius: var(--rounded);
+    font-weight: bold;
+}
+.fern-button.filled.primary{
+    color: var(--nv-color-black);
+}
+.dark .fern-button.filled.primary{
+    background-color: var(--nv-color-white);
+}
+.dark .fern-button.filled.primary:hover{
+    background-color: var(--nv-light-grey-2);
+}
+.fern-button.outlined.normal{
+    background-color: transparent;
+    --tw-ring-color: transparent;
+    color: var(--nv-color-black);
+}
+.fern-button.outlined.normal:hover{
+    color: var(--nv-color-green)
+}
+.dark .fern-button.outlined.normal{
+    color: var(--nv-color-white);
+}
+.dark .fern-button.outlined.normal:hover{
+    color: var(--nv-color-green);
+}
+/* Fern content tabs: use the same neutral, outlined card treatment as the
+   Install Selector, Compatibility, and Recipes widgets. The tab strip already
+   provides the card header, so individual <Tabs> blocks do not need an extra
+   title or eyebrow. Stable direction/orientation attributes keep this independent
+   of Fern utility-class changes while the .fern-prose scope excludes
+   site-navigation tabs. */
+.fern-prose div[dir="ltr"][data-orientation="horizontal"] {
+    margin: 1.5rem 0;
+    overflow: hidden;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 12px;
+    background: var(--nv-color-bg-default);
+}
+
+.fern-prose div[dir="ltr"][data-orientation="horizontal"]
+    > div:first-child {
+    margin: 0 !important;
+    padding: 0 18px;
+    border-bottom: 1px solid var(--border, var(--grayscale-a5));
+    background: var(--pst-color-surface);
+}
+
+.fern-prose div[dir="ltr"][data-orientation="horizontal"]
+    > div:first-child > div {
+    gap: 1.25rem;
+}
+
+.fern-prose div[dir="ltr"][data-orientation="horizontal"]
+    [role="tab"] {
+    padding-top: 0.75rem;
+    padding-bottom: 0.75rem;
+}
+
+.fern-prose div[dir="ltr"][data-orientation="horizontal"]
+    > [role="tabpanel"] {
+    padding: 18px;
+}
+
+.fern-prose div[dir="ltr"][data-orientation="horizontal"]
+    > [role="tabpanel"]::before {
+    display: none;
+}
+
+.fern-prose div[dir="ltr"][data-orientation="horizontal"]
+    > [role="tabpanel"] > :first-child {
+    margin-top: 0 !important;
+}
+
+.fern-prose div[dir="ltr"][data-orientation="horizontal"]
+    > [role="tabpanel"] > :last-child {
+    margin-bottom: 0 !important;
+}
+
+@media (max-width: 640px) {
+    .fern-prose div[dir="ltr"][data-orientation="horizontal"]
+        > div:first-child {
+        padding-inline: 14px;
+    }
+
+    .fern-prose div[dir="ltr"][data-orientation="horizontal"]
+        > [role="tabpanel"] {
+        padding: 14px;
+    }
+}
+
+/* Card styling */
+.fern-card{
+    transition: box-shadow 0.3s ease, outline 0.3s ease;
+}
+svg.card-icon{
+    height: 24px !important;
+    width: 24px !important;
+}
+.card-icon{
+    background-color: transparent !important;
+}
+/* Only linked cards (rendered as <a>) get the hover highlight. Cards without an
+   href render as <div class="fern-card"> — e.g. the "Why Dynamo" cards — and must
+   not look clickable. */
+a.fern-card:hover{
+    box-shadow: 0 0 0 1px var(--nv-color-green) !important;
+}
+.fern-docs-badge{
+    border-radius: var(--rounded);
+}
+/* Enum "Allowed values" chips: match Fern's Schema renderer, which builds each
+   chip as <Badge size="sm"> with the default subtle variant. We can't invoke
+   that renderer (it needs an OpenAPI-backed <Schema>), so we restyle the MDX
+   <Badge> to the same tokens Fern uses: label in shrink-0 text-sm grayscale-a11,
+   chips as .subtle.small (grayscale-a3 fill, grayscale-a11 text, radius-1). The
+   forced background/color neutralize whatever intent the MDX <Badge> requires.
+   Scoped to .enum-values so the pill <Badge> used elsewhere is unaffected. */
+.enum-values {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+.enum-values .enum-label {
+    flex-shrink: 0;
+    color: var(--grayscale-a11);
+    font-size: var(--text-sm);
+}
+.enum-values .fern-docs-badge {
+    border-radius: var(--radius-1) !important;
+    height: 1.25rem;
+    padding: 0 0.375rem;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    background-color: var(--grayscale-a3) !important;
+    color: var(--grayscale-a11) !important;
+    text-transform: none;
+}
+
+/* ============================================================
+   Compatibility page: category chips for the Requirement table.
+   Splits comma-separated OS / Arch / GPU / CUDA values into
+   color-coded chips so supported platforms read at a glance.
+   Colored by category (distro brand, CPU arch, GPU generation,
+   CUDA toolkit); arch is always blue across rows so x86_64 /
+   ARM64 stay visually consistent wherever they appear. Tints
+   are rgba so they hold up in both light and dark themes.
+   Scoped to .dynamo-chip; nothing else is affected.
+   ============================================================ */
+.dynamo-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3em;
+    margin: 0.15rem 0.1rem;
+    min-height: 24px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
+    border: 1px solid transparent;
+    vertical-align: middle;
+}
+
+/* Ubuntu — brand orange */
+.dynamo-chip-ubuntu {
+    background-color: rgba(233, 84, 32, 0.12);
+    color: #C7401C;
+    border-color: rgba(233, 84, 32, 0.3);
+}
+.dark .dynamo-chip-ubuntu {
+    background-color: rgba(233, 84, 32, 0.2);
+    color: #FF9068;
+    border-color: rgba(233, 84, 32, 0.42);
+}
+
+/* CentOS — violet */
+.dynamo-chip-centos {
+    background-color: rgba(124, 58, 237, 0.12);
+    color: #6D28D9;
+    border-color: rgba(124, 58, 237, 0.3);
+}
+.dark .dynamo-chip-centos {
+    background-color: rgba(139, 92, 246, 0.2);
+    color: #C4B5FD;
+    border-color: rgba(139, 92, 246, 0.42);
+}
+
+/* CPU architecture — blue (consistent across every row) */
+.dynamo-chip-arch {
+    background-color: rgba(37, 99, 235, 0.1);
+    color: #1D4ED8;
+    border-color: rgba(37, 99, 235, 0.28);
+}
+.dark .dynamo-chip-arch {
+    background-color: rgba(59, 130, 246, 0.18);
+    color: #93C5FD;
+    border-color: rgba(59, 130, 246, 0.42);
+}
+
+/* GPU generation — NVIDIA green */
+.dynamo-chip-gpu {
+    background-color: rgba(118, 185, 0, 0.16);
+    color: #4D7C0F;
+    border-color: rgba(118, 185, 0, 0.38);
+}
+.dark .dynamo-chip-gpu {
+    background-color: rgba(118, 185, 0, 0.22);
+    color: #A3E635;
+    border-color: rgba(118, 185, 0, 0.46);
+}
+
+/* CUDA toolkit — teal */
+.dynamo-chip-cuda {
+    background-color: rgba(8, 145, 178, 0.12);
+    color: #0E7490;
+    border-color: rgba(8, 145, 178, 0.3);
+}
+.dark .dynamo-chip-cuda {
+    background-color: rgba(34, 211, 238, 0.16);
+    color: #67E8F9;
+    border-color: rgba(34, 211, 238, 0.4);
+}
+
+/* Caveat qualifier (e.g. "experimental") — amber */
+.dynamo-chip-note {
+    background-color: rgba(217, 119, 6, 0.12);
+    color: #B45309;
+    border-color: rgba(217, 119, 6, 0.3);
+    font-weight: 500;
+}
+.dark .dynamo-chip-note {
+    background-color: rgba(245, 158, 11, 0.16);
+    color: #FCD34D;
+    border-color: rgba(245, 158, 11, 0.4);
+}
+
+/* Neutral qualifier — subtle grey */
+.dynamo-chip-neutral {
+    background-color: var(--grayscale-a3);
+    color: var(--grayscale-a11);
+    border-color: var(--grayscale-a3);
+    font-weight: 500;
+}
+
+/* ============================================================
+   Release Artifacts page: the Tags column renders each version
+   as a click-to-copy Badge (Fern's <Copy> wraps a <Badge> so the
+   click copies the full image reference). <Copy> paints its own
+   filled, padded chrome around the child, which shows as a grey
+   box flanking the badge. Strip that chrome inside .dynamo-tag-copy
+   so only the Badge shows; the wrapper stays clickable, so the
+   copy behavior is unchanged. Scoped to .dynamo-tag-copy so the
+   Icon-based <Copy> buttons in the Install columns keep their
+   button chrome.
+   ============================================================ */
+.dynamo-tag-copy {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.375rem;
+}
+/* Reset fill/padding/border/shadow on every wrapper the <Copy>
+   renders — matched depth-independently (any descendant that is
+   not the Badge and not inside it) so the grey box is gone no
+   matter how Fern nests the copy affordance. The Badge and its
+   own children are excluded and keep their styling. */
+.dynamo-tag-copy *:not(.fern-docs-badge):not(.fern-docs-badge *) {
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+.dynamo-tag-copy .fern-docs-badge {
+    cursor: pointer;
+}
+
+/* ============================================================
+   Release Artifacts page: the Install column renders a
+   click-to-copy button as <Copy><Icon icon="copy"/></Copy>.
+   Fern's default chrome is wider than it is tall, so the icon
+   looks cramped. Give the button uniform padding and a square
+   footprint so the icon sits centered — the compact copy-button
+   shape. Scoped to .dynamo-install-copy so the Tags-column tag
+   copies (.dynamo-tag-copy) are untouched.
+   ============================================================ */
+.dynamo-install-copy {
+    display: inline-flex;
+}
+/* Shape the button the <Copy> renders. Matched depth-independently
+   (the interactive element plus any wrapper it nests in) so the
+   uniform padding lands regardless of how Fern structures the DOM. */
+.dynamo-install-copy button,
+.dynamo-install-copy [role="button"],
+.dynamo-install-copy > * {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 0.375rem !important;
+    aspect-ratio: 1 / 1;
+    border-radius: 6px !important;
+}
+
+.fern-page-actions button:hover{
+    background-color: transparent !important;
+}
+.fern-page-actions a:hover{
+    background-color: transparent !important;
+}
+/* Moving logo to footer */
+#builtwithfern, #builtwithfern * {
+    display: none !important;
+}
+
+/* Landing Page Gradients */
+/* Top: Simple radial gradient (no mask, responsive) */
+.landing-gradient-top {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 800px;
+    background: radial-gradient(ellipse 100% 100% at 50% 10%,
+        rgba(191, 242, 48, 0.15) 0%,
+        rgba(158, 228, 179, 0.12) 30%,
+        rgba(124, 215, 254, 0.12) 50%,
+        rgba(124, 215, 254, 0.06) 75%,
+        transparent 100%);
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* Bottom: Gradient for organic transition */
+.landing-gradient-bottom {
+    position: absolute;
+    bottom: -282px;
+    left: 0;
+    right: 0;
+    height: 1232px;
+    background: linear-gradient(85deg, #BFF230 41.98%, #7CD7FE 99.52%);
+    opacity: 0.05;
+    pointer-events: none;
+    z-index: 5;
+}
+
+/* Landing Page Gradients Wrapper */
+.landing-page-gradients {
+    position: relative;
+    width: 100%;
+    margin-top: -100px;
+    padding-top: 100px;
+    overflow: visible;
+    background: #181818;
+}
+
+/* Hero Section (Landing page only) */
+.hero-section {
+    position: relative;
+    width: 100%;
+    padding: 3rem 6rem;
+    margin: 0 auto;
+    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    z-index: 10;
+}
+
+/* Hero Section Content - constrain width */
+.hero-section > * {
+    position: relative;
+    z-index: 100;
+    max-width: 1440px;
+    width: 100%;
+}
+
+/* Tablet and Mobile: fix spacing and layout */
+@media (max-width: 1024px) {
+    /* Extend dark background behind header */
+    .landing-page body, .landing-page html, .landing-page main {
+        background: #181818 !important;
+    }
+
+    .landing-page-gradients {
+        margin-top: -100px;
+        padding-top: 100px;
+    }
+
+    .hero-section {
+        padding: 2rem 2rem;
+    }
+
+    .hero-section > * {
+        max-width: none;
+    }
+
+    .hero-content-grid {
+        grid-template-columns: 1fr;
+        gap: 2rem;
+    }
+
+    .hero-heading {
+        font-size: 36px;
+    }
+
+    .hero-subtitle {
+        font-size: 16px;
+    }
+
+    .hero-title-section {
+        margin-bottom: 2rem;
+    }
+}
+
+/* Small mobile only */
+@media (max-width: 600px) {
+    .hero-heading {
+        font-size: 28px;
+    }
+
+    .hero-section {
+        padding: 1.5rem 1.5rem;
+    }
+}
+
+.hero-section h1,
+.hero-section h2,
+.hero-section h3,
+.hero-section h4,
+.hero-section h5,
+.hero-section h6 {
+    pointer-events: none !important;
+}
+/* Hero Title Section */
+.hero-title-section {
+    text-align: center;
+    margin-bottom: 4rem;
+    position: relative;
+    z-index: 100;
+}
+
+.hero-heading {
+    font-size: 48px;
+    font-weight: 700;
+    line-height: 1.2;
+    margin: 0 0 1rem 0;
+    color: var(--nv-color-white);
+}
+
+.hero-subtitle {
+    font-size: 18px;
+    line-height: 1.5;
+    margin: 0;
+    color: var(--nv-color-white);
+}
+
+/* Hero Content Grid */
+.hero-content-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 3rem;
+    align-items: start;
+    position: relative;
+    z-index: 100;
+}
+
+.hero-column {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.hero-column-title {
+    font-size: 24px;
+    font-weight: 700;
+    margin: 0;
+    color: var(--nv-color-white);
+}
+
+.hero-column-subtitle {
+    font-size: 16px;
+    margin: 0 0 1rem 0;
+    color: var(--nv-color-white);
+}
+
+/* Hero Card Container (Left Column) */
+.hero-card-container {
+    display: flex;
+    flex-direction: column;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    margin-top: 1.5rem !important;
+    background: rgba(26, 26, 26, 0.2);
+    backdrop-filter: blur(6px);
+}
+
+.hero-card-image {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.hero-card-content {
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: row;
+    gap: 1rem;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(26, 26, 26, 0.2);
+    backdrop-filter: blur(6px);
+}
+
+.hero-card-text-wrapper {
+    flex: 1;
+}
+
+.hero-card-text {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--nv-color-white);
+}
+
+.hero-card-button-wrapper {
+    flex-shrink: 0;
+}
+.hero-card-button-wrapper .fern-mdx-link{
+    text-decoration: none !important;
+}
+
+.hero-card-button {
+    white-space: nowrap;
+}
+
+/* Hero Cards */
+
+.hero-column .fern-card {
+    padding: 9px 17px;
+    background-color: rgba(26, 26, 26, 0.2) !important;
+    backdrop-filter: blur(6px);
+}
+
+.hero-section .fern-card{
+    color: white !important;
+}
+
+.hero-column .card-icon {
+    font-size: 64px !important;
+    width: 64px !important;
+    height: 64px !important;
+}
+
+.hero-column .card-icon svg,
+.hero-column .card-icon i {
+    font-size: 64px !important;
+    width: 64px !important;
+    height: 64px !important;
+}
+
+.hero-column .fern-card-title {
+    font-size: 16px;
+    font-weight: 500;
+    line-height: 24px;
+}
+
+.hero-column .fern-card p {
+    font-size: 14px;
+    line-height: 20px;
+    color: white !important;
+}
+
+/* Body Section */
+.body-section {
+    display: flex;
+    padding: 4rem 16rem;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 4rem;
+    align-self: stretch;
+    position: relative;
+    z-index: 1;
+    background: #181818;
+}
+
+/* Body Section Content - constrain width */
+.body-section > * {
+    max-width: 1440px;
+    width: 100%;
+    position: relative;
+    z-index: 10;
+}
+
+.code-block .fern-code-link{
+    text-decoration: underline !important;
+    text-decoration-color: var(--accent) !important;
+    text-underline-offset: 1px !important;
+    text-decoration-style: underline !important;
+}
+
+/* Rounded Mermaid canvas aligned with the Dynamo story-stage visual language. */
+.mermaid-container {
+  --mermaid-label-backdrop: #f1f5e9;
+  position: relative;
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  margin: 1.75rem 0 2rem;
+  padding: clamp(2rem, 5vw, 3.5rem) clamp(1.25rem, 4vw, 3rem);
+  overflow: hidden;
+  border: 1px solid rgba(118, 185, 0, 0.25);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 16% 8%, rgba(118, 185, 0, 0.2), transparent 36%),
+    linear-gradient(145deg, #fbfcf8 0%, #f1f5e9 52%, #e8eee2 100%);
+  box-shadow: 0 18px 48px rgba(23, 42, 0, 0.1);
+}
+
+.dark .mermaid-container {
+  --mermaid-label-backdrop: #0d1209;
+  border-color: rgba(118, 185, 0, 0.3);
+  background:
+    radial-gradient(circle at 16% 8%, rgba(118, 185, 0, 0.18), transparent 36%),
+    linear-gradient(145deg, #12170e 0%, #0d1209 55%, #070906 100%);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.3);
+}
+
+.mermaid-container-expanded {
+  --mermaid-label-backdrop: #f1f5e9;
+  padding: clamp(1.5rem, 4vw, 3rem);
+  border: 1px solid rgba(118, 185, 0, 0.25);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 16% 8%, rgba(118, 185, 0, 0.18), transparent 36%),
+    linear-gradient(145deg, #fbfcf8 0%, #f1f5e9 52%, #e8eee2 100%);
+}
+
+.dark .mermaid-container-expanded {
+  --mermaid-label-backdrop: #0d1209;
+  border-color: rgba(118, 185, 0, 0.3);
+  background:
+    radial-gradient(circle at 16% 8%, rgba(118, 185, 0, 0.16), transparent 36%),
+    linear-gradient(145deg, #12170e 0%, #0d1209 55%, #070906 100%);
+}
+
+/* Lightweight NVIDIA-green overrides for Mermaid's default blue-gray theme. */
+.mermaid-container svg .cluster > rect:not([style*="fill"]),
+.mermaid-container svg .cluster > rect[style*="#e3f2fd" i],
+.mermaid-container svg .cluster > rect[style*="#2196f3" i],
+.mermaid-container-expanded svg .cluster > rect:not([style*="fill"]),
+.mermaid-container-expanded svg .cluster > rect[style*="#e3f2fd" i],
+.mermaid-container-expanded svg .cluster > rect[style*="#2196f3" i] {
+  fill: rgba(255, 255, 255, 0.5) !important;
+  stroke: rgba(118, 185, 0, 0.72) !important;
+  rx: 14px;
+  ry: 14px;
+}
+
+.mermaid-container
+  svg
+  .node
+  > :is(rect.label-container, polygon.label-container, path.label-container, circle.label-container, ellipse.label-container):not(
+    [style*="fill"]
+  ),
+.mermaid-container-expanded
+  svg
+  .node
+  > :is(rect.label-container, polygon.label-container, path.label-container, circle.label-container, ellipse.label-container):not(
+    [style*="fill"]
+  ) {
+  fill: #fcfdf9 !important;
+  stroke: #76b900 !important;
+}
+
+.mermaid-container svg .node > rect.label-container:not([style*="fill"]),
+.mermaid-container-expanded
+  svg
+  .node
+  > rect.label-container:not([style*="fill"]) {
+  rx: 8px;
+  ry: 8px;
+}
+
+/* Flowcharts. */
+.mermaid-container svg :is(.flowchart-link, .edgePath .path),
+.mermaid-container-expanded svg :is(.flowchart-link, .edgePath .path) {
+  stroke: #76b900 !important;
+}
+
+/* Sequence diagrams use actor boxes instead of flowchart nodes. */
+.mermaid-container svg rect.actor,
+.mermaid-container-expanded svg rect.actor {
+  fill: #fcfdf9 !important;
+  stroke: #76b900 !important;
+  rx: 8px;
+  ry: 8px;
+}
+
+.mermaid-container svg :is(.actor-line, .messageLine0, .messageLine1),
+.mermaid-container-expanded svg :is(.actor-line, .messageLine0, .messageLine1) {
+  stroke: #76b900 !important;
+}
+
+/* Keep sequence labels legible when self-message arrows run behind them. */
+.mermaid-container svg .messageText,
+.mermaid-container-expanded svg .messageText {
+  stroke: var(--mermaid-label-backdrop) !important;
+  stroke-width: 8px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+}
+
+.mermaid-container svg :is(.marker, marker path, marker polygon),
+.mermaid-container-expanded svg :is(.marker, marker path, marker polygon) {
+  fill: #76b900 !important;
+  stroke: #76b900 !important;
+}
+
+.dark .mermaid-container svg .cluster > rect:not([style*="fill"]),
+.dark .mermaid-container svg .cluster > rect[style*="#e3f2fd" i],
+.dark .mermaid-container svg .cluster > rect[style*="#2196f3" i],
+.dark .mermaid-container-expanded svg .cluster > rect:not([style*="fill"]),
+.dark .mermaid-container-expanded svg .cluster > rect[style*="#e3f2fd" i],
+.dark .mermaid-container-expanded svg .cluster > rect[style*="#2196f3" i] {
+  fill: rgba(118, 185, 0, 0.06) !important;
+  stroke: rgba(118, 185, 0, 0.72) !important;
+}
+
+.dark
+  .mermaid-container
+  svg
+  .node
+  > :is(rect.label-container, polygon.label-container, path.label-container, circle.label-container, ellipse.label-container):not(
+    [style*="fill"]
+  ),
+.dark
+  .mermaid-container-expanded
+  svg
+  .node
+  > :is(rect.label-container, polygon.label-container, path.label-container, circle.label-container, ellipse.label-container):not(
+    [style*="fill"]
+  ) {
+  fill: #141c0e !important;
+  stroke: #76b900 !important;
+}
+
+.dark .mermaid-container svg :is(.flowchart-link, .edgePath .path),
+.dark .mermaid-container-expanded svg :is(.flowchart-link, .edgePath .path) {
+  stroke: #76b900 !important;
+}
+
+.dark .mermaid-container svg rect.actor,
+.dark .mermaid-container-expanded svg rect.actor {
+  fill: #141c0e !important;
+  stroke: #76b900 !important;
+}
+
+.dark .mermaid-container svg :is(.actor-line, .messageLine0, .messageLine1),
+.dark
+  .mermaid-container-expanded
+  svg
+  :is(.actor-line, .messageLine0, .messageLine1) {
+  stroke: #76b900 !important;
+}
+
+.dark .mermaid-container svg :is(.marker, marker path, marker polygon),
+.dark .mermaid-container-expanded svg :is(.marker, marker path, marker polygon) {
+  fill: #76b900 !important;
+  stroke: #76b900 !important;
+}
+
+
+/* ===================== Community page ===================== */
+
+:root {
+  --dynamo-community-green: #76b900;
+  --dynamo-community-green-bright: #8ed600;
+  --dynamo-community-ink: var(--grayscale-a12);
+  --dynamo-community-muted: var(--grayscale-a10);
+  --dynamo-community-rule: color-mix(in srgb, var(--grayscale-a12) 14%, transparent);
+  --dynamo-community-soft: #f3f4f3;
+  --dynamo-community-titlebar-text: #555755;
+}
+`;
+// sync-site-css:end
+
 export default function CustomFooter() {
   const currentYear = new Date().getFullYear();
   const logoUrl =
     "https://fern-image-hosting.s3.us-east-1.amazonaws.com/nvidia/NVIDIA_Logo_0.svg";
 
   return (
+    <>
+    <style dangerouslySetInnerHTML={{ __html: SITE_CSS }} />
     <footer className="bd-footer">
       <div className="bd-footer__inner">
         <div className="footer-items__start">
@@ -84,5 +1387,6 @@ export default function CustomFooter() {
         </div>
       </div>
     </footer>
+    </>
   );
 }

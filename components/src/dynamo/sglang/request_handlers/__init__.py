@@ -8,7 +8,6 @@ _EXPORTS = {
     # Base handlers
     "BaseGenerativeHandler": ".handler_base",
     "BaseWorkerHandler": ".handler_base",
-    "RLMixin": ".handler_base",
     # LLM handlers
     "DecodeWorkerHandler": ".llm",
     "DiffusionWorkerHandler": ".llm",
@@ -40,7 +39,6 @@ __all__ = [
     # Base handlers
     "BaseGenerativeHandler",
     "BaseWorkerHandler",
-    "RLMixin",
     # LLM handlers
     "DecodeWorkerHandler",
     "DiffusionWorkerHandler",
