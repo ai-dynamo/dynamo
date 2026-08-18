@@ -970,11 +970,7 @@ shared:
   owners:
   - operator
   - gms
-- glob: deploy/operator/internal/controller/dcd_checkpoint_storage_reconciler.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/dcd_checkpoint_storage_reconciler_test.go
+- glob: deploy/operator/internal/controller/dcd_checkpoint_storage_reconciler*
   owners:
   - operator
   - gms
@@ -986,11 +982,7 @@ shared:
   owners:
   - operator
   - gms
-- glob: deploy/operator/internal/controller/dgd_gms_resource_claims_reconciler.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/dgd_gms_resource_claims_reconciler_test.go
+- glob: deploy/operator/internal/controller/dgd_gms_resource_claims_reconciler*
   owners:
   - operator
   - gms
@@ -1010,35 +1002,15 @@ shared:
   owners:
   - operator
   - gms
-- glob: deploy/operator/internal/controller/testing/nvidia/nvidia.com_podsnapshots.yaml
+- glob: deploy/operator/internal/controller/testing/nvidia/
   owners:
   - operator
   - gms
-- glob: deploy/operator/internal/controller/testing/nvidia/nvidia.com_podsnapshotcontents.yaml
+- glob: deploy/operator/internal/webhook/mutation/
   owners:
   - operator
   - gms
-- glob: deploy/operator/internal/webhook/mutation/pod_checkpoint_restore_handler.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/webhook/mutation/pod_checkpoint_restore_handler_test.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/webhook/validation/dynamocheckpoint.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/webhook/validation/dynamocheckpoint_handler.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/webhook/validation/dynamocheckpoint_handler_test.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/webhook/validation/dynamocheckpoint_helpers.go
+- glob: deploy/operator/internal/webhook/validation/dynamocheckpoint*
   owners:
   - operator
   - gms
