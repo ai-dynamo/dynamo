@@ -274,7 +274,6 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
             args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
         ),
         enable_prefix_caching=getattr(args, "enable_prefix_caching", True),
-        g1_backend=getattr(args, "g1_backend", None),
         enable_chunked_prefill=getattr(args, "enable_chunked_prefill", True),
         speedup_ratio=getattr(args, "speedup_ratio", 1.0),
         decode_speedup_ratio=getattr(args, "decode_speedup_ratio", 1.0),
@@ -300,16 +299,6 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         kv_bytes_per_token=getattr(args, "kv_bytes_per_token", None),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
         kv_transfer_timing_mode=getattr(args, "kv_transfer_timing_mode", "full_prompt"),
-        num_g2_blocks=getattr(args, "num_g2_blocks", None),
-        num_g3_blocks=getattr(args, "num_g3_blocks", None),
-        enable_g4_storage=getattr(args, "enable_g4_storage", False),
-        offload_batch_size=getattr(args, "offload_batch_size", None),
-        bandwidth_g1_to_g2_gbps=getattr(args, "bandwidth_g1_to_g2_gbps", None),
-        bandwidth_g2_to_g1_gbps=getattr(args, "bandwidth_g2_to_g1_gbps", None),
-        bandwidth_g2_to_g3_gbps=getattr(args, "bandwidth_g2_to_g3_gbps", None),
-        bandwidth_g3_to_g2_gbps=getattr(args, "bandwidth_g3_to_g2_gbps", None),
-        bandwidth_g2_to_g4_gbps=getattr(args, "bandwidth_g2_to_g4_gbps", None),
-        bandwidth_g4_to_g2_gbps=getattr(args, "bandwidth_g4_to_g2_gbps", None),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
         response_replay_trace_path=args.response_replay_trace_path,
         sglang=_build_sglang_args(args),
@@ -371,8 +360,8 @@ def build_runtime_config(
 
     bootstrap_port = engine_args.bootstrap_port
     if engine_args.is_prefill() and bootstrap_port is not None:
-        host = os.environ.get(
-            "DYN_HTTP_RPC_HOST", socket.gethostbyname(socket.gethostname())
+        host = os.environ.get("DYN_HTTP_RPC_HOST") or socket.gethostbyname(
+            socket.gethostname()
         )
         rc.set_disaggregated_endpoint(
             bootstrap_host=host, bootstrap_port=bootstrap_port

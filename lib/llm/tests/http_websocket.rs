@@ -60,7 +60,9 @@ async fn spawn_test_service(
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
     if realtime_enabled {
-        service.enable_model_endpoint(EndpointType::Realtime, true);
+        service
+            .enable_model_endpoint(EndpointType::Realtime, true)
+            .unwrap();
     }
     if register_echo_engine {
         register_echo(&service);

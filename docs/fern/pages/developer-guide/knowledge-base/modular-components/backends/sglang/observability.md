@@ -185,7 +185,7 @@ In disaggregated serving, queued request metrics read from the correct engine-sp
 
 | Engine | Queue Source |
 |--------|-------------|
-| Unified (non-disagg) | `waiting_queue` |
+| Aggregated (non-disagg) | `waiting_queue` |
 | Prefill | `disagg_prefill_bootstrap_queue` |
 | Decode | `disagg_decode_prealloc_queue` + `disagg_decode_transfer_queue` |
 
@@ -248,7 +248,8 @@ Key implementation files:
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_LOGGING_JSONL` | Enable JSONL logging (required for tracing) | `false` | `true` |
+| `DYN_LOGGING_CONSOLE_FORMAT` | Console output format (`readable` or `jsonl`) | `readable` | `readable` |
+| `DYN_LOGGING_JSONL` | Legacy JSONL and local trace-context fallback | `false` | `true` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `false` | `true` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` | `http://tempo:4317` |
 | `OTEL_SERVICE_NAME` | Service name shown in Grafana Tempo | `dynamo` | `dynamo-worker-decode` |
@@ -304,7 +305,7 @@ cd examples/backends/sglang/launch
 Or manually for an aggregated deployment:
 
 ```bash
-export DYN_LOGGING_JSONL=true
+export DYN_LOGGING_CONSOLE_FORMAT=readable
 export OTEL_EXPORT_ENABLED=true
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 

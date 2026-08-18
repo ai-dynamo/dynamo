@@ -408,7 +408,7 @@ class TestLoraEngineRouteRegistration:
             for call in runtime.register_engine_route.call_args_list
         }
 
-        # Routes should be registered with update/ prefix per unified worker convention
+        # Routes use the update/ engine-management prefix.
         assert set(registered) == {
             "update/load_lora",
             "update/unload_lora",

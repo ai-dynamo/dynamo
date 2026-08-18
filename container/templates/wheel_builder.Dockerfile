@@ -564,6 +564,7 @@ FROM wheel_builder_base AS runtime_wheel_builder
 COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
+COPY aisimulate/crates/ /opt/dynamo/aisimulate/crates/
 COPY components/ /opt/dynamo/components/
 
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
@@ -587,23 +588,36 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-{% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3{% if target == "planner" %},mocker-kvbm-offload{% endif %}" --out /opt/dynamo/dist && \
+{% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist && \
 {% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3{% if target == "planner" %},mocker-kvbm-offload{% endif %}" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
     else \
-        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3{% if target == "planner" %},mocker-kvbm-offload{% endif %}" --out /opt/dynamo/dist; \
+        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
     fi && \
 {% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
-{% if target == "planner" %}
-# AI Simulate is a separate Python distribution. Build it only for the planner
-# image, after the Dynamo wheels so Python-only changes do not invalidate the
-# expensive Rust build layers above.
+# Complete the root Cargo workspace after the expensive runtime build. Planner
+# wheel metadata and optional source archival both validate every member.
+COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-policy-example/
+COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
+
+{% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
+# AI Simulate is a separate, architecture-specific Python distribution used by
+# Planner and the framework runtime images. Build it after the Dynamo wheels so
+# Python-only changes do not invalidate the expensive Rust layers above.
 COPY aisimulate/ /opt/dynamo/aisimulate/
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/aisimulate
+    cd /opt/dynamo/aisimulate && \
+{% if device == "cuda" %}    maturin build --release \
+        --auditwheel repair \
+        --compatibility manylinux_2_28 \
+        --out /opt/dynamo/dist
+{% else %}    maturin build --release \
+        --auditwheel repair \
+        --out /opt/dynamo/dist
+{% endif %}
 {% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
@@ -637,7 +651,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 # the bare system python3 lacks it and the step would no-op with a warning.
 COPY container/compliance /opt/compliance
 RUN set -u; injected=0; \
-    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl; do \
+    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisimulate*.whl; do \
         [ -e "$whl" ] || continue; \
         PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
@@ -792,6 +806,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
+COPY aisimulate/crates/ /opt/dynamo/aisimulate/crates/
 COPY components/ /opt/dynamo/components/
 
 # Build kvbm wheel (with nixl linkage via auditwheel repair)

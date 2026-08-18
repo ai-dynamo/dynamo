@@ -31,8 +31,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+
+type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
+type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedRead;
@@ -376,9 +380,66 @@ struct TcpConnection {
     post_enqueue_barrier: Option<Arc<tokio::sync::Barrier>>,
 }
 
+/// Cached TLS connector for the request plane. Built once from env vars.
+static REQUEST_PLANE_TLS_CONNECTOR: once_cell::sync::OnceCell<Option<TlsConnector>> =
+    once_cell::sync::OnceCell::new();
+
+fn get_request_plane_tls_connector() -> anyhow::Result<&'static Option<TlsConnector>> {
+    REQUEST_PLANE_TLS_CONNECTOR.get_or_try_init(build_request_plane_tls_connector_from_env)
+}
+
+/// Build the request-plane client TLS connector from the `DYN_TCP_TLS_*`
+/// environment. Returns `None` when no TLS is requested (no CA and not
+/// insecure). Split out from the `OnceCell` init so the env parsing can be
+/// unit-tested directly.
+fn build_request_plane_tls_connector_from_env() -> anyhow::Result<Option<TlsConnector>> {
+    use crate::config::environment_names::tcp_response_stream::tls as env;
+    let ca_cert_path = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).ok();
+    let insecure = crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
+    let tls_requested = ca_cert_path.is_some() || insecure;
+    if !tls_requested {
+        return Ok(None);
+    }
+    let tls_config = crate::tls_utils::client_tls_config(
+        ca_cert_path.as_deref().map(std::path::Path::new),
+        insecure,
+    )?;
+    Ok(Some(TlsConnector::from(std::sync::Arc::new(tls_config))))
+}
+
+impl Drop for TcpConnection {
+    fn drop(&mut self) {
+        self.healthy.store(false, Ordering::Relaxed);
+        self.closed.store(true, Ordering::Release);
+        self.admission.close();
+        self.writer_notify.notify_one();
+        self.writer_handle.abort();
+        self.reader_handle.abort();
+    }
+}
+
 impl TcpConnection {
     /// Create a new connection with lock-free submit and batched write/read tasks
     async fn connect(addr: SocketAddr, timeout: Duration, channel_buffer: usize) -> Result<Self> {
+        Self::connect_with_connector(
+            addr,
+            timeout,
+            channel_buffer,
+            get_request_plane_tls_connector()?.as_ref(),
+        )
+        .await
+    }
+
+    /// Like [`TcpConnection::connect`], but with an explicitly supplied TLS
+    /// connector instead of the process-global `REQUEST_PLANE_TLS_CONNECTOR`.
+    /// This lets tests drive the real connect/handshake/reader/writer path with a
+    /// per-test connector, without initializing (and poisoning) the cached one.
+    async fn connect_with_connector(
+        addr: SocketAddr,
+        timeout: Duration,
+        channel_buffer: usize,
+        connector: Option<&TlsConnector>,
+    ) -> Result<Self> {
         let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
             .await
             .map_err(|_| anyhow::anyhow!("TCP connect timeout to {}", addr))??;
@@ -386,7 +447,26 @@ impl TcpConnection {
         // Configure socket for lower latency
         Self::configure_socket(&stream)?;
 
-        let (read_half, write_half) = tokio::io::split(stream);
+        let (read_half, write_half): (BoxRead, BoxWrite) = if let Some(connector) = connector {
+            use crate::config::environment_names::tcp_response_stream::tls as env;
+            let server_name = match std::env::var(env::DYN_TCP_TLS_SERVER_NAME) {
+                Ok(name) => rustls::pki_types::ServerName::try_from(name)
+                    .map_err(|e| anyhow::anyhow!("invalid TLS server name: {e}"))?,
+                Err(_) => rustls::pki_types::ServerName::IpAddress(addr.ip().into()),
+            };
+            let tls_stream = tokio::time::timeout(
+                crate::tls_utils::handshake_timeout(),
+                connector.connect(server_name, stream),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("Request plane TLS handshake timed out to {}", addr))?
+            .map_err(|e| anyhow::anyhow!("Request plane TLS handshake failed to {}: {e}", addr))?;
+            let (r, w) = tokio::io::split(tls_stream);
+            (Box::new(r), Box::new(w))
+        } else {
+            let (r, w) = tokio::io::split(stream);
+            (Box::new(r), Box::new(w))
+        };
 
         let submit_queue = Arc::new(SegQueue::new());
         let response_queue = Arc::new(SegQueue::new());
@@ -557,7 +637,7 @@ impl TcpConnection {
     /// - If a response races back before waiters are queued, the reader's
     ///   existing spin-wait covers that small handoff window
     async fn writer_task(
-        mut write_half: tokio::io::WriteHalf<TcpStream>,
+        mut write_half: BoxWrite,
         submit_queue: Arc<SegQueue<PendingRequest>>,
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         notify: Arc<tokio::sync::Notify>,
@@ -632,11 +712,26 @@ impl TcpConnection {
                     }
                     return Err(e.into());
                 }
+                // Flush after the batch write. `write_half` may be a tokio-rustls
+                // TLS stream, whose `poll_write` copies plaintext into the session
+                // buffer and can return Ready(Ok(n)) with encrypted records still
+                // buffered when the socket would block; without this flush the batch
+                // can stall under write back-pressure until the next request is
+                // written, hanging its callers until the request timeout. For a
+                // plaintext TCP write half this is a no-op.
+                if let Err(e) = write_half.flush().await {
+                    write_buf.clear();
+                    let err_msg = format!("Flush failed: {}", e);
+                    for tx in response_batch.drain(..) {
+                        let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+                    }
+                    return Err(e.into());
+                }
                 TCP_BYTES_SENT_TOTAL.inc_by(bytes_to_write as f64);
                 debug_assert!(write_buf.is_empty());
 
-                // Phase 3: write_all succeeded — data is committed to the wire.
-                // NOW push response_txs to response_queue so the reader can
+                // Phase 3: write_all + flush succeeded — data is committed to the
+                // wire. NOW push response_txs to response_queue so the reader can
                 // match them with incoming responses.
                 for tx in response_batch.drain(..) {
                     response_queue.push(tx);
@@ -698,7 +793,7 @@ impl TcpConnection {
     /// On exit (clean close or error), sets `healthy=false` and wakes the writer
     /// via `writer_notify` so it can detect reader death and drain pending callers.
     async fn reader_task(
-        read_half: tokio::io::ReadHalf<TcpStream>,
+        read_half: BoxRead,
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         healthy: Arc<AtomicBool>,
         writer_notify: Arc<tokio::sync::Notify>,
@@ -869,6 +964,19 @@ impl TcpConnection {
         let inflight = self.inflight.load(Ordering::Acquire) as usize;
         self.channel_buffer.saturating_sub(inflight)
     }
+}
+
+fn cannot_connect_error(addr: SocketAddr, error: anyhow::Error) -> anyhow::Error {
+    let cause = crate::error::DynamoError::from(
+        error.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
+    );
+    anyhow::anyhow!(
+        crate::error::DynamoError::builder()
+            .error_type(crate::error::ErrorType::CannotConnect)
+            .message(format!("TCP connection to {addr} failed"))
+            .cause(cause)
+            .build()
+    )
 }
 
 /// Per-host connection pool with LRU lifecycle and ArcSwap-based snapshot.
@@ -1087,7 +1195,7 @@ impl HostPool {
                     }
                     Err(e) => {
                         self.connect_notify.notify_waiters();
-                        return Err(e);
+                        return Err(cannot_connect_error(self.addr, e));
                     }
                 }
             }
@@ -1440,7 +1548,7 @@ impl TcpRequestClient {
     /// Start a background task that eagerly warms TCP connections for
     /// newly-discovered backends.
     ///
-    /// Delegates to [`TcpConnectionPool::start_warmup_watcher`].
+    /// Delegates to `TcpConnectionPool::start_warmup_watcher`.
     pub fn start_warmup(
         &self,
         instance_rx: tokio::sync::watch::Receiver<Vec<crate::component::Instance>>,
@@ -1500,8 +1608,14 @@ impl RequestPlaneClient for TcpRequestClient {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
 
-        // Get shared connection from pool (Arc, not exclusive borrow)
-        let conn = self.pool.get_connection(addr).await?;
+        // Get shared connection from pool (Arc, not exclusive borrow). Actual connection
+        // failures are classified at the dial site; local pool errors retain their type.
+        let conn = self.pool.get_connection(addr).await.map_err(|e| {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            TCP_ERRORS_TOTAL.inc();
+            tracing::warn!(%addr, error = %e, "TCP connection unavailable");
+            e
+        })?;
 
         let result = tokio::time::timeout(
             self.config.request_timeout,
@@ -1588,7 +1702,23 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::task::{Context, Poll};
     use tokio::io::{AsyncReadExt, AsyncWrite};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
+
+    fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
+        use std::io::Write as _;
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file
+            .write_all(key_pair.serialize_pem().as_bytes())
+            .unwrap();
+        (cert_file, key_file)
+    }
 
     #[test]
     fn test_tcp_config_default() {
@@ -1645,6 +1775,113 @@ mod tests {
         assert!(client.is_healthy());
     }
 
+    #[tokio::test]
+    async fn test_cold_connection_failure_is_cannot_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+
+        let err = client
+            .send_request(
+                format!("{addr}/generate"),
+                Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(crate::error::match_error_chain(
+            err.as_ref(),
+            &[crate::error::ErrorType::CannotConnect],
+            &[],
+        ));
+        assert!(
+            err.chain().count() > 1,
+            "cold connection failure must retain its cause"
+        );
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_closed_connect_limiter_is_not_cannot_connect() {
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        client.pool.connect_limiter.close();
+
+        let err = client
+            .send_request(
+                "127.0.0.1:1/generate".to_string(),
+                Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(!crate::error::match_error_chain(
+            err.as_ref(),
+            &[crate::error::ErrorType::CannotConnect],
+            &[],
+        ));
+        assert!(err.to_string().contains("Global connect limiter closed"));
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
+    }
+
+    async fn echo_requests(stream: TcpStream) {
+        let (mut read_half, mut write_half) = tokio::io::split(stream);
+        loop {
+            let mut len_buf = [0u8; 2];
+            if read_half.read_exact(&mut len_buf).await.is_err() {
+                break;
+            }
+            let path_len = u16::from_be_bytes(len_buf) as usize;
+            let mut path_buf = vec![0u8; path_len];
+            if read_half.read_exact(&mut path_buf).await.is_err() {
+                break;
+            }
+
+            let mut headers_len_buf = [0u8; 2];
+            if read_half.read_exact(&mut headers_len_buf).await.is_err() {
+                break;
+            }
+            let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+            let mut headers_buf = vec![0u8; headers_len];
+            if read_half.read_exact(&mut headers_buf).await.is_err() {
+                break;
+            }
+
+            let mut payload_len_buf = [0u8; 4];
+            if read_half.read_exact(&mut payload_len_buf).await.is_err() {
+                break;
+            }
+            let payload_len = u32::from_be_bytes(payload_len_buf) as usize;
+            let mut payload = vec![0u8; payload_len];
+            if read_half.read_exact(&mut payload).await.is_err() {
+                break;
+            }
+
+            use crate::pipeline::network::codec::TcpResponseMessage;
+            let encoded = TcpResponseMessage::new(Bytes::from(payload))
+                .encode()
+                .unwrap();
+            if write_half.write_all(&encoded).await.is_err() {
+                break;
+            }
+        }
+    }
+
     /// Helper: spawn a mock TCP server that echoes requests.
     /// Returns (listener_addr, connection_count_tracker).
     async fn spawn_echo_server() -> (SocketAddr, Arc<AtomicUsize>) {
@@ -1662,55 +1899,190 @@ mod tests {
                 let (stream, _) = result.unwrap();
                 conn_count_clone.fetch_add(1, Ordering::SeqCst);
 
-                tokio::spawn(async move {
-                    let (mut read_half, mut write_half) = tokio::io::split(stream);
-                    loop {
-                        // Read path length
-                        let mut len_buf = [0u8; 2];
-                        if read_half.read_exact(&mut len_buf).await.is_err() {
-                            break;
-                        }
-                        let path_len = u16::from_be_bytes(len_buf) as usize;
-                        let mut path_buf = vec![0u8; path_len];
-                        if read_half.read_exact(&mut path_buf).await.is_err() {
-                            break;
-                        }
-
-                        // Read headers length
-                        let mut headers_len_buf = [0u8; 2];
-                        if read_half.read_exact(&mut headers_len_buf).await.is_err() {
-                            break;
-                        }
-                        let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
-                        let mut headers_buf = vec![0u8; headers_len];
-                        if read_half.read_exact(&mut headers_buf).await.is_err() {
-                            break;
-                        }
-
-                        // Read payload length + payload
-                        let mut len_buf = [0u8; 4];
-                        if read_half.read_exact(&mut len_buf).await.is_err() {
-                            break;
-                        }
-                        let payload_len = u32::from_be_bytes(len_buf) as usize;
-                        let mut payload_buf = vec![0u8; payload_len];
-                        if read_half.read_exact(&mut payload_buf).await.is_err() {
-                            break;
-                        }
-
-                        // Send response
-                        use crate::pipeline::network::codec::TcpResponseMessage;
-                        let response = TcpResponseMessage::new(Bytes::from(payload_buf));
-                        let encoded = response.encode().unwrap();
-                        if write_half.write_all(&encoded).await.is_err() {
-                            break;
-                        }
-                    }
-                });
+                tokio::spawn(echo_requests(stream));
             }
         });
 
         (addr, conn_count)
+    }
+
+    /// Env parsing for the request-plane client connector (independent of the
+    /// process-global `OnceCell`): no TLS env → no connector; CA or insecure →
+    /// connector built.
+    #[test]
+    fn request_plane_tls_connector_from_env_parses() {
+        let (cert, _key) = make_cert_files();
+        temp_env::with_vars_unset(["DYN_TCP_TLS_CA_CERT_PATH", "DYN_TCP_TLS_INSECURE"], || {
+            assert!(
+                build_request_plane_tls_connector_from_env()
+                    .unwrap()
+                    .is_none()
+            );
+        });
+        temp_env::with_vars(
+            [
+                (
+                    "DYN_TCP_TLS_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+                ("DYN_TCP_TLS_INSECURE", None),
+            ],
+            || {
+                assert!(
+                    build_request_plane_tls_connector_from_env()
+                        .unwrap()
+                        .is_some()
+                );
+            },
+        );
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_INSECURE", Some("1")),
+            ],
+            || {
+                assert!(
+                    build_request_plane_tls_connector_from_env()
+                        .unwrap()
+                        .is_some()
+                );
+            },
+        );
+    }
+
+    /// End-to-end encrypted request through the **real** request-plane client
+    /// path: `TcpConnection::connect_with_connector` performs the TLS handshake
+    /// (SNI from `DYN_TCP_TLS_SERVER_NAME`), spawns the reader/writer tasks over
+    /// boxed TLS I/O, and `send_request` frames a request that a TLS-wrapped echo
+    /// server (built from the production `server_tls_config`) reads and replies
+    /// to. This exercises handshake + SNI + boxed I/O + reader/writer + framing,
+    /// not just a `tls_utils` round-trip.
+    #[tokio::test]
+    async fn request_plane_tls_end_to_end() {
+        use crate::pipeline::network::codec::TcpResponseMessage;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        // Self-signed cert (SAN=localhost), trusted as the CA by the client.
+        let (cert, key) = make_cert_files();
+        let server_config = crate::tls_utils::server_tls_config(cert.path(), key.path()).unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let client_config = crate::tls_utils::client_tls_config(Some(cert.path()), false).unwrap();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+        // TLS-wrapped echo server speaking the request-plane wire framing.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let tls = acceptor.accept(tcp).await.expect("server TLS handshake");
+            let (mut r, mut w) = tokio::io::split(tls);
+            // path
+            let mut l2 = [0u8; 2];
+            r.read_exact(&mut l2).await.unwrap();
+            let mut path = vec![0u8; u16::from_be_bytes(l2) as usize];
+            r.read_exact(&mut path).await.unwrap();
+            // headers
+            let mut hl = [0u8; 2];
+            r.read_exact(&mut hl).await.unwrap();
+            let mut headers = vec![0u8; u16::from_be_bytes(hl) as usize];
+            r.read_exact(&mut headers).await.unwrap();
+            // payload
+            let mut l4 = [0u8; 4];
+            r.read_exact(&mut l4).await.unwrap();
+            let mut payload = vec![0u8; u32::from_be_bytes(l4) as usize];
+            r.read_exact(&mut payload).await.unwrap();
+            // echo the payload back as a response frame
+            let resp = TcpResponseMessage::new(Bytes::from(payload));
+            w.write_all(&resp.encode().unwrap()).await.unwrap();
+            w.flush().await.unwrap();
+        });
+
+        // Drive the real client path with an explicit connector (no OnceCell) and
+        // SNI supplied via env so it matches the cert's `localhost` SAN.
+        let payload = Bytes::from_static(b"encrypted-request-plane-payload");
+        let expected = payload.clone();
+        let response = temp_env::async_with_vars(
+            [("DYN_TCP_TLS_SERVER_NAME", Some("localhost"))],
+            async move {
+                let conn = TcpConnection::connect_with_connector(
+                    addr,
+                    Duration::from_secs(5),
+                    10,
+                    Some(&connector),
+                )
+                .await
+                .expect("client connect + TLS handshake");
+                let mut headers = Headers::new();
+                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                conn.send_request(payload, &headers)
+                    .await
+                    .expect("send_request over TLS")
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response, expected,
+            "payload should round-trip through the encrypted request plane"
+        );
+    }
+
+    async fn spawn_active_echo_server() -> (SocketAddr, Arc<AtomicUsize>) {
+        struct ActiveConnection(Arc<AtomicUsize>);
+
+        impl Drop for ActiveConnection {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let active_connections = Arc::new(AtomicUsize::new(0));
+        let tracker = active_connections.clone();
+
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tracker.fetch_add(1, Ordering::SeqCst);
+                let active = ActiveConnection(tracker.clone());
+                tokio::spawn(async move {
+                    let _active = active;
+                    echo_requests(stream).await;
+                });
+            }
+        });
+
+        (addr, active_connections)
+    }
+
+    #[tokio::test]
+    async fn dropping_client_closes_pooled_connections() {
+        let (addr, active_connections) = spawn_active_echo_server().await;
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        let mut headers = Headers::new();
+        headers.insert("x-endpoint-path".to_string(), "test".to_string());
+
+        client
+            .send_request(addr.to_string(), Bytes::from_static(b"test"), headers)
+            .await
+            .unwrap();
+        assert_eq!(active_connections.load(Ordering::SeqCst), 1);
+
+        drop(client);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active_connections.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the TCP client left its pooled connection open");
     }
 
     struct RecordingWriter {
@@ -2725,6 +3097,7 @@ mod tests {
                 instance_id: 1,
                 transport: TransportType::Tcp(tcp_addr),
                 device_type: None,
+                request_plane_codec: None,
             }])
             .unwrap();
 

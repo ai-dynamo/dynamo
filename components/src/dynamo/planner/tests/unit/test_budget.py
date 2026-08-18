@@ -101,6 +101,10 @@ def test_clamp_pair_no_op_when_both_disabled():
     assert proportional_clamp_pair(3, 5, 1, 1, -1, -1, 1) == (3, 5)
 
 
+def test_clamp_pair_preserves_asymmetric_component_minimums():
+    assert proportional_clamp_pair(10, 10, 1, 1, -1, 5, 2, 1) == (2, 3)
+
+
 def test_clamp_pair_in_band_returns_inputs():
     # min=max=4, p_gpu=d_gpu=1, desired (3,1) totals 4 — in band.
     assert proportional_clamp_pair(3, 1, 1, 1, 4, 4, 1) == (3, 1)

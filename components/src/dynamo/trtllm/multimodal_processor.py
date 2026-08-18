@@ -35,7 +35,12 @@ from dynamo.common.http.url_validator import (
     UrlValidationPolicy,
     validate_media_url,
 )
+from dynamo.common.multimodal.codec_errors import (
+    MissingMediaDecoderError,
+    video_decoder_missing,
+)
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.media_source import describe_media_source
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -462,13 +467,21 @@ class MultimodalRequestProcessor:
             videos = []
             for item in video_items:
                 url = item.get("Url") if isinstance(item, dict) else item
+                # Everything user-supplied that can reach an error message or a
+                # log line goes through this bounded label: a data: URI carries
+                # the entire media payload inline, so echoing one back would
+                # serialize megabytes of base64 to the client and to every log
+                # sink that records the failure.
+                source = describe_media_source(
+                    url if isinstance(url, str) else str(item)
+                )
                 if not isinstance(url, str):
                     raise HttpStatusError(
-                        400, f"Unsupported video item: {item!r}", str(item)
+                        400, f"Unsupported video item: {source}", source
                     )
                 if urlparse(url).scheme in ("", "file"):
                     raise HttpStatusError(
-                        400, "Local file access is not allowed for video", url
+                        400, "Local file access is not allowed for video", source
                     )
                 try:
                     normalized_url = await validate_media_url(url, self._url_policy)
@@ -479,7 +492,8 @@ class MultimodalRequestProcessor:
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.
                         nvdec_video = None
-                        if should_use_nvdec(probe_video_codec(content)):
+                        codec = probe_video_codec(content)
+                        if should_use_nvdec(codec):
                             try:
                                 nvdec_video = await asyncio.to_thread(
                                     _nvdec_video_data, content, self.num_video_frames
@@ -498,27 +512,59 @@ class MultimodalRequestProcessor:
                             ) as video_file:
                                 await asyncio.to_thread(video_file.write, content)
                                 await asyncio.to_thread(video_file.flush)
-                                videos.append(
-                                    await async_load_video(
-                                        video_file.name, self.num_video_frames
+                                try:
+                                    videos.append(
+                                        await async_load_video(
+                                            video_file.name, self.num_video_frames
+                                        )
                                     )
-                                )
+                                except ImportError as exc:
+                                    # The vendor loader needs cv2, which the
+                                    # image deliberately omits; its bare error
+                                    # names neither codec nor remedy. Carry its
+                                    # text as the cause so the underlying
+                                    # reason still reaches the client.
+                                    raise video_decoder_missing(
+                                        "trtllm",
+                                        "opencv-python-headless",
+                                        "cv2",
+                                        codec,
+                                        cause=str(exc),
+                                    ) from exc
                     else:
-                        videos.append(
-                            await async_load_video(
-                                normalized_url, self.num_video_frames
+                        try:
+                            videos.append(
+                                await async_load_video(
+                                    normalized_url, self.num_video_frames
+                                )
                             )
-                        )
+                        except ImportError as exc:
+                            # No bytes fetched on this branch, so no codec probe.
+                            raise video_decoder_missing(
+                                "trtllm",
+                                "opencv-python-headless",
+                                "cv2",
+                                None,
+                                cause=str(exc),
+                            ) from exc
                 except UrlValidationError as e:
-                    raise HttpStatusError(400, str(e), url) from e
+                    raise HttpStatusError(400, str(e), source) from e
                 except HttpStatusError:
                     raise
+                except MissingMediaDecoderError as e:
+                    # A missing decoder is deployment configuration, not a bad
+                    # request: 500, not the 400 the generic handler below
+                    # assigns. The actionable text (codec, bounded spec,
+                    # installer command, vendor cause) is the message.
+                    raise HttpStatusError(
+                        500, f"Failed to load video ({source}): {e}", source
+                    ) from e
                 except Exception as e:
                     status = getattr(e, "status", None) or getattr(e, "code", None)
                     raise HttpStatusError(
                         status if isinstance(status, int) and status >= 400 else 400,
-                        f"Failed to load video ({url}): {e}",
-                        url,
+                        f"Failed to load video ({source}): {e}",
+                        source,
                     ) from e
             if videos:
                 processed_mm_data["video"] = videos

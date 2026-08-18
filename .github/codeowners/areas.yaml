@@ -47,6 +47,7 @@ areas:
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
   - components/src/dynamo/kv_dc_relay/
+  - components/src/dynamo/kv_state_agent/
   - components/src/dynamo/global_router/
   - components/src/dynamo/global_router/tests/
   - components/src/dynamo/router/
@@ -66,7 +67,9 @@ areas:
   - lib/llm/src/kv_router/publisher/
   - tests/router/
   - tests/router/configs/
+  - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
+  - examples/router/custom-policy-example/
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
@@ -215,7 +218,6 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - aisimulate/
-  - examples/aisimulate/
   - examples/power-aware-budget/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
@@ -433,25 +435,12 @@ areas:
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
+  - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
-  - deploy/helm/charts/snapshot/
+  - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
+  - deploy/operator/internal/checkpointjob/
   - deploy/operator/internal/gms/
-  - deploy/snapshot/
-  - deploy/snapshot/cmd/
-  - deploy/snapshot/cmd/agent/
-  - deploy/snapshot/cmd/cuda-checkpoint-helper/
-  - deploy/snapshot/cmd/nsrestore/
-  - deploy/snapshot/cmd/snapshotctl/
-  - deploy/snapshot/internal/
-  - deploy/snapshot/internal/controller/
-  - deploy/snapshot/internal/criu/
-  - deploy/snapshot/internal/cuda/
-  - deploy/snapshot/internal/executor/
-  - deploy/snapshot/internal/logging/
-  - deploy/snapshot/internal/runtime/
-  - deploy/snapshot/internal/types/
-  - deploy/snapshot/protocol/
   - lib/gpu_memory_service/
   - lib/gpu_memory_service/cli/
   - lib/gpu_memory_service/client/
@@ -485,6 +474,8 @@ areas:
 - label: performance
   github_team: '@ai-dynamo/dynamo-performance-codeowners'
   path_globs:
+  - aisimulate/crates/core/src/engine/cache/
+  - aisimulate/crates/core/src/engine/kv_manager/
   - benchmarks/README.md
   - benchmarks/__init__.py
   - benchmarks/burstgpt_loadgen/
@@ -516,10 +507,7 @@ areas:
   - lib/bench/tests/
   - lib/data-gen/
   - lib/mocker/
-  - lib/mocker/src/cache/
   - lib/mocker/src/common/
-  - lib/mocker/src/kv_manager/
-  - lib/mocker/src/kvbm_offload/
   - lib/mocker/src/loadgen/
   - lib/mocker/src/replay/
   - lib/mocker/src/scheduler/
@@ -666,14 +654,6 @@ shared:
   owners:
   - backend-trtllm
   - observability
-- glob: components/src/dynamo/vllm/logits_processing/
-  owners:
-  - backend-vllm
-  - frontend
-- glob: components/src/dynamo/sglang/logits_processing/
-  owners:
-  - backend-sglang
-  - frontend
 - glob: components/src/dynamo/trtllm/logits_processing/
   owners:
   - backend-trtllm
@@ -855,7 +835,7 @@ shared:
   owners:
   - planner
   - operator
-- glob: components/src/dynamo/planner/connectors/kubernetes_api.py
+- glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
   owners:
   - planner
   - operator
@@ -1041,11 +1021,7 @@ shared:
   owners:
   - frontend
   - diffusion
-- glob: lib/mocker/src/kv_manager/
-  owners:
-  - performance
-  - kv-memory
-- glob: lib/mocker/src/kvbm_offload/
+- glob: aisimulate/crates/core/src/engine/kv_manager/
   owners:
   - performance
   - kv-memory
@@ -1088,4 +1064,3 @@ classify:
   filetype_rules:
   - pattern: '*Dockerfile*'
     coowner: ops
-    advisory: false

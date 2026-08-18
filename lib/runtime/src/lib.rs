@@ -39,6 +39,7 @@ pub mod nvtx;
 pub mod pipeline;
 pub mod prelude;
 pub mod protocols;
+mod routing_policy;
 pub mod runnable;
 pub mod runtime;
 pub mod service;
