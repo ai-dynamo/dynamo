@@ -145,16 +145,12 @@ after round 53 consumed about 4 hours 39 minutes for 1.05% additional hypervolum
 ## Reproduction Status
 
 The packaged dependencies support this configuration's KV-capacity and candidate-concurrency
-calculations. Reproducing the historical frontier still depends on AI Configurator performance
-database coverage for B200/SGLang/GLM-5-FP8 and on Replay behavior in the runtime snapshot.
+calculations. These results are historical and cannot be reproduced from the current public
+artifacts because the published `aisimulate==0.1.0.dev1` wheel does not include the example runner
+or this experiment's configuration. Recreating the frontier also requires AI Configurator
+performance database coverage for B200/SGLang/GLM-5-FP8 and the Replay behavior from the original
+runtime snapshot.
 
-## Reproduce
-
-```bash
-python path/to/aisimulate/examples/sweeper/tools/run_sweep.py \
-  --config path/to/aisimulate/examples/sweeper/configs/glm5-disagg-pareto-frontier.yaml
-```
-
-The AI Configurator performance model needs the `aic-forward-pass` binding. Dynamo's attention-DP
-KV-capacity calculation multiplies per-rank capacity by attention DP and replicas before passing
-engine capacity to Replay.
+The original run required the `aic-forward-pass` binding. Dynamo's attention-DP KV-capacity
+calculation multiplied per-rank capacity by attention DP and replicas before passing engine
+capacity to Replay.
