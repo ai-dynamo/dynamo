@@ -938,79 +938,23 @@ shared:
   owners:
   - operator
   - observability
-- glob: deploy/operator/api/v1alpha1/dynamocheckpoint_types.go
+- glob: deploy/operator/api/v1alpha1/dynamocheckpoint*
   owners:
   - operator
   - gms
-- glob: deploy/operator/config/crd/bases/nvidia.com_dynamocheckpoints.yaml
+- glob: deploy/operator/config/**/*dynamocheckpoint*
   owners:
   - operator
   - gms
-- glob: deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml
+- glob: deploy/operator/internal/controller/*checkpoint*
   owners:
   - operator
   - gms
-- glob: deploy/operator/internal/controller/checkpoint_cleanup_job.go
+- glob: deploy/operator/**/*podsnapshot*
   owners:
   - operator
   - gms
-- glob: deploy/operator/internal/controller/checkpoint_coverage_test.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/checkpoint_job.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/checkpoint_podsnapshot.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/checkpoint_podsnapshot_test.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/dcd_checkpoint_storage_reconciler*
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/dgd_checkpoints_reconciler.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/dgd_checkpoints_reconciler_test.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/dgd_gms_resource_claims_reconciler*
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/dynamocheckpoint_controller.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/dynamocheckpoint_controller_test.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/gms_pod_replacement_controller.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/gms_pod_replacement_controller_test.go
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/controller/testing/nvidia/
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/webhook/mutation/
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/internal/webhook/validation/dynamocheckpoint*
+- glob: deploy/operator/internal/webhook/**/*checkpoint*
   owners:
   - operator
   - gms
