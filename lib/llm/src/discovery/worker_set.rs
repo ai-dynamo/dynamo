@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     discovery::{KvWorkerMonitor, allocator::AllocatorTrimOnDrop},
-    kv_router::{EncoderRouter, prefill_router::PrefillRouterLifecycle},
+    kv_router::{EncoderRouter, indexer::PlacementFeed, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -162,6 +162,9 @@ pub struct WorkerSet {
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
 
+    /// Read-only view of the KV index accepted by this worker set's router.
+    pub(crate) kv_placement_feed: Option<PlacementFeed>,
+
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
     pub(crate) prefill_router: Option<Arc<dyn PrefillRouterLifecycle>>,
@@ -202,6 +205,7 @@ impl WorkerSet {
             realtime_engine: None,
             generate_engine: None,
             worker_monitor: None,
+            kv_placement_feed: None,
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
@@ -234,6 +238,18 @@ impl WorkerSet {
 
     pub fn card(&self) -> &ModelDeploymentCard {
         &self.card
+    }
+
+    pub(crate) fn worker_monitor(&self) -> Option<&KvWorkerMonitor> {
+        self.worker_monitor.as_ref()
+    }
+
+    pub(crate) fn kv_placement_feed(&self) -> Option<&PlacementFeed> {
+        self.kv_placement_feed.as_ref()
+    }
+
+    pub(crate) fn prefill_placement_feed(&self) -> Option<(EndpointId, PlacementFeed)> {
+        self.prefill_router.as_ref()?.placement_feed()
     }
 
     pub fn has_chat_engine(&self) -> bool {
@@ -429,6 +445,7 @@ impl WorkerSet {
             realtime_engine: None,
             generate_engine,
             worker_monitor: self.worker_monitor.clone(),
+            kv_placement_feed: self.kv_placement_feed.clone(),
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),

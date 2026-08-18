@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -22,14 +23,44 @@ use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::component::Client;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
+use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{EventSubscriber, TypedEventSubscriber};
 
 use super::{RuntimeConfigWatch, runtime_config_watch};
+use crate::worker_type::WorkerType;
 
 // Re-export worker type constants from timing.rs (single source of truth)
 pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
+const KV_LOAD_FRESHNESS: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KvWorkerPoolSnapshot {
+    pub endpoint: EndpointId,
+    pub role: WorkerType,
+    pub expected_ranks: u64,
+    pub observed_ranks: u64,
+    pub capacity_blocks: Option<u64>,
+    pub used_blocks: Option<u64>,
+    pub free_blocks: Option<u64>,
+    pub active_decode_blocks: Option<u64>,
+    pub active_prefill_tokens: Option<u64>,
+    pub complete: bool,
+}
+
+#[derive(Default)]
+struct KvMonitorSources {
+    decode_workers: HashSet<u64>,
+    prefill_workers: HashSet<u64>,
+    decode_metrics_healthy: bool,
+    prefill_metrics_healthy: bool,
+    decode_configs_healthy: bool,
+    prefill_configs_healthy: bool,
+    decode_recovery_after: Option<Instant>,
+    prefill_recovery_after: Option<Instant>,
+    prefill_endpoint: Option<EndpointId>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LoadMembership {
@@ -259,12 +290,22 @@ pub struct WorkerLoadState {
     pub kv_used_blocks: HashMap<u32, u64>,
     pub kv_total_blocks: HashMap<u32, u64>,
     pub active_prefill_tokens: HashMap<u32, u64>,
+    expected_dp_ranks: HashSet<u32>,
+    kv_used_observed_at: HashMap<u32, Instant>,
     /// max_num_batched_tokens from runtime config (same for all dp_ranks)
     pub max_num_batched_tokens: HashMap<u32, u64>,
     decode_overload_latches: HashMap<u32, DecodeOverloadLatchState>,
 }
 
 impl WorkerLoadState {
+    fn clear_observations(&mut self) {
+        self.active_decode_blocks.clear();
+        self.kv_used_blocks.clear();
+        self.kv_used_observed_at.clear();
+        self.active_prefill_tokens.clear();
+        self.decode_overload_latches.clear();
+    }
+
     fn is_decode_signal_overloaded(
         used_blocks: u64,
         total_blocks: u64,
@@ -347,10 +388,24 @@ impl WorkerLoadState {
         }
     }
 
+    #[cfg(test)]
     fn update_from_active_load(
         &mut self,
         active_load: &ActiveLoad,
         active_decode_blocks_threshold: Option<f64>,
+    ) {
+        self.update_from_active_load_at(
+            active_load,
+            active_decode_blocks_threshold,
+            Instant::now(),
+        );
+    }
+
+    fn update_from_active_load_at(
+        &mut self,
+        active_load: &ActiveLoad,
+        active_decode_blocks_threshold: Option<f64>,
+        observed_at: Instant,
     ) {
         let dp_rank = active_load.dp_rank;
         if let Some(active_blocks) = active_load.active_decode_blocks {
@@ -358,6 +413,7 @@ impl WorkerLoadState {
         }
         if let Some(kv_used_blocks) = active_load.kv_used_blocks {
             self.kv_used_blocks.insert(dp_rank, kv_used_blocks);
+            self.kv_used_observed_at.insert(dp_rank, observed_at);
         }
         if let Some(active_tokens) = active_load.active_prefill_tokens {
             self.active_prefill_tokens.insert(dp_rank, active_tokens);
@@ -541,6 +597,124 @@ fn merge_endpoint_runtime_configs(
     merged
 }
 
+fn checked_add(total: &mut Option<u64>, value: u64) -> bool {
+    let Some(current) = *total else {
+        *total = Some(value);
+        return true;
+    };
+    let Some(next) = current.checked_add(value) else {
+        return false;
+    };
+    *total = Some(next);
+    true
+}
+
+fn pool_snapshot(
+    states: &DashMap<u64, WorkerLoadState>,
+    endpoint: EndpointId,
+    role: WorkerType,
+    workers: &HashSet<u64>,
+    source_healthy: bool,
+    recovery_after: Option<Instant>,
+    now: Instant,
+) -> KvWorkerPoolSnapshot {
+    let mut expected_ranks = 0_u64;
+    let mut observed_ranks = 0_u64;
+    let mut capacity_blocks = None;
+    let mut used_blocks = None;
+    let mut active_decode_blocks = None;
+    let mut active_prefill_tokens = None;
+    let mut capacity_overflow = false;
+    let mut used_overflow = false;
+    let mut active_decode_overflow = false;
+    let mut active_prefill_overflow = false;
+    let mut complete = source_healthy && !workers.is_empty();
+
+    for worker_id in workers {
+        let Some(state) = states.get(worker_id) else {
+            complete = false;
+            continue;
+        };
+        if state.expected_dp_ranks.is_empty() {
+            complete = false;
+        }
+        for &dp_rank in &state.expected_dp_ranks {
+            expected_ranks = expected_ranks.saturating_add(1);
+            let Some(&total) = state.kv_total_blocks.get(&dp_rank) else {
+                complete = false;
+                continue;
+            };
+            if !capacity_overflow && !checked_add(&mut capacity_blocks, total) {
+                capacity_overflow = true;
+                capacity_blocks = None;
+                complete = false;
+            }
+            let Some(&used) = state.kv_used_blocks.get(&dp_rank) else {
+                complete = false;
+                continue;
+            };
+            let Some(&observed_at) = state.kv_used_observed_at.get(&dp_rank) else {
+                complete = false;
+                continue;
+            };
+            if used > total
+                || now.saturating_duration_since(observed_at) > KV_LOAD_FRESHNESS
+                || recovery_after.is_some_and(|barrier| observed_at <= barrier)
+            {
+                complete = false;
+                continue;
+            }
+            observed_ranks = observed_ranks.saturating_add(1);
+            if !used_overflow && !checked_add(&mut used_blocks, used) {
+                used_overflow = true;
+                used_blocks = None;
+                complete = false;
+            }
+        }
+        if state
+            .kv_total_blocks
+            .keys()
+            .chain(state.kv_used_blocks.keys())
+            .any(|dp_rank| !state.expected_dp_ranks.contains(dp_rank))
+        {
+            complete = false;
+        }
+        for value in state.active_decode_blocks.values().copied() {
+            if !active_decode_overflow && !checked_add(&mut active_decode_blocks, value) {
+                active_decode_overflow = true;
+                active_decode_blocks = None;
+            }
+        }
+        for value in state.active_prefill_tokens.values().copied() {
+            if !active_prefill_overflow && !checked_add(&mut active_prefill_tokens, value) {
+                active_prefill_overflow = true;
+                active_prefill_tokens = None;
+            }
+        }
+    }
+
+    complete &= expected_ranks > 0 && observed_ranks == expected_ranks;
+    let free_blocks = if complete {
+        capacity_blocks.and_then(|capacity| used_blocks.and_then(|used| capacity.checked_sub(used)))
+    } else {
+        None
+    };
+    complete &= free_blocks.is_some();
+
+    KvWorkerPoolSnapshot {
+        endpoint,
+        role,
+        expected_ranks,
+        observed_ranks,
+        capacity_blocks,
+        used_blocks,
+        free_blocks,
+        active_decode_blocks,
+        active_prefill_tokens,
+        complete,
+    }
+}
+
 /// Worker monitor for tracking KV cache usage and overload states.
 ///
 /// Cloning shares state via internal Arc-wrapped fields. This allows multiple pipelines
@@ -562,6 +736,7 @@ pub struct KvWorkerMonitor {
     /// Notifies the monitoring task when a prefill client is registered
     prefill_client_notify: Arc<Notify>,
     worker_load_states: Arc<DashMap<u64, WorkerLoadState>>,
+    sources: Arc<RwLock<KvMonitorSources>>,
     /// Load thresholds for overload detection. Each field is `Option<T>` — unset
     /// means the corresponding check in `is_overloaded` is skipped. If all three are
     /// `None`, rejection is fully disabled.
@@ -621,6 +796,7 @@ impl KvWorkerMonitor {
             prefill_client: Arc::new(RwLock::new(None)),
             prefill_client_notify: Arc::new(Notify::new()),
             worker_load_states: Arc::new(DashMap::new()),
+            sources: Arc::new(RwLock::new(KvMonitorSources::default())),
             thresholds: Arc::new(RwLock::new(config)),
             started: Arc::new(AtomicBool::new(false)),
             start_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -661,11 +837,38 @@ impl KvWorkerMonitor {
         prefill_client.set_overloaded_instances(&overloaded);
 
         let mut guard = self.prefill_client.write().unwrap();
+        self.sources.write().unwrap().prefill_endpoint = Some(prefill_client.endpoint.id());
         *guard = Some(prefill_client);
         self.prefill_client_notify.notify_one();
         tracing::debug!(
             "KvWorkerMonitor: prefill client attached (seeded overloaded set; overload publish + TTFT cleanup)"
         );
+    }
+
+    pub(crate) fn pool_snapshots(&self, decode_role: WorkerType) -> Vec<KvWorkerPoolSnapshot> {
+        let now = Instant::now();
+        let sources = self.sources.read().unwrap();
+        let mut snapshots = vec![pool_snapshot(
+            &self.worker_load_states,
+            self.client.endpoint.id(),
+            decode_role,
+            &sources.decode_workers,
+            sources.decode_metrics_healthy && sources.decode_configs_healthy,
+            sources.decode_recovery_after,
+            now,
+        )];
+        if let Some(endpoint) = sources.prefill_endpoint.clone() {
+            snapshots.push(pool_snapshot(
+                &self.worker_load_states,
+                endpoint,
+                WorkerType::Prefill,
+                &sources.prefill_workers,
+                sources.prefill_metrics_healthy && sources.prefill_configs_healthy,
+                sources.prefill_recovery_after,
+                now,
+            ));
+        }
+        snapshots
     }
 
     /// Get the current active decode blocks threshold, if configured.
@@ -770,15 +973,19 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
         // Subscribe to KV metrics events using EventSubscriber (Msgpack payloads)
         // This is optional - if NATS isn't available, we skip KV metrics but still do TTFT/ITL cleanup
-        let kv_metrics_rx = match EventSubscriber::for_endpoint(endpoint, KV_METRICS_SUBJECT).await
+        let (kv_metrics_rx, decode_metrics_healthy) = match EventSubscriber::for_endpoint(
+            endpoint,
+            KV_METRICS_SUBJECT,
+        )
+        .await
         {
-            Ok(sub) => Some(sub.typed::<ActiveLoad>()),
+            Ok(sub) => (Some(sub.typed::<ActiveLoad>()), true),
             Err(e) => {
                 tracing::warn!(
                     "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
                     e
                 );
-                None
+                (None, false)
             }
         };
 
@@ -787,11 +994,13 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
+        let decode_endpoint = endpoint.clone();
         let prefill_client_holder = self.prefill_client.clone();
         let prefill_client_notify = self.prefill_client_notify.clone();
         let thresholds = self.thresholds.clone();
         let started = self.started.clone();
         let task_guard = self.lifecycle.task_guard.clone();
+        let sources = self.sources.clone();
 
         // Spawn background monitoring task
         self.started.store(true, Ordering::Release);
@@ -824,6 +1033,22 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 HashMap::new();
             let mut overloaded_tracker = OverloadedWorkerTracker::default();
             let mut last_thresholds = thresholds.read().unwrap().clone();
+            let mut decode_sequences = HashMap::new();
+            let mut prefill_sequences = HashMap::new();
+            let mut decode_publishers = HashMap::new();
+            let mut prefill_publishers = HashMap::new();
+            let mut metrics_reconnect = tokio::time::interval_at(
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                Duration::from_secs(1),
+            );
+            metrics_reconnect.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            {
+                let mut source_state = sources.write().unwrap();
+                source_state.decode_workers = known_decode_workers.clone();
+                source_state.decode_metrics_healthy = decode_metrics_healthy;
+                source_state.decode_configs_healthy = true;
+            }
+            decode_configs_rx.mark_changed();
 
             loop {
                 // Read from the exact decode endpoint and, when attached, the exact prefill
@@ -842,10 +1067,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         (None, Some(prefill_rx)) => (true, prefill_rx.next().await),
                         (None, None) => std::future::pending().await,
                     };
-                    (
-                        prefill_scope,
-                        event.map(|result| result.map(|(_envelope, active_load)| active_load)),
-                    )
+                    (prefill_scope, event)
                 };
 
                 let config_change_future = async {
@@ -892,16 +1114,63 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         break;
                     }
 
+                    _ = metrics_reconnect.tick() => {
+                        if kv_metrics_rx.is_none() {
+                            match EventSubscriber::for_endpoint(&decode_endpoint, KV_METRICS_SUBJECT).await {
+                                Ok(subscriber) => {
+                                    kv_metrics_rx = Some(subscriber.typed::<ActiveLoad>());
+                                    sources.write().unwrap().decode_metrics_healthy = true;
+                                }
+                                Err(error) => tracing::debug!(
+                                    endpoint = %decode_endpoint.id(),
+                                    %error,
+                                    "KvWorkerMonitor: decode KV metrics reconnect failed"
+                                ),
+                            }
+                        }
+                        let prefill_client = {
+                            prefill_client_holder.read().unwrap().clone()
+                        };
+                        if prefill_metrics_rx.is_none()
+                            && let Some(prefill_client) = prefill_client
+                        {
+                            let endpoint = prefill_client.endpoint.clone();
+                            match EventSubscriber::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await {
+                                Ok(subscriber) => {
+                                    prefill_metrics_rx = Some(subscriber.typed::<ActiveLoad>());
+                                    sources.write().unwrap().prefill_metrics_healthy = true;
+                                }
+                                Err(error) => tracing::debug!(
+                                    endpoint = %endpoint.id(),
+                                    %error,
+                                    "KvWorkerMonitor: prefill KV metrics reconnect failed"
+                                ),
+                            }
+                        }
+                    }
+
                     // Handle runtime config updates
                     (prefill_scope, result) = config_change_future => {
                         if result.is_err() {
                             if prefill_scope {
                                 prefill_configs_rx = None;
+                                sources.write().unwrap().prefill_configs_healthy = false;
                                 tracing::warn!("prefill runtime-config watch closed");
                                 continue;
                             }
+                            sources.write().unwrap().decode_configs_healthy = false;
                             tracing::warn!("decode runtime-config watch closed");
                             break;
+                        }
+
+                        let recovery_after = Instant::now();
+                        {
+                            let mut source_state = sources.write().unwrap();
+                            if prefill_scope {
+                                source_state.prefill_recovery_after = Some(recovery_after);
+                            } else {
+                                source_state.decode_recovery_after = Some(recovery_after);
+                            }
                         }
 
                         let runtime_configs = merge_endpoint_runtime_configs(
@@ -928,6 +1197,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     worker_id
                                 );
                             }
+                            if let Some(publisher_id) = decode_publishers.remove(worker_id) {
+                                decode_sequences.remove(&publisher_id);
+                            }
+                            if let Some(publisher_id) = prefill_publishers.remove(worker_id) {
+                                prefill_sequences.remove(&publisher_id);
+                            }
                         }
 
                         worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
@@ -948,14 +1223,29 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                             let dp_start = runtime_config.data_parallel_start_rank;
                             let dp_end = dp_start + runtime_config.data_parallel_size;
+                            let expected_dp_ranks = (dp_start..dp_end).collect::<HashSet<_>>();
 
                             // Track dp_ranks for this worker (for cleanup when worker disappears)
-                            let dp_ranks_set = known_worker_dp_ranks.entry(*lease_id).or_default();
-                            for dp_rank in dp_start..dp_end {
-                                dp_ranks_set.insert(dp_rank);
-                            }
+                            known_worker_dp_ranks.insert(*lease_id, expected_dp_ranks.clone());
+                            state.expected_dp_ranks = expected_dp_ranks.clone();
+                            state
+                                .active_decode_blocks
+                                .retain(|rank, _| expected_dp_ranks.contains(rank));
+                            state
+                                .kv_used_blocks
+                                .retain(|rank, _| expected_dp_ranks.contains(rank));
+                            state
+                                .kv_used_observed_at
+                                .retain(|rank, _| expected_dp_ranks.contains(rank));
+                            state
+                                .active_prefill_tokens
+                                .retain(|rank, _| expected_dp_ranks.contains(rank));
+                            state
+                                .decode_overload_latches
+                                .retain(|rank, _| expected_dp_ranks.contains(rank));
 
                             // Populate total_blocks for all dp_ranks (they share the same total)
+                            state.kv_total_blocks.clear();
                             if let Some(total_blocks) = runtime_config.total_kv_blocks {
                                 for dp_rank in dp_start..dp_end {
                                     state.kv_total_blocks.insert(dp_rank, total_blocks);
@@ -963,6 +1253,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             }
 
                             // Populate max_num_batched_tokens for all dp_ranks
+                            state.max_num_batched_tokens.clear();
                             if let Some(max_batched) = runtime_config.max_num_batched_tokens {
                                 for dp_rank in dp_start..dp_end {
                                     state.max_num_batched_tokens.insert(dp_rank, max_batched);
@@ -988,17 +1279,34 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                     // This branch only updates WorkerLoadState for overload detection thresholds.
                     (prefill_scope, kv_event) = kv_event_future => {
                         let Some(event_result) = kv_event else {
+                            let recovery_after = Instant::now();
                             if prefill_scope {
                                 prefill_metrics_rx = None;
+                                let mut source = sources.write().unwrap();
+                                source.prefill_metrics_healthy = false;
+                                source.prefill_recovery_after = Some(recovery_after);
                                 tracing::debug!("prefill KV metrics stream closed");
                             } else {
                                 kv_metrics_rx = None;
+                                let mut source = sources.write().unwrap();
+                                source.decode_metrics_healthy = false;
+                                source.decode_recovery_after = Some(recovery_after);
                                 tracing::debug!("decode KV metrics stream closed");
                             }
                             continue;
                         };
 
-                        let Ok(active_load) = event_result else {
+                        let Ok((envelope, active_load)) = event_result else {
+                            let recovery_after = Instant::now();
+                            if prefill_scope {
+                                let mut source = sources.write().unwrap();
+                                source.prefill_metrics_healthy = false;
+                                source.prefill_recovery_after = Some(recovery_after);
+                            } else {
+                                let mut source = sources.write().unwrap();
+                                source.decode_metrics_healthy = false;
+                                source.decode_recovery_after = Some(recovery_after);
+                            }
                             tracing::error!("Error receiving KV metrics event: {event_result:?}");
                             continue;
                         };
@@ -1040,7 +1348,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 continue;
                             }
                             LoadMembership::Ambiguous => {
-                                worker_load_states.remove(&worker_id);
+                                if let Some(mut state) = worker_load_states.get_mut(&worker_id) {
+                                    state.clear_observations();
+                                }
                                 if overloaded_tracker.update_worker(worker_id, false) {
                                     let overloaded_instances = overloaded_tracker.ids();
                                     publish_overloaded_instances(
@@ -1058,6 +1368,64 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             }
                             LoadMembership::Exact => {}
                         }
+                        if !worker_load_states
+                            .get(&worker_id)
+                            .is_some_and(|state| state.expected_dp_ranks.contains(&dp_rank))
+                        {
+                            tracing::debug!(
+                                worker_id,
+                                dp_rank,
+                                endpoint_role,
+                                "dropping load event outside the current runtime-config rank set"
+                            );
+                            continue;
+                        }
+
+                        let observed_at = Instant::now();
+                        let (sequences, publishers) = if prefill_scope {
+                            (&mut prefill_sequences, &mut prefill_publishers)
+                        } else {
+                            (&mut decode_sequences, &mut decode_publishers)
+                        };
+                        let gap = match sequences.entry(envelope.publisher_id) {
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert(envelope.sequence);
+                                false
+                            }
+                            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                let previous = *entry.get();
+                                if envelope.sequence <= previous {
+                                    continue;
+                                }
+                                entry.insert(envelope.sequence);
+                                envelope.sequence > previous.saturating_add(1)
+                            }
+                        };
+                        let publisher_changed = publishers
+                            .insert(worker_id, envelope.publisher_id)
+                            .is_some_and(|previous| previous != envelope.publisher_id);
+                        {
+                            let mut source_state = sources.write().unwrap();
+                            if prefill_scope {
+                                source_state.prefill_metrics_healthy = true;
+                                if gap || publisher_changed {
+                                    source_state.prefill_recovery_after = Some(observed_at);
+                                }
+                            } else {
+                                source_state.decode_metrics_healthy = true;
+                                if gap || publisher_changed {
+                                    source_state.decode_recovery_after = Some(observed_at);
+                                }
+                            }
+                        }
+                        if gap || publisher_changed {
+                            tracing::warn!(
+                                publisher_id = envelope.publisher_id,
+                                sequence = envelope.sequence,
+                                endpoint_role = if prefill_scope { "prefill" } else { "decode" },
+                                "KV metrics source changed or skipped events; waiting for fresh rank snapshots"
+                            );
+                        }
 
                         // Track known worker/dp_rank combinations for cleanup
                         known_worker_dp_ranks
@@ -1074,9 +1442,10 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         // Note: Prometheus gauges are updated directly by sequence.rs
                         let (total_blocks, worker_overloaded) = {
                             let mut state = worker_load_states.entry(worker_id).or_default();
-                            state.update_from_active_load(
+                            state.update_from_active_load_at(
                                 &active_load,
                                 cfg.active_decode_blocks_threshold,
+                                observed_at,
                             );
                             let total_blocks = state.kv_total_blocks.get(&dp_rank).copied();
                             let worker_overloaded = state.is_overloaded_for_config(&cfg);
@@ -1121,7 +1490,13 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                     }
 
                     // Handle decode endpoint instance changes (for ITL and decode metrics cleanup)
-                    _ = decode_instances_rx.changed() => {
+                    result = decode_instances_rx.changed() => {
+                        if result.is_err() {
+                            known_decode_workers.clear();
+                            sources.write().unwrap().decode_workers.clear();
+                            tracing::info!("decode endpoint watcher closed");
+                            break;
+                        }
                         let current_instances: std::collections::HashSet<u64> =
                             decode_instances_rx.borrow().iter().copied().collect();
 
@@ -1144,12 +1519,19 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     "Cleaned up metrics for removed decode worker {}",
                                     worker_id
                                 );
+                                if let Some(publisher_id) = decode_publishers.remove(worker_id) {
+                                    decode_sequences.remove(&publisher_id);
+                                }
+                                if let Some(mut state) = worker_load_states.get_mut(worker_id) {
+                                    state.clear_observations();
+                                }
                             }
                             overloaded_tracker.remove_workers(&removed_workers);
                             client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
 
                         known_decode_workers = current_instances;
+                        sources.write().unwrap().decode_workers = known_decode_workers.clone();
                     }
 
                     // Handle prefill endpoint instance changes (for TTFT and prefill metrics cleanup in disaggregated mode)
@@ -1165,6 +1547,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let Ok(()) = result else {
                             // Prefill endpoint closed - stop watching to avoid busy loop
                             prefill_instances_rx = None;
+                            known_prefill_workers.clear();
+                            sources.write().unwrap().prefill_workers.clear();
                             tracing::info!("Prefill endpoint watcher closed, will re-activate when client is set");
                             continue;
                         };
@@ -1195,12 +1579,19 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     "Cleaned up metrics for removed prefill worker {}",
                                     worker_id
                                 );
+                                if let Some(publisher_id) = prefill_publishers.remove(worker_id) {
+                                    prefill_sequences.remove(&publisher_id);
+                                }
+                                if let Some(mut state) = worker_load_states.get_mut(worker_id) {
+                                    state.clear_observations();
+                                }
                             }
                             overloaded_tracker.remove_workers(&removed_workers);
                             client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
 
                         known_prefill_workers = current_instances;
+                        sources.write().unwrap().prefill_workers = known_prefill_workers.clone();
                     }
 
                     // Wait for prefill client to be registered (push-based notification)
@@ -1220,8 +1611,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 ) => result,
                             };
                             prefill_metrics_rx = match metrics_result {
-                                Ok(subscriber) => Some(subscriber.typed::<ActiveLoad>()),
+                                Ok(subscriber) => {
+                                    sources.write().unwrap().prefill_metrics_healthy = true;
+                                    Some(subscriber.typed::<ActiveLoad>())
+                                }
                                 Err(error) => {
+                                    sources.write().unwrap().prefill_metrics_healthy = false;
                                     tracing::warn!(
                                         endpoint = %prefill_endpoint.id(),
                                         %error,
@@ -1235,8 +1630,13 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 result = runtime_config_watch(&prefill_endpoint, cancellation_token.clone()) => result,
                             };
                             prefill_configs_rx = match config_result {
-                                Ok(rx) => Some(rx),
+                                Ok(mut rx) => {
+                                    rx.mark_changed();
+                                    sources.write().unwrap().prefill_configs_healthy = true;
+                                    Some(rx)
+                                }
                                 Err(error) => {
+                                    sources.write().unwrap().prefill_configs_healthy = false;
                                     tracing::warn!(
                                         endpoint = %prefill_endpoint.id(),
                                         %error,
@@ -1245,6 +1645,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     None
                                 }
                             };
+                            {
+                                let mut source_state = sources.write().unwrap();
+                                source_state.prefill_endpoint = Some(prefill_endpoint.id());
+                                source_state.prefill_workers = known_prefill_workers.clone();
+                                source_state.prefill_recovery_after = Some(Instant::now());
+                            }
                             tracing::info!(
                                 endpoint = %prefill_endpoint.id(),
                                 "KvWorkerMonitor: prefill endpoint watcher activated, tracking {} workers",
@@ -1277,10 +1683,181 @@ mod tests {
     use super::{
         LoadMembership, LoadThresholdConfig, OverloadedWorkerTracker, WorkerLoadState,
         classify_load_membership, compute_overloaded_instances, overload_reconciliation_needed,
-        publish_overloaded_instances, publish_overloaded_instances_if_needed,
+        pool_snapshot, publish_overloaded_instances, publish_overloaded_instances_if_needed,
     };
+    use dashmap::DashMap;
     use dynamo_kv_router::protocols::ActiveLoad;
+    use dynamo_runtime::protocols::EndpointId;
     use std::collections::HashSet;
+    use std::time::{Duration, Instant};
+
+    use crate::worker_type::WorkerType;
+
+    fn endpoint() -> EndpointId {
+        EndpointId {
+            namespace: "ns".to_string(),
+            component: "decode".to_string(),
+            name: "generate".to_string(),
+        }
+    }
+
+    #[test]
+    fn kv_pool_snapshot_requires_fresh_capacity_and_occupancy_for_every_rank() {
+        let states = DashMap::new();
+        let now = Instant::now();
+        let mut state = WorkerLoadState::default();
+        state.expected_dp_ranks.extend([0, 1]);
+        state.kv_total_blocks.extend([(0, 100), (1, 100)]);
+        state.kv_used_blocks.extend([(0, 25), (1, 50)]);
+        state.kv_used_observed_at.extend([(0, now), (1, now)]);
+        states.insert(7, state);
+
+        let snapshot = pool_snapshot(
+            &states,
+            endpoint(),
+            WorkerType::Decode,
+            &HashSet::from([7]),
+            true,
+            None,
+            now,
+        );
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.expected_ranks, 2);
+        assert_eq!(snapshot.observed_ranks, 2);
+        assert_eq!(snapshot.capacity_blocks, Some(200));
+        assert_eq!(snapshot.used_blocks, Some(75));
+        assert_eq!(snapshot.free_blocks, Some(125));
+
+        let stale = pool_snapshot(
+            &states,
+            endpoint(),
+            WorkerType::Decode,
+            &HashSet::from([7]),
+            true,
+            None,
+            now + super::KV_LOAD_FRESHNESS + Duration::from_nanos(1),
+        );
+        assert!(!stale.complete);
+        assert_eq!(stale.observed_ranks, 0);
+
+        let unhealthy = pool_snapshot(
+            &states,
+            endpoint(),
+            WorkerType::Decode,
+            &HashSet::from([7]),
+            false,
+            None,
+            now,
+        );
+        assert!(!unhealthy.complete);
+
+        let mut second = WorkerLoadState::default();
+        second.expected_dp_ranks.insert(2);
+        second.kv_total_blocks.insert(2, 50);
+        second.kv_used_blocks.insert(2, 10);
+        second.kv_used_observed_at.insert(2, now);
+        states.insert(8, second);
+        let multiple_workers = pool_snapshot(
+            &states,
+            endpoint(),
+            WorkerType::Decode,
+            &HashSet::from([7, 8]),
+            true,
+            None,
+            now,
+        );
+        assert!(multiple_workers.complete);
+        assert_eq!(multiple_workers.expected_ranks, 3);
+        assert_eq!(multiple_workers.capacity_blocks, Some(250));
+        assert_eq!(multiple_workers.used_blocks, Some(85));
+        states.remove(&8);
+
+        states.get_mut(&7).unwrap().kv_used_blocks.remove(&1);
+        let incomplete = pool_snapshot(
+            &states,
+            endpoint(),
+            WorkerType::Decode,
+            &HashSet::from([7]),
+            true,
+            None,
+            now,
+        );
+        assert!(!incomplete.complete);
+        assert_eq!(incomplete.observed_ranks, 1);
+        assert_eq!(incomplete.free_blocks, None);
+
+        let recovery = now + Duration::from_nanos(1);
+        {
+            let mut state = states.get_mut(&7).unwrap();
+            state.kv_used_blocks.insert(1, 50);
+        }
+        let pre_recovery = pool_snapshot(
+            &states,
+            endpoint(),
+            WorkerType::Decode,
+            &HashSet::from([7]),
+            true,
+            Some(recovery),
+            recovery,
+        );
+        assert!(!pre_recovery.complete);
+
+        states.get_mut(&7).unwrap().kv_used_observed_at.extend([
+            (0, recovery + Duration::from_nanos(1)),
+            (1, recovery + Duration::from_nanos(1)),
+        ]);
+        let recovered_at = recovery + Duration::from_nanos(1);
+        let recovered = pool_snapshot(
+            &states,
+            endpoint(),
+            WorkerType::Decode,
+            &HashSet::from([7]),
+            true,
+            Some(recovery),
+            recovered_at,
+        );
+        assert!(recovered.complete);
+    }
+
+    #[test]
+    fn clearing_worker_observations_preserves_config_but_requires_fresh_occupancy() {
+        let now = Instant::now();
+        let mut state = WorkerLoadState::default();
+        state.expected_dp_ranks.insert(0);
+        state.kv_total_blocks.insert(0, 100);
+        state.max_num_batched_tokens.insert(0, 4096);
+        state.kv_used_blocks.insert(0, 25);
+        state.kv_used_observed_at.insert(0, now);
+        state.active_decode_blocks.insert(0, 10);
+        state.active_prefill_tokens.insert(0, 20);
+
+        state.clear_observations();
+
+        assert_eq!(state.expected_dp_ranks, HashSet::from([0]));
+        assert_eq!(state.kv_total_blocks.get(&0), Some(&100));
+        assert_eq!(state.max_num_batched_tokens.get(&0), Some(&4096));
+        assert!(state.kv_used_blocks.is_empty());
+        assert!(state.kv_used_observed_at.is_empty());
+        assert!(state.active_decode_blocks.is_empty());
+        assert!(state.active_prefill_tokens.is_empty());
+
+        let states = DashMap::from_iter([(7, state)]);
+        let snapshot = pool_snapshot(
+            &states,
+            endpoint(),
+            WorkerType::Decode,
+            &HashSet::from([7]),
+            true,
+            None,
+            now,
+        );
+        assert!(!snapshot.complete);
+        assert_eq!(snapshot.expected_ranks, 1);
+        assert_eq!(snapshot.observed_ranks, 0);
+        assert_eq!(snapshot.capacity_blocks, Some(100));
+        assert_eq!(snapshot.used_blocks, None);
+        assert_eq!(snapshot.free_blocks, None);
+    }
 
     #[test]
     fn overloaded_worker_tracker_updates_one_worker() {

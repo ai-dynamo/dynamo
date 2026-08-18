@@ -59,6 +59,7 @@ struct Ready {
 struct Snapshot {
     written_at_unix_ms: u64,
     candidates: Vec<Candidate>,
+    clusters: Vec<Cluster>,
 }
 
 #[derive(Serialize)]
@@ -71,8 +72,24 @@ struct Candidate {
     num_running_queries: u64,
     input_processing_queries: u64,
     output_generation_queries: u64,
+    kv_cache_capacity_tokens: u64,
+    kv_cache_used_tokens: u64,
+    kv_cache_free_tokens: u64,
+    kv_cache_source_observed_at_unix_ms: u64,
+    kv_cache_complete: bool,
     stats_sources: Vec<String>,
     stats_capabilities: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct Cluster {
+    cluster_id: String,
+    active_backend_count: usize,
+    kv_cache_capacity_tokens: u64,
+    kv_cache_used_tokens: u64,
+    kv_cache_free_tokens: u64,
+    kv_cache_source_observed_at_unix_ms: u64,
+    kv_cache_complete: bool,
 }
 
 #[tokio::main]
@@ -173,6 +190,7 @@ async fn main() -> Result<()> {
                     .into_iter()
                     .map(|candidate| {
                         let stats = candidate.stats;
+                        let kv_cache = stats.kv_cache.as_ref();
                         Candidate {
                             inference_server_id: candidate.inference_server_id,
                             stats_observed_at_unix_ms: stats.stats_observed_at_unix_ms,
@@ -182,8 +200,50 @@ async fn main() -> Result<()> {
                             num_running_queries: stats.num_running_queries,
                             input_processing_queries: stats.input_processing_queries,
                             output_generation_queries: stats.output_generation_queries,
+                            kv_cache_capacity_tokens: kv_cache
+                                .map(|stats| stats.capacity_tokens)
+                                .unwrap_or_default(),
+                            kv_cache_used_tokens: kv_cache
+                                .map(|stats| stats.used_tokens)
+                                .unwrap_or_default(),
+                            kv_cache_free_tokens: kv_cache
+                                .map(|stats| stats.free_tokens)
+                                .unwrap_or_default(),
+                            kv_cache_source_observed_at_unix_ms: kv_cache
+                                .map(|stats| stats.source_observed_at_unix_ms)
+                                .unwrap_or_default(),
+                            kv_cache_complete: kv_cache
+                                .map(|stats| stats.complete)
+                                .unwrap_or_default(),
                             stats_sources: stats.stats_sources,
                             stats_capabilities: stats.stats_capabilities,
+                        }
+                    })
+                    .collect();
+                let clusters = state
+                    .cluster_candidates_for_target(&target)
+                    .await
+                    .into_iter()
+                    .map(|cluster| {
+                        let kv_cache = cluster.stats.kv_cache.as_ref();
+                        Cluster {
+                            cluster_id: cluster.cluster_id,
+                            active_backend_count: cluster.active_backend_count,
+                            kv_cache_capacity_tokens: kv_cache
+                                .map(|stats| stats.capacity_tokens)
+                                .unwrap_or_default(),
+                            kv_cache_used_tokens: kv_cache
+                                .map(|stats| stats.used_tokens)
+                                .unwrap_or_default(),
+                            kv_cache_free_tokens: kv_cache
+                                .map(|stats| stats.free_tokens)
+                                .unwrap_or_default(),
+                            kv_cache_source_observed_at_unix_ms: kv_cache
+                                .map(|stats| stats.source_observed_at_unix_ms)
+                                .unwrap_or_default(),
+                            kv_cache_complete: kv_cache
+                                .map(|stats| stats.complete)
+                                .unwrap_or_default(),
                         }
                     })
                     .collect();
@@ -192,6 +252,7 @@ async fn main() -> Result<()> {
                     &Snapshot {
                         written_at_unix_ms: unix_time_ms()?,
                         candidates,
+                        clusters,
                     },
                 )
                 .await?;

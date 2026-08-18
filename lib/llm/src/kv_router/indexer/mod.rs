@@ -12,7 +12,9 @@ use dynamo_kv_router::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
         ThreadPoolIndexer, record_unsupported_residency_event,
     },
-    protocols::{DpRank, KvCacheEventData, ResidencyProjection, RouterEvent, WorkerId},
+    protocols::{
+        DpRank, KvCacheEvent, KvCacheEventData, ResidencyProjection, RouterEvent, WorkerId,
+    },
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -25,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 mod embedding_cache;
 mod lookup;
+mod placement;
 mod recording;
 mod recovery;
 pub mod remote;
@@ -33,6 +36,7 @@ mod side;
 pub use self::embedding_cache::{
     EmbeddingCacheIndexer, preprocessed_multimodal_cache_keys, try_build_cache_indexer,
 };
+pub(crate) use self::placement::{PlacementFeed, PlacementStream, PlacementUpdate};
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
@@ -64,12 +68,14 @@ pub enum Indexer {
         lower_tier: LowerTierIndexers,
         approx: Option<SideIndexer>,
         primary_records_routing_decisions: bool,
+        placement: Option<placement::PlacementJournal>,
     },
     Concurrent {
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
         lower_tier: LowerTierIndexers,
         approx: Option<SideIndexer>,
         primary_records_routing_decisions: bool,
+        placement: Option<placement::PlacementJournal>,
     },
     Remote {
         primary: Arc<RemoteIndexer>,
@@ -130,6 +136,7 @@ impl Indexer {
         kv_router_config: &KvRouterConfig,
         block_size: u32,
         model_name: Option<&str>,
+        placement_enabled: bool,
         cancellation_token: CancellationToken,
     ) -> Result<Self> {
         if kv_router_config.overlap_score_credit == 0.0 {
@@ -190,6 +197,9 @@ impl Indexer {
                     ),
                     approx: None,
                     primary_records_routing_decisions: true,
+                    placement: placement_enabled.then(|| {
+                        placement::PlacementJournal::new(cancellation_token.child_token())
+                    }),
                 });
             }
 
@@ -207,6 +217,8 @@ impl Indexer {
                 ),
                 approx: None,
                 primary_records_routing_decisions: true,
+                placement: placement_enabled
+                    .then(|| placement::PlacementJournal::new(cancellation_token.child_token())),
             });
         }
 
@@ -233,6 +245,8 @@ impl Indexer {
                 ),
                 approx,
                 primary_records_routing_decisions: false,
+                placement: placement_enabled
+                    .then(|| placement::PlacementJournal::new(cancellation_token.child_token())),
             });
         }
 
@@ -251,7 +265,31 @@ impl Indexer {
             ),
             approx,
             primary_records_routing_decisions: false,
+            placement: placement_enabled
+                .then(|| placement::PlacementJournal::new(cancellation_token.child_token())),
         })
+    }
+
+    pub(crate) fn placement_feed(&self) -> Option<PlacementFeed> {
+        match self {
+            Self::KvIndexer {
+                placement: Some(_), ..
+            }
+            | Self::Concurrent {
+                placement: Some(_), ..
+            } => Some(PlacementFeed::new(self.clone())),
+            Self::Remote { primary, .. } if primary.use_kv_events() => {
+                Some(PlacementFeed::new(self.clone()))
+            }
+            Self::KvIndexer {
+                placement: None, ..
+            }
+            | Self::Concurrent {
+                placement: None, ..
+            }
+            | Self::Remote { .. }
+            | Self::None => None,
+        }
     }
 
     pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
@@ -276,6 +314,27 @@ impl Indexer {
     }
 
     pub(crate) async fn try_apply_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        if let Some(journal) = self.placement_journal() {
+            let _guard = journal.lock().await;
+            if self.try_apply_event_inner(event.clone()).await? {
+                journal.publish(vec![event]);
+            }
+        } else {
+            self.try_apply_event_inner(event).await?;
+        }
+        Ok(())
+    }
+
+    fn placement_journal(&self) -> Option<&placement::PlacementJournal> {
+        match self {
+            Self::KvIndexer { placement, .. } | Self::Concurrent { placement, .. } => {
+                placement.as_ref()
+            }
+            Self::Remote { .. } | Self::None => None,
+        }
+    }
+
+    async fn try_apply_event_inner(&self, event: RouterEvent) -> Result<bool, KvRouterError> {
         let targets_primary = match event.targets_primary() {
             Ok(targets_primary) => targets_primary,
             Err(_) => {
@@ -287,7 +346,7 @@ impl Indexer {
                         record_unsupported_residency_event(None, &event);
                     }
                 }
-                return Ok(());
+                return Ok(false);
             }
         };
         let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
@@ -342,7 +401,7 @@ impl Indexer {
             }
             Self::Remote { .. } | Self::None => {}
         }
-        Ok(())
+        Ok(true)
     }
 
     #[cfg(test)]
@@ -357,6 +416,52 @@ impl Indexer {
     /// NOTE: Unlike ordinary event application, rank removal is an infallible lane operation.
     /// Its FIFO completion must be visible before source activation or clearing a pending reset.
     pub(crate) async fn reset_worker_dp_rank_and_wait(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        if let Some(journal) = self.placement_journal() {
+            let _guard = journal.lock().await;
+            self.reset_worker_dp_rank_inner(worker_id, dp_rank).await?;
+            journal.publish(vec![rank_reset_event(worker_id, dp_rank)]);
+        } else {
+            self.reset_worker_dp_rank_inner(worker_id, dp_rank).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn replace_worker_dp_rank_and_wait(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        events: Vec<RouterEvent>,
+    ) -> Result<(), KvRouterError> {
+        if let Some(journal) = self.placement_journal() {
+            let _guard = journal.lock().await;
+            self.reset_worker_dp_rank_inner(worker_id, dp_rank).await?;
+            let mut applied = Vec::with_capacity(events.len() + 1);
+            applied.push(rank_reset_event(worker_id, dp_rank));
+            for event in events {
+                match self.try_apply_event_inner(event.clone()).await {
+                    Ok(true) => applied.push(event),
+                    Ok(false) => {}
+                    Err(error) => {
+                        journal.publish(applied);
+                        return Err(error);
+                    }
+                }
+            }
+            journal.publish(applied);
+        } else {
+            self.reset_worker_dp_rank_inner(worker_id, dp_rank).await?;
+            for event in events {
+                self.try_apply_event_inner(event).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn reset_worker_dp_rank_inner(
         &self,
         worker_id: WorkerId,
         dp_rank: DpRank,
@@ -413,6 +518,17 @@ impl Indexer {
         }
         Ok(())
     }
+}
+
+fn rank_reset_event(worker_id: WorkerId, dp_rank: DpRank) -> RouterEvent {
+    RouterEvent::new(
+        worker_id,
+        KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Cleared,
+            dp_rank,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -501,6 +617,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
             primary_records_routing_decisions: false,
+            placement: None,
         }
     }
 
@@ -514,6 +631,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: None,
             primary_records_routing_decisions: false,
+            placement: None,
         }
     }
 
@@ -530,6 +648,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: None,
             primary_records_routing_decisions: true,
+            placement: None,
         }
     }
 
@@ -938,6 +1057,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: Some(super::SideIndexer::Concurrent(side)),
             primary_records_routing_decisions: false,
+            placement: None,
         };
         assert!(indexer.records_routing_decisions());
 
@@ -1069,6 +1189,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: Some(super::SideIndexer::Concurrent(side)),
             primary_records_routing_decisions: false,
+            placement: None,
         };
 
         let primary_worker = WorkerWithDpRank::new(10, 0);

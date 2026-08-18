@@ -541,10 +541,10 @@ impl TraceParent {
             if !header_value.trim().is_empty() {
                 request_id = Some(header_value.to_string());
             }
-        } else if let Some(header_value) = headers.get("x-dynamo-request-id") {
-            if uuid::Uuid::parse_str(header_value).is_ok() {
-                request_id = Some(header_value.to_string());
-            }
+        } else if let Some(header_value) = headers.get("x-dynamo-request-id")
+            && uuid::Uuid::parse_str(header_value).is_ok()
+        {
+            request_id = Some(header_value.to_string());
         }
 
         TraceParent {

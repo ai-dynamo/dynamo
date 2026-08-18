@@ -142,7 +142,8 @@ cargo build \
     --locked \
     --manifest-path "$stargate_root/Cargo.toml" \
     --target-dir "$consumer_target" \
-    -p pylon
+    -p pylon \
+    -p mock-dynamo
 
 printf 'Building Stargate state probe against NVCF\n'
 cp "$stargate_root/Cargo.lock" "$probe_root/Cargo.lock"
@@ -161,6 +162,7 @@ cargo build \
     --target-dir "$probe_target"
 
 consumer_bin="$consumer_target/debug/pylon"
+mock_dynamo_bin="$consumer_target/debug/mock-dynamo"
 stargate_probe_bin="$probe_target/debug/stargate-state-probe"
 printf 'Running E2E harness; artifacts: %s\n' "$artifact_dir"
 set +e
@@ -170,6 +172,7 @@ cargo run \
     -p engine-stats-e2e \
     -- \
     --stats-consumer-bin "$consumer_bin" \
+    --mock-dynamo-bin "$mock_dynamo_bin" \
     --stargate-probe-bin "$stargate_probe_bin" \
     --artifact-dir "$artifact_dir" \
     2>&1 | tee "$artifact_dir/harness.log"

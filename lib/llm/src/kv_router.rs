@@ -457,6 +457,7 @@ where
             &kv_router_config,
             block_size,
             model_name.as_deref(),
+            kv_event_source_requirement.should_subscribe(&kv_router_config),
             cancellation_token.child_token(),
         )
         .await?;

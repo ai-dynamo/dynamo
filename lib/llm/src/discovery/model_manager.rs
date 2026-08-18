@@ -148,6 +148,12 @@ pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) cards: Vec<ModelDeploymentCard>,
 }
 
+pub(crate) struct CommittedModelView {
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub worker_sets: Vec<Arc<WorkerSet>>,
+}
+
 /// Central manager for model engines, routing, and configuration.
 ///
 /// Models are stored hierarchically: ModelManager → Model → WorkerSet.
@@ -430,6 +436,31 @@ impl ModelManager {
 
     pub(crate) fn get_committed_model(&self, model_name: &str) -> Option<Arc<Model>> {
         self.catalog.load().models.get(model_name).cloned()
+    }
+
+    pub(crate) fn committed_model_views(&self) -> Vec<CommittedModelView> {
+        let catalog = self.catalog.load();
+        let mut views = catalog
+            .models
+            .iter()
+            .filter(|(name, _)| !catalog.aliases.contains_key(*name))
+            .map(|(name, model)| {
+                let mut aliases = catalog
+                    .aliases
+                    .iter()
+                    .filter(|(_, primary)| *primary == name)
+                    .map(|(alias, _)| alias.clone())
+                    .collect::<Vec<_>>();
+                aliases.sort_unstable();
+                CommittedModelView {
+                    name: name.clone(),
+                    aliases,
+                    worker_sets: model.worker_sets(),
+                }
+            })
+            .collect::<Vec<_>>();
+        views.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        views
     }
 
     fn get_model_internal(&self, model_name: &str) -> Option<Arc<Model>> {
@@ -2834,6 +2865,21 @@ mod tests {
 
         assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama");
         assert_eq!(mm.resolve_canonical_name("llama"), "llama");
+    }
+
+    #[test]
+    fn committed_model_views_collapse_aliases_onto_the_primary() {
+        let mm = ModelManager::new();
+        let worker_set = Arc::new(make_worker_set("ns1", "abc"));
+        assert!(mm.add_worker_set_arc("llama", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("llama-alias", "llama"));
+        assert!(mm.add_worker_set_arc("llama-alias", "ns1", worker_set));
+
+        let views = mm.committed_model_views();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].name, "llama");
+        assert_eq!(views[0].aliases, ["llama-alias"]);
+        assert_eq!(views[0].worker_sets.len(), 1);
     }
 
     #[test]

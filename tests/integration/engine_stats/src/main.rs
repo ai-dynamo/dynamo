@@ -33,11 +33,15 @@ use tokio::time::{MissedTickBehavior, timeout};
 
 const MODEL: &str = "stats-e2e";
 const STATS_CONSUMER_ID: &str = "stats-e2e";
+const KV_CLUSTER_ID: &str = "stats-e2e-kv-cluster";
+const KV_CONSUMER_A_ID: &str = "stats-e2e-kv-a";
+const KV_CONSUMER_B_ID: &str = "stats-e2e-kv-b";
 const ACTUAL_INPUT_TOKENS: u64 = 12;
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const KV_WITHDRAW_TIMEOUT: Duration = Duration::from_secs(15);
 const WHOLE_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const CHUNK_DELAY: Duration = Duration::from_millis(100);
 const METRIC_CONNECTED_REQUIRED: &str = r#"pylon_engine_stats_stream_connected{mode="required"}"#;
@@ -55,11 +59,15 @@ const METRIC_STATS_CAPABILITY_ENGINE: &str = r#"pylon_model_stats_capability{cap
 const METRIC_INPUT_TPS: &str = r#"pylon_model_last_mean_input_tps{model="stats-e2e"}"#;
 const METRIC_OUTPUT_TPS: &str = r#"pylon_model_output_tps{model="stats-e2e"}"#;
 const METRIC_MAX_OUTPUT_TPS: &str = r#"pylon_model_max_output_tps{model="stats-e2e"}"#;
+const METRIC_KV_CAPACITY: &str = r#"pylon_model_kv_cache_capacity_tokens{model="stats-e2e"}"#;
+const METRIC_KV_USED: &str = r#"pylon_model_kv_cache_used_tokens{model="stats-e2e"}"#;
+const METRIC_KV_FREE: &str = r#"pylon_model_kv_cache_free_tokens{model="stats-e2e"}"#;
 const METRIC_REGISTRATION_CONNECTED: &str = "pylon_registration_stream_connected";
 
 #[derive(Debug)]
 struct Args {
     stats_consumer_bin: PathBuf,
+    mock_dynamo_bin: PathBuf,
     stargate_probe_bin: PathBuf,
     artifact_dir: PathBuf,
 }
@@ -68,6 +76,7 @@ impl Args {
     fn parse() -> Result<Self> {
         let mut values = std::env::args_os().skip(1);
         let mut stats_consumer_bin = None;
+        let mut mock_dynamo_bin = None;
         let mut stargate_probe_bin = None;
         let mut artifact_dir = None;
         while let Some(argument) = values.next() {
@@ -79,6 +88,7 @@ impl Args {
             };
             match argument.as_ref() {
                 "--stats-consumer-bin" => stats_consumer_bin = Some(PathBuf::from(value()?)),
+                "--mock-dynamo-bin" => mock_dynamo_bin = Some(PathBuf::from(value()?)),
                 "--stargate-probe-bin" => stargate_probe_bin = Some(PathBuf::from(value()?)),
                 "--artifact-dir" => artifact_dir = Some(PathBuf::from(value()?)),
                 other => bail!("unknown argument: {other}"),
@@ -86,6 +96,7 @@ impl Args {
         }
         Ok(Self {
             stats_consumer_bin: stats_consumer_bin.context("--stats-consumer-bin is required")?,
+            mock_dynamo_bin: mock_dynamo_bin.context("--mock-dynamo-bin is required")?,
             stargate_probe_bin: stargate_probe_bin.context("--stargate-probe-bin is required")?,
             artifact_dir: artifact_dir.context("--artifact-dir is required")?,
         })
@@ -236,6 +247,114 @@ impl Drop for DynamoFixture {
     }
 }
 
+struct MockDynamoProcess {
+    child: Child,
+    port: u16,
+    log_path: PathBuf,
+}
+
+impl MockDynamoProcess {
+    async fn spawn(binary: &Path, artifact_dir: &Path) -> Result<Self> {
+        let reservation = PortReservation::ephemeral()?;
+        let port = reservation.port();
+        drop(reservation);
+        let log_path = artifact_dir.join("mock-dynamo.log");
+        let arguments = vec![
+            "--http-listen-addr".to_string(),
+            format!("127.0.0.1:{port}"),
+            "--model-name".to_string(),
+            MODEL.to_string(),
+            "--kv-cache-capacity-tokens".to_string(),
+            "1000".to_string(),
+            "--num-tokens".to_string(),
+            "1".to_string(),
+            "--token-delay-ms".to_string(),
+            "0".to_string(),
+        ];
+        tokio::fs::write(
+            artifact_dir.join("mock-dynamo.command.txt"),
+            format!(
+                "{} {}\n",
+                binary.display(),
+                arguments
+                    .iter()
+                    .map(|argument| shell_quote(argument))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        )
+        .await?;
+        let stdout = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&log_path)?;
+        let stderr = stdout.try_clone()?;
+        let child = Command::new(binary)
+            .args(&arguments)
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .kill_on_drop(true)
+            .spawn()
+            .context("failed to spawn mock-dynamo")?;
+        let mut process = Self {
+            child,
+            port,
+            log_path,
+        };
+        if let Err(error) =
+            wait_http_ok(&format!("http://127.0.0.1:{port}/health"), READY_TIMEOUT).await
+        {
+            process.force_stop().await;
+            return Err(error.context(format!(
+                "mock-dynamo startup logs:\n{}",
+                process.last_logs()
+            )));
+        }
+        Ok(process)
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        if self.child.try_wait()?.is_none() {
+            signal_interrupt(&mut self.child, "mock-dynamo").await?;
+            timeout(SHUTDOWN_TIMEOUT, self.child.wait())
+                .await
+                .context("mock-dynamo shutdown timed out")??;
+        }
+        Ok(())
+    }
+
+    async fn pause_kv_stats(&self) -> Result<()> {
+        reqwest::Client::new()
+            .put(format!(
+                "http://127.0.0.1:{}/test-control/kv-stats",
+                self.port
+            ))
+            .json(&json!({ "enabled": false }))
+            .send()
+            .await
+            .context("failed to pause mock KV stats stream")?
+            .error_for_status()
+            .context("mock KV stats pause request failed")?;
+        Ok(())
+    }
+
+    async fn force_stop(&mut self) {
+        let _ = self.child.start_kill();
+        let _ = self.child.wait().await;
+    }
+
+    fn last_logs(&self) -> String {
+        std::fs::read_to_string(&self.log_path).unwrap_or_default()
+    }
+}
+
+impl Drop for MockDynamoProcess {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
 async fn reserve_existing_port(port: u16, deadline: Duration) -> Result<PortReservation> {
     wait_until("reserve stopped Dynamo port", deadline, || async move {
         match PortReservation::bind(port) {
@@ -356,6 +475,14 @@ impl StargateFixture {
     }
 
     async fn candidates(&self) -> Result<Vec<CandidateReport>> {
+        Ok(self.snapshot().await?.candidates)
+    }
+
+    async fn clusters(&self) -> Result<Vec<ClusterReport>> {
+        Ok(self.snapshot().await?.clusters)
+    }
+
+    async fn snapshot(&self) -> Result<StargateSnapshot> {
         let bytes = tokio::fs::read(&self.snapshot_path)
             .await
             .context("failed to read Stargate state snapshot")?;
@@ -367,7 +494,7 @@ impl StargateFixture {
                 && now.saturating_sub(snapshot.written_at_unix_ms) <= 1_000,
             "Stargate state snapshot is stale"
         );
-        Ok(snapshot.candidates)
+        Ok(snapshot)
     }
 
     async fn shutdown(mut self) -> Result<()> {
@@ -409,6 +536,7 @@ struct StargateReady {
 struct StargateSnapshot {
     written_at_unix_ms: u64,
     candidates: Vec<CandidateReport>,
+    clusters: Vec<ClusterReport>,
 }
 
 struct StatsConsumerProcess {
@@ -507,6 +635,50 @@ impl StatsConsumerProcess {
         upstream_port: u16,
         stargate_grpc_addr: SocketAddr,
     ) -> Result<Self> {
+        Self::spawn_with_engine_stats(
+            stats_consumer_bin,
+            artifact_dir,
+            ordinal,
+            upstream_port,
+            stargate_grpc_addr,
+            "required",
+            STATS_CONSUMER_ID,
+            STATS_CONSUMER_ID,
+        )
+        .await
+    }
+
+    async fn spawn_for_kv(
+        stats_consumer_bin: &Path,
+        artifact_dir: &Path,
+        ordinal: usize,
+        upstream_port: u16,
+        stargate_grpc_addr: SocketAddr,
+        inference_server_id: &str,
+    ) -> Result<Self> {
+        Self::spawn_with_engine_stats(
+            stats_consumer_bin,
+            artifact_dir,
+            ordinal,
+            upstream_port,
+            stargate_grpc_addr,
+            "off",
+            inference_server_id,
+            KV_CLUSTER_ID,
+        )
+        .await
+    }
+
+    async fn spawn_with_engine_stats(
+        stats_consumer_bin: &Path,
+        artifact_dir: &Path,
+        ordinal: usize,
+        upstream_port: u16,
+        stargate_grpc_addr: SocketAddr,
+        engine_stats_mode: &str,
+        inference_server_id: &str,
+        cluster_id: &str,
+    ) -> Result<Self> {
         let log_path = artifact_dir.join(format!("stats-consumer-{ordinal}.log"));
         let command_path = artifact_dir.join(format!("stats-consumer-{ordinal}.command.txt"));
         let metrics_addr_path =
@@ -519,9 +691,9 @@ impl StatsConsumerProcess {
             "--stargate-address".to_string(),
             stargate_grpc_addr.to_string(),
             "--inference-server-id".to_string(),
-            STATS_CONSUMER_ID.to_string(),
+            inference_server_id.to_string(),
             "--cluster-id".to_string(),
-            STATS_CONSUMER_ID.to_string(),
+            cluster_id.to_string(),
             "--quic-listen-addr".to_string(),
             "127.0.0.1:0".to_string(),
             "--backend-connectivity".to_string(),
@@ -530,7 +702,7 @@ impl StatsConsumerProcess {
             "--initial-input-tps".to_string(),
             "1".to_string(),
             "--engine-stats-stream".to_string(),
-            "required".to_string(),
+            engine_stats_mode.to_string(),
             "--engine-stats-stream-path".to_string(),
             "/v1/stats/stream".to_string(),
             "--min-update-interval-ms".to_string(),
@@ -1075,8 +1247,24 @@ struct CandidateReport {
     num_running_queries: u64,
     input_processing_queries: u64,
     output_generation_queries: u64,
+    kv_cache_capacity_tokens: u64,
+    kv_cache_used_tokens: u64,
+    kv_cache_free_tokens: u64,
+    kv_cache_source_observed_at_unix_ms: u64,
+    kv_cache_complete: bool,
     stats_sources: Vec<String>,
     stats_capabilities: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct ClusterReport {
+    cluster_id: String,
+    active_backend_count: usize,
+    kv_cache_capacity_tokens: u64,
+    kv_cache_used_tokens: u64,
+    kv_cache_free_tokens: u64,
+    kv_cache_source_observed_at_unix_ms: u64,
+    kv_cache_complete: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1096,6 +1284,14 @@ struct TestReport {
     phases: Vec<PhaseReport>,
     batches: Vec<BatchReport>,
     reconnect_count: u64,
+    kv_cache: KvCacheReport,
+}
+
+#[derive(Debug, Serialize)]
+struct KvCacheReport {
+    populated: ClusterReport,
+    fallback: ClusterReport,
+    withdrawn: ClusterReport,
 }
 
 #[derive(Debug, Serialize)]
@@ -1391,19 +1587,183 @@ async fn run(args: &Args) -> Result<TestReport> {
         + metric_counter_sum(&final_metrics, METRIC_RECONNECTS)?;
 
     report
-        .phase("cleanup", async {
+        .phase("engine-stats-cleanup", async {
             drop(diagnostic);
             consumer.stop().await?;
             dynamo.stop().await?;
-            stargate.shutdown().await
+            wait_for_route(&stargate, false).await
         })
         .await?;
+    let kv_cache = report
+        .phase("kv-cache-stream", run_kv_cache_e2e(args, &stargate))
+        .await?;
+    report.phase("cleanup", stargate.shutdown()).await?;
 
     Ok(TestReport {
         total_duration_ms: report.started_at.elapsed().as_millis(),
         phases: report.phases,
         batches: report.batches,
         reconnect_count,
+        kv_cache,
+    })
+}
+
+async fn run_kv_cache_e2e(args: &Args, stargate: &StargateFixture) -> Result<KvCacheReport> {
+    let mut mock = MockDynamoProcess::spawn(&args.mock_dynamo_bin, &args.artifact_dir).await?;
+    let mut consumer_a = StatsConsumerProcess::spawn_for_kv(
+        &args.stats_consumer_bin,
+        &args.artifact_dir,
+        3,
+        mock.port,
+        stargate.grpc_addr,
+        KV_CONSUMER_A_ID,
+    )
+    .await?;
+    wait_for_registration(&mut consumer_a).await?;
+    let mut consumer_b = StatsConsumerProcess::spawn_for_kv(
+        &args.stats_consumer_bin,
+        &args.artifact_dir,
+        4,
+        mock.port,
+        stargate.grpc_addr,
+        KV_CONSUMER_B_ID,
+    )
+    .await?;
+    wait_for_registration(&mut consumer_b).await?;
+    wait_for_candidate_ids(stargate, &[KV_CONSUMER_A_ID, KV_CONSUMER_B_ID]).await?;
+
+    reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            mock.port
+        ))
+        .header("x-input-tokens", "123")
+        .header("x-cache-affinity-key", "kv-e2e")
+        .json(&json!({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "populate cache"}],
+            "stream": false,
+            "max_tokens": 1
+        }))
+        .send()
+        .await
+        .context("failed to populate mock KV cache")?
+        .error_for_status()
+        .context("mock KV population request failed")?
+        .bytes()
+        .await?;
+
+    wait_consumer_metrics(
+        &mut consumer_a,
+        READY_TIMEOUT,
+        |metrics| {
+            Ok((metrics.value(METRIC_KV_CAPACITY)? == 1_000.0
+                && metrics.value(METRIC_KV_USED)? == 123.0
+                && metrics.value(METRIC_KV_FREE)? == 877.0)
+                .then_some(metrics.clone()))
+        },
+        "first Pylon canonical KV snapshot",
+    )
+    .await?;
+    wait_consumer_metrics(
+        &mut consumer_b,
+        READY_TIMEOUT,
+        |metrics| {
+            Ok((metrics.value(METRIC_KV_CAPACITY)? == 1_000.0
+                && metrics.value(METRIC_KV_USED)? == 123.0
+                && metrics.value(METRIC_KV_FREE)? == 877.0)
+                .then_some(metrics.clone()))
+        },
+        "second Pylon canonical KV snapshot",
+    )
+    .await?;
+    let populated = wait_until(
+        "unsummed structured KV stats in Stargate",
+        READY_TIMEOUT,
+        || async {
+            let candidates = stargate.candidates().await?;
+            let clusters = stargate.clusters().await?;
+            Ok((candidates.len() == 2
+                && candidates.iter().all(|candidate| {
+                    candidate.kv_cache_capacity_tokens == 1_000
+                        && candidate.kv_cache_used_tokens == 123
+                        && candidate.kv_cache_free_tokens == 877
+                        && candidate.kv_cache_source_observed_at_unix_ms > 0
+                        && candidate.kv_cache_complete
+                })
+                && clusters.len() == 1
+                && clusters[0].cluster_id == KV_CLUSTER_ID
+                && clusters[0].active_backend_count == 2
+                && clusters[0].kv_cache_capacity_tokens == 1_000
+                && clusters[0].kv_cache_used_tokens == 123
+                && clusters[0].kv_cache_free_tokens == 877
+                && clusters[0].kv_cache_source_observed_at_unix_ms > 0
+                && clusters[0].kv_cache_complete)
+                .then(|| clusters[0].clone()))
+        },
+    )
+    .await?;
+
+    consumer_b.stop().await?;
+    wait_for_candidate_ids(stargate, &[KV_CONSUMER_A_ID]).await?;
+    let fallback = wait_until(
+        "KV stats fallback after one Pylon leaves",
+        READY_TIMEOUT,
+        || async {
+            let clusters = stargate.clusters().await?;
+            Ok((clusters.len() == 1
+                && clusters[0].active_backend_count == 1
+                && clusters[0].kv_cache_capacity_tokens == 1_000
+                && clusters[0].kv_cache_used_tokens == 123
+                && clusters[0].kv_cache_free_tokens == 877
+                && clusters[0].kv_cache_complete)
+                .then(|| clusters[0].clone()))
+        },
+    )
+    .await?;
+
+    mock.pause_kv_stats().await?;
+    wait_consumer_metrics(
+        &mut consumer_a,
+        KV_WITHDRAW_TIMEOUT,
+        |metrics| {
+            Ok((metrics.value(METRIC_KV_CAPACITY)? == 0.0
+                && metrics.value(METRIC_KV_USED)? == 0.0
+                && metrics.value(METRIC_KV_FREE)? == 0.0)
+                .then_some(metrics.clone()))
+        },
+        "Pylon KV snapshot withdrawal after stream loss",
+    )
+    .await?;
+    let withdrawn = wait_until(
+        "KV stats withdrawal in Stargate",
+        KV_WITHDRAW_TIMEOUT,
+        || async {
+            let candidates = stargate.candidates().await?;
+            let clusters = stargate.clusters().await?;
+            Ok((candidates.len() == 1
+                && candidates[0].inference_server_id == KV_CONSUMER_A_ID
+                && candidates[0].kv_cache_capacity_tokens == 0
+                && !candidates[0].kv_cache_complete
+                && clusters.len() == 1
+                && clusters[0].active_backend_count == 1
+                && clusters[0].kv_cache_capacity_tokens == 0
+                && clusters[0].kv_cache_used_tokens == 0
+                && clusters[0].kv_cache_free_tokens == 0
+                && clusters[0].kv_cache_source_observed_at_unix_ms == 0
+                && !clusters[0].kv_cache_complete)
+                .then(|| clusters[0].clone()))
+        },
+    )
+    .await?;
+
+    consumer_a.stop().await?;
+    wait_for_route(stargate, false).await?;
+    mock.stop().await?;
+    Ok(KvCacheReport {
+        populated,
+        fallback,
+        withdrawn,
     })
 }
 
@@ -1546,6 +1906,11 @@ async fn wait_for_registration_and_route(
     consumer: &mut StatsConsumerProcess,
     stargate: &StargateFixture,
 ) -> Result<()> {
+    wait_for_registration(consumer).await?;
+    wait_for_route(stargate, true).await
+}
+
+async fn wait_for_registration(consumer: &mut StatsConsumerProcess) -> Result<()> {
     wait_consumer_metrics(
         consumer,
         READY_TIMEOUT,
@@ -1556,7 +1921,23 @@ async fn wait_for_registration_and_route(
         "stats consumer registration stream",
     )
     .await?;
-    wait_for_route(stargate, true).await
+    Ok(())
+}
+
+async fn wait_for_candidate_ids(stargate: &StargateFixture, expected: &[&str]) -> Result<()> {
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    wait_until("Stargate candidate set", READY_TIMEOUT, || async {
+        let mut actual = stargate
+            .candidates()
+            .await?
+            .into_iter()
+            .map(|candidate| candidate.inference_server_id)
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        Ok((actual.iter().map(String::as_str).collect::<Vec<_>>() == expected).then_some(()))
+    })
+    .await
 }
 
 async fn wait_for_route(stargate: &StargateFixture, present: bool) -> Result<()> {

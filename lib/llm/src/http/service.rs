@@ -20,6 +20,8 @@
 
 mod anthropic;
 mod engine_stats;
+mod kv_placements;
+mod kv_stats;
 pub mod metadata;
 mod openai;
 

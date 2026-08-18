@@ -1260,6 +1260,8 @@ impl HttpServiceConfigBuilder {
                 config.drt_metrics,
             ),
             super::engine_stats::router(state.clone()),
+            super::kv_stats::router(state.clone()),
+            super::kv_placements::router(state.clone()),
             if anthropic_endpoints_enabled {
                 super::anthropic::anthropic_models_router(
                     state.clone(),
