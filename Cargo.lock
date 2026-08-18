@@ -2706,6 +2706,7 @@ dependencies = [
  "futures-util",
  "galil-seiferas",
  "hf-hub 0.4.3",
+ "http-body-util",
  "image",
  "indicatif 0.18.4",
  "insta",

@@ -88,6 +88,46 @@ _VALID_FAMILIES = frozenset(
 )
 
 
+def complete_predictor_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
+    """Expand one predictor preset into every public predictor knob."""
+
+    if isinstance(entry, str):
+        preset = LOAD_PREDICTOR_PRESETS[entry]
+        family = preset["family"]
+        log1p = preset["log1p"]
+        prophet_window_size = preset.get(
+            "prophet_window_size", _DEFAULTS["prophet_window_size"]
+        )
+        kalman_q_level = preset.get("q_level", _DEFAULTS["q_level"])
+        kalman_q_trend = preset.get("q_trend", _DEFAULTS["q_trend"])
+        kalman_r = preset.get("r", _DEFAULTS["r"])
+        kalman_min_points = preset.get("min_points", _DEFAULTS["min_points"])
+    else:
+        family = entry["load_predictor"]
+        if family not in _VALID_FAMILIES:
+            raise ValueError(
+                f"load_predictor must be one of {sorted(_VALID_FAMILIES)}, got {family!r}"
+            )
+        log1p = bool(entry.get("load_predictor_log1p", False))
+        prophet_window_size = entry.get(
+            "prophet_window_size", _DEFAULTS["prophet_window_size"]
+        )
+        kalman_q_level = entry.get("kalman_q_level", _DEFAULTS["q_level"])
+        kalman_q_trend = entry.get("kalman_q_trend", _DEFAULTS["q_trend"])
+        kalman_r = entry.get("kalman_r", _DEFAULTS["r"])
+        kalman_min_points = entry.get("kalman_min_points", _DEFAULTS["min_points"])
+
+    return {
+        "load_predictor": family,
+        "load_predictor_log1p": log1p,
+        "prophet_window_size": prophet_window_size,
+        "kalman_q_level": kalman_q_level,
+        "kalman_q_trend": kalman_q_trend,
+        "kalman_r": kalman_r,
+        "kalman_min_points": kalman_min_points,
+    }
+
+
 @dataclass(frozen=True)
 class Window:
     """One aggregated traffic window."""
@@ -136,23 +176,15 @@ class LoadPredictorResult:
 
 
 def _internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(entry, dict):
-        return LOAD_PREDICTOR_PRESETS[entry]
-    family = entry["load_predictor"]
-    if family not in _VALID_FAMILIES:
-        raise ValueError(
-            f"load_predictor must be one of {sorted(_VALID_FAMILIES)}, got {family!r}"
-        )
+    complete = complete_predictor_preset(entry)
     return {
-        "family": family,
-        "log1p": bool(entry.get("load_predictor_log1p", False)),
-        "prophet_window_size": entry.get(
-            "prophet_window_size", _DEFAULTS["prophet_window_size"]
-        ),
-        "q_level": entry.get("kalman_q_level", _DEFAULTS["q_level"]),
-        "q_trend": entry.get("kalman_q_trend", _DEFAULTS["q_trend"]),
-        "r": entry.get("kalman_r", _DEFAULTS["r"]),
-        "min_points": entry.get("kalman_min_points", _DEFAULTS["min_points"]),
+        "family": complete["load_predictor"],
+        "log1p": complete["load_predictor_log1p"],
+        "prophet_window_size": complete["prophet_window_size"],
+        "q_level": complete["kalman_q_level"],
+        "q_trend": complete["kalman_q_trend"],
+        "r": complete["kalman_r"],
+        "min_points": complete["kalman_min_points"],
     }
 
 

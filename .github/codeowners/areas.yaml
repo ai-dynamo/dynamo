@@ -437,24 +437,10 @@ areas:
   path_globs:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
-  - deploy/helm/charts/snapshot/
+  - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
+  - deploy/operator/internal/checkpointjob/
   - deploy/operator/internal/gms/
-  - deploy/snapshot/
-  - deploy/snapshot/cmd/
-  - deploy/snapshot/cmd/agent/
-  - deploy/snapshot/cmd/cuda-checkpoint-helper/
-  - deploy/snapshot/cmd/nsrestore/
-  - deploy/snapshot/cmd/snapshotctl/
-  - deploy/snapshot/internal/
-  - deploy/snapshot/internal/controller/
-  - deploy/snapshot/internal/criu/
-  - deploy/snapshot/internal/cuda/
-  - deploy/snapshot/internal/executor/
-  - deploy/snapshot/internal/logging/
-  - deploy/snapshot/internal/runtime/
-  - deploy/snapshot/internal/types/
-  - deploy/snapshot/protocol/
   - lib/gpu_memory_service/
   - lib/gpu_memory_service/cli/
   - lib/gpu_memory_service/client/

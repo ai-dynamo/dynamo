@@ -510,6 +510,12 @@ jobs:
           # a product switcher. Restore the release history in that native shape.
           yq -i '.versions = load("/tmp/preserved_versions.yml")' docs.yml
 
+          # Fern resolves a versioned site's bare URL through the default
+          # version's first page instead of the top-level landing-page. Legacy
+          # release snapshots predate the Home tab, so add the shared Home entry
+          # to the default version before publishing.
+          ../../source-checkout/docs/fern/scripts/ensure_default_version_home.sh .
+
           # Inject the private NVIDIA global theme for production builds only.
           # It is intentionally absent from the source repo's docs.yml so that
           # external contributors can run `fern docs dev` without an nvidia-org
