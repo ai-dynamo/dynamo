@@ -336,7 +336,6 @@ areas:
   - container/dev/
   - container/launch_message/
   - container/render.py
-  - container/test_render.py
   - container/run.sh
   - container/templates/
   - container/use-sccache.sh

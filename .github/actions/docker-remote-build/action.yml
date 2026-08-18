@@ -161,38 +161,14 @@ runs:
           TARGET_ARG="--target ${{ inputs.build_target }}"
         fi
 
-        PYPI_INDEX_HOST="${PIP_INDEX_URL:-}"
-        PYPI_INDEX_HOST="${PYPI_INDEX_HOST#*://}"
-        PYPI_INDEX_HOST="${PYPI_INDEX_HOST%%/*}"
-        is_retryable_pypi_failure() {
-          [ -n "${PYPI_INDEX_HOST}" ] \
-            && grep -F "${PYPI_INDEX_HOST}" "$1" \
-              | grep -E 'HTTP (status .*|error )(404|408|429|5[0-9][0-9])' >/dev/null
-        }
+        docker buildx build \
+          --progress=plain \
+          --tag "$IMAGE_TAG" \
+          --platform "${PLATFORM_FLAG}" \
+          -f ./container/rendered.Dockerfile \
+          $TARGET_ARG $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
 
-        BUILD_EXIT_CODE=1
-        for BUILD_ATTEMPT in 1 2 3; do
-          set +e
-          docker buildx build \
-            --progress=plain \
-            --tag "$IMAGE_TAG" \
-            --platform "${PLATFORM_FLAG}" \
-            -f ./container/rendered.Dockerfile \
-            $TARGET_ARG $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
-          BUILD_EXIT_CODE=${PIPESTATUS[0]}
-          set -e
-
-          if [ "${BUILD_EXIT_CODE}" -eq 0 ]; then
-            break
-          fi
-          if [ "${BUILD_ATTEMPT}" -eq 3 ] \
-            || ! is_retryable_pypi_failure "${BUILD_LOG_FILE}"; then
-            break
-          fi
-
-          echo "::warning::Mirror download failed; retrying cached image build ($((BUILD_ATTEMPT + 1))/3)"
-          sleep $((BUILD_ATTEMPT * 10))
-        done
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "BUILD_END_TIME=${BUILD_END_TIME}" >> $GITHUB_ENV

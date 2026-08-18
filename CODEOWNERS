@@ -286,7 +286,6 @@
 /container/context.yaml                                                      @ai-dynamo/dynamo-ops-codeowners
 /dev/docker-compose.yml                                                      @ai-dynamo/dynamo-ops-codeowners
 /.pre-commit-config.yaml                                                     @ai-dynamo/dynamo-ops-codeowners
-/container/test_render.py                                                    @ai-dynamo/dynamo-ops-codeowners
 /container/use-sccache.sh                                                    @ai-dynamo/dynamo-ops-codeowners
 /container/Dockerfile.docs                                                   @ai-dynamo/dynamo-ops-codeowners
 /container/Dockerfile.test                                                   @ai-dynamo/dynamo-ops-codeowners

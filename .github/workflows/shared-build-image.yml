@@ -654,45 +654,16 @@ jobs:
             PYPI_SECRET_ARGS+=(--secret "id=pypi-netrc,src=${NETRC}")
           fi
 
-          PYPI_INDEX_HOST="${PIP_INDEX_URL:-}"
-          PYPI_INDEX_HOST="${PYPI_INDEX_HOST#*://}"
-          PYPI_INDEX_HOST="${PYPI_INDEX_HOST%%/*}"
-          TEST_BUILD_LOG="${RUNNER_TEMP}/dynamo-test-image-build.log"
-          is_retryable_pypi_failure() {
-            [ -n "${PYPI_INDEX_HOST}" ] \
-              && grep -F "${PYPI_INDEX_HOST}" "$1" \
-                | grep -E 'HTTP (status .*|error )(404|408|429|5[0-9][0-9])' >/dev/null
-          }
-
-          BUILD_EXIT_CODE=1
-          for BUILD_ATTEMPT in 1 2 3; do
-            set +e
-            docker buildx build \
-              --progress=plain \
-              ${PUSH_ARGS} \
-              ${NO_CACHE_ARG} \
-              "${PYPI_SECRET_ARGS[@]}" \
-              --platform ${{ inputs.platform }} \
-              --target ${TEST_TARGET} \
-              -f container/Dockerfile.test \
-              --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
-              -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} . 2>&1 | tee "${TEST_BUILD_LOG}"
-            BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            set -e
-
-            if [ "${BUILD_EXIT_CODE}" -eq 0 ]; then
-              break
-            fi
-            if [ "${BUILD_ATTEMPT}" -eq 3 ] \
-              || ! is_retryable_pypi_failure "${TEST_BUILD_LOG}"; then
-              break
-            fi
-
-            echo "::warning::Mirror download failed; retrying cached test-image build ($((BUILD_ATTEMPT + 1))/3)"
-            sleep $((BUILD_ATTEMPT * 10))
-          done
-
-          exit "${BUILD_EXIT_CODE}"
+          docker buildx build \
+            --progress=plain \
+            ${PUSH_ARGS} \
+            ${NO_CACHE_ARG} \
+            "${PYPI_SECRET_ARGS[@]}" \
+            --platform ${{ inputs.platform }} \
+            --target ${TEST_TARGET} \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
+            -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}

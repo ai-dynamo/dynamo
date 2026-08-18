@@ -20,15 +20,16 @@ _PYTHON_PACKAGE_DOWNLOAD_RE = re.compile(
     re.MULTILINE,
 )
 
-_PYPI_SECRET_MOUNTS = (
+_PYPI_RUN_PREFIX = (
     "RUN --mount=type=secret,id=pip-index-url,env=PIP_INDEX_URL \\\n"
     "    --mount=type=secret,id=uv-default-index,env=UV_DEFAULT_INDEX \\\n"
     "    --mount=type=secret,id=pypi-netrc,target=/run/secrets/pypi-netrc,mode=0444 \\\n"
+    "    "
 )
 
 _PYPI_ENV = (
-    "    export NETRC=/run/secrets/pypi-netrc "
-    "PIP_RETRIES=10 UV_HTTP_RETRIES=10 && \\\n"
+    "export NETRC=/run/secrets/pypi-netrc PIP_RETRIES=10 UV_HTTP_RETRIES=10 && \\\n"
+    "    "
 )
 
 
@@ -205,47 +206,24 @@ def _make_jinja_env(script_dir):
 
 def _inject_python_index_secrets(dockerfile: str) -> str:
     """Mount optional PyPI credentials in every Python package install layer."""
-    lines = dockerfile.splitlines(keepends=True)
-    result = []
-    index = 0
-
-    while index < len(lines):
-        line = lines[index]
-        if not line.startswith("RUN "):
-            result.append(line)
-            index += 1
+    instructions = re.split(r"(?=^[A-Z]+\b)", dockerfile, flags=re.MULTILINE)
+    for index, instruction in enumerate(instructions):
+        if not instruction.startswith("RUN ") or not _PYTHON_PACKAGE_DOWNLOAD_RE.search(
+            instruction
+        ):
             continue
 
-        end = index + 1
-        while end < len(lines) and lines[end - 1].rstrip().endswith("\\"):
-            end += 1
-
-        instruction = "".join(lines[index:end])
-        if not _PYTHON_PACKAGE_DOWNLOAD_RE.search(instruction):
-            result.extend(lines[index:end])
-            index = end
-            continue
-
-        # Keep template-local settings from silently weakening the runner policy.
         instruction = re.sub(
             r"\bUV_HTTP_RETRIES=\d+\b", "UV_HTTP_RETRIES=10", instruction
         )
-        instruction_lines = instruction.splitlines(keepends=True)
-        parts = ["    " + instruction_lines[0][len("RUN ") :]] + instruction_lines[1:]
-        command_index = next(
-            (
-                i
-                for i, part in enumerate(parts)
-                if not part.lstrip().startswith("--mount=")
-            ),
-            len(parts),
+        instructions[index] = re.sub(
+            r"^RUN (?P<mounts>(?:--mount=[^\n]*\\\n[ \t]+)*)",
+            lambda match: _PYPI_RUN_PREFIX + match.group("mounts") + _PYPI_ENV,
+            instruction,
+            count=1,
         )
-        parts.insert(command_index, _PYPI_ENV)
-        result.append(_PYPI_SECRET_MOUNTS)
-        result.extend(parts)
-        index = end
 
-    return "".join(result)
+    return "".join(instructions)
 
 
 def _render_context(args, context=None):
