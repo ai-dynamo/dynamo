@@ -34,16 +34,6 @@ classifiers = [
 ]
 keywords = ["llm", "genai", "inference", "nvidia", "gpu", "memory", "dynamo"]
 
-# vLLM loads general plugins from EngineCore.__init__, the process that owns
-# the scheduler and its BlockPool at any TP. Importing the GMS worker module is
-# not enough: at TP>1 that happens only in the worker children. Self-disables
-# unless GMS_KV_INDEX_PATH is set.
-#
-# Declared here, not in setup.py: this file has a [project] table, which
-# replaces setup()'s entry_points wholesale rather than merging with it.
-[project.entry-points."vllm.general_plugins"]
-gms_kv_index = "gpu_memory_service.integrations.vllm.kv_index:enable_kv_index"
-
 [project.scripts]
 gpu-memory-service = "gpu_memory_service.cli.runner:main"
 gms-storage-client = "gpu_memory_service.cli.storage_runner:main"

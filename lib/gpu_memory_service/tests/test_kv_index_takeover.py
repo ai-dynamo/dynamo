@@ -7,8 +7,8 @@
 side: the pause/unpause transitions that bracket a sleep, and the takeover they
 trigger.
 
-These drive the *real* ``_make_scheduler_cls`` product over a stand-in base, so
-the transition logic under test is the shipped code rather than a paraphrase.
+These mix the *real* ``KvIndexMixin`` into a stand-in base, exactly as
+``schedulers.py`` does, so the transition logic under test is the shipped code.
 """
 
 from __future__ import annotations
@@ -77,7 +77,8 @@ class FakeBaseScheduler:
 
 
 def new_scheduler(pool):
-    return kv_index._make_scheduler_cls(FakeBaseScheduler)(pool)
+    cls = type("T", (kv_index.KvIndexMixin, FakeBaseScheduler), {})
+    return cls(pool)
 
 
 def key_for(tag: str):

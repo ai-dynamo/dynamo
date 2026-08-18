@@ -30,9 +30,11 @@ behind, so a later participant would replay labels describing bytes that engine
 changed. Closing it needs a writer epoch on the GMS handshake; until then, do
 not mix participating and non-participating engines over one pool.
 
-Enabled by setting ``GMS_KV_INDEX_PATH``; off by default. Installed through the
-``vllm.general_plugins`` entry point in ``setup.py``, which wraps
-``EngineCore.wake_up`` and ``EngineCore.sleep`` and nothing else.
+Enabled by setting ``GMS_KV_INDEX_PATH``; off by default. Installed by naming a
+scheduler -- ``--scheduler-cls ...schedulers.KvIndexScheduler`` -- the same way
+GMS itself is selected with ``--worker-cls``. There is no plugin and no
+monkey-patching of vLLM: the only non-config touch is a runtime subclass swap on
+the ``BlockPool`` instance we are handed.
 """
 
 from __future__ import annotations
@@ -48,8 +50,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Everything else is internal, exported only for the tests.
-__all__ = ["enable_kv_index"]
+# The public surface: mix KvIndexMixin ahead of a vLLM scheduler, or name one
+# of the ready-made classes in schedulers.py with --scheduler-cls.
+__all__ = ["KvIndexMixin"]
 
 MAGIC = b"DYNKVIX1"
 VERSION = 1
@@ -516,40 +519,13 @@ class KvIndexMixin:
         return out
 
 
-def _make_scheduler_cls(base: type) -> type:
-    """Derive from whatever scheduler vLLM (or Dynamo) already chose."""
-    return type(f"KvIndex{base.__name__}", (KvIndexMixin, base), {})
-
-
 def _sleeping_for(pool) -> bool:
-    """The BlockPool hook asks its scheduler whether we are mid-sleep."""
+    """Is the engine that owns this pool mid-sleep?
+
+    The BlockPool hook has to ask, because vLLM clears its prefix index inside a
+    sleep on the assumption the KV is discarded -- and under a committed GMS
+    layout it is not. Per-engine state on the scheduler rather than a module
+    global, so one engine's sleep never speaks for another.
+    """
     sched = getattr(pool, "_dyn_scheduler", None)
     return bool(sched is not None and getattr(sched, "_dyn_sleeping", False))
-
-
-def enable_kv_index() -> None:
-    """Entry point for ``vllm.general_plugins``. Self-disables when unset.
-
-    This is the *fallback* path, for when nobody named a scheduler explicitly.
-    The supported route is ``--scheduler-cls`` naming one of the classes in
-    ``schedulers.py``; this wrap only says "if no one chose for us, choose well"
-    by deriving from whatever base vLLM or Dynamo already settled on.
-    """
-    if not mirror_path():
-        return
-    from vllm.config.scheduler import SchedulerConfig
-
-    if getattr(SchedulerConfig, "_dyn_kv_index_patched", False):
-        return
-    original = SchedulerConfig.get_scheduler_cls
-    derived: dict[type, type] = {}
-
-    def get_scheduler_cls(self):
-        base = original(self)
-        if base not in derived:
-            derived[base] = _make_scheduler_cls(base)
-        return derived[base]
-
-    SchedulerConfig.get_scheduler_cls = get_scheduler_cls
-    SchedulerConfig._dyn_kv_index_patched = True
-    logger.info("[kv_index] enabled; mirror at %s", mirror_path())
