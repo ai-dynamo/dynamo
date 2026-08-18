@@ -244,6 +244,24 @@ pub fn maybe_wrap_stream(
         };
 
         if wind_down {
+            // Only a warmup that got as far as its downstream has anything to
+            // wind down, and the slot is how we know. An empty slot means the
+            // cancellation arm won before `warmup` was ever polled, so the
+            // future is still unstarted — and draining it would start it,
+            // dispatching into the very shutdown the arm exists to avoid. The
+            // bound is deliberately read into a local first: holding the lock
+            // guard across the await below would be both wrong and unbuildable.
+            let dispatched = context_slot.lock().is_some();
+
+            if !dispatched {
+                tracing::debug!(
+                    request_id = %request_id,
+                    model = %model,
+                    "Speculative prefill dropped before dispatch; nothing to wind down"
+                );
+                return;
+            }
+
             stop_downstream(&context_slot);
             // Dropping the non-winning arm released the borrow but not the
             // future itself: `warmup` was pinned separately and the stream it
