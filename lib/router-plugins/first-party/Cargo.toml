@@ -13,5 +13,6 @@ description = "First-party worker-selection policy catalog for Dynamo"
 
 [dependencies]
 dynamo-kv-router = { workspace = true }
+dynamo-runtime = { workspace = true }
 fastrand = "2"
 serde = { workspace = true }

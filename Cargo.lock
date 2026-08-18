@@ -2603,6 +2603,7 @@ name = "dynamo-first-party-router-policies"
 version = "1.5.0"
 dependencies = [
  "dynamo-kv-router",
+ "dynamo-runtime",
  "fastrand",
  "serde",
 ]

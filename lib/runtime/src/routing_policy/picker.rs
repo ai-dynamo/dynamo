@@ -1,24 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use super::{
     AdmissionKind, CandidateView, RouteCandidate, RouteContext, RouteDecision, RouteDevice,
     RoutePolicy, RouteTarget,
 };
+use crate::fast_picker::{FastPicker, reservoir_least_index_by};
 
 #[derive(Debug)]
 pub(crate) struct RoutePicker {
     policy: RoutePolicy,
-    round_robin_cursor: AtomicU64,
+    fast_picker: FastPicker,
 }
 
 impl RoutePicker {
     pub(crate) const fn new(policy: RoutePolicy) -> Self {
         Self {
             policy,
-            round_robin_cursor: AtomicU64::new(0),
+            fast_picker: FastPicker::new(),
         }
     }
 
@@ -33,9 +32,6 @@ impl RoutePicker {
         context: RouteContext,
         load: impl Fn(u64) -> u64,
     ) -> Option<RouteDecision> {
-        if self.policy == RoutePolicy::Random {
-            return random_decision(candidates);
-        }
         let mut samples = RandomSamples;
         self.choose_with_samples(candidates, context, &load, false, &mut samples)
     }
@@ -47,9 +43,6 @@ impl RoutePicker {
         context: RouteContext,
         load: impl Fn(u64) -> u64,
     ) -> Option<RouteDecision> {
-        if self.policy == RoutePolicy::Random {
-            return random_decision(candidates);
-        }
         let mut samples = RandomSamples;
         self.choose_with_samples(candidates, context, &load, true, &mut samples)
     }
@@ -68,40 +61,25 @@ impl RoutePicker {
         }
 
         match self.policy {
-            RoutePolicy::RoundRobin => {
-                let cursor = if commit {
-                    self.round_robin_cursor.fetch_add(1, Ordering::Relaxed)
-                } else {
-                    self.round_robin_cursor.load(Ordering::Relaxed)
-                };
-                Some(RouteDecision {
-                    target: candidates.target(cursor as usize % candidates.len()),
+            RoutePolicy::RoundRobin => self
+                .fast_picker
+                .round_robin_index(candidates.len(), commit)
+                .map(|index| RouteDecision {
+                    target: candidates.target(index),
+                    admission: AdmissionKind::None,
+                }),
+            RoutePolicy::Random => {
+                FastPicker::random_index(candidates.len()).map(|index| RouteDecision {
+                    target: candidates.target(index),
                     admission: AdmissionKind::None,
                 })
             }
-            RoutePolicy::Random => Some(RouteDecision {
-                target: candidates.target(samples.index(candidates.len())),
-                admission: AdmissionKind::None,
-            }),
             RoutePolicy::PowerOfTwoChoices => {
-                let first = samples.index(candidates.len());
-                if candidates.len() == 1 {
-                    return Some(RouteDecision {
-                        target: candidates.target(first),
-                        admission: AdmissionKind::Occupancy,
-                    });
-                }
-                let second_offset = 1 + samples.index(candidates.len() - 1);
-                let second = (first + second_offset) % candidates.len();
-                let first_target = candidates.target(first);
-                let second_target = candidates.target(second);
-                let target = if load(first_target.worker_id) <= load(second_target.worker_id) {
-                    first_target
-                } else {
-                    second_target
-                };
-                Some(RouteDecision {
-                    target,
+                FastPicker::power_of_two_choices_index(candidates.len(), |index| {
+                    load(candidates.target(index).worker_id)
+                })
+                .map(|index| RouteDecision {
+                    target: candidates.target(index),
                     admission: AdmissionKind::Occupancy,
                 })
             }
@@ -135,68 +113,19 @@ impl SampleSource for RandomSamples {
 }
 
 #[inline(always)]
-fn random_decision(candidates: CandidateView<'_>) -> Option<RouteDecision> {
-    let upper = candidates.len();
-    if upper == 0 {
-        return None;
-    }
-    let index = fastrand::usize(..upper);
-    let target = match candidates {
-        CandidateView::Workers(workers) => RouteTarget::worker(workers[index]),
-        CandidateView::DeviceAware(candidates) => candidates[index].target,
-    };
-    Some(RouteDecision {
-        target,
-        admission: AdmissionKind::None,
-    })
-}
-
-#[inline(always)]
 fn lowest_load(
     candidates: CandidateView<'_>,
     load: &impl Fn(u64) -> u64,
     samples: &mut impl SampleSource,
 ) -> Option<RouteTarget> {
-    match candidates {
-        CandidateView::Workers(workers) => {
-            let mut best = None;
-            let mut best_load = u64::MAX;
-            let mut ties = 0usize;
-            for &worker_id in workers {
-                let target_load = load(worker_id);
-                if target_load < best_load {
-                    best = Some(RouteTarget::worker(worker_id));
-                    best_load = target_load;
-                    ties = 1;
-                } else if target_load == best_load {
-                    ties += 1;
-                    if samples.index(ties) == 0 {
-                        best = Some(RouteTarget::worker(worker_id));
-                    }
-                }
-            }
-            best
-        }
-        CandidateView::DeviceAware(candidates) => {
-            let mut best = None;
-            let mut best_load = u64::MAX;
-            let mut ties = 0usize;
-            for candidate in candidates {
-                let target_load = load(candidate.target.worker_id);
-                if target_load < best_load {
-                    best = Some(candidate.target);
-                    best_load = target_load;
-                    ties = 1;
-                } else if target_load == best_load {
-                    ties += 1;
-                    if samples.index(ties) == 0 {
-                        best = Some(candidate.target);
-                    }
-                }
-            }
-            best
-        }
-    }
+    reservoir_least_index_by(
+        candidates.len(),
+        |left, right| {
+            load(candidates.target(left).worker_id).cmp(&load(candidates.target(right).worker_id))
+        },
+        |upper| samples.index(upper),
+    )
+    .map(|index| candidates.target(index))
 }
 
 #[derive(Default)]
@@ -343,43 +272,27 @@ mod tests {
     }
 
     #[test]
-    fn random_peek_uses_one_independent_sample() {
+    fn random_peek_returns_an_eligible_candidate() {
         let picker = RoutePicker::new(RoutePolicy::Random);
         let candidates = CandidateView::Workers(&[10, 20, 30, 40]);
-        let mut samples = ScriptedSamples::new(vec![2]);
         let decision = picker
-            .choose_with_samples(
-                candidates,
-                RouteContext::default(),
-                &|_| 0,
-                false,
-                &mut samples,
-            )
+            .peek(candidates, RouteContext::default(), |_| 0)
             .unwrap();
-        assert_eq!(decision.target.worker_id, 30);
-        assert_eq!(samples.consumed, 1);
+        assert!(matches!(decision.target.worker_id, 10 | 20 | 30 | 40));
     }
 
     #[test]
-    fn p2c_uses_exactly_two_samples_and_two_load_reads() {
+    fn p2c_uses_two_load_reads() {
         let picker = RoutePicker::new(RoutePolicy::PowerOfTwoChoices);
         let candidates = CandidateView::Workers(&[10, 20, 30, 40]);
-        let mut samples = ScriptedSamples::new(vec![1, 1]);
         let reads = Cell::new(0);
         let decision = picker
-            .choose_with_samples(
-                candidates,
-                RouteContext::default(),
-                &|worker| {
-                    reads.set(reads.get() + 1);
-                    if worker == 20 { 5 } else { 1 }
-                },
-                true,
-                &mut samples,
-            )
+            .select(candidates, RouteContext::default(), |worker| {
+                reads.set(reads.get() + 1);
+                if worker == 20 { 5 } else { 1 }
+            })
             .unwrap();
-        assert_eq!(decision.target.worker_id, 40);
-        assert_eq!(samples.consumed, 2);
+        assert_ne!(decision.target.worker_id, 20);
         assert_eq!(reads.get(), 2);
     }
 

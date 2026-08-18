@@ -26,6 +26,7 @@ pub mod discovery;
 pub mod engine;
 pub mod engine_routes;
 pub mod error;
+pub mod fast_picker;
 pub mod health_check;
 pub mod local_endpoint_registry;
 pub mod metadata_registry;

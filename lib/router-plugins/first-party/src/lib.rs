@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Always-linked, first-party worker-selection policies.
+//! First-party worker-selection policies linked by Dynamo's Python router extension.
+//!
+//! Standalone EPP and Rust hosts link and register this crate explicitly.
 //!
 //! This crate owns policy algorithms and policy-local state. The selection host retains discovery,
 //! eligibility, and request accounting. The optional custom catalog uses the same registry API,
 //! but never needs to replace these stock policies.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use dynamo_kv_router::{
     KvRouterConfig,
@@ -23,6 +24,7 @@ use dynamo_kv_router::{
         WorkerSelectionPolicyRegistryError,
     },
 };
+use dynamo_runtime::fast_picker::{FastPicker, reservoir_least_index_by};
 
 /// Register the stock policy types linked by Dynamo's Python router extension.
 ///
@@ -90,14 +92,14 @@ fn worker_selection_policy(
 /// the host-maintained minimum. None of these algorithms may walk the candidate table.
 struct FirstPartyCacheFreePicker {
     policy: FirstPartyRoutingPolicy,
-    round_robin_cursor: AtomicU64,
+    fast_picker: FastPicker,
 }
 
 impl FirstPartyCacheFreePicker {
     const fn new(policy: FirstPartyRoutingPolicy) -> Self {
         Self {
             policy,
-            round_robin_cursor: AtomicU64::new(0),
+            fast_picker: FastPicker::new(),
         }
     }
 
@@ -138,30 +140,17 @@ impl CacheFreeWorkerPicker for FirstPartyCacheFreePicker {
         }
 
         let index = match self.policy {
-            FirstPartyRoutingPolicy::RoundRobin => {
-                let cursor = if request.is_advisory() {
-                    self.round_robin_cursor.load(Ordering::Relaxed)
-                } else {
-                    self.round_robin_cursor.fetch_add(1, Ordering::Relaxed)
-                };
-                cursor as usize % candidate_count
-            }
-            FirstPartyRoutingPolicy::Random => fastrand::usize(..candidate_count),
+            FirstPartyRoutingPolicy::RoundRobin => self
+                .fast_picker
+                .round_robin_index(candidate_count, !request.is_advisory())
+                .expect("candidate count was checked above"),
+            FirstPartyRoutingPolicy::Random => FastPicker::random_index(candidate_count)
+                .expect("candidate count was checked above"),
             FirstPartyRoutingPolicy::PowerOfTwoChoices => {
-                let first = fastrand::usize(..candidate_count);
-                if candidate_count == 1 {
-                    first
-                } else {
-                    let second =
-                        (first + 1 + fastrand::usize(..candidate_count - 1)) % candidate_count;
-                    if candidate_table.active_requests(first)
-                        <= candidate_table.active_requests(second)
-                    {
-                        first
-                    } else {
-                        second
-                    }
-                }
+                FastPicker::power_of_two_choices_index(candidate_count, |index| {
+                    candidate_table.active_requests(index) as u64
+                })
+                .expect("candidate count was checked above")
             }
             FirstPartyRoutingPolicy::LeastLoaded => {
                 Self::checked_index(candidate_table.least_loaded_index(), candidate_count)?
@@ -233,40 +222,20 @@ impl FirstPartyWorkerPicker {
 
     fn p2c_row(&self, input: WorkerInputView<'_>) -> usize {
         let candidates = input.candidates();
-        let first = fastrand::usize(..candidates.len());
-        if candidates.len() == 1 {
-            return first;
-        }
-        let second = (first + 1 + fastrand::usize(..candidates.len() - 1)) % candidates.len();
-        if candidates[first].cost() <= candidates[second].cost() {
-            first
-        } else {
-            second
-        }
+        FastPicker::power_of_two_choices_index_by(candidates.len(), |first, second| {
+            candidates[first].cost() <= candidates[second].cost()
+        })
+        .expect("picker only runs with candidates")
     }
 
     fn least_loaded_row(&self, input: WorkerInputView<'_>) -> usize {
-        let mut best = 0;
-        let mut ties = 1usize;
-        for row in 1..input.candidates().len() {
-            match input.candidates()[row]
-                .cost()
-                .total_cmp(&input.candidates()[best].cost())
-            {
-                std::cmp::Ordering::Less => {
-                    best = row;
-                    ties = 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    ties += 1;
-                    if fastrand::usize(..ties) == 0 {
-                        best = row;
-                    }
-                }
-                std::cmp::Ordering::Greater => {}
-            }
-        }
-        best
+        let candidates = input.candidates();
+        reservoir_least_index_by(
+            candidates.len(),
+            |left, right| candidates[left].cost().total_cmp(&candidates[right].cost()),
+            |upper| fastrand::usize(..upper),
+        )
+        .expect("picker only runs with candidates")
     }
 }
 
@@ -283,7 +252,8 @@ impl WorkerPicker for FirstPartyWorkerPicker {
             FirstPartyRoutingPolicy::RoundRobin => {
                 self.round_robin_row(input, context.is_advisory())
             }
-            FirstPartyRoutingPolicy::Random => fastrand::usize(..input.candidates().len()),
+            FirstPartyRoutingPolicy::Random => FastPicker::random_index(input.candidates().len())
+                .expect("picker only runs with candidates"),
             FirstPartyRoutingPolicy::PowerOfTwoChoices => self.p2c_row(input),
             FirstPartyRoutingPolicy::LeastLoaded => self.least_loaded_row(input),
         })
