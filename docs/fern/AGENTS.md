@@ -28,7 +28,8 @@ The Dynamo Docs Bot enforces the deterministic subset pre-merge.
 Commit the artifact when any input is external or time-varying. Generate at publish when the artifact is a pure function of sources committed in the same commit and the toolchain to compute it is already present in the publish runner. Where the toolchain is not in the publish runner, or committed history matters, regenerate post-merge: a workflow on push to main runs the generator and bot-commits changed outputs, so PRs carry source edits only.
 
 `releases.json`, `releases-atom.xml`, and the Python/Rust API reference pages are generated at
-publish time; the marker-spliced pages stay committed for review.
+publish time. The marker-spliced release pages and the Kubernetes `full-api-reference.mdx` stay
+committed for review (the Kubernetes page is the one committed, freshness-gated API reference).
 
 ## API references
 
@@ -49,7 +50,7 @@ Python and Rust are one hop: `gen_python_api.py` and `gen_rust_api.py` read docs
 griffe.
 
 ```bash
-python3 docs/fern/scripts/gen_python_api.py        # add --check to verify without writing
+python3 docs/fern/scripts/gen_python_api.py        # writes into gitignored paths; nothing to commit
 ```
 
 The full Kubernetes reference has two stages, and the first lives outside `docs/`.
@@ -64,9 +65,9 @@ make -C deploy/operator generate-api-docs         # Go types -> api-reference-k8
 python3 docs/fern/scripts/gen_kubernetes_api.py   # that Markdown -> full-api-reference.mdx
 ```
 
-`--check` is the `Generated API References` pre-merge job. On a pull request it runs with
+The `Generated API References` pre-merge job runs the Python/Rust generators in write mode (a
+source PR that breaks generation fails fast; there is no committed output to diff) and applies
+`--check` only to the Kubernetes reference. On a pull request the Kubernetes check runs with
 `--since <base>`, which scopes it to what the branch itself changed; on `main` the flag is omitted
-and the strict gate applies. Because generated references track source outside `docs/`, a branch's
-output goes stale whenever `main` lands a commit touching a symbol it documents — so regenerate
-immediately before merge rather than earlier in review. Reviewers must separately verify that any
-affected curated Kubernetes page remains aligned with the generated schema.
+and the strict gate applies. Reviewers must separately verify that any affected curated Kubernetes
+page remains aligned with the generated schema.

@@ -77,6 +77,11 @@ jobs:
     if: github.ref_type != 'tag'
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
+      # api_docs also matches the Python/Rust source trees. The publish job
+      # keys on it for main pushes: the API reference pages generate from
+      # source at publish time, so a code-only merge that changes a
+      # documented symbol must republish or the live pages go stale.
+      api_docs: ${{ steps.changes.outputs.api_docs }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -96,10 +101,18 @@ jobs:
   preview-or-publish-docs:
     name: Preview or publish docs
     needs: changed-files
+    # api_docs is scoped to main pushes: on gated preview branches a code-only
+    # change would otherwise build (and comment) a preview per source PR, while
+    # on main a documented-symbol change must republish the generated API
+    # reference pages or the live site shows the previous code.
     if: |
       always() &&
       github.ref_type != 'tag' &&
-      (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
+      (
+        needs.changed-files.outputs.docs == 'true' ||
+        (github.ref == 'refs/heads/main' && needs.changed-files.outputs.api_docs == 'true') ||
+        github.event_name == 'workflow_dispatch'
+      ) &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
     runs-on: ubuntu-latest
     steps:
@@ -739,15 +752,25 @@ jobs:
       - name: Generate API references at the tag
         # Tags cut after the Python/Rust references became publish-time
         # artifacts carry no committed pages, so the snapshot below must
-        # generate them from the tagged source. Older tags predate the
-        # generators (or still commit their pages); their snapshots sync
-        # whatever the tag holds, so generation is skipped, never failed.
+        # generate them from the tagged source. Two classes of older tag are
+        # left untouched: tags that predate the generators, and tags that
+        # still COMMIT their pages -- a tag freezes its docs, and write-mode
+        # regeneration would overwrite (or via orphan removal, delete) pages
+        # the tag shipped with, while turning a generator error at the old
+        # ref into a hard release failure. Tracked pages are the signal:
+        # generation runs only when the tagged tree commits none.
         run: |
           set -euo pipefail
           gen_py="source-checkout/docs/fern/scripts/gen_python_api.py"
           gen_rs="source-checkout/docs/fern/scripts/gen_rust_api.py"
           if [ ! -f "$gen_py" ] || [ ! -f "$gen_rs" ]; then
             echo "::notice::Tagged tree lacks the API reference generators; snapshotting committed pages as-is"
+            exit 0
+          fi
+          tracked="$(git -C source-checkout ls-files -- \
+            docs/fern/pages/reference/api/python docs/fern/pages/reference/api/rust)"
+          if [ -n "$tracked" ]; then
+            echo "::notice::Tagged tree commits its API reference pages; snapshotting them as-is"
             exit 0
           fi
           python3 -m pip install 'griffe==2.1.0'
