@@ -5,6 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Nemotron-3-Ultra Recipes
 
+<img src="https://hits.sh/github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/README.md.svg" width="0" height="0" />
+
 Recipes for **nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4** — a ~550B hybrid Mamba/Attention/MoE model (~55B active).
 
 We ship Dynamo + vLLM deployment profiles across B200 and H200, with aggregated and disaggregated serving modes.
