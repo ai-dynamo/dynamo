@@ -63,9 +63,22 @@ fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
 }
 
 fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
-    value
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_TOKENIZER_CACHE_BYTES)
+    match value {
+        Some(value) => match value.parse::<usize>() {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    env_var = "DYN_TOKENIZER_CACHE_BYTES",
+                    value,
+                    default = DEFAULT_TOKENIZER_CACHE_BYTES,
+                    %error,
+                    "Failed to parse tokenizer cache byte budget; using default"
+                );
+                DEFAULT_TOKENIZER_CACHE_BYTES
+            }
+        },
+        None => DEFAULT_TOKENIZER_CACHE_BYTES,
+    }
 }
 
 fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
@@ -984,6 +997,28 @@ impl ModelDeploymentCard {
 
     pub fn builder() -> ModelDeploymentCardBuilder {
         ModelDeploymentCardBuilder::default()
+    }
+
+    /// Return this card's explicit worker role, with compatibility for legacy cards.
+    ///
+    /// Before `worker_type` was added, prefill cards used `ModelType::Prefill`; every other
+    /// worker was a full-request worker.
+    pub fn effective_worker_type(&self) -> crate::worker_type::WorkerType {
+        Self::resolve_worker_type(self.worker_type, self.model_type)
+    }
+
+    /// Resolve an explicit or legacy worker role without constructing a model card.
+    pub fn resolve_worker_type(
+        worker_type: Option<crate::worker_type::WorkerType>,
+        model_type: ModelType,
+    ) -> crate::worker_type::WorkerType {
+        worker_type.unwrap_or_else(|| {
+            if model_type.supports_prefill() {
+                crate::worker_type::WorkerType::Prefill
+            } else {
+                crate::worker_type::WorkerType::Aggregated
+            }
+        })
     }
 
     /// Create a ModelDeploymentCard where only the name is filled in.

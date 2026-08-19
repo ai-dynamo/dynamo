@@ -3,7 +3,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash, compute_seq_hash_for_block};
+use crate::protocols::{LocalBlockHash, compute_seq_hash_for_block};
 
 use super::addressing::{CkfAddressing, CkfProbe};
 use super::bucket::{CuckooBucketStore, PackedBucket, TransposedCkfTable};
@@ -14,9 +14,13 @@ use super::search::{
     find_prefix_depths_with_test_trace, fixed_window_prefix_depths, linear_prefix_depths,
     refine_binary_level_with_test_trace,
 };
-use super::{CkfConfig, DC_COUNT};
+use super::{CanonicalSequenceBlockHash, CkfConfig, DC_COUNT};
 
 const TEST_SEED: u64 = 0x1234_5678_9ABC_DEF0;
+
+fn canonical(hash: u64) -> CanonicalSequenceBlockHash {
+    CanonicalSequenceBlockHash::root(LocalBlockHash(hash))
+}
 
 const fn search_trace_event(
     kind: SearchTraceKind,
@@ -155,7 +159,7 @@ fn bounded_relocation_rolls_back_every_write_and_emits_no_dirty_bucket() {
     let mut state = DcWriterState::new(8, 1, TEST_SEED).unwrap();
     let mut dirty = Vec::new();
     let result = CuckooMutator::new(&view, &addressing, 1).insert(
-        ExternalSequenceBlockHash(999),
+        canonical(999),
         &mut state.rng,
         &mut state.scratch,
         |bucket| dirty.push(bucket),
@@ -741,9 +745,7 @@ fn store_remove_churn_drains_every_physical_slot() {
     let view = table.lane(0);
     let addressing = CkfAddressing::new(64, TEST_SEED);
     let mut state = DcWriterState::new(128, 500, TEST_SEED).unwrap();
-    let hashes: Vec<_> = (0..128)
-        .map(|hash| ExternalSequenceBlockHash(10_000 + hash))
-        .collect();
+    let hashes: Vec<_> = (0..128).map(|hash| canonical(10_000 + hash)).collect();
     let mutator = CuckooMutator::new(&view, &addressing, 500);
     for &hash in &hashes {
         mutator
@@ -1343,9 +1345,7 @@ fn fill_study_table(
         }
         while state.resident.len() < target {
             let hash = noise.next();
-            if query_hashes.contains(&hash)
-                || state.resident.contains(&ExternalSequenceBlockHash(hash))
-            {
+            if query_hashes.contains(&hash) || state.resident.contains(&canonical(hash)) {
                 continue;
             }
             insert_study_hash(&view, &addressing, &mut state, hash, max_kicks);
@@ -1367,7 +1367,7 @@ fn insert_study_hash<S: CuckooBucketStore>(
     hash: u64,
     max_kicks: usize,
 ) {
-    let hash = ExternalSequenceBlockHash(hash);
+    let hash = canonical(hash);
     if state.resident.contains(&hash) {
         return;
     }
@@ -1430,8 +1430,8 @@ impl StudyRng {
 fn colliding_hashes(
     addressing: CkfAddressing,
 ) -> (
-    ExternalSequenceBlockHash,
-    ExternalSequenceBlockHash,
+    CanonicalSequenceBlockHash,
+    CanonicalSequenceBlockHash,
     CkfProbe,
 ) {
     let mut seen = FxHashMap::default();
@@ -1439,11 +1439,7 @@ fn colliding_hashes(
         let probe = addressing.prepare(hash);
         let key = (probe.fingerprint, probe.bucket_a, probe.bucket_b);
         if let Some(first) = seen.insert(key, hash) {
-            return (
-                ExternalSequenceBlockHash(first),
-                ExternalSequenceBlockHash(hash),
-                probe,
-            );
+            return (canonical(first), canonical(hash), probe);
         }
     }
     panic!("failed to find deterministic CKF representation collision")
