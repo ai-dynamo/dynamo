@@ -605,8 +605,7 @@ async fn handler_generate(
         .get_generate_engine_for_capability_with_routing(
             &model,
             VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-        )
-    {
+        ) {
         Ok(selection) => selection,
         Err(error) => {
             let (status, error_type) = match error {
