@@ -146,13 +146,12 @@ impl LightseekMmCounter {
 /// - no `ModelProcessorSpec` matches the model (caller should fall back to
 ///   text-prefix routing).
 ///
-/// Standalone wrapper around [`resolve_image_token_id_with_config`]. Prefer
-/// [`resolve_routing_tokens`] when also fetching the chat-template placeholder
-/// or BOS token (one config-parse pass instead of two).
+/// Standalone token-only wrapper. Prefer [`resolve_routing_tokens`] when also
+/// fetching the chat-template placeholder or BOS token (one config-parse pass
+/// instead of two).
 pub fn resolve_image_token_id(model_id: &str, model_dir: &Path) -> Option<TokenIdType> {
     let config = read_json(model_dir, "config.json")?;
-    resolve_model_routing_with_config(model_id, model_dir, &config)
-        .map(|resolved| resolved.token_id)
+    resolve_model_token_with_config(model_id, model_dir, &config).map(|resolved| resolved.token_id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,16 +164,32 @@ pub enum ImagePromptKind {
     KimiK3,
 }
 
-struct ResolvedModelRouting {
-    token_id: TokenIdType,
-    prompt_kind: ImagePromptKind,
+impl LightseekMmCounter {
+    /// Return the exact-routing prompt shape for the processor selected by
+    /// `VisionProcessorRegistry::find`.
+    ///
+    /// This deliberately maps the selected processor family rather than
+    /// repeating its model-id / model-type aliases. New processor families
+    /// fail closed until their worker prompt shape has been verified here.
+    pub fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
+        match self.processor.model_name() {
+            "kimi-k3" => Some(ImagePromptKind::KimiK3),
+            "kimi-k2.5" | "llama4-vision" | "llava" | "llava-next" | "phi3-vision" | "qwen2-vl"
+            | "qwen3-vl" => Some(ImagePromptKind::RepeatedPad),
+            _ => None,
+        }
+    }
 }
 
-fn resolve_model_routing_with_config(
+struct ResolvedModelToken {
+    token_id: TokenIdType,
+}
+
+fn resolve_model_token_with_config(
     model_id: &str,
     model_dir: &Path,
     config: &serde_json::Value,
-) -> Option<ResolvedModelRouting> {
+) -> Option<ResolvedModelToken> {
     // Try the HuggingFace fast tokenizer first; fall back to a no-op
     // tokenizer when `tokenizer.json` is missing (Kimi-K2.5 ships only
     // `tiktoken.model`, for example). Specs that read the placeholder
@@ -228,13 +243,8 @@ fn resolve_model_routing_with_config(
         spec = spec.name(),
         "resolved image-placeholder token id"
     );
-    let prompt_kind = match spec.name() {
-        "kimi_k3" => ImagePromptKind::KimiK3,
-        _ => ImagePromptKind::RepeatedPad,
-    };
-    Some(ResolvedModelRouting {
+    Some(ResolvedModelToken {
         token_id: id as TokenIdType,
-        prompt_kind,
     })
 }
 
@@ -253,9 +263,8 @@ pub struct RoutingTokens {
     /// above. Equals `image_token_id` for most VLMs; Qwen2-VL / Qwen2.5-VL
     /// emit `<|image_pad|>` here while the per-patch id is `<|vision_pad|>`.
     pub chat_placeholder_token_id: Option<TokenIdType>,
-    /// Model-specific shape of the routing-side image prompt. Kimi-K3 is
-    /// identified conservatively from model metadata; other models with a
-    /// valid explicit placeholder retain the historical repeated-pad shape.
+    /// Model-specific shape of the routing-side image prompt, derived from
+    /// the same selected vision processor used for image-token counting.
     pub image_prompt_kind: Option<ImagePromptKind>,
     /// `bos_token` string from `tokenizer_config.json` when
     /// `add_bos_token: true`. Caller encodes via its model tokenizer to
@@ -283,41 +292,31 @@ impl RoutingTokens {
 /// placeholder, and `tokenizer_config.json` once for BOS. Replaces the
 /// in-`preprocessor.rs` `read_image_token_id_from_config` /
 /// `read_bos_token_from_config` helpers so config parsing lives next to
-/// the rest of the MM-routing token resolution.
-pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens {
+/// the rest of the MM-routing token resolution. `counter` is the processor
+/// already selected for image-token counting, so counting and layout
+/// classification share one model-family selection.
+pub fn resolve_routing_tokens(
+    model_id: &str,
+    model_dir: &Path,
+    counter: Option<&LightseekMmCounter>,
+) -> RoutingTokens {
     let config = read_json(model_dir, "config.json");
     let tokenizer_config = read_json(model_dir, "tokenizer_config.json");
 
     let resolved = config
         .as_ref()
-        .and_then(|c| resolve_model_routing_with_config(model_id, model_dir, c));
+        .and_then(|c| resolve_model_token_with_config(model_id, model_dir, c));
     let image_token_id = resolved.as_ref().map(|r| r.token_id);
     let chat_placeholder_token_id = config
         .as_ref()
         .and_then(extract_chat_placeholder_from_config)
         .or(image_token_id);
-    // Kimi-K3 is the only supported family whose routing-side replacement is
-    // not the historical repeated-pad shape. Keep its special classification
-    // conservative, but preserve repeated-pad routing for counter-supported
-    // models whose explicit config placeholder is valid even when the
-    // upstream ModelRegistry has not learned a model_type alias yet (for
-    // example qwen2_5_vl or qwen3_6 behind a generic local model path).
-    let normalized_model_id = model_id.to_ascii_lowercase();
-    let is_kimi_k3 = (normalized_model_id.contains("kimi") && normalized_model_id.contains("k3"))
-        || config
-            .as_ref()
-            .and_then(|c| c.get("model_type"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|model_type| model_type == "kimi_k3");
-    let image_prompt_kind = resolved.as_ref().map(|r| r.prompt_kind).or_else(|| {
-        chat_placeholder_token_id.map(|_| {
-            if is_kimi_k3 {
-                ImagePromptKind::KimiK3
-            } else {
-                ImagePromptKind::RepeatedPad
-            }
-        })
-    });
+    // The counter's selected processor is the family authority for both
+    // token counting and routing layout. The independent ModelRegistry lookup
+    // above remains only a placeholder-token fallback; its alias set cannot
+    // silently disable a layout selected by the vision processor.
+    let image_prompt_kind =
+        chat_placeholder_token_id.and(counter.and_then(LightseekMmCounter::routing_prompt_kind));
     let bos_token_string = tokenizer_config
         .as_ref()
         .and_then(extract_bos_token_from_tokenizer_config);
@@ -339,9 +338,8 @@ pub fn resolve_exact_routing_image_token_id(
 ) -> Option<TokenIdType> {
     let config = read_json(model_dir, "config.json")?;
     let model_type = config.get("model_type").and_then(serde_json::Value::as_str);
-    LightseekMmCounter::try_new(model_id, model_type, model_dir).ok()?;
-
-    resolve_routing_tokens(model_id, model_dir).exact_routing_image_token_id(true)
+    let counter = LightseekMmCounter::try_new(model_id, model_type, model_dir).ok()?;
+    resolve_routing_tokens(model_id, model_dir, Some(&counter)).exact_routing_image_token_id(true)
 }
 
 /// Read + parse a JSON file under `model_dir`. Warns on read or parse
@@ -479,11 +477,23 @@ mod tests {
     }
 
     #[test]
-    fn routing_tokens_classify_kimi_k3_prompt_shape_via_model_registry() {
+    fn routing_tokens_classify_kimi_k3_via_selected_vision_processor() {
         let model_dir = tempfile::tempdir().unwrap();
         write_model_config(model_dir.path(), "kimi_k3");
+        std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+        let counter = LightseekMmCounter::try_new(
+            "/models/internal-checkpoint",
+            Some("kimi_k3"),
+            model_dir.path(),
+        )
+        .unwrap();
 
-        let resolved = resolve_routing_tokens("/models/internal-checkpoint", model_dir.path());
+        assert_eq!(counter.routing_prompt_kind(), Some(ImagePromptKind::KimiK3));
+        let resolved = resolve_routing_tokens(
+            "/models/internal-checkpoint",
+            model_dir.path(),
+            Some(&counter),
+        );
 
         assert_eq!(resolved.image_token_id, Some(163605));
         assert_eq!(resolved.chat_placeholder_token_id, Some(163605));
@@ -494,10 +504,54 @@ mod tests {
     fn routing_tokens_keep_kimi_k2_on_repeated_pad_prompt_shape() {
         let model_dir = tempfile::tempdir().unwrap();
         write_model_config(model_dir.path(), "kimi_k25");
+        std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+        let counter =
+            LightseekMmCounter::try_new("moonshotai/Kimi-K2.6", Some("kimi_k25"), model_dir.path())
+                .unwrap();
 
-        let resolved = resolve_routing_tokens("moonshotai/Kimi-K2.6", model_dir.path());
+        assert_eq!(
+            counter.routing_prompt_kind(),
+            Some(ImagePromptKind::RepeatedPad)
+        );
+        let resolved =
+            resolve_routing_tokens("moonshotai/Kimi-K2.6", model_dir.path(), Some(&counter));
 
         assert_eq!(resolved.image_token_id, Some(163605));
+        assert_eq!(
+            resolved.image_prompt_kind,
+            Some(ImagePromptKind::RepeatedPad)
+        );
+    }
+
+    #[test]
+    fn routing_tokens_keep_phi3_vision_on_repeated_pad_prompt_shape() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("config.json"),
+            serde_json::json!({
+                "model_type": "phi3_v",
+                "image_token_id": 32044
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+        let counter = LightseekMmCounter::try_new(
+            "microsoft/Phi-3-vision-128k-instruct",
+            Some("phi3_v"),
+            model_dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            counter.routing_prompt_kind(),
+            Some(ImagePromptKind::RepeatedPad)
+        );
+        let resolved = resolve_routing_tokens(
+            "microsoft/Phi-3-vision-128k-instruct",
+            model_dir.path(),
+            Some(&counter),
+        );
         assert_eq!(
             resolved.image_prompt_kind,
             Some(ImagePromptKind::RepeatedPad)
@@ -519,9 +573,25 @@ mod tests {
             .unwrap();
             std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
 
-            let resolved = resolve_routing_tokens("/models/vision-model", model_dir.path());
+            let counter = LightseekMmCounter::try_new(
+                "/models/vision-model",
+                Some(model_type),
+                model_dir.path(),
+            )
+            .unwrap();
+            let resolved =
+                resolve_routing_tokens("/models/vision-model", model_dir.path(), Some(&counter));
 
+            assert_eq!(
+                resolved.image_token_id, None,
+                "{model_type} should reproduce the independent ModelRegistry alias gap"
+            );
             assert_eq!(resolved.chat_placeholder_token_id, Some(151655));
+            assert_eq!(
+                counter.routing_prompt_kind(),
+                Some(ImagePromptKind::RepeatedPad),
+                "{model_type} counter selection should also choose its routing layout"
+            );
             assert_eq!(
                 resolved.image_prompt_kind,
                 Some(ImagePromptKind::RepeatedPad),

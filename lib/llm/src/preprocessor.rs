@@ -1655,8 +1655,11 @@ impl OpenAIPreprocessor {
                     // One-shot config/tokenizer_config read for all
                     // routing-side token info. Parsing lives next to the
                     // spec resolution in the MM-routing module.
-                    let routing_tokens =
-                        lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
+                    let routing_tokens = lightseek_mm::resolve_routing_tokens(
+                        &model_id,
+                        &model_dir,
+                        counter.as_ref(),
+                    );
                     let prompt_layout =
                             routing_tokens.image_prompt_kind.and_then(|kind| {
                                 match resolve_routing_image_prompt_layout(tokenizer.as_ref(), kind) {
