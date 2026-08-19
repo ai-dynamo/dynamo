@@ -17,6 +17,7 @@ use crate::{
         scheduler::DefaultWorkerSelector,
     },
     local_model::runtime_config::ModelRuntimeConfig,
+    lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -24,6 +25,27 @@ use crate::{
         timing::{RequestPhase, RequestTracker},
     },
 };
+
+pub(super) struct LoraLoadGuard {
+    estimator: Arc<LoadEstimator>,
+    lora_name: String,
+}
+
+impl LoraLoadGuard {
+    pub(super) fn new(estimator: Arc<LoadEstimator>, lora_name: String) -> Self {
+        estimator.increment_load(&lora_name);
+        Self {
+            estimator,
+            lora_name,
+        }
+    }
+}
+
+impl Drop for LoraLoadGuard {
+    fn drop(&mut self) {
+        self.estimator.decrement_load(&self.lora_name);
+    }
+}
 
 /// Owns scheduler cleanup after a worker is selected.
 ///
@@ -354,6 +376,7 @@ where
     record_itl_at_completion: bool,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
+    _lora_load: Option<LoraLoadGuard>,
 }
 
 impl<Sel> RequestGuard<Sel>
@@ -399,6 +422,7 @@ where
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            _lora_load: None,
         }
     }
 
@@ -406,6 +430,7 @@ where
         request_metrics: Arc<RouterRequestMetrics>,
         worker_id: u64,
         load_reservation: Option<RoutingLoadReservation>,
+        lora_load: Option<LoraLoadGuard>,
         request: &PreprocessedRequest,
     ) -> Self {
         let (track_output_blocks, block_size) = load_reservation
@@ -433,6 +458,7 @@ where
             record_itl_at_completion: !track_output_blocks,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            _lora_load: lora_load,
         }
     }
 
