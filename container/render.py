@@ -15,6 +15,8 @@ _PYTHON_PACKAGE_DOWNLOAD_RE = re.compile(
     r"\buv\s+(?:build|lock|sync|pip\s+(?:compile|install|sync))\b"
     r"|(?:^|[\s;&|])(?:\S*/)?pip3?\s+(?:install|wheel)\b"
     r"|(?:^|[\s;&|])(?:\S*/)?python3?(?:\.\d+)?\s+-m\s+pip\s+(?:install|wheel)\b"
+    # vLLM Omni installs packages inside this mounted script.
+    r"|(?:^|[\s;&|])bash\s+/tmp/install_vllm_omni\.sh\b"
     # NIXL's Meson build resolves Python build dependencies through uv.
     r"|github\.com/ai-dynamo/nixl\.git",
     re.MULTILINE,
@@ -211,7 +213,7 @@ def _inject_python_index_mounts(dockerfile: str) -> str:
             continue
 
         instructions[index] = re.sub(
-            r"^RUN (?P<mounts>(?:--mount=[^\n]*\\\n[ \t]+)*)",
+            r"^RUN (?P<mounts>(?:(?:--mount=[^\n]*\\|#[^\n]*)\n[ \t]+)*)",
             lambda match: _PYPI_RUN_PREFIX + match.group("mounts") + _PYPI_ENV,
             instruction,
             count=1,
