@@ -8,9 +8,9 @@
 //! multiplex these per-slot agents on one DRT without coupling their durable
 //! identity to its connection ID.
 //!
-//! Cross-incarnation KVCC continuity is not implemented by this foundation.
+//! Cross-incarnation KVCR continuity is not implemented by this foundation.
 //! CacheOwner routing is advisory: live sequence gaps are reported but do not
-//! claim that every committed KVCC residency transition reached this agent.
+//! claim that every committed KVCR residency transition reached this agent.
 //!
 //! CacheOwner events bypass Worker refcount bookkeeping because KVCR guarantees
 //! at most one logical residency per (CacheOwner, tier, block hash). This avoids
@@ -18,7 +18,7 @@
 //! out-of-order delivery replay-convergent. Missing a committed transition is
 //! not recoverable from the live stream alone.
 //!
-//! TODO(#13044): require replacement KVCC/vLLM ingress to provide at-least-once
+//! TODO(#13044): require replacement KVCR/vLLM ingress to provide at-least-once
 //! delivery across the incarnation boundary using an overlapping journal suffix
 //! followed atomically by live events. The later authoritative mode must keep
 //! CacheOwner unready after a detected gap or replay-window miss until a fuller
@@ -71,7 +71,7 @@ use crate::{
 use super::{
     DEFAULT_MAX_BATCH_BLOCKS,
     batching::PlacementEventCoalescer,
-    dedup::EventDedupFilter,
+    dedup::{EventDedupFilter, EventDedupPolicy},
     sinks::{EventPlanePublisher, RouterEventBatchSink, admit_local_event},
     zmq_listener::{DecodedZmqKvBatch, decode_zmq_kv_batch},
 };
@@ -386,7 +386,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         attachment.ready_at_outbound_cursor = barrier_cursor;
         self.ingress_generation = Some(attachment.generation);
         attachment.ready = true;
-        // NOTE: Resetting this per-attachment cursor does not prove KVCC continuity.
+        // NOTE: Resetting this per-attachment cursor does not prove KVCR continuity.
         // CacheOwner remains advisory in this foundation. Future authoritative
         // reattachment must prove at-least-once cross-incarnation delivery before
         // CacheOwner becomes ready.
@@ -635,6 +635,11 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
 
         for placement_event in coalesced {
             let domain = placement_event.placement.residency_domain;
+            let dedup_policy = match domain {
+                ResidencyDomain::Worker => EventDedupPolicy::RefCounted,
+                // This state agent creates CacheOwner events only from KVCR ownership.
+                ResidencyDomain::CacheOwner => EventDedupPolicy::SetLike,
+            };
             let mut event = placement_event.event;
             if event.dp_rank != self.slot_dp_rank {
                 self.fail_source(
@@ -653,21 +658,30 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             let tier = placement_event.placement.tier;
             event.data = match event.data {
                 KvCacheEventData::Removed(data) => {
-                    let Some(filtered) =
-                        self.dedup
-                            .filter_remove_in_domain(event.dp_rank, tier, domain, data)
-                    else {
+                    let Some(filtered) = self.dedup.filter_remove_in_domain(
+                        event.dp_rank,
+                        tier,
+                        domain,
+                        dedup_policy,
+                        data,
+                    ) else {
                         continue;
                     };
                     KvCacheEventData::Removed(filtered)
                 }
                 KvCacheEventData::Stored(data) => {
-                    self.dedup
-                        .track_store_in_domain(event.dp_rank, tier, domain, &data);
+                    self.dedup.track_store_in_domain(
+                        event.dp_rank,
+                        tier,
+                        domain,
+                        dedup_policy,
+                        &data,
+                    );
                     KvCacheEventData::Stored(data)
                 }
                 KvCacheEventData::Cleared => {
-                    self.dedup.clear_rank_domain(event.dp_rank, domain);
+                    self.dedup
+                        .clear_rank_domain(event.dp_rank, domain, dedup_policy);
                     KvCacheEventData::Cleared
                 }
             };
@@ -2304,21 +2318,6 @@ mod tests {
             vec![
                 serde_json::json!({
                     "type": "BlockStored",
-                    "block_hashes": [107],
-                    "parent_block_hash": null,
-                    "token_ids": [30, 31, 32, 33],
-                    "block_size": 4,
-                    "medium": "KVCC_G2",
-                    "locality": "LOCAL"
-                }),
-                serde_json::json!({
-                    "type": "BlockRemoved",
-                    "block_hashes": [107],
-                    "medium": "KVCC_G3",
-                    "locality": "LOCAL"
-                }),
-                serde_json::json!({
-                    "type": "BlockStored",
                     "block_hashes": [108],
                     "parent_block_hash": null,
                     "token_ids": [34, 35, 36, 37],
@@ -2359,8 +2358,6 @@ mod tests {
                 ResidencyDomain::CacheOwner,
             ]
         );
-        assert!(StorageTier::from_kv_medium("KVCC_G2").is_none());
-        assert!(StorageTier::from_kv_medium("KVCC_G3").is_none());
     }
 
     fn send_ingress(

@@ -197,15 +197,6 @@ impl RawKvEvent {
         }
     }
 
-    pub fn set_medium(&mut self, canonical_medium: Option<&str>) {
-        match self {
-            Self::BlockStored { medium, .. } | Self::BlockRemoved { medium, .. } => {
-                *medium = canonical_medium.map(str::to_string);
-            }
-            Self::AllBlocksCleared { .. } | Self::Ignored => {}
-        }
-    }
-
     pub fn block_size(&self) -> Option<usize> {
         match self {
             Self::BlockStored { block_size, .. } => Some(*block_size),

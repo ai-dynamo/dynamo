@@ -1925,7 +1925,7 @@ mod test_event_dedup_filter {
     }
 
     #[test]
-    fn cache_owner_stores_do_not_refcount_removes() {
+    fn cache_owner_policy_controls_refcounting() {
         let mut filter = EventDedupFilter::new();
         let data = store_data(&[1, 2, 3]);
 
@@ -1933,12 +1933,14 @@ mod test_event_dedup_filter {
             0,
             StorageTier::HostPinned,
             ResidencyDomain::CacheOwner,
+            EventDedupPolicy::SetLike,
             &data,
         );
         filter.track_store_in_domain(
             0,
             StorageTier::HostPinned,
             ResidencyDomain::CacheOwner,
+            EventDedupPolicy::SetLike,
             &data,
         );
 
@@ -1947,6 +1949,7 @@ mod test_event_dedup_filter {
                 0,
                 StorageTier::HostPinned,
                 ResidencyDomain::CacheOwner,
+                EventDedupPolicy::SetLike,
                 remove_data(&[1, 2, 3]),
             )
             .expect("CacheOwner removes bypass Worker refcounting");
@@ -1964,9 +1967,45 @@ mod test_event_dedup_filter {
                     0,
                     StorageTier::HostPinned,
                     ResidencyDomain::CacheOwner,
+                    EventDedupPolicy::SetLike,
                     remove_data(&[]),
                 )
                 .is_none()
+        );
+
+        let mut refcounted = EventDedupFilter::new();
+        for _ in 0..2 {
+            refcounted.track_store_in_domain(
+                0,
+                StorageTier::HostPinned,
+                ResidencyDomain::CacheOwner,
+                EventDedupPolicy::RefCounted,
+                &data,
+            );
+        }
+        assert!(
+            refcounted
+                .filter_remove_in_domain(
+                    0,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::CacheOwner,
+                    EventDedupPolicy::RefCounted,
+                    remove_data(&[1, 2, 3]),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            refcounted
+                .filter_remove_in_domain(
+                    0,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::CacheOwner,
+                    EventDedupPolicy::RefCounted,
+                    remove_data(&[1, 2, 3]),
+                )
+                .expect("refcounted CacheOwner removes pass only at zero")
+                .block_hashes,
+            result.block_hashes
         );
     }
 

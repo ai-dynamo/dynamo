@@ -53,7 +53,7 @@ fn test_deserialize_bigram_block_stored_sequence() {
 }
 
 #[test]
-fn ownership_is_additive_on_positional_events() {
+fn decodes_ownership_on_positional_events() {
     let stored = (
         "BlockStored",
         vec![BlockHashValue::Unsigned(11)],
@@ -128,7 +128,7 @@ struct MapBlockRemovedFixture {
 }
 
 #[test]
-fn ownership_is_additive_on_named_map_events() {
+fn decodes_ownership_on_named_map_events() {
     let encoded = to_vec_named(&MapBlockStoredFixture {
         medium: Some("CPU_PINNED".to_string()),
         locality: Some("LOCAL"),

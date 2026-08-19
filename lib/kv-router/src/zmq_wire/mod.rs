@@ -144,7 +144,7 @@ impl ZmqEventNormalizer {
     }
 
     /// Normalize a version-gated state-agent stream which may contain both
-    /// framework and vLLM-enriched KVCC transitions.
+    /// framework and vLLM-enriched KVCR transitions.
     pub fn preprocess_residency_with_reason(
         &mut self,
         mut raw: RawKvEvent,
