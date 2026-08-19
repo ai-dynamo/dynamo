@@ -21,7 +21,7 @@ jobs:
   # SETUP & DETECTION JOBS
   # ============================================================================
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: prod-default-small-v2
     outputs:
       core: ${{ steps.changes.outputs.core }}
       dev_images: ${{ steps.changes.outputs.dev_images }}
@@ -121,7 +121,7 @@ jobs:
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
   backend-status-check:
-    runs-on: ubuntu-latest
+    runs-on: prod-default-small-v2
     needs:
       - changed-files
       - operator
@@ -165,7 +165,7 @@ jobs:
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   deploy-status-check:
-    runs-on: ubuntu-latest
+    runs-on: prod-default-small-v2
     needs:
       - changed-files
       - deploy-operator
@@ -271,7 +271,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
     name: Helm Chart Tests
-    runs-on: ubuntu-latest
+    runs-on: prod-default-small-v2
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
