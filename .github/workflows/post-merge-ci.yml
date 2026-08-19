@@ -866,6 +866,8 @@ jobs:
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
       with:
+        # Sole writer of this vCluster name; every other caller recovers into it.
+        reset_existing: 'true'
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
         repository: ${{ vars.ACR_REPOSITORY }}
         operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
@@ -946,6 +948,8 @@ jobs:
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
       with:
+        # Sole writer of this vCluster name; every other caller recovers into it.
+        reset_existing: 'true'
         vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
         vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -974,6 +978,8 @@ jobs:
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
       with:
+        # Sole writer of this vCluster name; every other caller recovers into it.
+        reset_existing: 'true'
         vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
         vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1002,6 +1008,8 @@ jobs:
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
       with:
+        # Sole writer of this vCluster name; every other caller recovers into it.
+        reset_existing: 'true'
         vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
         vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-trtllm-dt
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
