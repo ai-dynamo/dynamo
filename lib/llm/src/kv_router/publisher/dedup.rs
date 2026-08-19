@@ -8,15 +8,16 @@ use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, ResidencyDomain, StorageTier,
 };
 
-/// Reference-counting filter that deduplicates KV cache events.
+/// Reference-counting filter for framework-owned KV cache events.
 ///
 /// vLLM can emit multiple store/remove events for the same block hash.
 /// Refcounts are tracked **per DP rank** because identical block hashes
 /// on different ranks represent independent blocks.
 ///
-/// - **Store**: always passes through; increments refcount for the rank.
-/// - **Remove**: only passes through when refcount decrements to 0.
-/// - **Cleared**: resets refcounts for the emitting rank and domain across storage tiers.
+/// Worker Stores increment a refcount and Worker Removes pass only when it
+/// reaches zero. CacheOwner events bypass bookkeeping because KVCR guarantees
+/// at most one logical residency per (CacheOwner, storage tier, block hash).
+/// Clears reset Worker refcounts for the emitting rank across storage tiers.
 pub(super) struct EventDedupFilter {
     /// Per-(dp_rank, storage_tier, residency_domain) refcounts.
     per_rank_tier:
@@ -40,6 +41,9 @@ impl EventDedupFilter {
         residency_domain: ResidencyDomain,
         data: &KvCacheStoreData,
     ) {
+        if residency_domain == ResidencyDomain::CacheOwner {
+            return;
+        }
         let refcounts = self
             .per_rank_tier
             .entry((dp_rank, storage_tier, residency_domain))
@@ -59,6 +63,9 @@ impl EventDedupFilter {
         residency_domain: ResidencyDomain,
         mut data: KvCacheRemoveData,
     ) -> Option<KvCacheRemoveData> {
+        if residency_domain == ResidencyDomain::CacheOwner {
+            return Some(data);
+        }
         let refcounts = self
             .per_rank_tier
             .entry((dp_rank, storage_tier, residency_domain))
@@ -88,6 +95,9 @@ impl EventDedupFilter {
 
     /// Clear refcounts for one DP rank and residency domain across storage tiers.
     pub(super) fn clear_rank_domain(&mut self, dp_rank: u32, domain: ResidencyDomain) {
+        if domain == ResidencyDomain::CacheOwner {
+            return;
+        }
         self.per_rank_tier
             .retain(|(tracked_dp_rank, _, tracked_domain), _| {
                 *tracked_dp_rank != dp_rank || *tracked_domain != domain

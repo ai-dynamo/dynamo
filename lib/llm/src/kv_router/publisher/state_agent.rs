@@ -12,10 +12,11 @@
 //! CacheOwner routing is advisory: live sequence gaps are reported but do not
 //! claim that every committed KVCC residency transition reached this agent.
 //!
-//! Duplicate delivery is recoverable: router ownership mutations are
-//! replay-convergent, and the future replay path will deduplicate stable KVCC
-//! journal cursors before publisher-side refcount bookkeeping. Missing a
-//! committed transition is not recoverable from the live stream alone.
+//! CacheOwner events bypass Worker refcount bookkeeping because KVCR guarantees
+//! at most one logical residency per (CacheOwner, tier, block hash). This avoids
+//! amplifying replayed Stores, but does not make arbitrary duplicate Removes or
+//! out-of-order delivery replay-convergent. Missing a committed transition is
+//! not recoverable from the live stream alone.
 //!
 //! TODO(#13044): require replacement KVCC/vLLM ingress to provide at-least-once
 //! delivery across the incarnation boundary using an overlapping journal suffix
@@ -41,7 +42,7 @@ use dynamo_kv_router::{
         KvCacheEvent, KvCacheEventData, PlacementEvent, ResidencyDomain, ResidencyOwner,
         RouterEvent, StorageTier, WorkerWithDpRank,
     },
-    zmq_wire::{KvEventSourceKind, ZmqEventNormalizer},
+    zmq_wire::{KvEventOwnership, ZmqEventNormalizer},
 };
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},
@@ -1793,94 +1794,79 @@ fn normalize_raw_batch(
     framework_normalizer: &mut ZmqEventNormalizer,
     cache_owner_normalizer: &mut ZmqEventNormalizer,
 ) -> NormalizedRawBatch {
-    // KVCC is the placement authority. vLLM only enriches committed KVCC
+    // KVCR is the placement authority. vLLM only enriches committed KVCR
     // transitions with canonical routing metadata and serializes them on this
     // versioned stream. Any failure on that path quarantines CacheOwner below;
-    // silently omitting a KVCC transition would make retained ownership lie.
+    // silently omitting a KVCR transition would make retained ownership lie.
     let mut events = Vec::with_capacity(raw_events.len().min(MAX_INGRESS_EVENTS));
     let mut source_fault = None;
     let mut cache_owner_fault = None;
-    for mut raw_event in raw_events {
-        let custom_tier = match raw_event.medium() {
-            Some("KVCC_G2") => Some(StorageTier::HostPinned),
-            Some("KVCC_G3") => Some(StorageTier::Disk),
-            _ => None,
-        };
-        let source_kind = match (raw_event.source_kind_wire(), custom_tier) {
-            (None, Some(tier)) | (Some("kvcc"), Some(tier)) => {
-                raw_event.set_medium(tier.to_kv_medium());
-                KvEventSourceKind::Kvcc
-            }
-            (Some("framework"), Some(_)) => {
-                cache_owner_fault
-                    .get_or_insert("framework attribution contradicts KVCC storage medium");
-                continue;
-            }
-            (None | Some("framework"), None) => KvEventSourceKind::Framework,
-            (Some("kvcc"), None) => {
-                if !matches!(
-                    raw_event.medium(),
-                    Some("CPU" | "CPU_PINNED" | "STORAGE" | "DISK")
-                ) && !matches!(
-                    raw_event,
-                    dynamo_kv_router::zmq_wire::RawKvEvent::AllBlocksCleared { .. }
-                ) {
-                    cache_owner_fault
-                        .get_or_insert("KVCC attribution has an unsupported storage medium");
-                    continue;
-                }
-                KvEventSourceKind::Kvcc
-            }
-            (Some(_), _) => {
-                source_fault.get_or_insert("unknown raw source kind");
+    for raw_event in raw_events {
+        let ownership = match raw_event.ownership() {
+            Ok(ownership) => ownership,
+            Err(_) => {
+                source_fault.get_or_insert("unknown raw event ownership");
                 continue;
             }
         };
-        if source_kind == KvEventSourceKind::Kvcc
+        if ownership == KvEventOwnership::Kvcr
             && ingress_protocol != KvStateIngressProtocol::VllmResidencyV1
         {
-            source_fault.get_or_insert("KVCC event on framework-only raw protocol");
+            source_fault.get_or_insert("KVCR event on framework-only raw protocol");
             continue;
         }
-        if source_kind == KvEventSourceKind::Kvcc
+        if ownership == KvEventOwnership::Kvcr
+            && !matches!(
+                raw_event.medium(),
+                Some("CPU" | "CPU_PINNED" | "STORAGE" | "DISK")
+            )
+            && !matches!(
+                raw_event,
+                dynamo_kv_router::zmq_wire::RawKvEvent::AllBlocksCleared { .. }
+            )
+        {
+            cache_owner_fault.get_or_insert("KVCR ownership has an unsupported storage medium");
+            continue;
+        }
+        if ownership == KvEventOwnership::Kvcr
             && raw_event
                 .block_size()
                 .is_some_and(|size| size != kv_block_size as usize)
         {
-            cache_owner_fault.get_or_insert("KVCC block size is incompatible");
+            cache_owner_fault.get_or_insert("KVCR block size is incompatible");
             continue;
         }
 
-        let normalizer = match source_kind {
-            KvEventSourceKind::Framework => &mut *framework_normalizer,
-            KvEventSourceKind::Kvcc => &mut *cache_owner_normalizer,
+        let normalizer = match ownership {
+            KvEventOwnership::Framework => &mut *framework_normalizer,
+            KvEventOwnership::Kvcr => &mut *cache_owner_normalizer,
         };
         let raw_event = match normalizer.preprocess_residency_with_reason(raw_event, worker) {
             Ok(raw_event) => raw_event,
-            Err(reason) if source_kind == KvEventSourceKind::Kvcc => {
-                tracing::warn!(?reason, "KVCC event enrichment failed");
-                cache_owner_fault.get_or_insert("KVCC event enrichment failed");
+            Err(reason) if ownership == KvEventOwnership::Kvcr => {
+                tracing::warn!(?reason, "KVCR event enrichment failed");
+                cache_owner_fault.get_or_insert("KVCR event enrichment failed");
                 continue;
             }
             Err(_) => continue,
         };
         let Some(mut event) = normalizer.normalize_preprocessed(raw_event, 0, worker) else {
-            if source_kind == KvEventSourceKind::Kvcc {
-                cache_owner_fault.get_or_insert("KVCC event canonicalization failed");
+            if ownership == KvEventOwnership::Kvcr {
+                cache_owner_fault.get_or_insert("KVCR event canonicalization failed");
             }
             continue;
         };
-        match source_kind {
-            KvEventSourceKind::Framework => {
+        match ownership {
+            KvEventOwnership::Framework => {
                 event.placement.residency_domain = ResidencyDomain::Worker;
             }
-            KvEventSourceKind::Kvcc => {
+            KvEventOwnership::Kvcr => {
                 if !matches!(
                     (&event.event.data, event.placement.tier),
                     (KvCacheEventData::Cleared, _)
                         | (_, StorageTier::HostPinned | StorageTier::Disk)
                 ) {
-                    cache_owner_fault.get_or_insert("unsupported KVCC storage medium");
+                    cache_owner_fault.get_or_insert("unsupported KVCR storage medium");
                     continue;
                 }
                 event.placement.residency_domain = ResidencyDomain::CacheOwner;
@@ -2047,7 +2033,7 @@ mod tests {
         )
     }
 
-    fn raw_store(medium: Option<&str>, source_kind: Option<&str>, block: u64) -> RawKvEvent {
+    fn raw_store(medium: Option<&str>, ownership: Option<&str>, block: u64) -> RawKvEvent {
         RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(block)],
             parent_block_hash: None,
@@ -2062,23 +2048,23 @@ mod tests {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality: None,
-            source_kind: source_kind.map(str::to_owned),
+            ownership: ownership.map(str::to_owned),
         }
     }
 
     #[test]
-    fn raw_source_kind_maps_owners_and_quarantines_unsupported_kvcc() {
+    fn raw_ownership_maps_domains_and_quarantines_unsupported_kvcr() {
         let worker = WorkerWithDpRank::new(17, 3);
         let mut framework = ZmqEventNormalizer::new(4);
         let mut cache_owner = ZmqEventNormalizer::new(4);
         let normalized = normalize_raw_batch(
             vec![
                 raw_store(None, None, 101),
-                raw_store(Some("CPU"), Some("framework"), 102),
-                raw_store(Some("CPU_PINNED"), Some("kvcc"), 103),
-                raw_store(Some("STORAGE"), Some("kvcc"), 104),
+                raw_store(Some("CPU"), None, 102),
+                raw_store(Some("CPU_PINNED"), Some("kvcr"), 103),
+                raw_store(Some("STORAGE"), Some("kvcr"), 104),
                 RawKvEvent::AllBlocksCleared {
-                    source_kind: Some("kvcc".to_string()),
+                    ownership: Some("kvcr".to_string()),
                 },
             ],
             worker,
@@ -2106,7 +2092,7 @@ mod tests {
 
         let normalized = normalize_raw_batch(
             vec![
-                raw_store(Some("GPU"), Some("kvcc"), 105),
+                raw_store(Some("GPU"), Some("kvcr"), 105),
                 raw_store(None, None, 106),
             ],
             worker,
@@ -2117,7 +2103,7 @@ mod tests {
         );
         assert_eq!(
             normalized.cache_owner_fault,
-            Some("KVCC attribution has an unsupported storage medium")
+            Some("KVCR ownership has an unsupported storage medium")
         );
         assert_eq!(normalized.source_fault, None);
         assert_eq!(normalized.events.len(), 1);
@@ -2128,24 +2114,24 @@ mod tests {
 
         assert_eq!(
             ZmqEventNormalizer::new(4)
-                .preprocess_with_reason(raw_store(Some("CPU"), Some("kvcc"), 107), worker)
+                .preprocess_with_reason(raw_store(Some("CPU"), Some("kvcr"), 107), worker)
                 .unwrap_err(),
-            dynamo_kv_router::zmq_wire::ZmqEventFilterReason::UnsupportedSourceKind
+            dynamo_kv_router::zmq_wire::ZmqEventFilterReason::UnsupportedOwnership
         );
 
         let normalized = normalize_raw_batch(
-            vec![raw_store(Some("CPU"), Some("future_source"), 108)],
+            vec![raw_store(Some("CPU"), Some("future_owner"), 108)],
             worker,
             4,
             KvStateIngressProtocol::VllmResidencyV1,
             &mut framework,
             &mut cache_owner,
         );
-        assert_eq!(normalized.source_fault, Some("unknown raw source kind"));
+        assert_eq!(normalized.source_fault, Some("unknown raw event ownership"));
     }
 
     #[tokio::test]
-    async fn production_named_map_custom_media_reaches_exact_local_recovery_owners() {
+    async fn production_named_map_ownership_reaches_exact_local_recovery_owners() {
         let wire = (
             1.0f64,
             vec![
@@ -2155,8 +2141,9 @@ mod tests {
                     "parent_block_hash": null,
                     "token_ids": [10, 11, 12, 13],
                     "block_size": 4,
-                    "medium": "KVCC_G2",
-                    "locality": "LOCAL"
+                    "medium": "CPU_PINNED",
+                    "locality": "LOCAL",
+                    "ownership": "kvcr"
                 }),
                 serde_json::json!({
                     "type": "BlockStored",
@@ -2164,14 +2151,16 @@ mod tests {
                     "parent_block_hash": 101,
                     "token_ids": [14, 15, 16, 17, 18, 19, 20, 21],
                     "block_size": 4,
-                    "medium": "KVCC_G3",
-                    "locality": "LOCAL"
+                    "medium": "STORAGE",
+                    "locality": "LOCAL",
+                    "ownership": "kvcr"
                 }),
                 serde_json::json!({
                     "type": "BlockRemoved",
                     "block_hashes": [102],
-                    "medium": "KVCC_G3",
-                    "locality": "LOCAL"
+                    "medium": "STORAGE",
+                    "locality": "LOCAL",
+                    "ownership": "kvcr"
                 }),
                 serde_json::json!({
                     "type": "BlockStored",
@@ -2179,14 +2168,16 @@ mod tests {
                     "parent_block_hash": null,
                     "token_ids": [22, 23, 24, 25],
                     "block_size": 4,
-                    "medium": "KVCC_G2",
-                    "locality": "LOCAL"
+                    "medium": "CPU_PINNED",
+                    "locality": "LOCAL",
+                    "ownership": "kvcr"
                 }),
                 serde_json::json!({
                     "type": "BlockRemoved",
                     "block_hashes": [101],
-                    "medium": "KVCC_G2",
-                    "locality": "LOCAL"
+                    "medium": "CPU_PINNED",
+                    "locality": "LOCAL",
+                    "ownership": "kvcr"
                 }),
                 serde_json::json!({
                     "type": "BlockStored",
@@ -2318,8 +2309,13 @@ mod tests {
                     "token_ids": [30, 31, 32, 33],
                     "block_size": 4,
                     "medium": "KVCC_G2",
-                    "locality": "LOCAL",
-                    "source_kind": "framework"
+                    "locality": "LOCAL"
+                }),
+                serde_json::json!({
+                    "type": "BlockRemoved",
+                    "block_hashes": [107],
+                    "medium": "KVCC_G3",
+                    "locality": "LOCAL"
                 }),
                 serde_json::json!({
                     "type": "BlockStored",
@@ -2334,7 +2330,7 @@ mod tests {
                 }),
                 serde_json::json!({
                     "type": "AllBlocksCleared",
-                    "source_kind": "kvcc"
+                    "ownership": "kvcr"
                 }),
             ],
             Some(3i32),
@@ -2349,10 +2345,8 @@ mod tests {
             &mut framework,
             &mut cache_owner,
         );
-        assert_eq!(
-            normalized.cache_owner_fault,
-            Some("framework attribution contradicts KVCC storage medium")
-        );
+        assert_eq!(normalized.source_fault, None);
+        assert_eq!(normalized.cache_owner_fault, None);
         assert_eq!(
             normalized
                 .events

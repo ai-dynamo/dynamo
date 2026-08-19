@@ -67,30 +67,23 @@ pub enum Locality {
     Unknown,
 }
 
-/// Semantic producer of one vLLM-enriched placement event.
+/// Ownership domain of one vLLM-enriched placement event.
 ///
 /// Missing on the wire is deliberately interpreted as `Framework`; an
 /// explicit unrecognized value remains distinguishable at the state-agent
 /// boundary so CacheOwner routing can fail closed without failing the batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KvEventSourceKind {
+pub enum KvEventOwnership {
     Framework,
-    Kvcc,
+    Kvcr,
 }
 
-impl KvEventSourceKind {
+impl KvEventOwnership {
     pub fn from_wire(value: Option<&str>) -> Result<Self, &str> {
         match value {
-            None | Some("framework") => Ok(Self::Framework),
-            Some("kvcc") => Ok(Self::Kvcc),
+            None => Ok(Self::Framework),
+            Some("kvcr") => Ok(Self::Kvcr),
             Some(unknown) => Err(unknown),
-        }
-    }
-
-    pub fn as_wire(self) -> &'static str {
-        match self {
-            Self::Framework => "framework",
-            Self::Kvcc => "kvcc",
         }
     }
 }
@@ -132,7 +125,7 @@ pub enum RawKvEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         locality: Option<Locality>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        source_kind: Option<String>,
+        ownership: Option<String>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
@@ -147,11 +140,11 @@ pub enum RawKvEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         locality: Option<Locality>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        source_kind: Option<String>,
+        ownership: Option<String>,
     },
     AllBlocksCleared {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        source_kind: Option<String>,
+        ownership: Option<String>,
     },
     Ignored,
 }
@@ -191,15 +184,15 @@ impl RawKvEvent {
         }
     }
 
-    pub fn source_kind(&self) -> Result<KvEventSourceKind, &str> {
-        KvEventSourceKind::from_wire(self.source_kind_wire())
+    pub fn ownership(&self) -> Result<KvEventOwnership, &str> {
+        KvEventOwnership::from_wire(self.ownership_wire())
     }
 
-    pub fn source_kind_wire(&self) -> Option<&str> {
+    pub fn ownership_wire(&self) -> Option<&str> {
         match self {
-            Self::BlockStored { source_kind, .. }
-            | Self::BlockRemoved { source_kind, .. }
-            | Self::AllBlocksCleared { source_kind } => source_kind.as_deref(),
+            Self::BlockStored { ownership, .. }
+            | Self::BlockRemoved { ownership, .. }
+            | Self::AllBlocksCleared { ownership } => ownership.as_deref(),
             Self::Ignored => None,
         }
     }
