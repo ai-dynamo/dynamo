@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Send the same OpenAI request to either implementation."""
+"""Send the same OpenAI request to any implementation."""
 
 import argparse
 import asyncio

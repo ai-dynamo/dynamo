@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Transport-neutral stage behavior shared by both implementations."""
+"""Transport-neutral stage behavior shared by all implementations."""
 
 from collections.abc import Mapping
 from typing import Any
