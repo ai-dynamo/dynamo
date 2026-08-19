@@ -18,8 +18,8 @@ use crate::{
     },
     protocols::{EndpointId, maybe_error::MaybeError},
     routing_policy::{
-        BuiltinRoutingPolicy, BuiltinWorkerPicker, BuiltinWorkerReservation, CandidateView,
-        RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy, RouteTarget,
+        CandidateView, RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy,
+        RouteTarget,
     },
     traits::DistributedRuntimeProvider,
 };
@@ -76,27 +76,6 @@ struct OccupancyPermit {
     instance_id: u64,
     counter: Arc<AtomicU64>,
     armed: bool,
-}
-
-enum RoutingPermit {
-    Occupancy(OccupancyPermit),
-    Builtin(BuiltinWorkerReservation),
-}
-
-impl RoutingPermit {
-    fn retarget(&mut self, instance_id: u64) {
-        match self {
-            Self::Occupancy(permit) => permit.retarget(instance_id),
-            Self::Builtin(permit) => permit.retarget(instance_id),
-        }
-    }
-
-    fn into_tracked_stream<U: Data + MaybeError>(self, stream: ManyOut<U>) -> ManyOut<U> {
-        match self {
-            Self::Occupancy(permit) => permit.into_tracked_stream(stream),
-            Self::Builtin(permit) => permit.into_tracked_stream(stream),
-        }
-    }
 }
 
 impl OccupancyPermit {
@@ -186,11 +165,8 @@ where
     /// dynamo-llm's KV Routing does this.
     router_mode: RouterMode,
 
-    /// Device-aware policy state. Builtin cache-free modes use `builtin_picker`.
+    /// Shared, scheduler-independent policy state. KV and Direct have no picker.
     picker: Option<Arc<RoutePicker>>,
-
-    /// Cache-free builtin policy state owned by this router/host partition.
-    builtin_picker: Option<Arc<BuiltinWorkerPicker>>,
 
     /// Policy-specific state for callers that explicitly request static routing,
     /// independently of the router's configured generate mode.
@@ -267,20 +243,12 @@ impl RouterMode {
 
     fn route_policy(self) -> Option<RoutePolicy> {
         match self {
+            Self::RoundRobin => Some(RoutePolicy::RoundRobin),
+            Self::Random => Some(RoutePolicy::Random),
+            Self::PowerOfTwoChoices => Some(RoutePolicy::PowerOfTwoChoices),
             Self::LeastLoaded => Some(RoutePolicy::LeastLoaded),
             Self::DeviceAwareWeighted => Some(RoutePolicy::DeviceAwareWeighted),
-            Self::RoundRobin | Self::Random | Self::PowerOfTwoChoices | Self::KV | Self::Direct => {
-                None
-            }
-        }
-    }
-
-    fn builtin_policy(self) -> Option<BuiltinRoutingPolicy> {
-        match self {
-            Self::RoundRobin => Some(BuiltinRoutingPolicy::RoundRobin),
-            Self::Random => Some(BuiltinRoutingPolicy::Random),
-            Self::PowerOfTwoChoices => Some(BuiltinRoutingPolicy::PowerOfTwoChoices),
-            Self::LeastLoaded | Self::KV | Self::Direct | Self::DeviceAwareWeighted => None,
+            Self::KV | Self::Direct => None,
         }
     }
 }
@@ -290,10 +258,11 @@ fn route_pickers(
 ) -> (Arc<RoutePicker>, Arc<RoutePicker>, Option<Arc<RoutePicker>>) {
     let round_robin = Arc::new(RoutePicker::new(RoutePolicy::RoundRobin));
     let random = Arc::new(RoutePicker::new(RoutePolicy::Random));
-    let configured = router_mode
-        .route_policy()
-        .map(RoutePicker::new)
-        .map(Arc::new);
+    let configured = match router_mode {
+        RouterMode::RoundRobin => Some(round_robin.clone()),
+        RouterMode::Random => Some(random.clone()),
+        mode => mode.route_policy().map(RoutePicker::new).map(Arc::new),
+    };
     (round_robin, random, configured)
 }
 
@@ -546,6 +515,10 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
+    pub fn router_mode(&self) -> RouterMode {
+        self.router_mode
+    }
+
     /// Create a new PushRouter without a worker load monitor (no overload detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         Self::from_client_with_monitor(client, router_mode, None).await
@@ -564,15 +537,14 @@ where
 
         let occupancy_state = if matches!(
             router_mode,
-            RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
         ) {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None
         };
-        let builtin_picker = router_mode
-            .builtin_policy()
-            .map(|policy| BuiltinWorkerPicker::new(&client, policy));
 
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
@@ -588,7 +560,6 @@ where
             addressed,
             router_mode,
             picker,
-            builtin_picker,
             round_robin_picker,
             random_picker,
             fault_detection_enabled: false,
@@ -631,15 +602,14 @@ where
 
         let occupancy_state = if matches!(
             router_mode,
-            RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
         ) {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None
         };
-        let builtin_picker = router_mode
-            .builtin_policy()
-            .map(|policy| BuiltinWorkerPicker::new(&client, policy));
 
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
@@ -664,7 +634,6 @@ where
             addressed,
             router_mode,
             picker,
-            builtin_picker,
             round_robin_picker,
             random_picker,
             fault_detection_enabled: true,
@@ -692,15 +661,14 @@ where
     ) -> anyhow::Result<Self> {
         let occupancy_state = if matches!(
             router_mode,
-            RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
         ) {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None
         };
-        let builtin_picker = router_mode
-            .builtin_policy()
-            .map(|policy| BuiltinWorkerPicker::new(&client, policy));
 
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
@@ -714,7 +682,6 @@ where
             addressed: dispatch,
             router_mode,
             picker,
-            builtin_picker,
             round_robin_picker,
             random_picker,
             fault_detection_enabled: true,
@@ -759,61 +726,6 @@ where
         })
     }
 
-    pub fn builtin_picker(&self) -> Option<&Arc<BuiltinWorkerPicker>> {
-        self.builtin_picker.as_ref()
-    }
-
-    async fn builtin_prepared<M, F>(
-        &self,
-        request: SingleIn<T>,
-        prepare: F,
-    ) -> anyhow::Result<(M, ManyOut<U>)>
-    where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
-    {
-        let picker = self.builtin_picker.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "{:?} routing has no builtin worker picker",
-                self.router_mode
-            )
-        })?;
-        let reservation = picker.select()?;
-        let instance_id = reservation.worker_id();
-        tracing::info!(
-            router_mode = ?self.router_mode,
-            worker_id = instance_id,
-            candidate_count = reservation.candidate_count(),
-            load = reservation.load(),
-            "Selected worker"
-        );
-        self.dispatch_selected(
-            instance_id,
-            request,
-            Some(RoutingPermit::Builtin(reservation)),
-            prepare,
-        )
-        .await
-    }
-
-    async fn builtin_policy_prepared<M, F>(
-        &self,
-        request: SingleIn<T>,
-        policy: BuiltinRoutingPolicy,
-        prepare: F,
-    ) -> anyhow::Result<(M, ManyOut<U>)>
-    where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
-    {
-        let configured = self.builtin_picker.as_ref().map(|picker| picker.policy());
-        if configured != Some(policy) {
-            anyhow::bail!(
-                "{policy:?} routing requested from a {:?} PushRouter",
-                self.router_mode
-            );
-        }
-        self.builtin_prepared(request, prepare).await
-    }
-
     fn select_untracked_worker(&self, picker: &RoutePicker) -> anyhow::Result<(u64, usize)> {
         let routing_instances = self.client.routing_instances();
         let candidates = routing_instances.free_ids();
@@ -829,12 +741,6 @@ where
 
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        if self.router_mode == RouterMode::RoundRobin {
-            return self
-                .builtin_prepared(request, |_, _| Ok(()))
-                .await
-                .map(|(_, stream)| stream);
-        }
         self.round_robin_prepared(request, |_, _| Ok(()))
             .await
             .map(|(_, stream)| stream)
@@ -863,12 +769,6 @@ where
 
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        if self.router_mode == RouterMode::Random {
-            return self
-                .builtin_prepared(request, |_, _| Ok(()))
-                .await
-                .map(|(_, stream)| stream);
-        }
         self.random_prepared(request, |_, _| Ok(()))
             .await
             .map(|(_, stream)| stream)
@@ -898,11 +798,46 @@ where
     /// Issue a request using power-of-two-choices: pick 2 random healthy workers,
     /// route to the one with fewer in-flight requests.
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        self.builtin_policy_prepared(request, BuiltinRoutingPolicy::PowerOfTwoChoices, |_, _| {
-            Ok(())
-        })
-        .await
-        .map(|(_, stream)| stream)
+        self.power_of_two_choices_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn power_of_two_choices_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        let state = self.occupancy_state()?;
+        let (instance_id, counter, candidate_count) = {
+            let routing_instances = self.client.routing_instances();
+            let candidates = routing_instances.free_ids();
+            let (decision, counter) = state
+                .select_and_admit(
+                    self.picker()?,
+                    CandidateView::Workers(candidates),
+                    RouteContext::default(),
+                )
+                .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+            (
+                decision.target.worker_id,
+                counter.expect("P2C selection always requests occupancy admission"),
+                candidates.len(),
+            )
+        };
+        tracing::info!(
+            router_mode = "power-of-two-choices",
+            worker_id = instance_id,
+            candidate_count,
+            load = state.load(instance_id),
+            "Selected worker"
+        );
+        let permit = OccupancyPermit::from_counter(state, instance_id, counter);
+        self.dispatch_selected(instance_id, request, Some(permit), prepare)
+            .await
     }
 
     /// Issue a request to exactly one endpoint without transport fallback.
@@ -976,6 +911,23 @@ where
             .await
     }
 
+    /// Dispatch a host-selected worker with normal transport fallback and no load reservation.
+    ///
+    /// This is the transport half of stateless first-party routing: the caller owns selection
+    /// and request lifecycle tracking, while `PushRouter` retains fault detection and fallback.
+    pub async fn dispatch_selected_untracked<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        self.dispatch_selected(instance_id, request, None, prepare)
+            .await
+    }
+
     /// Dispatch to exactly one worker without transport fallback.
     ///
     /// The worker is revalidated against the latest discovery and overload
@@ -1023,8 +975,10 @@ where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
         match self.router_mode {
-            RouterMode::Random | RouterMode::RoundRobin | RouterMode::PowerOfTwoChoices => {
-                self.builtin_prepared(request, prepare).await
+            RouterMode::Random => self.random_prepared(request, prepare).await,
+            RouterMode::RoundRobin => self.round_robin_prepared(request, prepare).await,
+            RouterMode::PowerOfTwoChoices => {
+                self.power_of_two_choices_prepared(request, prepare).await
             }
             RouterMode::LeastLoaded => self.least_loaded_prepared(request, prepare).await,
             RouterMode::DeviceAwareWeighted => {
@@ -1041,7 +995,7 @@ where
         &self,
         instance_id: u64,
         request: SingleIn<T>,
-        mut permit: Option<RoutingPermit>,
+        mut permit: Option<OccupancyPermit>,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
@@ -1129,13 +1083,8 @@ where
             "Selected worker"
         );
 
-        self.dispatch_selected(
-            instance_id,
-            request,
-            permit.map(RoutingPermit::Occupancy),
-            prepare,
-        )
-        .await
+        self.dispatch_selected(instance_id, request, permit, prepare)
+            .await
     }
 
     fn device_aware_candidates(&self, request: &T, instance_ids: &[u64]) -> DeviceAwareCandidates {
@@ -1243,26 +1192,25 @@ where
             "Selected worker"
         );
 
-        self.dispatch_selected(
-            instance_id,
-            request,
-            Some(RoutingPermit::Occupancy(permit)),
-            prepare,
-        )
-        .await
+        self.dispatch_selected(instance_id, request, Some(permit), prepare)
+            .await
     }
 
     /// Select the next worker according to the routing mode.
     /// Increments round-robin counter if applicable.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn select_next_worker(&self) -> Option<u64> {
+        let routing_instances = self.client.routing_instances();
         match self.router_mode {
             RouterMode::RoundRobin | RouterMode::Random => self
-                .builtin_picker
+                .picker
                 .as_deref()?
-                .select()
-                .ok()
-                .map(|reservation| reservation.worker_id()),
+                .select(
+                    CandidateView::Workers(routing_instances.free_ids()),
+                    RouteContext::default(),
+                    |_| 0,
+                )
+                .map(|decision| decision.target.worker_id),
             RouterMode::PowerOfTwoChoices
             | RouterMode::Direct
             | RouterMode::LeastLoaded
@@ -1282,12 +1230,6 @@ where
     /// `None` for [`RouterMode::Direct`] (caller-supplied routing); panics for
     /// [`RouterMode::KV`], which selects via `kv_chooser::find_best_match`.
     pub fn peek_next_worker(&self) -> Option<u64> {
-        if matches!(
-            self.router_mode,
-            RouterMode::RoundRobin | RouterMode::Random | RouterMode::PowerOfTwoChoices
-        ) {
-            return self.builtin_picker.as_deref()?.peek();
-        }
         // Select among free (admission-eligible) workers — see select_next_worker
         // for the per-mode selection rationale.
         let routing_instances = self.client.routing_instances();
@@ -1297,10 +1239,16 @@ where
         }
 
         match self.router_mode {
-            RouterMode::RoundRobin | RouterMode::Random | RouterMode::PowerOfTwoChoices => {
-                unreachable!()
-            }
-            RouterMode::LeastLoaded => self
+            RouterMode::RoundRobin | RouterMode::Random => self
+                .picker
+                .as_deref()?
+                .peek(
+                    CandidateView::Workers(instance_ids),
+                    RouteContext::default(),
+                    |_| 0,
+                )
+                .map(|decision| decision.target.worker_id),
+            RouterMode::LeastLoaded | RouterMode::PowerOfTwoChoices => self
                 .occupancy_state
                 .as_deref()?
                 .peek(
@@ -1361,14 +1309,9 @@ where
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn occupancy_for_test(&self, worker_id: u64) -> u64 {
-        self.builtin_picker
+        self.occupancy_state
             .as_deref()
-            .map(|picker| picker.occupancy_for_test(worker_id))
-            .or_else(|| {
-                self.occupancy_state
-                    .as_deref()
-                    .map(|state| state.load(worker_id))
-            })
+            .map(|state| state.load(worker_id))
             .unwrap_or(0)
     }
 
@@ -1376,7 +1319,7 @@ where
         &self,
         request: &T,
         pinned_worker: Option<u64>,
-    ) -> anyhow::Result<(u64, Option<RoutingPermit>)> {
+    ) -> anyhow::Result<(u64, Option<OccupancyPermit>)> {
         if let Some(instance_id) = pinned_worker {
             let routing_instances = self.client.routing_instances();
             if !routing_instances.routable_ids().contains(&instance_id) {
@@ -1386,60 +1329,24 @@ where
                 ));
             }
             let permit = match self.router_mode {
-                RouterMode::RoundRobin | RouterMode::Random | RouterMode::PowerOfTwoChoices => {
-                    Some(RoutingPermit::Builtin(
-                        self.builtin_picker
-                            .as_deref()
-                            .ok_or_else(|| anyhow::anyhow!("builtin picker is not initialized"))?
-                            .reserve_exact(instance_id)?,
-                    ))
-                }
-                RouterMode::LeastLoaded | RouterMode::DeviceAwareWeighted => {
+                RouterMode::LeastLoaded
+                | RouterMode::PowerOfTwoChoices
+                | RouterMode::DeviceAwareWeighted => {
                     let state = self.occupancy_state()?;
-                    Some(RoutingPermit::Occupancy(OccupancyPermit::acquire(
-                        state,
-                        instance_id,
-                    )))
+                    Some(OccupancyPermit::acquire(state, instance_id))
                 }
-                RouterMode::Direct | RouterMode::KV => None,
+                RouterMode::RoundRobin
+                | RouterMode::Random
+                | RouterMode::Direct
+                | RouterMode::KV => None,
             };
             return Ok((instance_id, permit));
         }
 
         match self.router_mode {
-            RouterMode::RoundRobin | RouterMode::Random | RouterMode::PowerOfTwoChoices => {
-                let reservation = self
-                    .builtin_picker
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("builtin picker is not initialized"))?
-                    .select()?;
-                Ok((
-                    reservation.worker_id(),
-                    Some(RoutingPermit::Builtin(reservation)),
-                ))
-            }
-            RouterMode::LeastLoaded => {
-                let state = self.occupancy_state()?;
-                let routing_instances = self.client.routing_instances();
-                let instance_ids = routing_instances.free_ids();
-                let (decision, counter) = state
-                    .select_and_admit(
-                        self.picker()?,
-                        CandidateView::Workers(instance_ids),
-                        RouteContext::default(),
-                    )
-                    .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-                let instance_id = decision.target.worker_id;
-                let permit = counter.map(|counter| {
-                    RoutingPermit::Occupancy(OccupancyPermit::from_counter(
-                        state,
-                        instance_id,
-                        counter,
-                    ))
-                });
-                Ok((instance_id, permit))
-            }
-            RouterMode::DeviceAwareWeighted => {
+            RouterMode::LeastLoaded
+            | RouterMode::PowerOfTwoChoices
+            | RouterMode::DeviceAwareWeighted => {
                 let state = self.occupancy_state()?;
                 let routing_instances = self.client.routing_instances();
                 let instance_ids = routing_instances.free_ids();
@@ -1447,24 +1354,37 @@ where
                     return Err(self.empty_free_pool_error(&routing_instances));
                 }
 
-                let selection = self.device_aware_candidates(request, instance_ids);
-                let (decision, counter) = state
-                    .select_and_admit(
-                        self.picker()?,
-                        CandidateView::DeviceAware(&selection.candidates),
-                        selection.context,
-                    )
-                    .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+                let (decision, counter) = match self.router_mode {
+                    RouterMode::LeastLoaded | RouterMode::PowerOfTwoChoices => state
+                        .select_and_admit(
+                            self.picker()?,
+                            CandidateView::Workers(instance_ids),
+                            RouteContext::default(),
+                        )
+                        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?,
+                    RouterMode::DeviceAwareWeighted => {
+                        let selection = self.device_aware_candidates(request, instance_ids);
+                        state
+                            .select_and_admit(
+                                self.picker()?,
+                                CandidateView::DeviceAware(&selection.candidates),
+                                selection.context,
+                            )
+                            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?
+                    }
+                    _ => unreachable!(),
+                };
                 let instance_id = decision.target.worker_id;
-                let permit = counter.map(|counter| {
-                    RoutingPermit::Occupancy(OccupancyPermit::from_counter(
-                        state,
-                        instance_id,
-                        counter,
-                    ))
-                });
+                let permit = counter
+                    .map(|counter| OccupancyPermit::from_counter(state, instance_id, counter));
                 Ok((instance_id, permit))
             }
+            RouterMode::RoundRobin => self
+                .select_untracked_worker(self.round_robin_picker.as_ref())
+                .map(|(instance_id, _)| (instance_id, None)),
+            RouterMode::Random => self
+                .select_untracked_worker(self.random_picker.as_ref())
+                .map(|(instance_id, _)| (instance_id, None)),
             RouterMode::Direct => Err(anyhow::anyhow!(
                 "Worker ID required for exact dispatch in Direct routing mode"
             )),
@@ -2399,8 +2319,6 @@ mod tests {
         let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
             .await
             .unwrap();
-        assert!(router.builtin_picker.is_none());
-        assert!(router.occupancy_state.is_some());
 
         // LeastLoaded selection tracks request occupancy, so the advisory API is
         // separate from select_next_worker().
@@ -2409,62 +2327,6 @@ mod tests {
             router.peek_next_worker().is_some(),
             "LeastLoaded peek must return the available worker for disagg bootstrap"
         );
-
-        rt.shutdown();
-    }
-
-    #[tokio::test]
-    async fn load_aware_pickers_are_shared_but_static_pickers_are_local() {
-        let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let endpoint = drt
-            .namespace("test_builtin_picker_sharing".to_string())
-            .unwrap()
-            .component("test_component".to_string())
-            .unwrap()
-            .endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
-
-        let p2c_a = PushRouter::<u64, TestResponse>::from_client(
-            client.clone(),
-            RouterMode::PowerOfTwoChoices,
-        )
-        .await
-        .unwrap();
-        let p2c_b = PushRouter::<u64, TestResponse>::from_client(
-            client.clone(),
-            RouterMode::PowerOfTwoChoices,
-        )
-        .await
-        .unwrap();
-        assert!(Arc::ptr_eq(
-            p2c_a.builtin_picker.as_ref().unwrap(),
-            p2c_b.builtin_picker.as_ref().unwrap()
-        ));
-        client.override_instance_avail(vec![1, 2]);
-        let reservation = p2c_a
-            .builtin_picker
-            .as_ref()
-            .unwrap()
-            .reserve_exact(1)
-            .unwrap();
-        assert_eq!(p2c_b.occupancy_for_test(1), 1);
-        drop(reservation);
-        assert_eq!(p2c_b.occupancy_for_test(1), 0);
-
-        let rr_a =
-            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
-                .await
-                .unwrap();
-        let rr_b = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
-            .await
-            .unwrap();
-        assert!(!Arc::ptr_eq(
-            rr_a.builtin_picker.as_ref().unwrap(),
-            rr_b.builtin_picker.as_ref().unwrap()
-        ));
 
         rt.shutdown();
     }
