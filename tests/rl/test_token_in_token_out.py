@@ -383,24 +383,32 @@ def _request_sglang_generation_events(*, frontend_port: int) -> list[dict[str, A
 @pytest.mark.timeout(600)
 def test_sglang_token_in_token_out(start_sglang_tito_services: int) -> None:
     events = _request_sglang_generation_events(frontend_port=start_sglang_tito_services)
-    final = events[-1]
-    output_ids = final.get("output_ids")
-    assert (
-        isinstance(output_ids, list)
-        and output_ids
-        and all(isinstance(token_id, int) for token_id in output_ids)
-    ), final
+    all_output_ids: list[int] = []
+    for event in events:
+        output_ids = event.get("output_ids")
+        assert isinstance(output_ids, list) and all(
+            isinstance(token_id, int) for token_id in output_ids
+        ), event
 
+        meta_info = event.get("meta_info")
+        assert isinstance(meta_info, dict), event
+        output_logprobs = meta_info.get("output_token_logprobs")
+        assert isinstance(output_logprobs, list), event
+        assert len(output_logprobs) == len(output_ids), event
+        for token_id, logprob_entry in zip(output_ids, output_logprobs, strict=True):
+            assert isinstance(logprob_entry, list) and len(logprob_entry) >= 2, event
+            logprob, logprob_token_id = logprob_entry[:2]
+            assert isinstance(logprob, (int, float)) and math.isfinite(logprob), event
+            assert logprob_token_id == token_id, event
+
+        all_output_ids.extend(output_ids)
+
+    assert all_output_ids, events
+    final = events[-1]
     meta_info = final.get("meta_info")
     assert isinstance(meta_info, dict), final
     assert meta_info.get("prompt_tokens") == len(SGLANG_INPUT_IDS), final
-    assert meta_info.get("completion_tokens") == len(output_ids), final
-
-    output_logprobs = meta_info.get("output_token_logprobs")
-    assert isinstance(output_logprobs, list), final
-    assert len(output_logprobs) == len(output_ids), final
-    for token_id, logprob_entry in zip(output_ids, output_logprobs, strict=True):
-        assert isinstance(logprob_entry, list) and len(logprob_entry) >= 2, final
-        logprob, logprob_token_id = logprob_entry[:2]
-        assert isinstance(logprob, (int, float)) and math.isfinite(logprob), final
-        assert logprob_token_id == token_id, final
+    assert meta_info.get("completion_tokens") == len(all_output_ids), {
+        "completion_tokens": meta_info.get("completion_tokens"),
+        "all_output_ids": all_output_ids,
+    }
