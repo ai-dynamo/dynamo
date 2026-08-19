@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import re as re_mod
 from copy import deepcopy
 from dataclasses import dataclass
@@ -22,7 +23,7 @@ from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.llmapi import DisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
 
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, HttpError
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -371,6 +372,54 @@ class TestGuidedDecodingFromToolChoice:
         result = HandlerBase._override_sampling_params(sampling_params, request)
 
         assert result.guided_decoding.regex is None
+
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {"$ref": "#"},
+            json.dumps({"$ref": "#"}),
+            {
+                "$defs": {
+                    "A": {"$ref": "#/$defs/B"},
+                    "B": {"$ref": "#/$defs/A"},
+                },
+                "$ref": "#/$defs/A",
+            },
+        ],
+    )
+    def test_rejects_guided_json_reference_cycles(self, schema):
+        """Non-progressing local $ref cycles must be rejected before reaching
+        the grammar compiler, matching the vLLM and SGLang backends."""
+        sampling_params = MockSamplingParams()
+        request = {"sampling_options": {"guided_decoding": {"json": schema}}}
+
+        with pytest.raises(HttpError) as error:
+            HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert error.value.code == 400
+
+    def test_accepts_productive_recursive_guided_json(self):
+        """Recursive schemas that consume input stay supported."""
+        schema = {
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "children": {
+                            "type": "array",
+                            "items": {"$ref": "#/$defs/Node"},
+                        }
+                    },
+                }
+            },
+            "$ref": "#/$defs/Node",
+        }
+        sampling_params = MockSamplingParams()
+        request = {"sampling_options": {"guided_decoding": {"json": schema}}}
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.guided_decoding.json == schema
 
 
 class _ConcreteHandler(HandlerBase):
