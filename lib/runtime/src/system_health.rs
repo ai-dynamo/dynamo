@@ -53,6 +53,31 @@ struct RegisteredHealthCheckTarget {
     notifier: Arc<tokio::sync::Notify>,
 }
 
+/// Everything the canary needs to monitor one registration
+///
+/// Target, notifier and registration id are read together under one lock so that they cannot
+/// come from different registrations of the same subject.
+#[derive(Clone)]
+pub struct CanaryHandles {
+    /// What to probe
+    pub target: HealthCheckTarget,
+    /// What this registration's handler signals activity on
+    pub notifier: Arc<tokio::sync::Notify>,
+    /// Which registration the other two belong to
+    pub registration: ProbedRegistration,
+}
+
+/// Names the registration a canary verdict is about
+///
+/// A canary request outlives the lock it was issued under, so by the time it returns the
+/// subject may be held by a different registration — the probed endpoint stopped, or a start
+/// rolled back and re-exposed the one it had displaced. Carrying the registration lets
+/// [`set_endpoint_health_status_for`](SystemHealth::set_endpoint_health_status_for) drop a
+/// verdict about an endpoint that is gone instead of recording it against whoever holds the
+/// subject now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProbedRegistration(u64);
+
 /// Receipt for one [`register_health_check_target`](SystemHealth::register_health_check_target)
 /// call, to be handed back to
 /// [`release_health_check_target`](SystemHealth::release_health_check_target).
@@ -161,6 +186,40 @@ impl SystemHealth {
     pub fn set_endpoint_health_status(&self, endpoint: &str, status: HealthStatus) {
         let mut endpoint_health = self.endpoint_health.write().unwrap();
         endpoint_health.insert(endpoint.to_string(), status);
+    }
+
+    /// Record a canary verdict, but only while `probed` is still the registration the
+    /// subject is being served by
+    ///
+    /// Returns whether the verdict was recorded. A canary request is issued against one
+    /// registration and completes some time later, by which point that registration may have
+    /// been released; the verdict then says nothing about the endpoint now holding the
+    /// subject, and recording it would mark a live endpoint unready — or, worse, ready — on
+    /// evidence from an endpoint that has stopped.
+    pub fn set_endpoint_health_status_for(
+        &self,
+        endpoint: &str,
+        probed: ProbedRegistration,
+        status: HealthStatus,
+    ) -> bool {
+        // Both locks, so the registration cannot be released between the check and the write.
+        let targets = self.health_check_targets.read().unwrap();
+        let current = targets
+            .get(endpoint)
+            .and_then(|outstanding| outstanding.last())
+            .map(|registered| registered.registration);
+        if current != Some(probed.0) {
+            tracing::debug!(
+                "Discarding health check verdict for '{endpoint}': the registration it was \
+                 issued against is no longer serving the subject"
+            );
+            return false;
+        }
+        self.endpoint_health
+            .write()
+            .unwrap()
+            .insert(endpoint.to_string(), status);
+        true
     }
 
     /// Returns the overall health status and endpoint health statuses
@@ -436,6 +495,24 @@ impl SystemHealth {
             .get(endpoint_subject)
             .and_then(|outstanding| outstanding.last())
             .map(|registered| registered.notifier.clone())
+    }
+
+    /// Get everything the canary needs to monitor the registration now serving `endpoint_subject`
+    ///
+    /// None when the subject has no outstanding registration. Read under a single lock: a
+    /// target probed with another registration's notifier, or a verdict attributed to a
+    /// registration whose target was never probed, is exactly the confusion the registration
+    /// id exists to prevent.
+    pub fn get_canary_handles(&self, endpoint_subject: &str) -> Option<CanaryHandles> {
+        let targets = self.health_check_targets.read().unwrap();
+        targets
+            .get(endpoint_subject)
+            .and_then(|outstanding| outstanding.last())
+            .map(|registered| CanaryHandles {
+                target: registered.target.clone(),
+                notifier: registered.notifier.clone(),
+                registration: ProbedRegistration(registered.registration),
+            })
     }
 
     /// Take the receiver for new endpoint registrations (can only be called once)
@@ -1036,5 +1113,92 @@ mod tests {
                 .get_endpoint_health_check_notifier(ENDPOINT)
                 .is_none()
         );
+    }
+
+    /// A canary request outlives the read that issued it. If the registration it was issued
+    /// against is released while the probe is in flight, the verdict describes an endpoint
+    /// that is no longer serving the subject, and writing it would mark whichever
+    /// registration took the subject ready or not-ready on somebody else's evidence.
+    #[test]
+    fn a_verdict_for_a_released_registration_is_discarded() {
+        let health = system_health(true);
+        let probed =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let handles = health
+            .get_canary_handles(ENDPOINT)
+            .expect("the registration was just installed");
+
+        // The probe is in flight; the endpoint stops and another takes the subject.
+        health.release_health_check_target(probed);
+        let successor =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+
+        assert!(
+            !health.set_endpoint_health_status_for(
+                ENDPOINT,
+                handles.registration,
+                HealthStatus::Ready
+            ),
+            "a verdict about a released registration must not be filed"
+        );
+        assert!(
+            !health.get_health_status().0,
+            "the successor must still wait for a canary of its own"
+        );
+
+        let current = health
+            .get_canary_handles(ENDPOINT)
+            .expect("the successor is serving");
+        assert!(health.set_endpoint_health_status_for(
+            ENDPOINT,
+            current.registration,
+            HealthStatus::Ready
+        ));
+        assert!(health.get_health_status().0);
+        health.release_health_check_target(successor);
+    }
+
+    /// The same guard the other way round: a verdict about the registration that is serving
+    /// is filed, including when older registrations are still outstanding beneath it.
+    #[test]
+    fn a_verdict_for_the_serving_registration_is_filed() {
+        let health = system_health(true);
+        let displaced =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let serving =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+
+        let handles = health
+            .get_canary_handles(ENDPOINT)
+            .expect("the displacing registration is serving");
+        assert!(health.set_endpoint_health_status_for(
+            ENDPOINT,
+            handles.registration,
+            HealthStatus::Ready
+        ));
+        assert!(health.get_health_status().0);
+
+        health.release_health_check_target(serving);
+        health.release_health_check_target(displaced);
+    }
+
+    /// A subject with nothing registered under it has no registration to match, so a verdict
+    /// arriving after the last release cannot resurrect the entry.
+    #[test]
+    fn a_verdict_for_a_vacated_subject_is_discarded() {
+        let health = system_health(true);
+        let registration =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let handles = health
+            .get_canary_handles(ENDPOINT)
+            .expect("the registration was just installed");
+        health.release_health_check_target(registration);
+
+        assert!(!health.set_endpoint_health_status_for(
+            ENDPOINT,
+            handles.registration,
+            HealthStatus::Ready
+        ));
+        assert!(health.get_canary_handles(ENDPOINT).is_none());
     }
 }

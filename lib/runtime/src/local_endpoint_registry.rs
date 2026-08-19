@@ -26,8 +26,15 @@ pub type LocalAsyncEngine = Arc<
 /// and allows them to be called directly without going through the network transport layer.
 #[derive(Clone, Default)]
 pub struct LocalEndpointRegistry {
-    /// Map of endpoint name to async engine
-    engines: Arc<DashMap<String, LocalAsyncEngine>>,
+    /// Map of endpoint name to the engines outstanding under it, oldest first
+    ///
+    /// A name can carry more than one registration at a time — a restart that overlaps the
+    /// outgoing incarnation's cleanup, or two components whose endpoints share a name — and
+    /// the last one registered is the one that serves. The others stay so that a release can
+    /// re-expose whichever registration it displaced, the way the health check target map
+    /// does; a plain overwrite would leave a still-running endpoint undispatchable once the
+    /// endpoint that displaced it stopped.
+    engines: Arc<DashMap<String, Vec<LocalAsyncEngine>>>,
 }
 
 impl LocalEndpointRegistry {
@@ -40,47 +47,68 @@ impl LocalEndpointRegistry {
 
     /// Register a local endpoint
     ///
+    /// The registration joins any others outstanding under the same name and takes over
+    /// serving. It is withdrawn by [`remove_registration`](Self::remove_registration), which
+    /// identifies it by the `engine` handed in here.
+    ///
     /// # Arguments
     ///
     /// * `endpoint_name` - Name of the endpoint (e.g., "load_lora", "generate")
     /// * `engine` - The async engine that handles requests for this endpoint
     pub fn register(&self, endpoint_name: String, engine: LocalAsyncEngine) {
         tracing::debug!("Registering local endpoint: {endpoint_name}");
-        self.engines.insert(endpoint_name, engine);
+        self.engines.entry(endpoint_name).or_default().push(engine);
     }
 
-    /// Get a registered local endpoint
+    /// Get the local endpoint serving under `endpoint_name`
     ///
-    /// The async engine if found, None otherwise
+    /// The most recent registration, or None when the name has none.
     pub fn get(&self, endpoint_name: &str) -> Option<LocalAsyncEngine> {
-        self.engines.get(endpoint_name).map(|e| e.clone())
+        self.engines
+            .get(endpoint_name)
+            .and_then(|outstanding| outstanding.last().cloned())
     }
 
-    /// Remove a registered local endpoint
+    /// Remove every registration under `endpoint_name`
     ///
-    /// Returns the engine that was registered under `endpoint_name`, if any. An endpoint
-    /// that has stopped must be removed: the canary health check dispatches through this
-    /// registry, so an engine left behind stays callable for an endpoint that no longer
-    /// has a request-plane or discovery presence.
+    /// Returns the engine that was serving, if any. An endpoint that has stopped must be
+    /// removed: the canary health check dispatches through this registry, so an engine left
+    /// behind stays callable for an endpoint that no longer has a request-plane or discovery
+    /// presence. A caller withdrawing one endpoint's own registration wants
+    /// [`remove_registration`](Self::remove_registration) instead — this drops the
+    /// registrations of any other endpoint sharing the name along with it.
     pub fn remove(&self, endpoint_name: &str) -> Option<LocalAsyncEngine> {
         tracing::debug!("Removing local endpoint: {endpoint_name}");
-        self.engines.remove(endpoint_name).map(|(_, engine)| engine)
+        self.engines
+            .remove(endpoint_name)
+            .and_then(|(_, mut outstanding)| outstanding.pop())
     }
 
-    /// Remove a registered local endpoint only while `engine` is the registered one
+    /// Withdraw the registration `engine` was registered under, wherever it now sits
     ///
-    /// Registration is last-writer-wins, so an endpoint that restarts under the same name
-    /// replaces the entry. Cleanup for the previous incarnation must not evict the
-    /// replacement, so removal is conditional on the stored engine still being the one
-    /// this caller registered.
-    pub fn remove_if_current(
+    /// Returns it if it was still outstanding. Identity is the receipt: each start builds its
+    /// own engine, so `Arc::ptr_eq` tells one registration apart from another under a shared
+    /// name. Whichever registration remains on top afterwards serves — so cleanup for a
+    /// replaced endpoint does not evict the replacement, and an endpoint that stops re-exposes
+    /// the one it displaced rather than leaving the name undispatchable.
+    pub fn remove_registration(
         &self,
         endpoint_name: &str,
         engine: &LocalAsyncEngine,
     ) -> Option<LocalAsyncEngine> {
-        self.engines
-            .remove_if(endpoint_name, |_, current| Arc::ptr_eq(current, engine))
-            .map(|(_, engine)| engine)
+        let mut outstanding = self.engines.get_mut(endpoint_name)?;
+        let position = outstanding
+            .iter()
+            .rposition(|registered| Arc::ptr_eq(registered, engine))?;
+        let removed = outstanding.remove(position);
+        let vacated = outstanding.is_empty();
+        drop(outstanding);
+        if vacated {
+            // Only while still empty: another start may have registered in between.
+            self.engines
+                .remove_if(endpoint_name, |_, outstanding| outstanding.is_empty());
+        }
+        Some(removed)
     }
 }
 
@@ -150,23 +178,85 @@ mod tests {
     }
 
     #[test]
-    fn conditional_removal_keeps_the_engine_a_restart_installed() {
+    fn withdrawing_a_replaced_registration_keeps_the_engine_a_restart_installed() {
         let registry = LocalEndpointRegistry::new();
         let first = stub_engine();
         let second = stub_engine();
         registry.register(ENDPOINT.to_string(), first.clone());
         registry.register(ENDPOINT.to_string(), second.clone());
 
-        assert!(
-            registry.remove_if_current(ENDPOINT, &first).is_none(),
-            "cleanup for the replaced engine must not evict the replacement"
-        );
+        let withdrawn = registry
+            .remove_registration(ENDPOINT, &first)
+            .expect("the replaced registration was still outstanding");
+        assert!(Arc::ptr_eq(&withdrawn, &first));
         let live = registry
             .get(ENDPOINT)
             .expect("the restart's engine is still registered");
-        assert!(Arc::ptr_eq(&live, &second));
+        assert!(
+            Arc::ptr_eq(&live, &second),
+            "cleanup for the replaced engine must not evict the replacement"
+        );
 
-        assert!(registry.remove_if_current(ENDPOINT, &second).is_some());
+        assert!(registry.remove_registration(ENDPOINT, &second).is_some());
+        assert!(registry.get(ENDPOINT).is_none());
+    }
+
+    /// The other order. When the endpoint that took the name stops first, the one it
+    /// displaced is still running and must become dispatchable again — the registry has to
+    /// re-expose it the way the health check target map re-exposes its target. Overwriting
+    /// on registration lost it, so the name went undispatchable while an endpoint was still
+    /// serving under it.
+    #[test]
+    fn withdrawing_the_serving_registration_re_exposes_the_one_it_displaced() {
+        let registry = LocalEndpointRegistry::new();
+        let displaced = stub_engine();
+        let serving = stub_engine();
+        registry.register(ENDPOINT.to_string(), displaced.clone());
+        registry.register(ENDPOINT.to_string(), serving.clone());
+
+        registry
+            .remove_registration(ENDPOINT, &serving)
+            .expect("the serving registration was outstanding");
+
+        let live = registry
+            .get(ENDPOINT)
+            .expect("the displaced endpoint is still running and must be reachable again");
+        assert!(Arc::ptr_eq(&live, &displaced));
+    }
+
+    #[test]
+    fn withdrawing_a_registration_twice_is_a_no_op() {
+        let registry = LocalEndpointRegistry::new();
+        let engine = stub_engine();
+        registry.register(ENDPOINT.to_string(), engine.clone());
+
+        assert!(registry.remove_registration(ENDPOINT, &engine).is_some());
+        assert!(
+            registry.remove_registration(ENDPOINT, &engine).is_none(),
+            "a second release must not disturb whatever holds the name now"
+        );
+
+        let replacement = stub_engine();
+        registry.register(ENDPOINT.to_string(), replacement.clone());
+        assert!(registry.remove_registration(ENDPOINT, &engine).is_none());
+        let live = registry
+            .get(ENDPOINT)
+            .expect("the replacement still serves");
+        assert!(Arc::ptr_eq(&live, &replacement));
+    }
+
+    #[test]
+    fn removing_the_endpoint_drops_every_outstanding_registration() {
+        let registry = LocalEndpointRegistry::new();
+        let first = stub_engine();
+        let second = stub_engine();
+        registry.register(ENDPOINT.to_string(), first.clone());
+        registry.register(ENDPOINT.to_string(), second.clone());
+
+        let removed = registry
+            .remove(ENDPOINT)
+            .expect("removal hands back the engine that was serving");
+        assert!(Arc::ptr_eq(&removed, &second));
         assert!(registry.get(ENDPOINT).is_none());
     }
 }

@@ -185,10 +185,12 @@ impl EndpointScopedState {
                 .release_health_check_target(registration);
         }
         if let Some(engine) = &self.local_engine {
-            // Conditional on engine identity: an endpoint that restarted under the same
-            // name has already installed its own engine, and this cleanup must not evict
-            // the replacement.
-            self.registry.remove_if_current(&self.endpoint_name, engine);
+            // By engine identity, for the same reason the target above is released by
+            // registration: the registry is keyed by endpoint name alone, so this withdraws
+            // only this start's engine and leaves whichever registration is still
+            // outstanding under that name serving.
+            self.registry
+                .remove_registration(&self.endpoint_name, engine);
         }
     }
 }
@@ -836,6 +838,56 @@ mod tests {
             guard.get_endpoint_health_status(ENDPOINT),
             Some(HealthStatus::NotReady),
             "the live endpoint is still tracked, awaiting its own canary verdict"
+        );
+    }
+
+    /// The same overlap, released in the other order. When the scope that took the name goes
+    /// first, the one it displaced is still serving, so both structures have to hand the name
+    /// back to it — engine and canary target together. A registry that overwrote on
+    /// registration could not: it had nothing left to re-expose, so the canary kept a target
+    /// for an endpoint it could no longer dispatch to.
+    #[test]
+    fn releasing_the_newer_scope_hands_the_name_back_to_the_older_one() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        let displaced_engine = stub_engine();
+        let newer_engine = stub_engine();
+
+        let (_displaced, _) = acquire(
+            &registry,
+            &health,
+            &displaced_engine,
+            1,
+            serde_json::json!({"generation": "displaced"}),
+        );
+        let (newer, _) = acquire(
+            &registry,
+            &health,
+            &newer_engine,
+            2,
+            serde_json::json!({"generation": "newer"}),
+        );
+
+        newer.release();
+
+        let registered = registry
+            .get(ENDPOINT)
+            .expect("the displaced endpoint is still running and must be reachable again");
+        assert!(
+            Arc::ptr_eq(&registered, &displaced_engine),
+            "requests must reach the endpoint that is serving now"
+        );
+        let guard = health.lock();
+        let target = guard
+            .get_health_check_target(ENDPOINT)
+            .expect("the displaced endpoint's target is re-exposed");
+        assert_eq!(
+            target.instance.instance_id, 1,
+            "the canary must probe the instance the registry now dispatches to"
+        );
+        assert_eq!(
+            target.payload,
+            serde_json::json!({"generation": "displaced"})
         );
     }
 }

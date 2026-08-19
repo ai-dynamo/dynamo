@@ -6,6 +6,7 @@ use crate::config::HealthStatus;
 use crate::engine::AsyncEngine;
 use crate::pipeline::SingleIn;
 use crate::protocols::maybe_error::MaybeError;
+use crate::system_health::{CanaryHandles, ProbedRegistration};
 use futures::StreamExt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -82,16 +83,20 @@ impl HealthCheckManager {
         let canary_wait = self.config.canary_wait_time;
         let endpoint_subject_clone = endpoint_subject.clone();
 
-        // Get the endpoint-specific notifier.
+        // Get the handles for the registration this task monitors.
         //
-        // Its absence is not a bug: registration announces the endpoint on a channel, and
+        // Their absence is not a bug: registration announces the endpoint on a channel, and
         // the endpoint can be released again — a start that rolls back, a shutdown —
         // before this monitor gets to it. There is then nothing left to monitor.
-        let Some(notifier) = self
+        let Some(CanaryHandles {
+            notifier,
+            registration: watched,
+            ..
+        }) = self
             .drt
             .system_health()
             .lock()
-            .get_endpoint_health_check_notifier(&endpoint_subject)
+            .get_canary_handles(&endpoint_subject)
         else {
             debug!(
                 "Endpoint '{}' was deregistered before its health check task started; skipping",
@@ -111,11 +116,15 @@ impl HealthCheckManager {
                         // Timeout - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
-                        // Get the health check payload for this endpoint
-                        let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
+                        // Get the payload to probe with, and the registration it belongs to,
+                        // in one read. Whichever registration is serving the subject now is
+                        // the one this probe is about, so its verdict is filed against that
+                        // one rather than against whatever holds the subject when the probe
+                        // finally answers.
+                        let handles = manager.drt.system_health().lock().get_canary_handles(&endpoint_subject);
 
-                        if let Some(target) = target {
-                            if let Err(e) = manager.send_health_check_request(&endpoint_subject, &target.payload).await {
+                        if let Some(handles) = handles {
+                            if let Err(e) = manager.send_health_check_request(&endpoint_subject, handles.registration, &handles.target.payload).await {
                                 error!("Failed to send health check for {}: {}", endpoint_subject, e);
                             }
                         } else {
@@ -134,9 +143,13 @@ impl HealthCheckManager {
                         // Activity detected - reset timer for this endpoint only.
                         // A notification means push_handler successfully streamed
                         // a non-error response chunk, proving the engine is healthy.
+                        // The notifier belongs to the registration this task was spawned for,
+                        // so the activity it reports is that registration's. Filed against it,
+                        // and dropped if the subject has moved on to another one.
                         debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
-                        manager.drt.system_health().lock().set_endpoint_health_status(
+                        manager.drt.system_health().lock().set_endpoint_health_status_for(
                             &endpoint_subject,
+                            watched,
                             crate::config::HealthStatus::Ready,
                         );
                     }
@@ -231,9 +244,15 @@ impl HealthCheckManager {
     }
 
     /// Send a health check request via the local endpoint registry (in-process).
+    ///
+    /// `probed` names the registration the payload came from. The request outlives the read
+    /// that issued it — it can still be in flight when that registration is released and
+    /// another takes the subject — so every verdict below is filed against `probed` and
+    /// discarded if it is no longer the one serving.
     async fn send_health_check_request(
         &self,
         endpoint_subject: &str,
+        probed: ProbedRegistration,
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
         debug!(
@@ -291,8 +310,9 @@ impl HealthCheckManager {
                         });
 
                         // Update health status based on response
-                        system_health.lock().set_endpoint_health_status(
+                        system_health.lock().set_endpoint_health_status_for(
                             &endpoint_subject_owned,
+                            probed,
                             if is_healthy {
                                 HealthStatus::Ready
                             } else {
@@ -305,8 +325,9 @@ impl HealthCheckManager {
                             "Health check request failed for {}: {}",
                             endpoint_subject_owned, e
                         );
-                        system_health.lock().set_endpoint_health_status(
+                        system_health.lock().set_endpoint_health_status_for(
                             &endpoint_subject_owned,
+                            probed,
                             HealthStatus::NotReady,
                         );
                     }
@@ -317,9 +338,11 @@ impl HealthCheckManager {
             // Handle timeout
             if result.is_err() {
                 warn!("Health check timeout for {}", endpoint_subject_owned);
-                system_health
-                    .lock()
-                    .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
+                system_health.lock().set_endpoint_health_status_for(
+                    &endpoint_subject_owned,
+                    probed,
+                    HealthStatus::NotReady,
+                );
             }
 
             debug!("Health check completed for {}", endpoint_subject_owned);
