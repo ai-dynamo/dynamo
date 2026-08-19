@@ -36,7 +36,9 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
-use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
+use dynamo_runtime::logging::{
+    make_extension_request_span, make_inference_request_span, make_system_request_span,
+};
 use dynamo_runtime::metrics::{
     frontend_perf::ensure_frontend_perf_metrics_registered_prometheus,
     request_plane::ensure_request_plane_metrics_registered_prometheus,
@@ -1265,15 +1267,25 @@ impl HttpServiceConfigBuilder {
                 "frontend admin API disabled — busy_threshold routes not registered"
             );
         }
-        for extension in &config.frontend_route_extensions {
-            let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
-            system_routes.push(route_set.into_parts());
-        }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             system_router = system_router.merge(route);
         }
+        // Extension routes (Python-backed, arbitrary latency) — own sub-router on
+        // the same port so extension-only middleware never touches system routes
+        let mut extension_router = axum::Router::new();
+        for extension in &config.frontend_route_extensions {
+            let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
+            let (route_docs, route) = route_set.into_parts();
+            append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
+            extension_router = extension_router.merge(route);
+        }
+        extension_router = extension_router.layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_extension_request_span)
+                .on_response(on_response),
+        );
         // Inference routes (completions, chat, embeddings, etc.) — info-level spans
         let endpoint_routes = HttpServiceConfigBuilder::get_endpoints_router(
             state.clone(),
@@ -1310,7 +1322,9 @@ impl HttpServiceConfigBuilder {
                 .on_response(on_response),
         );
 
-        let router = system_router.merge(inference_router);
+        let router = system_router
+            .merge(inference_router)
+            .merge(extension_router);
 
         // Return protocol-compatible JSON errors for unmatched routes. Register this router
         // outside `track_inflight_inference` so unmatched requests do not acquire an

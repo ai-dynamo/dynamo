@@ -652,6 +652,45 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     span
 }
 
+/// Create a span for frontend route-extension endpoints (Python-backed routes).
+///
+/// Like [`make_system_request_span`] but with `target: "extension_span"` so
+/// extension traffic can be filtered independently of built-in system routes
+/// (e.g. `DYN_LOG=extension_span=trace`), and without the inference-metric
+/// fields (model, token counts, latency) that extension handlers never record.
+/// Follows normal DYN_LOG filtering.
+pub fn make_extension_request_span<B>(req: &Request<B>) -> Span {
+    let method = req.method();
+    let uri = req.uri();
+    let version = format!("{:?}", req.version());
+    let trace_parent = TraceParent::from_headers(req.headers());
+    let otel_context = extract_otel_context_from_http_headers(req.headers());
+
+    // Ensure every extension request has a request_id on the span.
+    let request_id = trace_parent
+        .request_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let span = tracing::debug_span!(
+        target: "extension_span",
+        "http-request",
+        method = %method,
+        uri = %uri,
+        version = %version,
+        trace_id = trace_parent.trace_id,
+        parent_id = trace_parent.parent_id,
+        trace_flags = trace_parent.trace_flags,
+        x_request_id = trace_parent.x_request_id,
+        request_id = %request_id,
+    );
+
+    if let Some(context) = otel_context {
+        let _ = span.set_parent(context);
+    }
+
+    span
+}
+
 /// Extract OpenTelemetry context from HTTP headers for distributed tracing
 fn extract_otel_context_from_http_headers(
     headers: &http::HeaderMap,
@@ -2576,6 +2615,26 @@ pub mod tests {
         assert_eq!(
             headers.get("traceparent").map(String::as_str),
             Some("00-11111111111111111111111111111111-3333333333333333-00")
+        );
+    }
+
+    #[test]
+    fn extension_request_span_uses_extension_target() {
+        // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
+        // installing the global `log` LogTracer, which would poison a later
+        // `logging::init()` with SetLoggerError.
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let req = Request::builder()
+            .uri("/test/frontend-route")
+            .body(())
+            .unwrap();
+        // The target is an operator-facing contract: `DYN_LOG=extension_span=trace`
+        // must select extension traffic and nothing else.
+        assert_eq!(
+            make_extension_request_span(&req)
+                .metadata()
+                .map(|m| m.target()),
+            Some("extension_span")
         );
     }
 
