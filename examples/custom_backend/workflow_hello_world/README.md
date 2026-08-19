@@ -5,8 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Hello World Workflow Comparison
 
-This comparison accepts an OpenAI chat-completions request, ignores its content,
-and returns `Hello, World!`. All three implementations reuse the same stage behavior:
+This comparison composes the same fixed stage behavior in three ways:
 
 - `HelloStage` produces `Hello, `.
 - `WorldStage` produces `World!`.
@@ -34,27 +33,25 @@ examples/custom_backend/workflow_hello_world/bespoke/launch.sh
 
 ## Manual Dynamo Orchestration
 
-The manual Dynamo implementation uses the existing frontend, endpoint discovery,
-request transport, and model registration. A public orchestrator worker writes
-the concurrent fan-out, cancellation, response validation, and inline merge as
-ordinary Python control flow. The Hello and World workers remain private Dynamo
-endpoints and only the orchestrator registers a public model deployment card.
+The manual Dynamo implementation uses existing endpoint discovery, request
+transport, and clients. Its orchestrator expresses fan-out, join, cancellation,
+response validation, and the Merge dependency as ordinary Python control flow.
+The example intentionally stops at the Dynamo endpoint boundary and does not add
+another OpenAI frontend adapter or model registration path.
 
 ```text
-OpenAI client -> Dynamo frontend -> orchestrator --+--> private Hello --+
-                                                   +--> private World --+--> inline merge
+Dynamo caller -> manual orchestrator --+--> remote Hello --+
+                                       +--> remote World --+--> remote Merge
 ```
 
-Run the frontend, orchestrator, and two private workers:
-
-```bash
-examples/custom_backend/workflow_hello_world/dynamo_manual/launch.sh
-```
+See
+[`dynamo_manual/worker.py`](dynamo_manual/worker.py)
+for the conceptual implementation.
 
 ## Dynamo Orchestration
 
-The Dynamo implementation declares the graph and binds all three stages to
-discovery-backed remote endpoints. The existing frontend owns the OpenAI
+The Dynamo implementation declares the same all-remote graph and binds its three
+stages to discovery-backed endpoints. The existing frontend owns the OpenAI
 protocol, while `WorkflowOrchestrator` owns dependency scheduling, fan-out,
 join, cancellation, and result validation.
 
@@ -71,8 +68,8 @@ examples/custom_backend/workflow_hello_world/dynamo/launch.sh
 
 ## Send a Request
 
-All launchers listen on port 8000 by default. Send the same request to any
-implementation:
+The bespoke and Dynamo workflow launchers listen on port 8000 by default. Send
+the same request to either implementation:
 
 ```bash
 python3 -m examples.custom_backend.workflow_hello_world.common.client
@@ -84,10 +81,10 @@ Override `--base-url` when the selected launcher uses another port.
 
 | Concern | Bespoke | Manual Dynamo | Dynamo workflow |
 | --- | --- | --- | --- |
-| OpenAI request and response handling | Gateway code | Existing frontend | Existing frontend |
+| OpenAI request and response handling | Gateway code | Outside comparison | Existing frontend |
 | Worker location | Configured URLs | Discovery endpoint IDs in code | Discovery endpoint bindings |
 | Fan-out and join | Gateway tasks | Orchestrator tasks | Graph scheduler |
-| Merge placement | Inline code | Inline code | Remote binding |
+| Merge placement | Inline code | Remote endpoint call | Remote binding |
 | Cancellation and stage failure | Gateway code | Orchestrator code | Workflow attempt |
 | Stage input and output checks | HTTP adapter code | Orchestrator code | Stage contracts |
 | Graph representation | Python control flow | Python control flow | Validated workflow IR |

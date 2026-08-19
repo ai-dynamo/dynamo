@@ -13,16 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Serve private stages or their manually coded public orchestrator."""
+"""Serve a manually orchestrated graph or one of its Dynamo stages."""
 
 import argparse
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
-import uvloop
-
-from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import Context, DistributedRuntime, dynamo_worker
 from examples.custom_backend.workflow_hello_world.common import (
     HelloStage,
@@ -30,28 +27,28 @@ from examples.custom_backend.workflow_hello_world.common import (
     WorldStage,
 )
 
-MODEL_NAME = "hello-world"
 ORCHESTRATOR_ENDPOINT = "workflow-hello-world.manual.generate"
 STAGE_ENDPOINTS = {
     "hello": "workflow-hello-world.manual-hello.generate",
     "world": "workflow-hello-world.manual-world.generate",
+    "merge": "workflow-hello-world.manual-merge.generate",
 }
 STAGE_TYPES = {
     "hello": HelloStage,
     "world": WorldStage,
+    "merge": MergeStage,
 }
 
 
 class ManualOrchestrator:
-    """Own fan-out, cancellation, validation, merge, and output shaping."""
+    """Express the fixed graph directly as Python control flow."""
 
     def __init__(self, stage_clients: Mapping[str, Any]) -> None:
         self._stage_clients = dict(stage_clients)
-        self._merge = MergeStage()
 
     async def _call_stage(
         self, stage_name: str, request: Mapping[str, Any], context: Context
-    ) -> str:
+    ) -> Mapping[str, Any]:
         child_context = context.detached(f"{context.id()}:{stage_name}")
         stream = await self._stage_clients[stage_name].round_robin(
             request,
@@ -70,80 +67,70 @@ class ManualOrchestrator:
             child_context.stop_generating()
             raise
 
-        if not responses:
-            raise RuntimeError(f"stage {stage_name!r} returned no response")
-        response = responses[0]
-        if not isinstance(response, Mapping) or not isinstance(
-            response.get("text"), str
-        ):
+        if not responses or not isinstance(responses[0], Mapping):
             raise RuntimeError(f"stage {stage_name!r} returned an invalid response")
-        return response["text"]
+        return responses[0]
 
     async def _fan_out(
         self, request: Mapping[str, Any], context: Context
-    ) -> tuple[str, str]:
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
         tasks = {
             stage_name: asyncio.create_task(
                 self._call_stage(stage_name, request, context),
                 name=f"dynamo-manual:{stage_name}",
             )
-            for stage_name in STAGE_ENDPOINTS
+            for stage_name in ("hello", "world")
         }
         try:
-            hello, world = await asyncio.gather(tasks["hello"], tasks["world"])
+            return await asyncio.gather(tasks["hello"], tasks["world"])
         except BaseException:
             for task in tasks.values():
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks.values(), return_exceptions=True)
             raise
-        return hello, world
 
     async def generate(
         self, request: Mapping[str, Any], context: Context
     ) -> AsyncIterator[dict[str, Any]]:
-        fan_out = asyncio.create_task(
-            self._fan_out(request, context),
-            name=f"dynamo-manual:{context.id()}",
+        hello, world = await self._fan_out(request, context)
+        result = await self._call_stage(
+            "merge",
+            {"hello": hello["text"], "world": world["text"]},
+            context,
         )
-        cancelled = asyncio.ensure_future(context.async_killed_or_stopped())
-        try:
-            done, _ = await asyncio.wait(
-                {fan_out, cancelled}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if fan_out not in done:
-                fan_out.cancel()
-                await asyncio.gather(fan_out, return_exceptions=True)
-                return
-            hello, world = fan_out.result()
-        finally:
-            if not cancelled.done():
-                cancelled.cancel()
-            await asyncio.gather(cancelled, return_exceptions=True)
-
-        text = await self._merge.run(hello, world)
-        yield {
-            "token_ids": [],
-            "text": text,
-            "index": 0,
-            "finish_reason": "stop",
-        }
+        chunk = result["chunk"]
+        if not isinstance(chunk, Mapping):
+            raise RuntimeError("merge stage returned an invalid chunk")
+        yield dict(chunk)
 
 
 class StageServer:
-    """Adapt one shared stage implementation to a private Dynamo endpoint."""
+    """Expose one shared stage implementation through a Dynamo endpoint."""
 
-    def __init__(self, stage: Any) -> None:
-        self._stage = stage
+    def __init__(self, stage_name: str) -> None:
+        self._stage_name = stage_name
+        self._stage = STAGE_TYPES[stage_name]()
 
     async def generate(
         self, request: Mapping[str, Any], context: Context
-    ) -> AsyncIterator[dict[str, str]]:
+    ) -> AsyncIterator[dict[str, Any]]:
         del context
+        if self._stage_name == "merge":
+            text = await self._stage.run(request["hello"], request["world"])
+            yield {
+                "chunk": {
+                    "token_ids": [],
+                    "text": text,
+                    "index": 0,
+                    "finish_reason": "stop",
+                }
+            }
+            return
         yield {"text": await self._stage.run(request)}
 
 
-async def _serve_orchestrator(runtime: DistributedRuntime, model_path: str) -> None:
+async def _serve_orchestrator(runtime: DistributedRuntime) -> None:
     stage_clients = {
         stage_name: await runtime.endpoint(endpoint_id).client()
         for stage_name, endpoint_id in STAGE_ENDPOINTS.items()
@@ -151,31 +138,19 @@ async def _serve_orchestrator(runtime: DistributedRuntime, model_path: str) -> N
     await asyncio.gather(
         *(client.wait_for_instances() for client in stage_clients.values())
     )
-
     endpoint = runtime.endpoint(ORCHESTRATOR_ENDPOINT)
-    await register_model(
-        model_input=ModelInput.Tokens,
-        model_type=ModelType.Chat | ModelType.Completions,
-        endpoint=endpoint,
-        model_path=model_path,
-        model_name=MODEL_NAME,
-        worker_type=WorkerType.Aggregated,
-        needs=[],
-        ignore_weights=True,
-    )
     await endpoint.serve_endpoint(ManualOrchestrator(stage_clients).generate)
 
 
 async def _serve_stage(runtime: DistributedRuntime, stage_name: str) -> None:
     endpoint = runtime.endpoint(STAGE_ENDPOINTS[stage_name])
-    stage = STAGE_TYPES[stage_name]()
-    await endpoint.serve_endpoint(StageServer(stage).generate)
+    await endpoint.serve_endpoint(StageServer(stage_name).generate)
 
 
 @dynamo_worker()
-async def worker(runtime: DistributedRuntime, role: str, model_path: str) -> None:
+async def worker(runtime: DistributedRuntime, role: str) -> None:
     if role == "orchestrator":
-        await _serve_orchestrator(runtime, model_path)
+        await _serve_orchestrator(runtime)
     else:
         await _serve_stage(runtime, role)
 
@@ -183,9 +158,8 @@ async def worker(runtime: DistributedRuntime, role: str, model_path: str) -> Non
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("role", choices=("orchestrator", *STAGE_ENDPOINTS))
-    parser.add_argument("--model-path", default="Qwen/Qwen3-0.6B")
     args = parser.parse_args()
-    uvloop.run(worker(args.role, args.model_path))
+    asyncio.run(worker(args.role))
 
 
 if __name__ == "__main__":
