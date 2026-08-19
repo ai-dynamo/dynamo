@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# AIPerf trace-replay benchmark for the Gemma 4 31B aggregate B200 DGD.
+# AIPerf trace-replay benchmark for the Gemma 4 31B aggregate DGDs.
 #
 # Restart the DGD pods between independent concurrency points so TensorRT-LLM
 # KV-cache state and Dynamo routing state are reset.
@@ -52,8 +52,8 @@ spec:
                 - key: nvidia.com/dynamo-graph-deployment-name
                   operator: In
                   values:
-                  # Change together with ENDPOINT below.
-                  # Variants: gemma4-31b-agg-{b200,gb200}-agentic
+                  # Change together with ENDPOINT, TARGET_MODEL and CONCURRENCY below.
+                  # Variants: gemma4-31b-agg-{b200,gb200,h200}-agentic
                   - gemma4-31b-agg-b200-agentic
               topologyKey: kubernetes.io/hostname
       # tolerations: # Uncomment and populate for tainted frontend nodes.
@@ -181,8 +181,15 @@ spec:
           value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
         - name: SYNTHESIS_MAX_ISL
           value: "262144"
+        # Blackwell (b200/gb200) variants serve this trace at c=192 within a
+        # ~3s TTFT p50. The h200 variant cannot: bf16 weights plus a 16-bit KV
+        # cache (fp8 KV is unavailable on Hopper for this model) leave far less
+        # KV pool, so c=192 runs deep in admission queueing and TTFT p50 reaches
+        # ~5 minutes. Use CONCURRENCY=16 for h200, which keeps TTFT p50 well
+        # under a second at roughly two thirds of the saturated throughput.
         - name: CONCURRENCY
           value: "192"
+        # h200 variant serves bf16 weights, so use google/gemma-4-31B-it there.
         - name: TARGET_MODEL
           value: nvidia/Gemma-4-31B-IT-NVFP4
         - name: AIPERF_HTTP_CONNECTION_LIMIT
