@@ -33,5 +33,5 @@ ordered Worker resets, status/discovery metadata, and recovery fencing separate.
 Fail closed only when an event cannot be interpreted safely, identity is
 inconsistent, or a reset barrier fails.
 
-The in-process foundation does not establish durable KVCC continuity. Do not
+The in-process foundation does not establish durable KVCR continuity. Do not
 strengthen the ordinary event pipeline to imply that guarantee.

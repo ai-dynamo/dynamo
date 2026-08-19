@@ -214,9 +214,16 @@ html.dark,
     padding-left: 0.25rem !important;
 }
 /* User Guide variants use collapsible top-level sections. Keep those section
-   titles visually distinct without changing flat entries in Reference. */
+   titles visually distinct. */
 #fern-sidebar:has(.fern-variant-selector)
     .fern-sidebar-link.fern-sidebar-level-1:has(.expand-indicator)
+    .fern-sidebar-link-title {
+    font-weight: 600 !important;
+}
+/* Fern semibolds sections but not pages. Reference intentionally mixes both at
+   level 1, so use one weight for a consistent top-level hierarchy. */
+#fern-sidebar
+    .fern-sidebar-link.fern-sidebar-level-1[href*="/reference/"]
     .fern-sidebar-link-title {
     font-weight: 600 !important;
 }

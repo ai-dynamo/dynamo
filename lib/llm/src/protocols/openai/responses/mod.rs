@@ -751,7 +751,7 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
 }
 
 /// Convert Responses API `text.format` to Chat Completions `response_format`.
-fn convert_text_format(text: &ResponseTextParam) -> Option<ResponseFormat> {
+pub fn convert_text_format(text: &ResponseTextParam) -> Option<ResponseFormat> {
     match &text.format {
         TextResponseFormatConfiguration::Text => None,
         TextResponseFormatConfiguration::JsonObject => Some(ResponseFormat::JsonObject),

@@ -199,8 +199,6 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  # Operator imports the local snapshot module.
-  - 'deploy/snapshot/**'
   - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
@@ -209,11 +207,17 @@ operator:
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 snapshot:
-  - 'deploy/snapshot/**'
-  - 'deploy/snapshot/.*'
+  - 'deploy/checkpoint-placeholder/**'
   - 'components/src/dynamo/common/snapshot/**'
   - 'deploy/operator/internal/checkpoint/**'
+  - 'deploy/operator/internal/checkpointjob/**'
   - 'tests/deploy/test_dynamocheckpoint.py'
+  # Where the pinned github.com/ai-dynamo/snapshot chart version/values live --
+  # a version bump or install-config change must trigger the deploy-snapshot-
+  # agent-checkpoint-*/deploy-test-checkpoint-* jobs, not just 'operator'.
+  - 'deploy/helm/charts/platform/Chart.yaml'
+  - 'deploy/helm/charts/platform/Chart.lock'
+  - 'deploy/helm/charts/platform/values.yaml'
 
 # Framework-local snapshot lifecycle files, plus TRT-LLM's unit test. These gate
 # that framework's DynamoCheckpoint deploy jobs (and shared snapshot-agent/operator
@@ -239,6 +243,9 @@ deploy:
   - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
+  - 'deploy/checkpoint-placeholder/**'
+  # Nothing exists here anymore; kept so the coverage check below still
+  # classifies deletions under this now-defunct path.
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and
@@ -344,6 +351,11 @@ rust:
   # Sidecar protobuf contracts are compiled by crate build scripts and need the
   # same workspace checks as sidecar Rust sources.
   - 'lib/sidecar/**/*.proto'
+  # The prometheus_names.py sync check runs as part of cargo test in the
+  # rust-tests job; trigger it when the generator template or committed output
+  # changes.
+  - 'lib/bindings/python/codegen/templates/prometheus_names.py.template'
+  - 'lib/bindings/python/src/dynamo/prometheus_names.py'
 
 benchmarks:
   - 'benchmarks/**'

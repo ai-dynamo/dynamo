@@ -16,7 +16,7 @@ pub const ROUTER_HINT_RUNTIME_CAPABILITY_KEY: &str = "router_hint";
 /// Worker runtime_data key for matching router-hint sources to targets by backend role.
 pub const ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY: &str = "router_hint_worker_type";
 
-/// Worker runtime_data key for per-global-DP-rank advertised KVCC control endpoints.
+/// Worker runtime_data key for per-global-DP-rank advertised KVCR control endpoints.
 pub const ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
     "router_hint_source_control_endpoints";
 
