@@ -739,6 +739,36 @@ where
         Ok((decision.target.worker_id, candidates.len()))
     }
 
+    /// Select a cache-free builtin worker while preserving empty-pool error semantics.
+    pub fn select_stateless_worker(&self) -> anyhow::Result<u64> {
+        let picker = match self.router_mode {
+            RouterMode::RoundRobin => &self.round_robin_picker,
+            RouterMode::Random => &self.random_picker,
+            _ => anyhow::bail!(
+                "{:?} routing does not use stateless worker selection",
+                self.router_mode
+            ),
+        };
+        self.select_untracked_worker(picker)
+            .map(|(worker_id, _)| worker_id)
+    }
+
+    /// Reject an exact target that local fault detection has removed from routing.
+    pub fn ensure_routable(&self, instance_id: u64) -> anyhow::Result<()> {
+        if self
+            .client
+            .routing_instances()
+            .routable_ids()
+            .contains(&instance_id)
+        {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "instance_id={instance_id} not found for endpoint {}",
+            self.client.endpoint.id()
+        )
+    }
+
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         self.round_robin_prepared(request, |_, _| Ok(()))
@@ -908,23 +938,6 @@ where
             .map(TransportFallback::Within)
             .unwrap_or(TransportFallback::Allow);
         self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
-            .await
-    }
-
-    /// Dispatch a host-selected worker with normal transport fallback and no load reservation.
-    ///
-    /// This is the transport half of stateless first-party routing: the caller owns selection
-    /// and request lifecycle tracking, while `PushRouter` retains fault detection and fallback.
-    pub async fn dispatch_selected_untracked<M, F>(
-        &self,
-        instance_id: u64,
-        request: SingleIn<T>,
-        prepare: F,
-    ) -> anyhow::Result<(M, ManyOut<U>)>
-    where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
-    {
-        self.dispatch_selected(instance_id, request, None, prepare)
             .await
     }
 
