@@ -1328,6 +1328,42 @@ where
             .unwrap_or(0)
     }
 
+    /// Select one worker using this router's existing load-aware policy and caller-owned load.
+    ///
+    /// The caller remains responsible for admission and request-lifecycle accounting.
+    pub fn select_target_with_load(
+        &self,
+        pinned_worker: Option<u64>,
+        load: impl Fn(u64) -> u64,
+    ) -> anyhow::Result<u64> {
+        if !matches!(
+            self.router_mode,
+            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded
+        ) {
+            anyhow::bail!("{:?} routing does not consume LOAD", self.router_mode);
+        }
+
+        let routing_instances = self.client.routing_instances();
+        if let Some(worker_id) = pinned_worker {
+            if !routing_instances.routable_ids().contains(&worker_id) {
+                anyhow::bail!(
+                    "instance_id={worker_id} is not routable for endpoint {}",
+                    self.client.endpoint.id()
+                );
+            }
+            return Ok(worker_id);
+        }
+
+        self.picker()?
+            .select(
+                CandidateView::Workers(routing_instances.free_ids()),
+                RouteContext::default(),
+                load,
+            )
+            .map(|decision| decision.target.worker_id)
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))
+    }
+
     async fn select_exact_target(
         &self,
         request: &T,
@@ -2341,6 +2377,39 @@ mod tests {
             "LeastLoaded peek must return the available worker for disagg bootstrap"
         );
 
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn caller_owned_load_drives_existing_picker_without_runtime_admission() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_caller_owned_load".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::LeastLoaded)
+                .await
+                .unwrap();
+        client.override_instance_avail(vec![1, 2, 3]);
+        let selected = router
+            .select_target_with_load(None, |worker_id| match worker_id {
+                1 => 8,
+                2 => 1,
+                3 => 4,
+                _ => unreachable!(),
+            })
+            .unwrap();
+
+        assert_eq!(selected, 2);
+        assert_eq!(router.occupancy_for_test(2), 0);
+        assert_eq!(router.select_target_with_load(Some(3), |_| 0).unwrap(), 3);
         rt.shutdown();
     }
 
