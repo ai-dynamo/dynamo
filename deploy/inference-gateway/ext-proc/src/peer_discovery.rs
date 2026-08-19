@@ -62,26 +62,36 @@ fn replica_sync_port<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Res
             .as_deref()
             .unwrap_or_default()
             .iter()
-            // Only a TCP `replica-agg` port satisfies the contract: the replica
-            // plane binds and dials `tcp://`. Kubernetes defaults `protocol` to
-            // TCP when absent, so treat `None` as TCP and reject explicit
-            // UDP/SCTP rather than let a mismatched port through.
-            .filter(|port| {
-                port.name.as_deref() == Some(REPLICA_AGG_PORT_NAME)
-                    && port
-                        .protocol
-                        .as_deref()
-                        .is_none_or(|protocol| protocol.eq_ignore_ascii_case("TCP"))
-            });
-        let endpoint_port = matches.next().with_context(|| {
-            format!(
-                "EndpointSlice {slice_name} does not expose named port \
-                 {REPLICA_AGG_PORT_NAME:?}"
-            )
-        })?;
+            .filter(|port| port.name.as_deref() == Some(REPLICA_AGG_PORT_NAME));
+        // Skip a slice that does not expose the named port at all. The
+        // EndpointSlice controller rewrites slices while pods churn, so a LIST
+        // can observe a slice mid-update without its ports; the Service is the
+        // single source of truth for ports, so this is a transient race, not a
+        // misconfiguration. Erroring on it made replica startup crash (and
+        // restart) whenever every pod is restarted at once. Genuine
+        // misconfiguration is still caught below: no slice exposing the port,
+        // or conflicting values across slices.
+        let Some(endpoint_port) = matches.next() else {
+            tracing::debug!(
+                slice_name,
+                "EndpointSlice does not expose replica-agg port; skipping transient slice"
+            );
+            continue;
+        };
         anyhow::ensure!(
             matches.next().is_none(),
             "EndpointSlice {slice_name} exposes named port {REPLICA_AGG_PORT_NAME:?} more than once"
+        );
+        // Only a TCP `replica-agg` port satisfies the contract: the replica
+        // plane binds and dials `tcp://`. Kubernetes defaults `protocol` to
+        // TCP when absent, so treat `None` as TCP and reject explicit
+        // UDP/SCTP rather than let a mismatched port through.
+        anyhow::ensure!(
+            endpoint_port
+                .protocol
+                .as_deref()
+                .is_none_or(|protocol| protocol.eq_ignore_ascii_case("TCP")),
+            "EndpointSlice {slice_name} named port {REPLICA_AGG_PORT_NAME:?} must use TCP"
         );
         let raw_port = endpoint_port.port.with_context(|| {
             format!(
@@ -101,6 +111,10 @@ fn replica_sync_port<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Res
     }
 
     anyhow::ensure!(slice_count > 0, "peer Service has no EndpointSlices");
+    anyhow::ensure!(
+        !resolved.is_empty(),
+        "no EndpointSlice exposes named port {REPLICA_AGG_PORT_NAME:?}"
+    );
     anyhow::ensure!(
         resolved.len() == 1,
         "named port {REPLICA_AGG_PORT_NAME:?} resolves to inconsistent ports {resolved:?}"
@@ -432,6 +446,18 @@ mod tests {
         let slices = [slice_with(&["10.0.0.1"], false, "IPv4")];
         let error = replica_sync_port(slices.iter()).unwrap_err().to_string();
         assert!(error.contains(REPLICA_AGG_PORT_NAME));
+    }
+
+    #[test]
+    fn skips_slice_missing_named_port_alongside_one_that_exposes_it() {
+        // A slice being rewritten during pod churn can momentarily lack the
+        // named port; the Service is the source of truth for ports, so
+        // resolution must succeed as long as another slice exposes it.
+        let slices = [
+            slice_with(&["10.0.0.1"], false, "IPv4"),
+            slice_with_replica_port(Some(9092)),
+        ];
+        assert_eq!(replica_sync_port(slices.iter()).unwrap(), 9092);
     }
 
     #[test]
