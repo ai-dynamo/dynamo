@@ -502,6 +502,19 @@ pub trait GenericHeaders {
     fn get(&self, key: &str) -> Option<&str>;
 }
 
+/// Maximum size of the opaque request identifier propagated through Dynamo.
+pub const MAX_REQUEST_ID_BYTES: usize = 256;
+
+/// Return whether an opaque request identifier is safe to use as an internal key.
+///
+/// Request IDs are not required to be UUIDs, but they must be bounded and contain
+/// no whitespace or control characters.
+pub fn is_valid_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_REQUEST_ID_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
 impl GenericHeaders for async_nats::HeaderMap {
     fn get(&self, key: &str) -> Option<&str> {
         async_nats::HeaderMap::get(self, key).map(|value| value.as_str())
@@ -535,10 +548,10 @@ impl TraceParent {
             tracestate = Some(header_value.to_string());
         }
 
-        // Internal request IDs are opaque nonempty values. The deprecated public
+        // Internal request IDs are opaque bounded values. The deprecated public
         // x-dynamo-request-id remains UUID-only for backwards compatibility.
         if let Some(header_value) = headers.get("request-id") {
-            if !header_value.trim().is_empty() {
+            if is_valid_request_id(header_value) {
                 request_id = Some(header_value.to_string());
             }
         } else if let Some(header_value) = headers.get("x-dynamo-request-id")
@@ -2533,6 +2546,16 @@ pub mod tests {
             trace_parent.trace_id.as_deref(),
             Some("11111111111111111111111111111111")
         );
+    }
+
+    #[test]
+    fn internal_request_id_must_be_bounded_and_header_safe() {
+        assert!(is_valid_request_id("opaque-request-g7-42"));
+        assert!(is_valid_request_id(&"x".repeat(MAX_REQUEST_ID_BYTES)));
+        assert!(!is_valid_request_id(""));
+        assert!(!is_valid_request_id("request id"));
+        assert!(!is_valid_request_id("request\nid"));
+        assert!(!is_valid_request_id(&"x".repeat(MAX_REQUEST_ID_BYTES + 1)));
     }
 
     #[test]

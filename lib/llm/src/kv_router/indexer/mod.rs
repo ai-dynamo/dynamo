@@ -315,9 +315,24 @@ impl Indexer {
 
     pub(crate) async fn try_apply_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         if let Some(journal) = self.placement_journal() {
-            let _guard = journal.lock().await;
-            if self.try_apply_event_inner(event.clone()).await? {
-                journal.publish(vec![event]);
+            let shared = journal.lock_shared().await;
+            if !journal.has_subscribers() {
+                if self.try_apply_event_inner(event).await? {
+                    journal.advance();
+                }
+                return Ok(());
+            }
+
+            // Upgrade without holding the read lock. A snapshot may run first, in which
+            // case this mutation is published as its next delta.
+            drop(shared);
+            let _exclusive = journal.lock_exclusive().await;
+            if journal.has_subscribers() {
+                if self.try_apply_event_inner(event.clone()).await? {
+                    journal.publish(vec![event]);
+                }
+            } else if self.try_apply_event_inner(event).await? {
+                journal.advance();
             }
         } else {
             self.try_apply_event_inner(event).await?;
@@ -421,9 +436,13 @@ impl Indexer {
         dp_rank: DpRank,
     ) -> Result<(), KvRouterError> {
         if let Some(journal) = self.placement_journal() {
-            let _guard = journal.lock().await;
+            let _guard = journal.lock_exclusive().await;
             self.reset_worker_dp_rank_inner(worker_id, dp_rank).await?;
-            journal.publish(vec![rank_reset_event(worker_id, dp_rank)]);
+            if journal.has_subscribers() {
+                journal.publish(vec![rank_reset_event(worker_id, dp_rank)]);
+            } else {
+                journal.advance();
+            }
         } else {
             self.reset_worker_dp_rank_inner(worker_id, dp_rank).await?;
         }
@@ -437,8 +456,18 @@ impl Indexer {
         events: Vec<RouterEvent>,
     ) -> Result<(), KvRouterError> {
         if let Some(journal) = self.placement_journal() {
-            let _guard = journal.lock().await;
+            let _guard = journal.lock_exclusive().await;
             self.reset_worker_dp_rank_inner(worker_id, dp_rank).await?;
+            if !journal.has_subscribers() {
+                for event in events {
+                    if let Err(error) = self.try_apply_event_inner(event).await {
+                        journal.advance();
+                        return Err(error);
+                    }
+                }
+                journal.advance();
+                return Ok(());
+            }
             let mut applied = Vec::with_capacity(events.len() + 1);
             applied.push(rank_reset_event(worker_id, dp_rank));
             for event in events {

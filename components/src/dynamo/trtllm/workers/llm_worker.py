@@ -424,9 +424,9 @@ async def init_llm_worker(
                 f"Using existing event_buffer_max_size={existing} from kv_cache_config"
             )
         else:
-            current_kv_config["event_buffer_max_size"] = (
-                DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
-            )
+            current_kv_config[
+                "event_buffer_max_size"
+            ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         event_buffer_max_size = int(current_kv_config["event_buffer_max_size"])
 
         # TRT-LLM enables block reuse by default; warn only when it is explicitly

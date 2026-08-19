@@ -88,7 +88,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
-use dynamo_runtime::logging::get_distributed_tracing_context;
+use dynamo_runtime::logging::{get_distributed_tracing_context, is_valid_request_id};
 use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
@@ -566,9 +566,14 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     if let Some(request_id) = headers
         .get(INTERNAL_REQUEST_ID_HEADER)
         .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
     {
-        return request_id.to_string();
+        if is_valid_request_id(request_id) {
+            return request_id.to_string();
+        }
+        tracing::warn!(
+            header = INTERNAL_REQUEST_ID_HEADER,
+            "ignoring invalid internal request ID"
+        );
     }
 
     // Validate x-dynamo-request-id header if present, warn on invalid values.
@@ -4658,6 +4663,18 @@ mod tests {
         );
 
         assert_eq!(get_or_create_request_id(&headers), "opaque-request-g7-42");
+    }
+
+    #[test]
+    fn invalid_internal_request_id_uses_the_validated_public_fallback() {
+        let fallback = "2fe691e1-1006-41a5-bd04-9b660975dec4";
+        for invalid in ["request id".to_string(), "x".repeat(257)] {
+            let mut headers = HeaderMap::new();
+            headers.insert(INTERNAL_REQUEST_ID_HEADER, invalid.parse().unwrap());
+            headers.insert(DYNAMO_REQUEST_ID_HEADER, fallback.parse().unwrap());
+
+            assert_eq!(get_or_create_request_id(&headers), fallback);
+        }
     }
 
     fn binary_pooling_response() -> NvCreatePoolingResponse {

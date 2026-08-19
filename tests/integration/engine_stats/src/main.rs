@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
@@ -498,13 +501,13 @@ impl StargateFixture {
     }
 
     async fn shutdown(mut self) -> Result<()> {
-        if self.child.try_wait()?.is_none() {
-            if let Some(mut stdin) = self.stdin.take() {
-                stdin
-                    .write_all(b"\n")
-                    .await
-                    .context("failed to signal Stargate probe shutdown")?;
-            }
+        if self.child.try_wait()?.is_none()
+            && let Some(mut stdin) = self.stdin.take()
+        {
+            stdin
+                .write_all(b"\n")
+                .await
+                .context("failed to signal Stargate probe shutdown")?;
         }
         let status = timeout(SHUTDOWN_TIMEOUT + Duration::from_secs(2), self.child.wait())
             .await
@@ -642,8 +645,7 @@ impl StatsConsumerProcess {
             upstream_port,
             stargate_grpc_addr,
             "required",
-            STATS_CONSUMER_ID,
-            STATS_CONSUMER_ID,
+            (STATS_CONSUMER_ID, STATS_CONSUMER_ID),
         )
         .await
     }
@@ -663,8 +665,7 @@ impl StatsConsumerProcess {
             upstream_port,
             stargate_grpc_addr,
             "off",
-            inference_server_id,
-            KV_CLUSTER_ID,
+            (inference_server_id, KV_CLUSTER_ID),
         )
         .await
     }
@@ -676,9 +677,9 @@ impl StatsConsumerProcess {
         upstream_port: u16,
         stargate_grpc_addr: SocketAddr,
         engine_stats_mode: &str,
-        inference_server_id: &str,
-        cluster_id: &str,
+        identity: (&str, &str),
     ) -> Result<Self> {
+        let (inference_server_id, cluster_id) = identity;
         let log_path = artifact_dir.join(format!("stats-consumer-{ordinal}.log"));
         let command_path = artifact_dir.join(format!("stats-consumer-{ordinal}.command.txt"));
         let metrics_addr_path =

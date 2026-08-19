@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use dynamo_kv_router::protocols::RouterEvent;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, MutexGuard, broadcast};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use super::Indexer;
@@ -37,7 +37,7 @@ pub struct PlacementJournal {
 }
 
 struct PlacementJournalInner {
-    mutation: Mutex<()>,
+    mutation: RwLock<()>,
     cursor: AtomicU64,
     sender: broadcast::Sender<PlacementDelta>,
     cancel: CancellationToken,
@@ -54,7 +54,7 @@ impl PlacementJournal {
         let (sender, _) = broadcast::channel(PLACEMENT_JOURNAL_CAPACITY);
         Self {
             inner: Arc::new(PlacementJournalInner {
-                mutation: Mutex::new(()),
+                mutation: RwLock::new(()),
                 cursor: AtomicU64::new(0),
                 sender,
                 cancel,
@@ -62,8 +62,12 @@ impl PlacementJournal {
         }
     }
 
-    pub(super) async fn lock(&self) -> MutexGuard<'_, ()> {
-        self.inner.mutation.lock().await
+    pub(super) async fn lock_shared(&self) -> RwLockReadGuard<'_, ()> {
+        self.inner.mutation.read().await
+    }
+
+    pub(super) async fn lock_exclusive(&self) -> RwLockWriteGuard<'_, ()> {
+        self.inner.mutation.write().await
     }
 
     fn cursor(&self) -> u64 {
@@ -78,15 +82,29 @@ impl PlacementJournal {
         self.inner.cancel.clone()
     }
 
+    pub(super) fn has_subscribers(&self) -> bool {
+        self.inner.sender.receiver_count() != 0
+    }
+
+    fn advance_cursor(&self) -> u64 {
+        self.inner
+            .cursor
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .expect("KV placement cursor overflowed")
+            + 1
+    }
+
+    pub(super) fn advance(&self) {
+        self.advance_cursor();
+    }
+
     pub(super) fn publish(&self, events: Vec<RouterEvent>) {
         if events.is_empty() {
             return;
         }
-        let cursor = self
-            .cursor()
-            .checked_add(1)
-            .expect("KV placement cursor overflowed");
-        self.inner.cursor.store(cursor, Ordering::Relaxed);
+        let cursor = self.advance_cursor();
         let _ = self.inner.sender.send(PlacementDelta { cursor, events });
     }
 }
@@ -127,9 +145,9 @@ impl PlacementFeed {
 }
 
 async fn local_stream(indexer: Indexer, journal: PlacementJournal) -> Result<PlacementStream> {
-    // The same lock serializes accepted index mutations. The dump is therefore a
-    // linearizable snapshot, and every later journal cursor is a post-snapshot delta.
-    let guard = journal.lock().await;
+    // The exclusive lock waits for accepted mutations and blocks later ones. The dump is
+    // therefore a linearizable snapshot, and every later journal cursor is a delta.
+    let guard = journal.lock_exclusive().await;
     let mut receiver = journal.subscribe();
     let cancel = journal.cancellation_token();
     let cursor = journal.cursor();

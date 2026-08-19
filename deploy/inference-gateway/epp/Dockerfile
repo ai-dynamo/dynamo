@@ -80,6 +80,7 @@ COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 COPY --from=dynamo lib/ lib/
 COPY --from=dynamo aisimulate/crates/ aisimulate/crates/
 COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom-policy-example/
+COPY --from=dynamo tests/integration/engine_stats/ tests/integration/engine_stats/
 
 # ext-proc is also a workspace member (referenced from the root Cargo.toml),
 # so cargo needs its manifest on disk to resolve the workspace even when we

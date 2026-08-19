@@ -287,9 +287,11 @@ impl Default for DecodeOverloadLatchState {
 #[derive(Clone, Debug, Default)]
 pub struct WorkerLoadState {
     pub active_decode_blocks: HashMap<u32, u64>,
+    active_decode_observed_at: HashMap<u32, Instant>,
     pub kv_used_blocks: HashMap<u32, u64>,
     pub kv_total_blocks: HashMap<u32, u64>,
     pub active_prefill_tokens: HashMap<u32, u64>,
+    active_prefill_observed_at: HashMap<u32, Instant>,
     expected_dp_ranks: HashSet<u32>,
     kv_used_observed_at: HashMap<u32, Instant>,
     /// max_num_batched_tokens from runtime config (same for all dp_ranks)
@@ -300,9 +302,11 @@ pub struct WorkerLoadState {
 impl WorkerLoadState {
     fn clear_observations(&mut self) {
         self.active_decode_blocks.clear();
+        self.active_decode_observed_at.clear();
         self.kv_used_blocks.clear();
         self.kv_used_observed_at.clear();
         self.active_prefill_tokens.clear();
+        self.active_prefill_observed_at.clear();
         self.decode_overload_latches.clear();
     }
 
@@ -410,6 +414,7 @@ impl WorkerLoadState {
         let dp_rank = active_load.dp_rank;
         if let Some(active_blocks) = active_load.active_decode_blocks {
             self.active_decode_blocks.insert(dp_rank, active_blocks);
+            self.active_decode_observed_at.insert(dp_rank, observed_at);
         }
         if let Some(kv_used_blocks) = active_load.kv_used_blocks {
             self.kv_used_blocks.insert(dp_rank, kv_used_blocks);
@@ -417,6 +422,7 @@ impl WorkerLoadState {
         }
         if let Some(active_tokens) = active_load.active_prefill_tokens {
             self.active_prefill_tokens.insert(dp_rank, active_tokens);
+            self.active_prefill_observed_at.insert(dp_rank, observed_at);
         }
         if let Some(threshold) = active_decode_blocks_threshold {
             self.update_decode_overload_latch(
@@ -609,6 +615,46 @@ fn checked_add(total: &mut Option<u64>, value: u64) -> bool {
     true
 }
 
+fn observation_is_fresh(
+    observed_at: Instant,
+    now: Instant,
+    recovery_after: Option<Instant>,
+) -> bool {
+    now.saturating_duration_since(observed_at) <= KV_LOAD_FRESHNESS
+        && recovery_after.is_none_or(|barrier| observed_at > barrier)
+}
+
+fn forget_worker_publisher(
+    sequences: &mut HashMap<u64, u64>,
+    publishers: &mut HashMap<u64, u64>,
+    worker_id: u64,
+) {
+    let Some(publisher_id) = publishers.remove(&worker_id) else {
+        return;
+    };
+    if !publishers.values().any(|current| *current == publisher_id) {
+        sequences.remove(&publisher_id);
+    }
+}
+
+fn set_worker_publisher(
+    sequences: &mut HashMap<u64, u64>,
+    publishers: &mut HashMap<u64, u64>,
+    worker_id: u64,
+    publisher_id: u64,
+) -> bool {
+    let Some(previous) = publishers.insert(worker_id, publisher_id) else {
+        return false;
+    };
+    if previous == publisher_id {
+        return false;
+    }
+    if !publishers.values().any(|current| *current == previous) {
+        sequences.remove(&previous);
+    }
+    true
+}
+
 fn pool_snapshot(
     states: &DashMap<u64, WorkerLoadState>,
     endpoint: EndpointId,
@@ -624,6 +670,8 @@ fn pool_snapshot(
     let mut used_blocks = None;
     let mut active_decode_blocks = None;
     let mut active_prefill_tokens = None;
+    let mut active_decode_observed_ranks = 0_u64;
+    let mut active_prefill_observed_ranks = 0_u64;
     let mut capacity_overflow = false;
     let mut used_overflow = false;
     let mut active_decode_overflow = false;
@@ -657,10 +705,7 @@ fn pool_snapshot(
                 complete = false;
                 continue;
             };
-            if used > total
-                || now.saturating_duration_since(observed_at) > KV_LOAD_FRESHNESS
-                || recovery_after.is_some_and(|barrier| observed_at <= barrier)
-            {
+            if used > total || !observation_is_fresh(observed_at, now, recovery_after) {
                 complete = false;
                 continue;
             }
@@ -679,13 +724,36 @@ fn pool_snapshot(
         {
             complete = false;
         }
-        for value in state.active_decode_blocks.values().copied() {
+        for dp_rank in &state.expected_dp_ranks {
+            let Some((&value, &observed_at)) = state
+                .active_decode_blocks
+                .get(dp_rank)
+                .zip(state.active_decode_observed_at.get(dp_rank))
+            else {
+                continue;
+            };
+            if !observation_is_fresh(observed_at, now, recovery_after) {
+                continue;
+            }
+            active_decode_observed_ranks = active_decode_observed_ranks.saturating_add(1);
             if !active_decode_overflow && !checked_add(&mut active_decode_blocks, value) {
                 active_decode_overflow = true;
                 active_decode_blocks = None;
             }
         }
-        for value in state.active_prefill_tokens.values().copied() {
+
+        for dp_rank in &state.expected_dp_ranks {
+            let Some((&value, &observed_at)) = state
+                .active_prefill_tokens
+                .get(dp_rank)
+                .zip(state.active_prefill_observed_at.get(dp_rank))
+            else {
+                continue;
+            };
+            if !observation_is_fresh(observed_at, now, recovery_after) {
+                continue;
+            }
+            active_prefill_observed_ranks = active_prefill_observed_ranks.saturating_add(1);
             if !active_prefill_overflow && !checked_add(&mut active_prefill_tokens, value) {
                 active_prefill_overflow = true;
                 active_prefill_tokens = None;
@@ -694,6 +762,12 @@ fn pool_snapshot(
     }
 
     complete &= expected_ranks > 0 && observed_ranks == expected_ranks;
+    if active_decode_observed_ranks != expected_ranks {
+        active_decode_blocks = None;
+    }
+    if active_prefill_observed_ranks != expected_ranks {
+        active_prefill_tokens = None;
+    }
     let free_blocks = if complete {
         capacity_blocks.and_then(|capacity| used_blocks.and_then(|used| capacity.checked_sub(used)))
     } else {
@@ -1197,12 +1271,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     worker_id
                                 );
                             }
-                            if let Some(publisher_id) = decode_publishers.remove(worker_id) {
-                                decode_sequences.remove(&publisher_id);
-                            }
-                            if let Some(publisher_id) = prefill_publishers.remove(worker_id) {
-                                prefill_sequences.remove(&publisher_id);
-                            }
+                            forget_worker_publisher(
+                                &mut decode_sequences,
+                                &mut decode_publishers,
+                                *worker_id,
+                            );
+                            forget_worker_publisher(
+                                &mut prefill_sequences,
+                                &mut prefill_publishers,
+                                *worker_id,
+                            );
                         }
 
                         worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
@@ -1232,6 +1310,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 .active_decode_blocks
                                 .retain(|rank, _| expected_dp_ranks.contains(rank));
                             state
+                                .active_decode_observed_at
+                                .retain(|rank, _| expected_dp_ranks.contains(rank));
+                            state
                                 .kv_used_blocks
                                 .retain(|rank, _| expected_dp_ranks.contains(rank));
                             state
@@ -1239,6 +1320,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 .retain(|rank, _| expected_dp_ranks.contains(rank));
                             state
                                 .active_prefill_tokens
+                                .retain(|rank, _| expected_dp_ranks.contains(rank));
+                            state
+                                .active_prefill_observed_at
                                 .retain(|rank, _| expected_dp_ranks.contains(rank));
                             state
                                 .decode_overload_latches
@@ -1401,9 +1485,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 envelope.sequence > previous.saturating_add(1)
                             }
                         };
-                        let publisher_changed = publishers
-                            .insert(worker_id, envelope.publisher_id)
-                            .is_some_and(|previous| previous != envelope.publisher_id);
+                        let publisher_changed = set_worker_publisher(
+                            sequences,
+                            publishers,
+                            worker_id,
+                            envelope.publisher_id,
+                        );
                         {
                             let mut source_state = sources.write().unwrap();
                             if prefill_scope {
@@ -1519,9 +1606,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     "Cleaned up metrics for removed decode worker {}",
                                     worker_id
                                 );
-                                if let Some(publisher_id) = decode_publishers.remove(worker_id) {
-                                    decode_sequences.remove(&publisher_id);
-                                }
+                                forget_worker_publisher(
+                                    &mut decode_sequences,
+                                    &mut decode_publishers,
+                                    *worker_id,
+                                );
                                 if let Some(mut state) = worker_load_states.get_mut(worker_id) {
                                     state.clear_observations();
                                 }
@@ -1579,9 +1668,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     "Cleaned up metrics for removed prefill worker {}",
                                     worker_id
                                 );
-                                if let Some(publisher_id) = prefill_publishers.remove(worker_id) {
-                                    prefill_sequences.remove(&publisher_id);
-                                }
+                                forget_worker_publisher(
+                                    &mut prefill_sequences,
+                                    &mut prefill_publishers,
+                                    *worker_id,
+                                );
                                 if let Some(mut state) = worker_load_states.get_mut(worker_id) {
                                     state.clear_observations();
                                 }
@@ -1682,13 +1773,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 mod tests {
     use super::{
         LoadMembership, LoadThresholdConfig, OverloadedWorkerTracker, WorkerLoadState,
-        classify_load_membership, compute_overloaded_instances, overload_reconciliation_needed,
-        pool_snapshot, publish_overloaded_instances, publish_overloaded_instances_if_needed,
+        classify_load_membership, compute_overloaded_instances, forget_worker_publisher,
+        overload_reconciliation_needed, pool_snapshot, publish_overloaded_instances,
+        publish_overloaded_instances_if_needed, set_worker_publisher,
     };
     use dashmap::DashMap;
     use dynamo_kv_router::protocols::ActiveLoad;
     use dynamo_runtime::protocols::EndpointId;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::time::{Duration, Instant};
 
     use crate::worker_type::WorkerType;
@@ -1820,6 +1912,58 @@ mod tests {
     }
 
     #[test]
+    fn kv_pool_snapshot_omits_partial_or_stale_optional_load() {
+        let states = DashMap::new();
+        let now = Instant::now();
+        let mut state = WorkerLoadState::default();
+        state.expected_dp_ranks.extend([0, 1]);
+        state.kv_total_blocks.extend([(0, 100), (1, 100)]);
+        state.kv_used_blocks.extend([(0, 25), (1, 50)]);
+        state.kv_used_observed_at.extend([(0, now), (1, now)]);
+        state.active_decode_blocks.extend([(0, 10), (1, 20)]);
+        state.active_decode_observed_at.extend([(0, now), (1, now)]);
+        state.active_prefill_tokens.insert(0, 30);
+        state.active_prefill_observed_at.insert(0, now);
+        states.insert(7, state);
+
+        let partial = pool_snapshot(
+            &states,
+            endpoint(),
+            WorkerType::Decode,
+            &HashSet::from([7]),
+            true,
+            None,
+            now,
+        );
+        assert!(partial.complete);
+        assert_eq!(partial.active_decode_blocks, Some(30));
+        assert_eq!(partial.active_prefill_tokens, None);
+
+        {
+            let mut state = states.get_mut(&7).unwrap();
+            state.active_prefill_tokens.insert(1, 40);
+            state.active_prefill_observed_at.insert(1, now);
+            state.active_decode_observed_at.insert(
+                1,
+                now.checked_sub(super::KV_LOAD_FRESHNESS + Duration::from_nanos(1))
+                    .unwrap(),
+            );
+        }
+        let stale = pool_snapshot(
+            &states,
+            endpoint(),
+            WorkerType::Decode,
+            &HashSet::from([7]),
+            true,
+            None,
+            now,
+        );
+        assert!(stale.complete);
+        assert_eq!(stale.active_decode_blocks, None);
+        assert_eq!(stale.active_prefill_tokens, Some(70));
+    }
+
+    #[test]
     fn clearing_worker_observations_preserves_config_but_requires_fresh_occupancy() {
         let now = Instant::now();
         let mut state = WorkerLoadState::default();
@@ -1829,7 +1973,9 @@ mod tests {
         state.kv_used_blocks.insert(0, 25);
         state.kv_used_observed_at.insert(0, now);
         state.active_decode_blocks.insert(0, 10);
+        state.active_decode_observed_at.insert(0, now);
         state.active_prefill_tokens.insert(0, 20);
+        state.active_prefill_observed_at.insert(0, now);
 
         state.clear_observations();
 
@@ -1839,7 +1985,9 @@ mod tests {
         assert!(state.kv_used_blocks.is_empty());
         assert!(state.kv_used_observed_at.is_empty());
         assert!(state.active_decode_blocks.is_empty());
+        assert!(state.active_decode_observed_at.is_empty());
         assert!(state.active_prefill_tokens.is_empty());
+        assert!(state.active_prefill_observed_at.is_empty());
 
         let states = DashMap::from_iter([(7, state)]);
         let snapshot = pool_snapshot(
@@ -1870,6 +2018,19 @@ mod tests {
         assert!(tracker.update_worker(7, false));
         assert!(!tracker.contains(7));
         assert!(!tracker.update_worker(7, false));
+    }
+
+    #[test]
+    fn publisher_sequence_is_retired_after_its_last_worker_moves() {
+        let mut sequences = HashMap::from([(10, 5), (20, 1)]);
+        let mut publishers = HashMap::from([(7, 10), (8, 10)]);
+
+        assert!(set_worker_publisher(&mut sequences, &mut publishers, 7, 20,));
+        assert!(sequences.contains_key(&10));
+
+        forget_worker_publisher(&mut sequences, &mut publishers, 8);
+        assert!(!sequences.contains_key(&10));
+        assert_eq!(publishers, HashMap::from([(7, 20)]));
     }
 
     #[test]

@@ -600,6 +600,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 # wheel metadata and optional source archival both validate every member.
 COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-policy-example/
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
+COPY tests/integration/engine_stats/ /opt/dynamo/tests/integration/engine_stats/
 
 {% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
 # AI Simulate is a separate, architecture-specific Python distribution used by
