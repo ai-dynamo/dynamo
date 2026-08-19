@@ -190,8 +190,8 @@ spec:
               --max-num-batched-tokens 32768 \
               --gpu-memory-utilization 0.9 \
               --attention-backend FLASHINFER \
-              --linear-backend CUTLASS \
-              --moe-backend CUTLASS \
+              --linear-backend cutlass \
+              --moe-backend flashinfer_trtllm \
               --block-size 64 \
               --mamba-backend triton \
               --no-enable-flashinfer-autotune \
@@ -338,8 +338,8 @@ spec:
               --max-num-batched-tokens 32768 \
               --gpu-memory-utilization 0.9 \
               --attention-backend FLASHINFER \
-              --linear-backend CUTLASS \
-              --moe-backend CUTLASS \
+              --linear-backend cutlass \
+              --moe-backend flashinfer_trtllm \
               --block-size 64 \
               --mamba-backend triton \
               --no-enable-flashinfer-autotune \

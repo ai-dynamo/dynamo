@@ -202,8 +202,8 @@ spec:
                     --max-num-batched-tokens 32768 \
                     --gpu-memory-utilization 0.9 \
                     --attention-backend FLASHINFER \
-                    --linear-backend CUTLASS \
-                    --moe-backend CUTLASS \
+                    --linear-backend cutlass \
+                    --moe-backend flashinfer_trtllm \
                     --no-enable-flashinfer-autotune \
                     --block-size 64 \
                     --no-enable-expert-parallel \
@@ -369,8 +369,8 @@ spec:
                     --max-num-batched-tokens 32768 \
                     --gpu-memory-utilization 0.9 \
                     --attention-backend FLASHINFER \
-                    --linear-backend CUTLASS \
-                    --moe-backend CUTLASS \
+                    --linear-backend cutlass \
+                    --moe-backend flashinfer_trtllm \
                     --no-enable-flashinfer-autotune \
                     --block-size 64 \
                     --no-enable-expert-parallel \
