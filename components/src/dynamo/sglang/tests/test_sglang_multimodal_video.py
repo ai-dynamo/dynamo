@@ -40,6 +40,35 @@ pytestmark = [
 ]
 
 
+class _FakeContext:
+    def __init__(self, context_id: str, trace_id: str | None = None):
+        self.trace_id = trace_id
+        self._context_id = context_id
+        self._cancelled = asyncio.Event()
+
+    def id(self) -> str:
+        return self._context_id
+
+    def async_killed_or_stopped(self) -> asyncio.Task[bool]:
+        return asyncio.create_task(self._cancelled.wait())
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+
+@asynccontextmanager
+async def _never_cancels(request_id_future, context):
+    task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        yield task
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 def test_extract_media_inputs_supports_video_urls():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
@@ -165,8 +194,8 @@ async def test_multimodal_prefill_starts_before_returning_bootstrap():
     handler._validate_and_parse_disagg_request = lambda request: request
     handler._generate_bootstrap_room = lambda: 17
 
-    async def start_prefill(request, bootstrap_room, context=None):
-        events.append(("start", bootstrap_room))
+    async def start_prefill(request, bootstrap_room, rid=None, context=None):
+        events.append(("start", bootstrap_room, rid))
 
         async def results():
             events.append(("iterate", None))
@@ -174,17 +203,21 @@ async def test_multimodal_prefill_starts_before_returning_bootstrap():
 
         return results(), None
 
-    @asynccontextmanager
-    async def cancellation_monitor(request_id_future, context):
-        yield
+    async def wait_for_registration(rid):
+        events.append(("registered", rid))
 
     handler._start_prefill_generation = start_prefill
-    handler._cancellation_monitor = cancellation_monitor
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
 
-    stream = handler.generate(object(), SimpleNamespace())
+    stream = handler.generate(object(), _FakeContext("request-id"))
     bootstrap = json.loads(await anext(stream))
 
-    assert events == [("start", 17), ("iterate", None)]
+    assert events == [
+        ("start", 17, "request-id"),
+        ("registered", "request-id"),
+        ("iterate", None),
+    ]
     assert bootstrap == {
         "bootstrap_host": "prefill-host",
         "bootstrap_port": 1234,
@@ -193,7 +226,11 @@ async def test_multimodal_prefill_starts_before_returning_bootstrap():
 
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
-    assert events == [("start", 17), ("iterate", None)]
+    assert events == [
+        ("start", 17, "request-id"),
+        ("registered", "request-id"),
+        ("iterate", None),
+    ]
 
 
 @pytest.mark.asyncio
@@ -237,11 +274,11 @@ async def test_multimodal_prefill_rejects_empty_engine_stream():
     released = []
     handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
 
-    @asynccontextmanager
-    async def cancellation_monitor(request_id_future, context):
-        yield
+    async def wait_for_registration(rid):
+        return None
 
-    handler._cancellation_monitor = cancellation_monitor
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
 
     async def empty_results():
         if False:
@@ -254,7 +291,8 @@ async def test_multimodal_prefill_rejects_empty_engine_stream():
         await handler._consume_results(
             empty_results(),
             23,
-            SimpleNamespace(),
+            "request-id",
+            _FakeContext("request-id"),
             owns_tensor,
             request_started,
         )
@@ -284,23 +322,74 @@ async def test_multimodal_prefill_cancellation_awaits_consumer_cleanup():
         finally:
             result_stopped.set()
 
-    async def start_prefill(request, bootstrap_room, context=None):
+    async def start_prefill(request, bootstrap_room, rid=None, context=None):
         return results(), 23
 
-    @asynccontextmanager
-    async def cancellation_monitor(request_id_future, context):
-        yield
+    async def wait_for_registration(rid):
+        return None
 
     handler._start_prefill_generation = start_prefill
-    handler._cancellation_monitor = cancellation_monitor
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
 
-    stream = handler.generate(object(), SimpleNamespace())
+    stream = handler.generate(object(), _FakeContext("request-id"))
     await anext(stream)
     await stream.aclose()
 
     assert result_stopped.is_set()
     assert released == [23]
     assert not handler._consume_tasks
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_cancels_registered_rid_before_first_result():
+    rid = "dynamo-request-id"
+    abort_calls = []
+    result_stopped = asyncio.Event()
+
+    class _TokenizerManager:
+        def __init__(self):
+            self.rid_to_state = {}
+
+        def abort_request(self, *, rid, abort_all):
+            abort_calls.append((rid, abort_all))
+
+    tokenizer_manager = _TokenizerManager()
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.engine = SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    handler.shutdown_event = None
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=lambda _: None)
+
+    async def results():
+        tokenizer_manager.rid_to_state[rid] = object()
+        try:
+            await asyncio.Event().wait()
+            yield {}
+        finally:
+            result_stopped.set()
+
+    owns_tensor = asyncio.Event()
+    request_started = asyncio.Event()
+    context = _FakeContext(rid)
+    consumer = asyncio.create_task(
+        handler._consume_results(
+            results(),
+            None,
+            rid,
+            context,
+            owns_tensor,
+            request_started,
+        )
+    )
+
+    await asyncio.wait_for(request_started.wait(), timeout=1)
+    context.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(consumer, timeout=1)
+
+    assert abort_calls == [(rid, False)]
+    assert result_stopped.is_set()
 
 
 @pytest.mark.asyncio

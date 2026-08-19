@@ -678,6 +678,8 @@ class MultimodalPrefillWorkerHandler(
     Processes multimodal inputs and coordinates with decode worker.
     """
 
+    _REQUEST_REGISTRATION_TIMEOUT_SECONDS = 5.0
+
     def __init__(
         self,
         engine: sgl.Engine,
@@ -723,9 +725,13 @@ class MultimodalPrefillWorkerHandler(
             # Validate and parse request
             disagg_request = self._validate_and_parse_disagg_request(disagg_request)
 
+            rid = context.trace_id or context.id()
             bootstrap_room = self._generate_bootstrap_room()
-            results, tensor_id = await self._start_prefill_generation(
-                disagg_request, bootstrap_room, context=context
+            results, tensor_id = await self._start_prefill_or_cancel(
+                disagg_request,
+                bootstrap_room,
+                rid,
+                context,
             )
             consumer_owns_tensor = asyncio.Event()
             request_started = asyncio.Event()
@@ -735,6 +741,7 @@ class MultimodalPrefillWorkerHandler(
                     self._consume_results(
                         results,
                         tensor_id,
+                        rid,
                         context,
                         consumer_owns_tensor,
                         request_started,
@@ -837,6 +844,7 @@ class MultimodalPrefillWorkerHandler(
         self,
         disagg_request: DisaggSglangMultimodalRequest,
         bootstrap_room: int,
+        rid: Optional[str] = None,
         context=None,
     ) -> tuple[AsyncIterator[Any], Optional[int]]:
         """Receive multimodal embeddings and submit the prefill to SGLang."""
@@ -870,7 +878,7 @@ class MultimodalPrefillWorkerHandler(
                     "bootstrap_port": self.bootstrap_port,
                     "bootstrap_room": bootstrap_room,
                     "external_trace_header": trace_header,
-                    "rid": context.trace_id if context else None,
+                    "rid": rid,
                 }
 
                 if image_mm_items:
@@ -886,10 +894,81 @@ class MultimodalPrefillWorkerHandler(
 
         return results, tensor_id
 
+    async def _start_prefill_or_cancel(
+        self,
+        disagg_request: DisaggSglangMultimodalRequest,
+        bootstrap_room: int,
+        rid: str,
+        context: Context,
+    ) -> tuple[AsyncIterator[Any], Optional[int]]:
+        """Cancel local preprocessing/submission if the client stops early."""
+        start_task = asyncio.create_task(
+            self._start_prefill_generation(
+                disagg_request,
+                bootstrap_room,
+                rid=rid,
+                context=context,
+            )
+        )
+        cancellation_future = context.async_killed_or_stopped()
+        try:
+            done, _ = await asyncio.wait(
+                (start_task, cancellation_future),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # Prefer a completed submission if both signals arrive together. The
+            # registered-request phase will observe the sticky context state and
+            # abort by the same RID without dropping tensor ownership.
+            if start_task in done:
+                return await start_task
+
+            start_task.cancel()
+            try:
+                await start_task
+            except asyncio.CancelledError:
+                pass
+            raise asyncio.CancelledError
+        finally:
+            if not start_task.done():
+                start_task.cancel()
+                try:
+                    await start_task
+                except asyncio.CancelledError:
+                    pass
+            if not cancellation_future.done():
+                cancellation_future.cancel()
+                try:
+                    await cancellation_future
+                except asyncio.CancelledError:
+                    pass
+
+    async def _wait_for_request_registration(self, rid: str) -> None:
+        """Wait until SGLang owns the RID, without waiting for engine output."""
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        rid_to_state = getattr(tokenizer_manager, "rid_to_state", None)
+        if rid_to_state is None:
+            raise RuntimeError("SGLang tokenizer manager has no request registry")
+
+        async def poll_registry() -> None:
+            while rid not in rid_to_state:
+                await asyncio.sleep(0.001)
+
+        try:
+            await asyncio.wait_for(
+                poll_registry(),
+                timeout=self._REQUEST_REGISTRATION_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as e:
+            raise RuntimeError(
+                f"SGLang did not register prefill request {rid} within "
+                f"{self._REQUEST_REGISTRATION_TIMEOUT_SECONDS:g}s"
+            ) from e
+
     async def _consume_results(
         self,
         results,
         tensor_id: Optional[int],
+        rid: str,
         context: Context,
         owns_tensor: asyncio.Event,
         request_started: asyncio.Event,
@@ -898,38 +977,148 @@ class MultimodalPrefillWorkerHandler(
         released = False
         request_id_future: asyncio.Future[str] = asyncio.Future()
         first_result_task: asyncio.Task[Any] | None = None
+        next_result_task: asyncio.Task[Any] | None = None
+        registration_task: asyncio.Task[None] | None = None
+        pre_registration_cancellation: asyncio.Future[Any] | None = None
 
         def process_result(result: dict[str, Any]) -> None:
             nonlocal released
-            if not request_id_future.done():
-                request_id = result.get("meta_info", {}).get("id")
-                if request_id:
-                    request_id_future.set_result(request_id)
             if tensor_id is not None and not released:
                 self.embeddings_processor.release_embeddings(tensor_id)
                 released = True
 
         try:
             owns_tensor.set()
-            async with self._cancellation_monitor(request_id_future, context):
-                first_result_task = asyncio.create_task(anext(results))
-                # SGLang's stream is a lazy async generator. Give its first
-                # iteration a scheduler turn before authorizing decode so the
-                # request reaches TokenizerManager.generate_request.
-                await asyncio.sleep(0)
-                request_started.set()
+            registration_task = asyncio.create_task(
+                self._wait_for_request_registration(rid)
+            )
+            first_result_task = asyncio.create_task(anext(results))
+            pre_registration_cancellation = context.async_killed_or_stopped()
+
+            first_result: Any = None
+            first_result_ready = False
+            while not registration_task.done():
+                wait_for: set[asyncio.Future[Any]] = {
+                    registration_task,
+                    pre_registration_cancellation,
+                }
+                if first_result_task is not None and not first_result_task.done():
+                    wait_for.add(first_result_task)
+                done, _ = await asyncio.wait(
+                    wait_for,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if registration_task in done:
+                    break
+                if first_result_task in done and not first_result_ready:
+                    try:
+                        first_result = await first_result_task
+                    except StopAsyncIteration as e:
+                        raise RuntimeError(
+                            "SGLang prefill stream ended before producing a result"
+                        ) from e
+                    finally:
+                        first_result_task = None
+                    first_result_ready = True
+                if pre_registration_cancellation in done:
+                    raise asyncio.CancelledError
+
+            await registration_task
+            request_id_future.set_result(rid)
+            if not pre_registration_cancellation.done():
+                pre_registration_cancellation.cancel()
                 try:
-                    first_result = await first_result_task
-                except StopAsyncIteration as e:
-                    raise RuntimeError(
-                        "SGLang prefill stream ended before producing a result"
-                    ) from e
+                    await pre_registration_cancellation
+                except asyncio.CancelledError:
+                    pass
+
+            async with self._cancellation_monitor(
+                request_id_future, context
+            ) as cancellation_task:
+                request_started.set()
+                if not first_result_ready:
+                    assert first_result_task is not None
+                    done, _ = await asyncio.wait(
+                        (first_result_task, cancellation_task),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if cancellation_task in done:
+                        await cancellation_task
+                        raise asyncio.CancelledError
+                    try:
+                        first_result = await first_result_task
+                    except StopAsyncIteration as e:
+                        raise RuntimeError(
+                            "SGLang prefill stream ended before producing a result"
+                        ) from e
+                    finally:
+                        first_result_task = None
                 process_result(first_result)
 
-                async for result in results:
+                while True:
+                    next_result_task = asyncio.create_task(anext(results))
+                    done, _ = await asyncio.wait(
+                        (next_result_task, cancellation_task),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if cancellation_task in done:
+                        if not next_result_task.done():
+                            next_result_task.cancel()
+                            try:
+                                await next_result_task
+                            except asyncio.CancelledError:
+                                pass
+                        await cancellation_task
+                        raise asyncio.CancelledError
+                    try:
+                        result = await next_result_task
+                    except StopAsyncIteration:
+                        break
+                    finally:
+                        next_result_task = None
                     process_result(result)
         finally:
             pending_exception = sys.exc_info()[1]
+            for task in (registration_task, pre_registration_cancellation):
+                if task is None:
+                    continue
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as task_error:
+                    if pending_exception is None:
+                        raise
+                    if task_error is not pending_exception:
+                        logger.error(
+                            "SGLang prefill registration task failed during cleanup",
+                            exc_info=(
+                                type(task_error),
+                                task_error,
+                                task_error.__traceback__,
+                            ),
+                        )
+            if next_result_task is not None:
+                if not next_result_task.done():
+                    next_result_task.cancel()
+                try:
+                    await next_result_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as task_error:
+                    if pending_exception is None:
+                        raise
+                    if task_error is not pending_exception:
+                        logger.error(
+                            "SGLang prefill next-result task failed during cleanup",
+                            exc_info=(
+                                type(task_error),
+                                task_error,
+                                task_error.__traceback__,
+                            ),
+                        )
             if first_result_task is not None:
                 if not first_result_task.done():
                     first_result_task.cancel()
