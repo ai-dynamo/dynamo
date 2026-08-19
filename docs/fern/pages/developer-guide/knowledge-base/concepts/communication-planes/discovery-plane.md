@@ -65,6 +65,16 @@ Example:
 export ETCD_ENDPOINTS=http://etcd-0:2379,http://etcd-1:2379,http://etcd-2:2379
 ```
 
+<Note>
+The bundled `dev/docker-compose.yml` and the mocker example run etcd with
+`ALLOW_NONE_AUTHENTICATION=yes` (anonymous) for convenience. To run etcd with a
+root password locally, layer the optional `docker-compose.etcd-auth.yml` overlay
+alongside each and export `ETCD_ROOT_PASSWORD` (the overlay wires
+`ETCD_AUTH_USERNAME`/`ETCD_AUTH_PASSWORD` into the Dynamo services). In
+Kubernetes, prefer `DYN_DISCOVERY_BACKEND=kubernetes`, which replaces etcd with
+RBAC-gated custom resources and removes the anonymous-discovery surface entirely.
+</Note>
+
 ### Service Registration
 
 Workers register their endpoints in etcd with a key hierarchy:
