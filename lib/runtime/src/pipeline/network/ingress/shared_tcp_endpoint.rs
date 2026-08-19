@@ -138,6 +138,23 @@ struct WorkItem {
     endpoint_name: String,
 }
 
+impl Drop for WorkItem {
+    /// Release the request-plane inflight slot via RAII.
+    ///
+    /// The inflight counter is incremented once in `read_loop` when the
+    /// `WorkItem` is built. Decrementing it here (rather than manually at the
+    /// tail of `handle_work_item`, after an `.await`) guarantees the release
+    /// runs on *every* exit path — normal completion, handler panic, task
+    /// cancellation, or the item being dropped undelivered (rejected/overflow,
+    /// or still sitting in the queue at shutdown). Each `WorkItem` owns exactly
+    /// one inflight increment, so this fires exactly once per increment and
+    /// cannot double-decrement.
+    fn drop(&mut self) {
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+}
+
 /// Shared TCP server that handles multiple endpoints on a single port
 pub struct SharedTcpServer {
     handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
@@ -387,9 +404,12 @@ impl SharedTcpServer {
             .or_else(|| work_item.headers.get("x-dynamo-request-id"))
             .cloned();
 
+        // Clone rather than move `payload` out: `WorkItem` implements `Drop`
+        // (for the inflight release), so a field cannot be moved out of it.
+        // `Bytes` is Arc-backed, so the clone is cheap.
         let result = work_item
             .service_handler
-            .handle_payload(work_item.payload, request_id)
+            .handle_payload(work_item.payload.clone(), request_id)
             .instrument(span)
             .await;
 
@@ -401,8 +421,9 @@ impl SharedTcpServer {
             );
         }
 
-        work_item.inflight.fetch_sub(1, Ordering::SeqCst);
-        work_item.notify.notify_one();
+        // The inflight counter is released by `WorkItem`'s `Drop` impl when
+        // `work_item` goes out of scope here — panic/cancel-safe, no manual
+        // decrement needed.
     }
 
     /// Bind the server and start accepting connections.
@@ -762,16 +783,17 @@ impl SharedTcpServer {
                     send_response(TcpResponseMessage::new(Bytes::from_static(
                         b"Server overloaded: worker at capacity",
                     )));
-                    handler.inflight.fetch_sub(1, Ordering::SeqCst);
-                    handler.notify.notify_one();
+                    // `work_item` is dropped undelivered at the end of this loop
+                    // iteration; its `Drop` releases the inflight slot. Do not
+                    // decrement here or the counter would go negative/underflow.
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
                     send_response(TcpResponseMessage::new(Bytes::from_static(
                         b"Server unavailable: worker pool channel closed",
                     )));
-                    handler.inflight.fetch_sub(1, Ordering::SeqCst);
-                    handler.notify.notify_one();
+                    // `work_item` is dropped undelivered when we break out of the
+                    // loop; its `Drop` releases the inflight slot.
                     tracing::error!("Worker pool channel closed, shutting down read loop");
                     break;
                 }
