@@ -2,16 +2,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Secure Deployment Guidelines
+subtitle: Trust model and hardening guidance for production Dynamo deployments
 ---
 
-Dynamo is a distributed inference framework built from multiple cooperating
-components — a frontend, backend workers, a KV-aware router, and a control plane
-(service discovery and messaging). This document describes how to deploy Dynamo
-securely and the trust boundaries you are responsible for when you operate it.
+NVIDIA Dynamo is a distributed inference framework built from multiple
+cooperating components: a frontend, backend workers, a KV router, and a control
+plane for service discovery and messaging. This page describes how to deploy
+Dynamo securely and the trust boundaries you are responsible for when you operate
+it.
 
-Dynamo is designed to run **inside a trusted network boundary**. The guidance
-below explains where that boundary sits, what Dynamo protects on its own, and
-what the deployer must protect.
+Dynamo is designed to run inside a trusted network boundary. The guidance below
+explains where that boundary sits, what Dynamo protects on its own, and what the
+deployer must protect.
 
 > [!IMPORTANT]
 > The `docker compose` files and example manifests in this repository are
@@ -23,9 +25,9 @@ what the deployer must protect.
 
 Dynamo separates two kinds of traffic:
 
-- The **data plane** — the frontend's OpenAI-compatible HTTP endpoint, which
+- The **data plane**: the frontend's OpenAI-compatible HTTP endpoint, which
   serves inference requests to clients.
-- The **control plane** — service discovery (etcd or Kubernetes custom
+- The **control plane**: service discovery (etcd or Kubernetes custom
   resources), messaging (NATS), and model/weight distribution
   (ModelExpress/NIXL). Components use the control plane to find each other and
   coordinate.
@@ -52,10 +54,13 @@ a microservice behind a dedicated gateway or proxy that provides:
 - **Rate limiting** and request-size limits.
 - **Load balancing** across frontend replicas.
 
-On Kubernetes, use the [Dynamo inference gateway](../../kubernetes/installation/gateway-api-routing.mdx)
-or a standard ingress/gateway in front of the frontend service. The frontend
-itself implements no client authentication; that is the gateway's
-responsibility.
+On Kubernetes, place a standard ingress or Gateway that you configure for
+authentication and TLS in front of the Dynamo Frontend service. The frontend
+implements no client authentication; that is the gateway's responsibility. If
+you adopt Dynamo's optional [Gateway API routing topology](../../kubernetes/installation/gateway-api-routing.mdx),
+note that its Endpoint Picker selects a backend for load and KV-cache reasons and
+does not authenticate clients, so it still sits behind your authenticating
+gateway.
 
 ## Secure the Control Plane
 
@@ -135,8 +140,8 @@ stack.
 
 ## Securing Model and Backend Code
 
-Dynamo loads models, tokenizers, chat templates, and — depending on the backend
-— executable model code. Treat all of these as code that runs with the worker's
+Dynamo loads models, tokenizers, chat templates, and (depending on the backend)
+executable model code. Treat all of these as code that runs with the worker's
 privileges.
 
 - **Load models only from trusted sources.** Restrict which model repositories
