@@ -12,7 +12,6 @@ import asyncio
 import base64
 import logging
 import struct
-import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -42,10 +41,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AudioStreamState:
-    """Request-local state for de-duplicating incremental audio output."""
+    """Request-local state for incremental audio output."""
 
     emitted_chunks: int = 0
-    first_chunk: bool = True
+    sample_rate: int | None = None
+    num_channels: int | None = None
 
 
 @dataclass
@@ -413,7 +413,15 @@ class AudioFormatter:
         sample_rate: int,
     ) -> None:
         audio_np, num_channels = self._channel_first_audio(audio_np)
+        self._validate_audio_metadata(state, sample_rate, num_channels)
+        state.chunks.append(audio_np)
 
+    @staticmethod
+    def _validate_audio_metadata(
+        state: AudioStreamState | AudioAggregateState,
+        sample_rate: int,
+        num_channels: int,
+    ) -> None:
         if state.sample_rate is not None and state.sample_rate != sample_rate:
             raise ValueError(
                 f"Audio sample rate changed from {state.sample_rate} to {sample_rate}"
@@ -423,7 +431,6 @@ class AudioFormatter:
 
         state.sample_rate = sample_rate
         state.num_channels = num_channels
-        state.chunks.append(audio_np)
 
     def _extract_audio_tensor(
         self,
@@ -471,15 +478,16 @@ class AudioFormatter:
         stream_state: AudioStreamState,
     ) -> tuple[bytes, str]:
         audio_np, num_channels = self._normalize_audio_layout(audio_np)
+        first_chunk = stream_state.sample_rate is None
+        self._validate_audio_metadata(stream_state, sample_rate, num_channels)
         pcm_bytes, _ = self._write_audio(audio_np, sample_rate, "pcm")
-        if fmt == "wav" and stream_state.first_chunk:
+        if fmt == "wav" and first_chunk:
             pcm_bytes = self._wav_stream_header(sample_rate, num_channels) + pcm_bytes
-        stream_state.first_chunk = False
         return pcm_bytes, "audio/wav" if fmt == "wav" else "audio/pcm"
 
     @staticmethod
     def _channel_first_audio(audio_np: np.ndarray) -> tuple[np.ndarray, int]:
-        """Validate vLLM-Omni channel-first audio layout."""
+        """Normalize mono or stereo audio to vLLM-Omni's channel-first layout."""
         if audio_np.ndim == 3:
             if audio_np.shape[0] != 1:
                 raise ValueError(
@@ -490,14 +498,21 @@ class AudioFormatter:
         if audio_np.ndim == 1:
             return audio_np, 1
 
-        if audio_np.ndim == 2 and audio_np.shape[0] in (1, 2):
+        if audio_np.ndim != 2:
+            raise ValueError(f"Unexpected audio shape {audio_np.shape}")
+
+        # Prefer vLLM-Omni's channel-first contract for ambiguous small shapes,
+        # while retaining compatibility with soundfile-style frame-major output.
+        if audio_np.shape[0] in (1, 2):
             return audio_np, int(audio_np.shape[0])
+        if audio_np.shape[1] in (1, 2):
+            return audio_np.T, int(audio_np.shape[1])
 
         raise ValueError(f"Expected mono or stereo audio, got shape {audio_np.shape}")
 
     @classmethod
     def _normalize_audio_layout(cls, audio_np: np.ndarray) -> tuple[np.ndarray, int]:
-        """Convert vLLM-Omni channel-first audio to soundfile's layout."""
+        """Convert supported audio layouts to soundfile's frame-major layout."""
         audio_np, num_channels = cls._channel_first_audio(audio_np)
         if audio_np.ndim == 2:
             audio_np = audio_np.T
