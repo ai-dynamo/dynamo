@@ -102,6 +102,13 @@ uv pip install -e .
 python3 -m dynamo.frontend --help   # verify
 ```
 
+The runtime wheel does not carry pytest or its plugins. Install the test dependencies
+separately before running the Python suite:
+
+```bash
+uv pip install -r container/deps/requirements.test.txt
+```
+
 Rust-only:
 
 ```bash
@@ -112,8 +119,28 @@ cargo build -p dynamo-llm   # one crate
 ## Test
 
 ```bash
-cargo test                  # Rust
-pytest -m unit tests/       # Python unit tests
+cargo test                                             # Rust
+python3 -m pytest -m "unit and not post_merge" tests/  # Python unit tests
+```
+
+Invoke pytest as `python3 -m pytest` so it resolves against the active venv, and install
+`container/deps/requirements.test.txt` first (see [Build](#build)). Pytest runs with
+`--strict-config` and `--strict-markers`, so a missing plugin is a collection error, not a
+warning — `Unknown config option: asyncio_mode` means `pytest-asyncio` is absent, and
+`'order' not found in markers` means `pytest-order` is.
+
+`not post_merge` drops `tests/dependencies/test_kvbm_imports.py`, which asserts on the
+in-container path `/opt/dynamo/wheelhouse/kvbm*.whl` and cannot pass on a host checkout.
+
+A base `uv pip install -e .` has no `torch`, and a few backend test modules import it at
+module scope, so they fail during *collection* even though `-m unit` deselects every test
+in them. Either install a backend extra (`uv pip install -e '.[vllm]'`) or skip those
+modules:
+
+```bash
+python3 -m pytest -m "unit and not post_merge" tests/ \
+  --ignore=tests/serve/test_vllm.py --ignore=tests/serve/test_sglang.py \
+  --ignore=tests/serve/test_trtllm.py --ignore=tests/fault_tolerance/test_canary_rank_pause.py
 ```
 
 Markers are strict (`--strict-markers`); the full marker list lives in

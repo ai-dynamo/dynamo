@@ -92,6 +92,39 @@ python3 -m dynamo.frontend --help
 
 You should see the frontend command help output.
 
+## 9. Install Test Dependencies
+
+The Dynamo wheel carries runtime dependencies only. Pytest and its plugins live in a separate
+manifest that the test and dev containers install:
+
+```bash
+uv pip install -r container/deps/requirements.test.txt
+```
+
+Install it before running the Python suite. Pytest is configured with `--strict-config` and
+`--strict-markers`, so a missing plugin becomes a collection error rather than a warning --
+`Unknown config option: asyncio_mode` means `pytest-asyncio` is absent, and
+`'order' not found in markers` means `pytest-order` is.
+
+## 10. Run the Tests
+
+```bash
+cargo test --locked --all-targets
+python3 -m pytest -m "unit and not post_merge" tests/
+```
+
+Invoke pytest as `python3 -m pytest` so it resolves against the active virtual environment.
+A bare `pytest` on your `PATH` may come from outside the environment and will not see the
+editable `dynamo` install.
+
+> [!NOTE]
+> `not post_merge` excludes `tests/dependencies/test_kvbm_imports.py`. That module asserts on
+> `/opt/dynamo/wheelhouse/kvbm*.whl`, a path that exists only inside a CI container image, so it
+> cannot pass on a host checkout.
+
+See [Pytest Guidelines](https://github.com/ai-dynamo/dynamo/blob/main/.ai/pytest-guidelines.md)
+for marker filtering, `--models-dir`, and the conventions that apply when you add tests.
+
 ## DevContainer
 
 VSCode and Cursor users can skip manual setup using pre-configured development containers. The DevContainer installs all toolchains, builds the project, and sets up the Python environment automatically.
@@ -129,6 +162,25 @@ Maturin builds against the active Python interpreter. If you see errors about Py
 
 ```bash
 source .venv/bin/activate
+```
+
+**Test collection fails with `No module named 'torch'`**
+
+A base `uv pip install -e .` does not install `torch`; it arrives with a backend extra. A few
+backend test modules import it at module scope, so they fail during collection even when the
+marker expression deselects every test inside them. Either install the backend extra you work
+against:
+
+```bash
+uv pip install -e '.[vllm]'
+```
+
+Or skip the affected modules for a runtime-only test run:
+
+```bash
+python3 -m pytest -m "unit and not post_merge" tests/ \
+  --ignore=tests/serve/test_vllm.py --ignore=tests/serve/test_sglang.py \
+  --ignore=tests/serve/test_trtllm.py --ignore=tests/fault_tolerance/test_canary_rank_pause.py
 ```
 
 **Disk space**
