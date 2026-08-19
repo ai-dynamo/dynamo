@@ -22,6 +22,14 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      build_placeholder:
+        description: 'Build and push checkpoint placeholder image, tagged with branch name'
+        type: boolean
+        default: false
+      placeholder_base_image:
+        description: 'Base image for the placeholder (default: the vllm runtime built in this run)'
+        type: string
+        default: ''
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -185,6 +193,91 @@ jobs:
           done
 
   # ============================================================================
+  # CHECKPOINT PLACEHOLDER (build-only)
+  # ============================================================================
+
+  placeholder:
+    needs: [init, vllm-build]
+    # Runs when requested and we have a base image to build on: either the
+    # vllm runtime built earlier in this same run, or an explicit override.
+    # always() is required so this is still reachable when vllm-build is
+    # skipped (build_vllm=false + placeholder_base_image set).
+    if: >-
+      always() && inputs.build_placeholder &&
+      (needs.vllm-build.result == 'success' || inputs.placeholder_base_image != '')
+    name: Checkpoint Placeholder
+    runs-on: prod-default-v2
+    env:
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          flavor: general
+          # amd64 only: the placeholder Dockerfile hard-fails on other arches
+          # because Dynamo Snapshot requires x86_64.
+          arch: 'linux/amd64'
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build and push Container
+        shell: bash
+        working-directory: ./deploy/checkpoint-placeholder
+        env:
+          PLACEHOLDER_BASE_IMAGE: ${{ inputs.placeholder_base_image }}
+          VLLM_TARGET_TAG_PLAIN: ${{ needs.vllm-build.outputs.target_tag_plain }}
+        run: |
+          set -euo pipefail
+
+          # Mirrors shared-build-image.yml's tag calculation:
+          #   IMAGE_TAG = <sha>-<framework>-<target>
+          BASE_IMAGE="${PLACEHOLDER_BASE_IMAGE}"
+          if [ -z "${BASE_IMAGE}" ]; then
+            BASE_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${{ github.sha }}-${VLLM_TARGET_TAG_PLAIN}"
+          fi
+          echo "Base image: ${BASE_IMAGE}"
+
+          ECR_DEFAULT_IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${ACR_REPOSITORY}"
+          DEFAULT_TAG="${{ github.sha }}-vllm-placeholder"
+          BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder"
+          IMAGE_URIS=(
+            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ECR_DEFAULT_IMAGE_BASE}:${BRANCH_TAG}"
+            "${ACR_IMAGE_BASE}:${BRANCH_TAG}"
+          )
+
+          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+          echo "flags for docker buildx: ${TAGGING_FLAGS}"
+
+          docker buildx build --push \
+              --platform linux/amd64 \
+              --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+              ${TAGGING_FLAGS} -f Dockerfile .
+
+          echo "### Checkpoint Placeholder Container Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Built from \`${BASE_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          for image_uri in "${IMAGE_URIS[@]}"; do
+            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+          done
+
+  # ============================================================================
   # CLEANUP
   # ============================================================================
 
@@ -192,7 +285,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, placeholder]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
