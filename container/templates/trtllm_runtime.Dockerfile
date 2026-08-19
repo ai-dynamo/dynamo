@@ -428,7 +428,16 @@ RUN set -eu; \
     done; \
     [ "$examined" -gt 0 ] \
         || { echo "ERROR: found no FFmpeg libraries under PyNvVideoCodec to examine;" >&2; \
-             echo "       the package layout changed and this check went blind." >&2; exit 1; }
+             echo "       the package layout changed and this check went blind." >&2; exit 1; }; \
+    vv=$(/opt/dynamo/venv/bin/python -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none); \
+    echo "PyNvVideoCodec in /opt/dynamo/venv: $vv"; \
+    [ "$vv" != none ] \
+        || { echo "ERROR: no PyNvVideoCodec in /opt/dynamo/venv; requirements.trtllm.txt" >&2; \
+             echo "       should have installed one." >&2; exit 1; }; \
+    [ "$(printf '%s\n2.2.0\n' "$vv" | sort -V | head -1)" = "2.2.0" ] \
+        || { echo "ERROR: venv PyNvVideoCodec $vv is below the 2.2.0 floor while the" >&2; \
+             echo "       system copy is $v -- the two specifiers have drifted apart." >&2; \
+             echo "       requirements.trtllm.txt and this stage must stay in step." >&2; exit 1; }
 
 # Align the base image's aiohttp with the floor requirements.common.txt sets for
 # the other Dynamo images. The base ships an older release and the --no-deps
