@@ -19,8 +19,6 @@ the two processes coordinate without etcd or nats. Mirrors
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
 
 import aiohttp
@@ -30,6 +28,7 @@ import requests
 
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import ServicePorts
+from tests.utils.realtime_ws import collect_turn, commit_audio, open_session
 
 logger = logging.getLogger(__name__)
 
@@ -106,101 +105,23 @@ def realtime_omni_frontend(
             yield frontend_port
 
 
-async def _recv_json(ws: aiohttp.ClientWebSocketResponse, timeout_s: float) -> dict:
-    msg = await asyncio.wait_for(ws.receive(), timeout=timeout_s)
-    if msg.type is not aiohttp.WSMsgType.TEXT:
-        raise AssertionError(f"unexpected websocket frame: {msg.type!r} {msg.data!r}")
-    return json.loads(msg.data)
-
-
-async def _drain_until(
-    ws: aiohttp.ClientWebSocketResponse, expected_type: str, timeout_s: float = 5.0
-) -> dict:
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + timeout_s
-    while loop.time() < deadline:
-        remaining = deadline - loop.time()
-        event = await _recv_json(ws, max(remaining, 0.01))
-        if event.get("type") == expected_type:
-            return event
-    raise AssertionError(
-        f"timed out waiting for a {expected_type!r} frame on the websocket"
-    )
-
-
 async def _audio_round_trip(port: int) -> None:
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(f"ws://127.0.0.1:{port}/v1/realtime") as ws:
-            await _drain_until(ws, "session.created")
+            await open_session(ws, {"type": "realtime", "model": MODEL_NAME})
 
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "type": "session.update",
-                        "session": {"type": "realtime", "model": MODEL_NAME},
-                    }
-                )
-            )
-            await _drain_until(ws, "session.updated")
-
-            # Send a short PCM16 ramp; the mock engine echoes it back as audio.
+            # A short PCM16 ramp; the mock engine echoes it back as audio.
             pcm16 = np.linspace(-8000, 8000, 128, dtype=np.int16).tobytes()
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "type": "input_audio_buffer.append",
-                        "audio": base64.b64encode(pcm16).decode("utf-8"),
-                    }
-                )
-            )
-            await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+            await commit_audio(ws, pcm16)
+            turn = await collect_turn(ws, timeout_s=10.0)
 
-            response_id: str | None = None
-            audio_b64_parts: list[str] = []
-            transcript_parts: list[str] = []
-            saw_audio_done = False
-            response_done_status: str | None = None
-
-            loop = asyncio.get_event_loop()
-            deadline = loop.time() + 10.0
-            while response_done_status is None:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise AssertionError(
-                        "timed out before response.done; "
-                        f"audio_parts={len(audio_b64_parts)}, "
-                        f"saw_audio_done={saw_audio_done}"
-                    )
-                event = await _recv_json(ws, remaining)
-                etype = event.get("type")
-                if etype == "response.created":
-                    response_id = event["response"]["id"]
-                elif etype == "response.output_audio_transcript.delta":
-                    transcript_parts.append(event["delta"])
-                    assert event["response_id"] == response_id, event
-                elif etype == "response.output_audio.delta":
-                    audio_b64_parts.append(event["delta"])
-                    assert event["response_id"] == response_id, event
-                elif etype == "response.output_audio.done":
-                    saw_audio_done = True
-                    assert event["response_id"] == response_id, event
-                elif etype == "response.done":
-                    response_done_status = event["response"]["status"]
-                    assert event["response"]["id"] == response_id, event
-                else:
-                    raise AssertionError(f"unexpected event type {etype!r}: {event}")
-
-            assert response_id is not None
-            assert saw_audio_done, "engine should emit response.output_audio.done"
-            assert response_done_status == "completed", response_done_status
-            assert "".join(transcript_parts) == MOCK_TRANSCRIPT, transcript_parts
+            assert turn.saw_audio_done, "engine should emit response.output_audio.done"
+            assert turn.status == "completed", turn.status
+            assert turn.transcript == MOCK_TRANSCRIPT, turn.transcript
 
             # Concatenated audio deltas decode back to the input ramp (echo).
-            out_bytes = b"".join(base64.b64decode(p) for p in audio_b64_parts)
             in_f32 = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32) / 32768.0
-            out_f32 = (
-                np.frombuffer(out_bytes, dtype=np.int16).astype(np.float32) / 32767.0
-            )
+            out_f32 = turn.audio_pcm16.astype(np.float32) / 32767.0
             assert out_f32.shape == in_f32.shape, (out_f32.shape, in_f32.shape)
             assert np.allclose(out_f32, in_f32, atol=2e-4)
 
