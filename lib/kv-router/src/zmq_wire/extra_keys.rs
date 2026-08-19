@@ -5,7 +5,7 @@ use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo, hash_mm_identifier};
 
 use super::types::ExtraKeyItem;
 
-// Must match _DYNAMO_CACHE_SALT_PREFIX in components/src/dynamo/vllm/handlers.py.
+// Must match DYNAMO_CACHE_SALT_PREFIX in components/src/dynamo/vllm/constants.py.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
 /// Parse MM hash from extra_keys string:
