@@ -1789,3 +1789,20 @@ func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
 		t.Fatalf("retained checkpoint should not keep DGD label after finalizer detach")
 	}
 }
+
+func TestEnsureCheckpointGMSPodClaimPreservesNamedResourceClaim(t *testing.T) {
+	claimName := "dsv4pro-source-gpus"
+	spec := corev1.PodSpec{
+		ResourceClaims: []corev1.PodResourceClaim{{
+			Name:              dra.ClaimName,
+			ResourceClaimName: &claimName,
+		}},
+	}
+
+	ensureCheckpointGMSPodClaim(&spec, "should-not-replace-named-claim")
+
+	require.Len(t, spec.ResourceClaims, 1)
+	require.NotNil(t, spec.ResourceClaims[0].ResourceClaimName)
+	assert.Equal(t, claimName, *spec.ResourceClaims[0].ResourceClaimName)
+	assert.Nil(t, spec.ResourceClaims[0].ResourceClaimTemplateName)
+}

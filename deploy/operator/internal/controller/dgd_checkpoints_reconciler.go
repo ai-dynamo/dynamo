@@ -471,10 +471,18 @@ func ensureCheckpointGMSPodClaim(podSpec *corev1.PodSpec, claimTemplateName stri
 		ResourceClaimTemplateName: &claimTemplateName,
 	}
 	for i := range podSpec.ResourceClaims {
-		if podSpec.ResourceClaims[i].Name == dra.ClaimName {
-			podSpec.ResourceClaims[i] = podClaim
+		if podSpec.ResourceClaims[i].Name != dra.ClaimName {
+			continue
+		}
+		existing := &podSpec.ResourceClaims[i]
+		// Checkpoint job manifests pin source GPUs with resourceClaimName so
+		// the vcluster agent can Get the claim. A template-generated claim
+		// name is not visible to that lookup.
+		if existing.ResourceClaimName != nil && *existing.ResourceClaimName != "" {
 			return
 		}
+		*existing = podClaim
+		return
 	}
 	podSpec.ResourceClaims = append(podSpec.ResourceClaims, podClaim)
 }
