@@ -34,7 +34,7 @@ pub struct WorkerCandidate {
     pub(super) inputs: WorkerInputs,
     pub(super) cache: WorkerCacheInput,
     pub(super) load: WorkerLoadInput,
-    pub(super) routing: WorkerRoutingInput,
+    pub(super) preferred_taint_multiplier: Option<f64>,
 }
 
 /// One eligible worker and its total cost after all scorers run.
@@ -42,6 +42,7 @@ pub struct WorkerCandidate {
 pub struct ScoredWorkerCandidate {
     pub(super) worker: WorkerWithDpRank,
     pub(super) cost: f64,
+    pub(super) preferred_taint_multiplier: Option<f64>,
 }
 
 /// Optional worker-signal groups requested by scorers and pickers.
@@ -55,9 +56,7 @@ impl WorkerInputs {
     pub const CACHE: Self = Self(1 << 0);
     /// Request active-load inputs.
     pub const LOAD: Self = Self(1 << 1);
-    /// Request routing-constraint inputs.
-    pub const ROUTING: Self = Self(1 << 2);
-    pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0);
+    pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0);
     pub(super) const MIN_ACTIVE_PREFILL_TOKENS: Self = Self(1 << 3);
     pub(super) const DEFAULT_POLICY_CACHE: Self = Self(1 << 4);
 
@@ -99,19 +98,12 @@ pub struct WorkerLoadInput {
     pub(super) active_requests: usize,
 }
 
-/// Routing-constraint values for one worker.
-#[derive(Clone, Copy, Default)]
-pub struct WorkerRoutingInput {
-    pub(super) preferred_taint_multiplier: Option<f64>,
-}
-
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
 #[derive(Clone, Copy)]
 pub struct WorkerInputView<'a> {
     pub(super) candidates: &'a [ScoredWorkerCandidate],
     pub(super) cache: Option<&'a [WorkerCacheInput]>,
     pub(super) load: Option<&'a [WorkerLoadInput]>,
-    pub(super) routing: Option<&'a [WorkerRoutingInput]>,
 }
 
 /// Adds one finite cost contribution to each eligible worker.
@@ -224,11 +216,12 @@ impl WorkerCandidate {
             .then_some(&self.load)
     }
 
-    /// Return routing inputs when the component requested [`WorkerInputs::ROUTING`].
-    pub fn routing(&self) -> Option<&WorkerRoutingInput> {
-        self.inputs
-            .contains(WorkerInputs::ROUTING)
-            .then_some(&self.routing)
+    /// Return the optional cost multiplier from preferred routing constraints.
+    ///
+    /// Required routing constraints are enforced by host eligibility. This preferred value is
+    /// ordinary candidate metadata and is always available without declaring a capability.
+    pub fn preferred_taint_multiplier(&self) -> Option<f64> {
+        self.preferred_taint_multiplier
     }
 
     fn with_inputs_from(&self, additional: &Self, inputs: WorkerInputs) -> Self {
@@ -254,15 +247,9 @@ impl WorkerCandidate {
             } else {
                 WorkerLoadInput::default()
             },
-            routing: if inputs.contains(WorkerInputs::ROUTING) {
-                if self.inputs.contains(WorkerInputs::ROUTING) {
-                    self.routing
-                } else {
-                    additional.routing
-                }
-            } else {
-                WorkerRoutingInput::default()
-            },
+            preferred_taint_multiplier: self
+                .preferred_taint_multiplier
+                .or(additional.preferred_taint_multiplier),
         }
     }
 }
@@ -276,6 +263,11 @@ impl ScoredWorkerCandidate {
     /// Return the sum of all scorer contributions for this candidate.
     pub fn cost(&self) -> f64 {
         self.cost
+    }
+
+    /// Return the optional cost multiplier from preferred routing constraints.
+    pub fn preferred_taint_multiplier(&self) -> Option<f64> {
+        self.preferred_taint_multiplier
     }
 }
 
@@ -318,13 +310,6 @@ impl WorkerLoadInput {
     }
 }
 
-impl WorkerRoutingInput {
-    /// Return the optional cost multiplier from preferred routing constraints.
-    pub fn preferred_taint_multiplier(&self) -> Option<f64> {
-        self.preferred_taint_multiplier
-    }
-}
-
 impl<'a> WorkerInputView<'a> {
     /// Return the eligible candidates and their total costs.
     pub fn candidates(self) -> &'a [ScoredWorkerCandidate] {
@@ -339,11 +324,6 @@ impl<'a> WorkerInputView<'a> {
     /// Return index-aligned active-load inputs when the picker requested them.
     pub fn load(self) -> Option<&'a [WorkerLoadInput]> {
         self.load
-    }
-
-    /// Return index-aligned routing inputs when the picker requested them.
-    pub fn routing(self) -> Option<&'a [WorkerRoutingInput]> {
-        self.routing
     }
 }
 
@@ -370,7 +350,6 @@ pub(super) struct CustomWorkerSelectionState {
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheInput>,
     pub(super) load_inputs: Vec<WorkerLoadInput>,
-    pub(super) routing_inputs: Vec<WorkerRoutingInput>,
 }
 
 /// Native scorer/picker composition for [`WorkerSelector`].
@@ -429,7 +408,6 @@ impl WorkerSelectionPolicy {
                 candidates: Vec::new(),
                 cache_inputs: Vec::new(),
                 load_inputs: Vec::new(),
-                routing_inputs: Vec::new(),
             })),
         }
     }
@@ -458,7 +436,6 @@ fn push_scored_candidate(
     candidates: &mut Vec<ScoredWorkerCandidate>,
     cache_inputs: &mut Vec<WorkerCacheInput>,
     load_inputs: &mut Vec<WorkerLoadInput>,
-    routing_inputs: &mut Vec<WorkerRoutingInput>,
 ) -> Result<(), KvSchedulerError> {
     let mut cost = 0.0;
     for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
@@ -475,15 +452,13 @@ fn push_scored_candidate(
     candidates.push(ScoredWorkerCandidate {
         worker: candidate.worker,
         cost,
+        preferred_taint_multiplier: candidate.preferred_taint_multiplier,
     });
     if picker_inputs.contains(WorkerInputs::CACHE) {
         cache_inputs.push(candidate.cache);
     }
     if picker_inputs.contains(WorkerInputs::LOAD) {
         load_inputs.push(candidate.load);
-    }
-    if picker_inputs.contains(WorkerInputs::ROUTING) {
-        routing_inputs.push(candidate.routing);
     }
     Ok(())
 }
@@ -506,26 +481,23 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
         candidates,
         cache_inputs,
         load_inputs,
-        routing_inputs,
         ..
     } = state;
     unscored_candidates.clear();
     candidates.clear();
     cache_inputs.clear();
     load_inputs.clear();
-    routing_inputs.clear();
     if filters.is_empty() {
         let pinned = eligibility.pinned_worker().is_some();
         let mut error = None;
         eligibility.any_eligible_worker_rank(workers, |worker, config| {
-            let preferred_taint_multiplier =
-                if pinned || !scorer_picker_inputs.contains(WorkerInputs::ROUTING) {
-                    None
-                } else {
-                    request
-                        .routing_constraints
-                        .preferred_taint_multiplier(config.taints())
-                };
+            let preferred_taint_multiplier = if pinned {
+                None
+            } else {
+                request
+                    .routing_constraints
+                    .preferred_taint_multiplier(config.taints())
+            };
             let candidate = input.row(worker, preferred_taint_multiplier, *scorer_picker_inputs);
             if let Err(policy_error) = push_scored_candidate(
                 &input.context,
@@ -535,7 +507,6 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
                 candidates,
                 cache_inputs,
                 load_inputs,
-                routing_inputs,
             ) {
                 error = Some(policy_error);
                 return true;
@@ -555,17 +526,14 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
     let mut min_active_prefill_tokens = usize::MAX;
     eligibility.any_eligible_worker_rank(workers, |worker, config| {
         has_eligible_worker = true;
-        let routing_multiplier = |inputs: WorkerInputs| {
-            if pinned || !inputs.contains(WorkerInputs::ROUTING) {
-                None
-            } else {
-                request
-                    .routing_constraints
-                    .preferred_taint_multiplier(config.taints())
-            }
+        let preferred_taint_multiplier = if pinned {
+            None
+        } else {
+            request
+                .routing_constraints
+                .preferred_taint_multiplier(config.taints())
         };
-        let filter_candidate =
-            input.row(worker, routing_multiplier(*filter_inputs), *filter_inputs);
+        let filter_candidate = input.row(worker, preferred_taint_multiplier, *filter_inputs);
         for filter in filters.iter_mut() {
             match filter.keep(&input.context, &filter_candidate) {
                 Ok(true) => {}
@@ -578,11 +546,7 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
         }
 
         let additional_inputs = scorer_picker_inputs.without(*filter_inputs);
-        let additional = input.row(
-            worker,
-            routing_multiplier(additional_inputs),
-            additional_inputs,
-        );
+        let additional = input.row(worker, preferred_taint_multiplier, additional_inputs);
         let candidate = filter_candidate.with_inputs_from(&additional, *scorer_picker_inputs);
         if needs_filtered_baseline {
             min_active_prefill_tokens =
@@ -596,7 +560,6 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
             candidates,
             cache_inputs,
             load_inputs,
-            routing_inputs,
         ) {
             error = Some(policy_error);
             return true;
@@ -622,7 +585,6 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
                 candidates,
                 cache_inputs,
                 load_inputs,
-                routing_inputs,
             )?;
         }
     }
@@ -632,9 +594,7 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.state {
-            WorkerSelectionPolicyState::Default(_) => {
-                WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::ROUTING
-            }
+            WorkerSelectionPolicyState::Default(_) => WorkerInputs::CACHE | WorkerInputs::LOAD,
             WorkerSelectionPolicyState::Custom(state) => {
                 let state = state.borrow();
                 state.filter_inputs | state.scorer_picker_inputs
@@ -672,7 +632,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use rustc_hash::FxHashMap;
 
@@ -766,6 +726,61 @@ mod tests {
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
         assert_eq!(selected.worker, worker1);
+    }
+
+    #[test]
+    fn preferred_taints_are_always_candidate_metadata() {
+        struct PreferenceScorer;
+
+        impl WorkerScorer for PreferenceScorer {
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: &WorkerCandidate,
+            ) -> Result<f64, WorkerSelectionPolicyError> {
+                assert!(candidate.preferred_taint_multiplier().is_some());
+                Ok(0.0)
+            }
+        }
+
+        struct PreferencePicker;
+
+        impl WorkerPicker for PreferencePicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert!(input.candidates()[0].preferred_taint_multiplier().is_some());
+                Ok(0)
+            }
+        }
+
+        let workers = HashMap::from([(
+            0,
+            TaintedWorkerConfig {
+                taints: HashSet::from(["preferred".to_string()]),
+            },
+        )]);
+        let mut request = base_request(16);
+        request.routing_constraints.preferred_taints =
+            HashMap::from([("preferred".to_string(), 0.5)]);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(PreferenceScorer)],
+            Box::new(PreferencePicker),
+        );
+
+        assert_eq!(
+            <WorkerSelectionPolicy as WorkerSelector<TaintedWorkerConfig>>::required_worker_inputs(
+                &policy,
+            ),
+            WorkerInputs::NONE
+        );
+        policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
     }
 
     #[test]
@@ -868,7 +883,7 @@ mod tests {
             ) -> Result<bool, WorkerSelectionPolicyError> {
                 assert!(candidate.cache().is_none());
                 assert!(candidate.load().is_none());
-                assert!(candidate.routing().is_none());
+                assert!(candidate.preferred_taint_multiplier().is_none());
                 Ok(false)
             }
         }
@@ -1063,12 +1078,8 @@ mod tests {
             }
         }
 
-        struct RoutingPicker;
-        impl WorkerPicker for RoutingPicker {
-            fn required_worker_inputs(&self) -> WorkerInputs {
-                WorkerInputs::ROUTING
-            }
-
+        struct FirstPicker;
+        impl WorkerPicker for FirstPicker {
             fn pick(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
@@ -1083,7 +1094,7 @@ mod tests {
             "test",
             vec![Box::new(CacheFilter)],
             vec![Box::new(LoadScorer)],
-            Box::new(RoutingPicker),
+            Box::new(FirstPicker),
         );
         let inputs =
             <WorkerSelectionPolicy as WorkerSelector<TaintedWorkerConfig>>::required_worker_inputs(
@@ -1092,6 +1103,5 @@ mod tests {
 
         assert!(inputs.contains(WorkerInputs::CACHE));
         assert!(inputs.contains(WorkerInputs::LOAD));
-        assert!(inputs.contains(WorkerInputs::ROUTING));
     }
 }
