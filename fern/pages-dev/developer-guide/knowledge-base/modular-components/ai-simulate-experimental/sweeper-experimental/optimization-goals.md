@@ -5,11 +5,6 @@ title: Sweeper Optimization Goals
 subtitle: Objective metrics, SLA constraints, and Pareto-front scoring
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/optimization-goals.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 <Warning>
 **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 planning. Its API, configuration schema, search results, and deployment output may change

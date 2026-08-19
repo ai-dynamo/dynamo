@@ -5,11 +5,6 @@ title: Sweep Configuration Providers
 subtitle: Extend Sweeper without adding application dependencies to its core
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/sweep-config-provider.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 <Warning>**Experimental.** The provider ABI is versioned but may change before AI Simulate stabilizes.</Warning>
 
 A `SweepConfigProvider` lets an optional feature package contribute search dimensions without

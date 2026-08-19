@@ -5,11 +5,6 @@ title: Sweeper Traffic
 subtitle: Trace, request-rate, concurrency, and KV-load workload definitions
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/traffic.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 <Warning>
 **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 planning. Its API, configuration schema, search results, and deployment output may change
@@ -20,7 +15,7 @@ optimality guarantees.
 The `workload:` block of a `SmartSearchConfig` YAML is the traffic **every candidate is
 replayed against**. Most workload fields are pinned. The exception is a ranged
 `kv_load_ratio` under a `pareto` goal: Vizier searches it as a continuous load dimension.
-The block maps to `Workload` in `aisimulate/src/aisimulate/sweeper/config.py`.
+The block maps to `aisimulate.sweeper.config.Workload`.
 
 A workload is **exactly one of four load shapes**. The shape is inferred from which field
 is set (`Workload._validate_workload`), and each shape is either **open-loop** (requests

@@ -5,11 +5,6 @@ title: Sweeper Results
 subtitle: Replay specifications, ranked candidates, and Pareto fronts
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/results.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 <Warning>
 **Experimental.** Sweeper's replay and result contracts may change without a standard deprecation
 period.

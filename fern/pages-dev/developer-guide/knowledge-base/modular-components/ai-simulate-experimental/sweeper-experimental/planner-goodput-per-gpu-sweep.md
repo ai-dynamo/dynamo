@@ -154,14 +154,14 @@ spread within the `load_180_10` family is noise).
   mostly mocker noise (~5%). The robust conclusion is the **policy family** (`load_180_10`), not
   a precise `sens`/`fpm` setting.
 
-## Reproduce
+## Reproduction Status
 
-```bash
-python aisimulate/examples/sweeper/tools/run_sweep.py --config path/to/planner-sweep.yaml
-```
+These results are historical and cannot be reproduced from the current public artifacts.
+The published `aisimulate==0.1.0.dev1` wheel does not include the example runner or the
+experiment configuration used for this sweep.
 
-Notes: the planner path needs the `aic-forward-pass` binding; a per-throughput-interval
-load-predictor sub-sweep runs first (forecast-loss winner pinned per interval). Static and
-default-planner baselines are run via `dynamo.replay.run_trace_replay` (static: no
+The original planner path required the `aic-forward-pass` binding; a per-throughput-interval
+load-predictor sub-sweep ran first (forecast-loss winner pinned per interval). Static and
+default-planner baselines ran via `dynamo.replay.run_trace_replay` (static: no
 `planner_config`; planner: `planner_config` + the SLA). Same deployment as
 [Router End-to-End Latency Sweep](router-end-to-end-latency-sweep.md).
