@@ -36,13 +36,9 @@ def write_template(path: Path, content: str, values: str = "") -> None:
         (path / "values.yaml").write_text(values, encoding="utf-8")
 
 
-def write_template_extension(path: Path, extends: str, values: str = "") -> None:
+def write_template_values(path: Path, values: str) -> None:
     path.mkdir(parents=True)
-    (path / ".kustomize-template.yaml").write_text(
-        f"extends: {extends}\n", encoding="utf-8"
-    )
-    if values:
-        (path / "values.yaml").write_text(values, encoding="utf-8")
+    (path / "values.yaml").write_text(values, encoding="utf-8")
 
 
 def run_matrix(
@@ -262,21 +258,17 @@ def test_unfold_materializes_template_component_with_base_and_variant_values(
         "    static-patch: {{ values.STATIC_PATCH }}\n",
         encoding="utf-8",
     )
-    (template_root / "assets/runtime.conf").parent.mkdir()
-    (template_root / "assets/runtime.conf").write_text(
-        "parent asset\n", encoding="utf-8"
-    )
-    (template_root / "assets/metadata.txt.j2").write_text(
-        "model={{ values.MODEL_NAME }}\n", encoding="utf-8"
+    (template_root / "nested").mkdir()
+    (template_root / "nested/kustomization.yaml.j2").write_text(
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\n" "kind: Component\n",
+        encoding="utf-8",
     )
     template = template_root / "instance"
-    write_template_extension(
+    write_template_values(
         template,
-        "..",
         "MODEL_NAME: default-model\nSTATIC_PATCH: default-patch\n",
     )
-    (template / "assets").mkdir()
-    (template / "assets/runtime.conf").write_text("instance asset\n", encoding="utf-8")
+    (template / "ignored.txt").write_text("not YAML\n", encoding="utf-8")
     matrix = recipe / ".kustomize-matrix.yaml"
     matrix.write_text(
         "source: kustomize/base\n"
@@ -319,60 +311,63 @@ def test_unfold_materializes_template_component_with_base_and_variant_values(
     assert "setting: from-base" in parsed_component["patches"][0]["patch"]
     assert 'replicas: "6"' in parsed_component["patches"][0]["patch"]
     assert parsed_component["patches"][1]["path"] == "patch.yaml"
-    assert (component.parent / "patch.yaml").read_text(encoding="utf-8") == (
-        "apiVersion: nvidia.com/v1alpha1\n"
-        "kind: DynamoGraphDeployment\n"
-        "metadata:\n"
-        "  name: app\n"
-        "  labels:\n"
-        "    static-patch: from-variant\n"
+    rendered_patch = (component.parent / "patch.yaml").read_text(encoding="utf-8")
+    assert (
+        "# Generated file. For repository contributors, do not edit this checked-in copy.\n"
+        "# Regenerate this matrix's public overlays and template Components from the repository root:\n"
+        f"# Regenerate: scripts/kustomize-matrix.py unfold {matrix}\n"
+        f"# Template source: {template}\n" in rendered_patch
     )
-    assert (component.parent / "assets/runtime.conf").read_text(
-        encoding="utf-8"
-    ) == "instance asset\n"
-    assert (component.parent / "assets/metadata.txt").read_text(
-        encoding="utf-8"
-    ) == "model=qwen\n"
+    assert yaml.safe_load(rendered_patch)["metadata"]["labels"]["static-patch"] == (
+        "from-variant"
+    )
+    assert not (component.parent / "nested").exists()
+    assert not (component.parent / "ignored.txt").exists()
     assert kustomize_matrix.unfold_matrix(config, check=True) == []
 
 
-def test_template_bundle_resolves_three_explicit_levels(tmp_path):
+def test_template_bundle_overlays_direct_parent_yaml_files(tmp_path):
     kustomize_matrix = load_matrix_module()
-    root = tmp_path / "templates/aws-efa"
+    parent = tmp_path / "templates/aws-efa"
     write_template(
-        root,
-        "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
+        parent,
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
+        "kind: Component\n"
+        "# Parent root\n",
         "FAMILY: efa\nCOUNT: 1\n",
     )
-    (root / "config.txt.j2").write_text(
-        "family={{ values.FAMILY }} count={{ values.COUNT }}\n", encoding="utf-8"
+    (parent / "config.yaml.j2").write_text(
+        "family: {{ values.FAMILY }}\ncount: {{ values.COUNT }}\n",
+        encoding="utf-8",
     )
-
-    family = root / "p5"
-    write_template_extension(family, "..", "FAMILY: p5\nCOUNT: 8\n")
-    (family / "config.txt.j2").write_text(
-        "family={{ values.FAMILY }} count={{ values.COUNT }}\n", encoding="utf-8"
+    (parent / "reverse.yaml").write_text("source: parent\n", encoding="utf-8")
+    (parent / "nested").mkdir()
+    (parent / "nested/ignored.yaml.j2").write_text("ignored: true\n", encoding="utf-8")
+    instance = parent / "p5.48xlarge"
+    write_template_values(instance, "COUNT: 16\nINSTANCE: p5.48xlarge\n")
+    (instance / "kustomization.yaml").write_text(
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
+        "kind: Component\n"
+        "# Selected root\n",
+        encoding="utf-8",
     )
-    instance = family / "p5.48xlarge"
-    write_template_extension(instance, "..", "COUNT: 16\nINSTANCE: p5.48xlarge\n")
-
-    sibling = root / "p6"
-    write_template_extension(sibling, "..", "COUNT: 32\n")
-    (sibling / "must-not-leak.txt").write_text("sibling\n", encoding="utf-8")
+    (instance / "config.yaml").write_text("family: p5\ncount: 16\n", encoding="utf-8")
+    (instance / "reverse.yaml.j2").write_text(
+        "source: {{ values.INSTANCE }}\n", encoding="utf-8"
+    )
 
     selection = kustomize_matrix.TemplateSelection(
         source=instance, output_path=Path("components/efa")
     )
     bundle = kustomize_matrix.resolve_template_bundle(selection)
 
-    assert bundle.sources == (root, family, instance)
-    assert bundle.files[Path("kustomization.yaml.j2")] == (
-        root / "kustomization.yaml.j2"
-    )
-    assert bundle.files[Path("config.txt.j2")] == family / "config.txt.j2"
-    assert Path("must-not-leak.txt") not in bundle.files
+    assert bundle.sources == (parent, instance)
+    assert bundle.files[Path("kustomization.yaml")] == (instance / "kustomization.yaml")
+    assert bundle.files[Path("config.yaml")] == instance / "config.yaml"
+    assert bundle.files[Path("reverse.yaml")] == instance / "reverse.yaml.j2"
+    assert Path("ignored.yaml") not in bundle.files
     assert kustomize_matrix.template_values(bundle) == {
-        "FAMILY": "p5",
+        "FAMILY": "efa",
         "COUNT": 16,
         "INSTANCE": "p5.48xlarge",
     }
@@ -381,88 +376,29 @@ def test_template_bundle_resolves_three_explicit_levels(tmp_path):
     assets = kustomize_matrix.render_template_assets(
         bundle, tmp_path / "component", {}, values
     )
-    assert assets[tmp_path / "component/config.txt"] == "family=p5 count=24\n"
-
-
-def test_template_bundle_can_explicitly_add_base_and_instance_components(tmp_path):
-    kustomize_matrix = load_matrix_module()
-    shared = tmp_path / "shared-component"
-    write_kustomization(
-        shared,
-        "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
+    assert "# Selected root" in kustomize_matrix.render_template_component(
+        bundle, {}, values
     )
-    parent = tmp_path / "templates/aws-efa"
+    assert assets[tmp_path / "component/config.yaml"] == "family: p5\ncount: 16\n"
+    assert assets[tmp_path / "component/reverse.yaml"] == "source: p5.48xlarge\n"
+
+
+def test_template_bundle_rejects_duplicate_output_files(tmp_path):
+    kustomize_matrix = load_matrix_module()
+    parent = tmp_path / "templates/provider"
     write_template(
         parent,
-        "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
-        "kind: Component\n"
-        "# Parent wrapper\n"
-        "components:\n"
-        "  - base\n",
-    )
-    (parent / "base").mkdir()
-    (parent / "base/kustomization.yaml.j2").write_text(
-        "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
-        "kind: Component\n"
-        "components:\n"
-        "  - ../../../shared-component\n",
-        encoding="utf-8",
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
     )
     child = parent / "instance"
-    write_template_extension(child, "..")
-    (child / "kustomization.yaml.j2").write_text(
-        "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
-        "kind: Component\n"
-        "# Child wrapper\n"
-        "components:\n"
-        "  - base\n"
-        "  - instance\n",
-        encoding="utf-8",
-    )
-    (child / "instance").mkdir()
-    (child / "instance/kustomization.yaml.j2").write_text(
-        "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
-        encoding="utf-8",
-    )
+    child.mkdir()
+    (child / "patch.yaml").write_text("kind: ConfigMap\n", encoding="utf-8")
+    (child / "patch.yaml.j2").write_text("kind: Secret\n", encoding="utf-8")
     selection = kustomize_matrix.TemplateSelection(
         source=child, output_path=Path("components/provider")
     )
 
-    bundle = kustomize_matrix.resolve_template_bundle(selection)
-    component_dir = tmp_path / "generated/components/efa"
-    rendered = kustomize_matrix.render_template_component(bundle, {}, {}, component_dir)
-    assets = kustomize_matrix.render_template_assets(bundle, component_dir, {}, {})
-
-    assert bundle.files[Path("kustomization.yaml.j2")] == (
-        child / "kustomization.yaml.j2"
-    )
-    assert yaml.safe_load(rendered)["components"] == ["base", "instance"]
-    assert "# Child wrapper" in rendered
-    assert "# Parent wrapper" not in rendered
-    assert yaml.safe_load(assets[component_dir / "base/kustomization.yaml"])[
-        "components"
-    ] == ["../../../../shared-component"]
-    assert component_dir / "instance/kustomization.yaml" in assets
-
-
-def test_template_bundle_rejects_missing_parents_and_cycles(tmp_path):
-    kustomize_matrix = load_matrix_module()
-    missing = tmp_path / "missing"
-    write_template_extension(missing, "../does-not-exist")
-    selection = kustomize_matrix.TemplateSelection(
-        source=missing, output_path=Path("components/provider")
-    )
-    with pytest.raises(ValueError, match="parent is not a directory"):
-        kustomize_matrix.resolve_template_bundle(selection)
-
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    write_template_extension(first, "../second")
-    write_template_extension(second, "../first")
-    selection = kustomize_matrix.TemplateSelection(
-        source=first, output_path=Path("components/provider")
-    )
-    with pytest.raises(ValueError, match="inheritance cycle"):
+    with pytest.raises(ValueError, match="multiple sources for patch.yaml"):
         kustomize_matrix.resolve_template_bundle(selection)
 
 
@@ -493,21 +429,25 @@ def test_template_only_and_undefined_values_fail_clearly(tmp_path):
         kustomize_matrix.render_template_component(bundle, {}, {})
 
 
-def test_template_rejects_plain_kustomization_asset(tmp_path):
+def test_template_accepts_plain_kustomization(tmp_path):
     kustomize_matrix = load_matrix_module()
     template = tmp_path / "template"
-    write_template(
-        template,
+    template.mkdir()
+    (template / "kustomization.yaml").write_text(
         "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
+        encoding="utf-8",
     )
-    (template / "kustomization.yaml").write_text("resources: []\n", encoding="utf-8")
     selection = kustomize_matrix.TemplateSelection(
         source=template, output_path=Path("components/provider")
     )
     bundle = kustomize_matrix.resolve_template_bundle(selection)
 
-    with pytest.raises(ValueError, match="must not contain a plain kustomization.yaml"):
-        kustomize_matrix.render_template_assets(bundle, tmp_path / "component", {}, {})
+    assert yaml.safe_load(
+        kustomize_matrix.render_template_component(bundle, {}, {})
+    ) == {
+        "apiVersion": "kustomize.config.k8s.io/v1alpha1",
+        "kind": "Component",
+    }
 
 
 def test_template_path_is_a_nested_overlay_component_path(tmp_path):
@@ -579,7 +519,7 @@ def test_unfold_rebases_external_component_paths(tmp_path, monkeypatch):
         "  - ../../shared-component\n",
     )
     template = template_root / "instance"
-    write_template_extension(template, "..")
+    template.mkdir()
     matrix = recipe / ".kustomize-matrix.yaml"
     matrix.write_text(
         "source: kustomize/base\n"
@@ -640,6 +580,10 @@ def test_render_uses_leaf_component_and_preserves_source_comments(
         "    path: patch.yaml\n",
     )
     (parent / "patch.yaml").write_text(
+        "# Generated file. For repository contributors, do not edit this checked-in copy.\n"
+        "# Regenerate this matrix's public overlays and template Components from the repository root:\n"
+        "# Regenerate: scripts/kustomize-matrix.py unfold recipe/.kustomize-matrix.yaml\n"
+        "# Template source: recipe/templates/provider/instance\n"
         "apiVersion: v1\n"
         "kind: ConfigMap\n"
         "metadata:\n"
@@ -728,6 +672,8 @@ def test_render_uses_leaf_component_and_preserves_source_comments(
     )
     assert "# Base comment\n  source: base" in rendered
     assert "# Parent comment\n  parent: value" in rendered
+    assert rendered.count("# Generated file.") == 1
+    assert rendered.count("# Template source:") == 0
     assert "  leaf: value" in rendered
     assert "  parent: value" in rendered
 

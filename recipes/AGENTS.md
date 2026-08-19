@@ -21,24 +21,21 @@ SPDX-License-Identifier: Apache-2.0
   Components are source. A dimension value may also select `templates` and set
   `values`. Each template selection has a source relative to the matrix and a
   generated `path` under the overlay's `components/` directory. Shared template
-  sources live in `recipes/kustomize/templates/`; a standalone template
-  directory has `kustomization.yaml.j2` and optional `values.yaml`. A concrete
-  child may instead declare one relative `extends` parent in
-  `.kustomize-template.yaml`. Resolve that explicit chain from root to leaf;
-  never infer inheritance from directory nesting. Child files replace inherited
-  files at the same relative path, while `values.yaml` mappings use shallow
-  root-to-leaf replacement before matrix values. Directories containing
-  `.kustomize-template.yaml` are child bundle boundaries, not parent assets.
+  sources live in `recipes/kustomize/templates/`. A selected template directory
+  extends the direct `*.yaml` and `*.yaml.j2` files in its parent directory by
+  convention. Only direct files participate; never scan or copy subdirectories.
+  Parent files are loaded first, then same-output-name files in the selected
+  directory replace them (`patch.yaml` and `patch.yaml.j2` both produce
+  `patch.yaml`, so either form replaces the other). Optional `values.yaml`
+  mappings use shallow parent-to-selected replacement before matrix values. The
+  effective files must provide a `kustomization.yaml` or
+  `kustomization.yaml.j2` that renders a Component.
   `unfold` evaluates the template with strict sandboxed Jinja, the variant values,
   and the fully rendered base indexed as `base.<lowercase-kind>[metadata.name]`.
   Use `base.<lowercase-kind> | only` only when exactly one such resource is
   required. Templates render one Component. `unfold` materializes the complete
-  effective inherited bundle at its selected path under the generated overlay,
-  so its local Kustomize paths remain valid. It copies every effective template
-  file except `values.yaml` and `.kustomize-template.yaml`; files ending in
-  `*.j2` are rendered without that suffix. Kustomize layers such as `base` and
-  `instance` must be explicit files and Components in the source bundle; the
-  generator does not infer or merge them. A template may select shared
+  effective files at its selected path under the generated overlay. Files ending
+  in `*.j2` are rendered without that suffix. A template may select shared
   Components; `unfold` rebases those external paths for the generated location.
   Kustomize is both the authoring model and recipe documentation: the base and
   Components explain settings, public overlay `kustomization.yaml` files

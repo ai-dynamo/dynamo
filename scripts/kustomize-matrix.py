@@ -31,7 +31,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 OPENAPI_GENERATOR = REPO_ROOT / "scripts/generate_kustomize_openapi.py"
 KUSTOMIZATION_FILE = "kustomization.yaml"
 TEMPLATE_KUSTOMIZATION_FILE = "kustomization.yaml.j2"
-TEMPLATE_METADATA_FILE = ".kustomize-template.yaml"
 TEMPLATE_VALUES_FILE = "values.yaml"
 TEMPLATE_COMPONENTS_DIR = "components"
 LEGACY_TEMPLATE_COMPONENTS_DIR = "generated-components"
@@ -47,10 +46,15 @@ LEGACY_MATRIX_RENDER_COMMAND_PREFIX = (
 )
 PathPart: TypeAlias = str | int
 YamlPath: TypeAlias = tuple[PathPart, ...]
-GeneratedContent: TypeAlias = str | bytes
 FIRST_TOP_LEVEL_KEYS = ("apiVersion", "kind", "metadata")
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 TEMPLATE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+GENERATED_SOURCE_COMMENT_PREFIXES = (
+    "# Generated file.",
+    "# Regenerate this matrix's public overlays",
+    GENERATED_OVERLAY_PREFIX,
+    GENERATED_TEMPLATE_PREFIX,
+)
 
 
 @dataclass(frozen=True)
@@ -447,74 +451,36 @@ def build_base_resource_index(source: Path) -> dict[str, ResourceCollection]:
     return index
 
 
-def template_parent(source: Path) -> Path | None:
-    metadata_path = source / TEMPLATE_METADATA_FILE
-    if not metadata_path.exists():
-        return None
-
-    metadata = load_yaml_mapping(metadata_path)
-    if set(metadata) != {"extends"}:
-        raise ValueError(f"{display_path(metadata_path)} must contain exactly extends")
-    extends = Path(
-        require_string(
-            metadata.get("extends"), f"{display_path(metadata_path)}.extends"
-        )
-    )
-    if extends.is_absolute():
-        raise ValueError(f"{display_path(metadata_path)}.extends must be relative")
-    parent = (source / extends).resolve()
-    if not parent.is_dir():
-        raise ValueError(
-            f"Kustomize template parent is not a directory: {display_path(parent)}"
-        )
-    return parent
-
-
-def template_source_chain(source: Path) -> tuple[Path, ...]:
-    chain: list[Path] = []
-    seen: set[Path] = set()
-    current = source
-    while True:
-        if current in seen:
-            cycle = " -> ".join(display_path(path) for path in (*chain, current))
-            raise ValueError(f"Kustomize template inheritance cycle: {cycle}")
-        seen.add(current)
-        chain.append(current)
-        parent = template_parent(current)
-        if parent is None:
-            return tuple(reversed(chain))
-        current = parent
-
-
 def template_source_files(source: Path) -> dict[Path, Path]:
     files: dict[Path, Path] = {}
-    for root, directory_names, file_names in os.walk(source):
-        root_path = Path(root)
-        directory_names[:] = sorted(
-            name
-            for name in directory_names
-            if not (root_path / name / TEMPLATE_METADATA_FILE).is_file()
+    for source_path in sorted(source.iterdir()):
+        if not source_path.is_file() or source_path.name == TEMPLATE_VALUES_FILE:
+            continue
+        if not source_path.name.endswith((".yaml", ".yaml.j2")):
+            continue
+        output_name = (
+            source_path.name.removesuffix(".j2")
+            if source_path.name.endswith(".yaml.j2")
+            else source_path.name
         )
-        for file_name in sorted(file_names):
-            source_path = root_path / file_name
-            relative_path = source_path.relative_to(source)
-            if relative_path in {
-                Path(TEMPLATE_METADATA_FILE),
-                Path(TEMPLATE_VALUES_FILE),
-            }:
-                continue
-            files[relative_path] = source_path
+        output_path = Path(output_name)
+        if output_path in files:
+            raise ValueError(
+                f"Kustomize template {display_path(source)} contains multiple sources for "
+                f"{output_name}"
+            )
+        files[output_path] = source_path
     return files
 
 
 def resolve_template_bundle(template: TemplateSelection) -> TemplateBundle:
-    sources = template_source_chain(template.source)
+    sources = (template.source.parent, template.source)
     files: dict[Path, Path] = {}
     for source in sources:
         files.update(template_source_files(source))
-    if Path(TEMPLATE_KUSTOMIZATION_FILE) not in files:
+    if Path(KUSTOMIZATION_FILE) not in files:
         raise ValueError(
-            "Kustomize template inheritance must provide "
+            "Kustomize template and its parent must provide kustomization.yaml or "
             f"{TEMPLATE_KUSTOMIZATION_FILE}: {display_path(template.source)}"
         )
     return TemplateBundle(selection=template, sources=sources, files=files)
@@ -605,22 +571,11 @@ def render_template_assets(
     component_dir: Path,
     base: dict[str, ResourceCollection],
     values: dict[str, Any],
-) -> dict[Path, GeneratedContent]:
-    assets: dict[Path, GeneratedContent] = {}
-    for relative_source, source_path in sorted(template.files.items()):
-        if relative_source == Path(TEMPLATE_KUSTOMIZATION_FILE):
+) -> dict[Path, str]:
+    assets: dict[Path, str] = {}
+    for relative_output, source_path in sorted(template.files.items()):
+        if relative_output == Path(KUSTOMIZATION_FILE):
             continue
-        if relative_source == Path(KUSTOMIZATION_FILE):
-            raise ValueError(
-                f"template {display_path(template.selection.source)} must not contain a plain "
-                f"{KUSTOMIZATION_FILE}; the Component renders from "
-                f"{TEMPLATE_KUSTOMIZATION_FILE}"
-            )
-        relative_output = (
-            relative_source.with_suffix("")
-            if source_path.suffix == ".j2"
-            else relative_source
-        )
         output_path = component_dir / relative_output
         if output_path in assets:
             raise ValueError(
@@ -628,20 +583,9 @@ def render_template_assets(
                 f"{relative_output}"
             )
         if source_path.suffix == ".j2":
-            content: GeneratedContent = render_jinja_template(source_path, base, values)
-        elif relative_output.name == KUSTOMIZATION_FILE:
-            content = source_path.read_text(encoding="utf-8")
+            content = render_jinja_template(source_path, base, values)
         else:
-            content = source_path.read_bytes()
-        if relative_output.name == KUSTOMIZATION_FILE:
-            assert isinstance(content, str)
-            content = rebase_template_kustomization_paths(
-                content,
-                template,
-                source_path,
-                relative_source,
-                output_path.parent,
-            )
+            content = source_path.read_text(encoding="utf-8")
         assets[output_path] = content
     return assets
 
@@ -702,40 +646,18 @@ def rebase_rendered_component_paths(
     return rendered
 
 
-def rebase_template_kustomization_paths(
-    rendered: str,
-    template: TemplateBundle,
-    source_path: Path,
-    relative_source: Path,
-    output_dir: Path,
-) -> str:
-    try:
-        documents = list(yaml.safe_load_all(rendered))
-    except yaml.YAMLError as exc:
-        raise ValueError(
-            f"template {display_path(source_path)} rendered invalid YAML: {exc}"
-        ) from exc
-    if len(documents) != 1 or not isinstance(documents[0], dict):
-        raise ValueError(
-            f"template {display_path(source_path)} must render one Kustomize mapping"
-        )
-    return rebase_rendered_component_paths(
-        rendered,
-        external_component_path_replacements(
-            documents[0], template, source_path, relative_source, output_dir
-        ),
-        source_path,
-    )
-
-
 def render_template_component(
     template: TemplateBundle,
     base: dict[str, ResourceCollection],
     values: dict[str, Any],
     component_dir: Path | None = None,
 ) -> str:
-    source_path = template.files[Path(TEMPLATE_KUSTOMIZATION_FILE)]
-    rendered = render_jinja_template(source_path, base, values)
+    source_path = template.files[Path(KUSTOMIZATION_FILE)]
+    rendered = (
+        render_jinja_template(source_path, base, values)
+        if source_path.suffix == ".j2"
+        else source_path.read_text(encoding="utf-8")
+    )
 
     try:
         documents = list(yaml.safe_load_all(rendered))
@@ -762,7 +684,7 @@ def render_template_component(
                 component,
                 template,
                 source_path,
-                Path(TEMPLATE_KUSTOMIZATION_FILE),
+                Path(KUSTOMIZATION_FILE),
                 component_dir,
             ),
             source_path,
@@ -779,8 +701,18 @@ def remove_leading_spdx_header(content: str) -> str:
     return "".join(lines)
 
 
-def generated_template_kustomization(
+def generated_template_file(
     config: MatrixConfig, template: TemplateSelection, rendered: str
+) -> str:
+    return generated_template_content(
+        config,
+        f"{GENERATED_TEMPLATE_PREFIX}{display_path(template.source)}",
+        rendered,
+    )
+
+
+def generated_template_content(
+    config: MatrixConfig, source_comment: str, rendered: str
 ) -> str:
     return "\n".join(
         [
@@ -789,7 +721,7 @@ def generated_template_kustomization(
             "# Generated file. For repository contributors, do not edit this checked-in copy.",
             "# Regenerate this matrix's public overlays and template Components from the repository root:",
             f"{GENERATED_OVERLAY_PREFIX}{config.command_path}",
-            f"{GENERATED_TEMPLATE_PREFIX}{display_path(template.source)}",
+            source_comment,
             "",
             remove_leading_spdx_header(rendered).rstrip(),
             "",
@@ -879,20 +811,15 @@ def remove_generated_template_kustomization(kustomization: Path) -> None:
             return
 
 
-def generated_content_matches(path: Path, content: GeneratedContent) -> bool:
+def generated_content_matches(path: Path, content: str) -> bool:
     if not path.exists():
         return False
-    if isinstance(content, str):
-        return path.read_text(encoding="utf-8") == content
-    return path.read_bytes() == content
+    return path.read_text(encoding="utf-8") == content
 
 
-def write_generated_content(path: Path, content: GeneratedContent) -> None:
+def write_generated_content(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, str):
-        path.write_text(content, encoding="utf-8")
-    else:
-        path.write_bytes(content)
+    path.write_text(content, encoding="utf-8")
 
 
 def unfold_matrix(
@@ -904,7 +831,7 @@ def unfold_matrix(
         if any(variant.templates for variant in variants)
         else None
     )
-    expected: dict[Path, GeneratedContent] = {}
+    expected: dict[Path, str] = {}
     expected_template_kustomizations: set[Path] = set()
     expected_template_assets: dict[Path, set[Path]] = {}
 
@@ -921,12 +848,14 @@ def unfold_matrix(
             )
             kustomization = component_dir / KUSTOMIZATION_FILE
             assert base is not None
-            expected[kustomization] = generated_template_kustomization(
+            expected[kustomization] = generated_template_file(
                 config,
                 selection,
                 render_template_component(template, base, values, component_dir),
             )
             assets = render_template_assets(template, component_dir, base, values)
+            for path, content in assets.items():
+                assets[path] = generated_template_file(config, selection, content)
             expected.update(assets)
             expected_template_kustomizations.add(kustomization)
             expected_template_assets[component_dir] = {
@@ -1085,7 +1014,7 @@ def scan_yaml(text: str) -> list[DocumentScan]:
         if not stripped:
             continue
         if stripped.startswith("#"):
-            if not stripped.startswith("# SPDX-"):
+            if not stripped.startswith(("# SPDX-", *GENERATED_SOURCE_COMMENT_PREFIXES)):
                 pending_comments.append(stripped)
             continue
 
