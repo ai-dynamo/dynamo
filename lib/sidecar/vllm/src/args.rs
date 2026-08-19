@@ -11,4 +11,8 @@ use dynamo_sidecar_common::SidecarArgs;
 pub(crate) struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
+
+    /// Optional vLLM HTTP admin endpoint advertised for RL weight-transfer control.
+    #[arg(long, env = "VLLM_HTTP_ENDPOINT")]
+    pub vllm_http_endpoint: Option<String>,
 }

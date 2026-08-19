@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_backend_common::{DynamoError, EngineConfig, LlmRegistration};
+use dynamo_backend_common::{DynamoError, EngineConfig, LlmRegistration, RlWorkerMetadata};
 
 use crate::client;
 use crate::proto as pb;
@@ -82,11 +82,10 @@ impl DiscoveredModel {
                 self.identity, observed.identity
             )));
         }
-        let expected_dp_size = self.data_parallel_size();
-        let observed_dp_size = observed.data_parallel_size();
-        if expected_dp_size != observed_dp_size {
+        if self.server.parallelism != observed.server.parallelism {
             return Err(client::protocol_error(format!(
-                "data-parallel size changed between bootstrap and startup: expected {expected_dp_size}, observed {observed_dp_size}"
+                "parallelism changed between bootstrap and startup: expected {:?}, observed {:?}",
+                self.server.parallelism, observed.server.parallelism
             )));
         }
         if self.server.rl_capabilities != observed.server.rl_capabilities {
@@ -100,6 +99,32 @@ impl DiscoveredModel {
 
     pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {
         self.server.rl_capabilities.as_ref()
+    }
+
+    pub(crate) fn rl_worker_metadata(
+        &self,
+        admin_base_url: Option<String>,
+    ) -> Result<RlWorkerMetadata, DynamoError> {
+        let parallelism = self.server.parallelism.as_ref().ok_or_else(|| {
+            client::protocol_error("RL discovery requires vLLM parallelism metadata")
+        })?;
+        let world_size = parallelism
+            .tensor_parallel_size
+            .checked_mul(parallelism.pipeline_parallel_size)
+            .and_then(|size| size.checked_mul(parallelism.data_parallel_size))
+            .filter(|size| *size > 0)
+            .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
+        let backend = self
+            .server
+            .rl_capabilities
+            .as_ref()
+            .and_then(|capabilities| {
+                capabilities
+                    .weight_transfer_enabled
+                    .then(|| capabilities.weight_transfer_backend.clone())
+            });
+        RlWorkerMetadata::new(world_size, backend, admin_base_url)
+            .map_err(|error| client::protocol_error(error.to_string()))
     }
 
     pub(crate) fn engine_config(&self) -> EngineConfig {
