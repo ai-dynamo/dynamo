@@ -15,7 +15,6 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
-use crate::local_model::runtime_config::VLLM_EXACT_MM_ROUTING_CAPABILITY;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -84,7 +83,6 @@ pub struct GenerateEngineSelection {
     pub engine: GenerateStreamingEngine,
     pub kv_cache_block_size: u32,
     pub lora_name: Option<String>,
-    pub supports_exact_mm_routing: bool,
 }
 
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
@@ -636,8 +634,6 @@ impl Model {
                     engine,
                     kv_cache_block_size: ws.card().kv_cache_block_size,
                     lora_name: ws.card().lora.as_ref().map(|lora| lora.name.clone()),
-                    supports_exact_mm_routing: ws
-                        .supports_runtime_capability(VLLM_EXACT_MM_ROUTING_CAPABILITY),
                 })
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
@@ -842,7 +838,6 @@ mod tests {
         namespace: &str,
         block_size: u32,
         lora_name: Option<&str>,
-        supports_exact_mm_routing: serde_json::Value,
     ) -> (
         Arc<WorkerSet>,
         GenerateStreamingEngine,
@@ -855,10 +850,6 @@ mod tests {
             name: name.to_string(),
             max_gpu_lora_count: None,
         });
-        card.runtime_config.runtime_data.insert(
-            VLLM_EXACT_MM_ROUTING_CAPABILITY.to_string(),
-            supports_exact_mm_routing,
-        );
         card.runtime_config.runtime_data.insert(
             VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
             true.into(),
@@ -1025,10 +1016,9 @@ mod tests {
     #[test]
     fn test_generate_engine_selection_keeps_worker_set_metadata_atomic() {
         let model = Model::new("generate-model".to_string());
-        let (worker_set_a, engine_a, worker_tx_a) =
-            make_generate_worker_set("ns-a", 16, None, false.into());
+        let (worker_set_a, engine_a, worker_tx_a) = make_generate_worker_set("ns-a", 16, None);
         let (worker_set_b, engine_b, worker_tx_b) =
-            make_generate_worker_set("ns-b", 32, Some("adapter-b"), "true".into());
+            make_generate_worker_set("ns-b", 32, Some("adapter-b"));
         worker_tx_b.send(vec![]).expect("disable worker set B");
         model.add_worker_set("ns-a".to_string(), worker_set_a);
         model.add_worker_set("ns-b".to_string(), worker_set_b);
@@ -1039,7 +1029,6 @@ mod tests {
         assert!(Arc::ptr_eq(&selection_a.engine, &engine_a));
         assert_eq!(selection_a.kv_cache_block_size, 16);
         assert_eq!(selection_a.lora_name, None);
-        assert!(!selection_a.supports_exact_mm_routing);
 
         worker_tx_a.send(vec![]).expect("disable worker set A");
         worker_tx_b.send(vec![2]).expect("enable worker set B");
@@ -1050,7 +1039,6 @@ mod tests {
         assert!(Arc::ptr_eq(&selection_b.engine, &engine_b));
         assert_eq!(selection_b.kv_cache_block_size, 32);
         assert_eq!(selection_b.lora_name.as_deref(), Some("adapter-b"));
-        assert!(selection_b.supports_exact_mm_routing);
     }
 
     fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {

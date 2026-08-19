@@ -18,9 +18,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::local_model::runtime_config::{
-    ModelRuntimeConfig, TokenizerBackend, VLLM_EXACT_MM_ROUTING_CAPABILITY,
-};
+use crate::local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend};
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
@@ -1194,19 +1192,6 @@ impl ModelDeploymentCard {
 
                 if let Some(identity) = self.indexer_identity.as_ref() {
                     append_indexer_identity_checksum(&mut bytes_to_hash, identity);
-                }
-
-                // A WorkerSet keeps the first worker's model card for request-side
-                // routing metadata. Exact-MM-capable and legacy workers therefore
-                // cannot safely share a set: whichever arrives first would make the
-                // entire set advertise its capability. Preserve the legacy checksum
-                // for absent/false values, but force a drain-and-redeploy boundary
-                // when the capability is enabled.
-                if self
-                    .runtime_config
-                    .supports_runtime_capability(VLLM_EXACT_MM_ROUTING_CAPABILITY)
-                {
-                    bytes_to_hash.extend_from_slice(b"dynamo/model-card/vllm-exact-mm-routing/v1");
                 }
 
                 // Aliases participate in the checksum. Every worker in a
