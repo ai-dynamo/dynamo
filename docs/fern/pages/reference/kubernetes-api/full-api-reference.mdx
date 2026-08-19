@@ -10,10 +10,10 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 181 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 171 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">83 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">73 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">66 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
@@ -38,8 +38,6 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 <Card title="DynamoGraphDeploymentRequest" href="#dynamographdeploymentrequest" />
 <Card title="DynamoGraphDeploymentScalingAdapter" href="#dynamographdeploymentscalingadapter" />
 <Card title="DynamoModel" href="#dynamomodel" />
-<Card title="PodSnapshot" href="#podsnapshot" />
-<Card title="PodSnapshotContent" href="#podsnapshotcontent" />
 </CardGroup>
 
 <Accordion id="autoscaling" title="Autoscaling">
@@ -219,7 +217,7 @@ Annotations are additional annotations to add to the DynamoGraphDeployment metad
 </ParamField>
 
 <ParamField path="workersImage" type="string">
-WorkersImage specifies the container image to use for DynamoGraphDeployment worker components. This image is used for both temporary DGDs created during online profiling and the final DGD. If omitted, the image from the base config file (e.g., disagg.yaml) is used. Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1"
+WorkersImage specifies the container image to use for DynamoGraphDeployment worker components. This image is used for both temporary DGDs created during online profiling and the final DGD. If omitted, the image from the base config file (e.g., disagg.yaml) is used. Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0"
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -538,7 +536,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -624,7 +622,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed via DGDSA and external autoscalers can scale the service using the Scale subresource. When disabled, replicas can be modified directly.
+ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed by the DGDSA and external autoscalers scale the service via the Scale subresource; when disabled, replicas are set directly. Opt in with `scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because `enabled` defaults to false.
 See [ScalingAdapter](#scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -699,7 +697,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -785,7 +783,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed via DGDSA and external autoscalers can scale the service using the Scale subresource. When disabled, replicas can be modified directly.
+ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed by the DGDSA and external autoscalers scale the service via the Scale subresource; when disabled, replicas are set directly. Opt in with `scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because `enabled` defaults to false.
 See [ScalingAdapter](#scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -1733,221 +1731,6 @@ See [PlacementScoreState](#placementscorestate).
 </ParamField>
 </Accordion>
 
-<Accordion id="podreference" title="PodReference">
-PodReference names a pod in the same namespace as the referencing PodSnapshot.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotContentSource](#podsnapshotcontentsource), [PodSnapshotSource](#podsnapshotsource)
-
-<ParamField path="name" type="string" required={true}>
-Name of the source pod.
-**Validation:** MinLength: 1  Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="uid" type="UID">
-UID of the source pod, recorded so the node agent dumps that specific pod and not a same-named recreation.
-See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="containers" type="string array" required={true}>
-Containers narrows the capture to these containers of the source pod. The node agent reads this instead of the source pod's target-container annotation. v1alpha1 supports exactly one container; the cap is lifted when the runtime supports multi-container capture.
-**Validation:** MaxItems: 1  MinItems: 1  Required: \&#123;\&#125;  items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshot" title="PodSnapshot">
-PodSnapshot is the Schema for the snapshots API. It is the namespaced binding
-for a captured container checkpoint and is consumed by restore paths.
-
-No conversion: this type exists only in v1alpha1 (no other API version), so it
-is not part of any conversion scheme.
-
-
-**Kind:** `resource`
-
-<ParamField path="apiVersion" type="string">
-`nvidia.com/v1alpha1`
-</ParamField>
-
-<ParamField path="kind" type="string">
-`PodSnapshot`
-</ParamField>
-
-<ParamField path="metadata" type="ObjectMeta">
-Refer to Kubernetes API documentation for fields of `metadata`.
-See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
-</ParamField>
-
-<ParamField path="spec" type="PodSnapshotSpec">
-See [PodSnapshotSpec](#podsnapshotspec).
-</ParamField>
-
-<ParamField path="status" type="PodSnapshotStatus">
-See [PodSnapshotStatus](#podsnapshotstatus).
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotcontent" title="PodSnapshotContent">
-PodSnapshotContent is the Schema for the snapshotcontents API. It is the
-cluster-scoped artifact-of-record for a captured container checkpoint.
-
-No conversion: this type exists only in v1alpha1 (no other API version), so it
-is not part of any conversion scheme.
-
-
-**Kind:** `resource`
-
-<ParamField path="apiVersion" type="string">
-`nvidia.com/v1alpha1`
-</ParamField>
-
-<ParamField path="kind" type="string">
-`PodSnapshotContent`
-</ParamField>
-
-<ParamField path="metadata" type="ObjectMeta">
-Refer to Kubernetes API documentation for fields of `metadata`.
-See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
-</ParamField>
-
-<ParamField path="spec" type="PodSnapshotContentSpec">
-See [PodSnapshotContentSpec](#podsnapshotcontentspec).
-</ParamField>
-
-<ParamField path="status" type="PodSnapshotContentStatus">
-See [PodSnapshotContentStatus](#podsnapshotcontentstatus).
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotcontentsource" title="PodSnapshotContentSource">
-PodSnapshotContentSource is the immutable source descriptor: what to dump
-(PodRef) and where it runs (NodeName).
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotContentSpec](#podsnapshotcontentspec)
-
-<ParamField path="podRef" type="PodReference" required={true}>
-PodRef identifies the pod to dump. Its UID guards against dumping a same-named recreation of the pod.
-See [PodReference](#podreference).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="nodeName" type="string" required={true}>
-NodeName is the node the source pod runs on, denormalized from the live pod so it travels with PodRef as one immutable unit and selects the node agent that performs the dump.
-**Validation:** MinLength: 1  Required: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotcontentspec" title="PodSnapshotContentSpec">
-PodSnapshotContentSpec defines the desired state of PodSnapshotContent. It is
-populated by the PodSnapshotReconciler (operator) at creation time and is
-immutable thereafter.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotContent](#podsnapshotcontent)
-
-<ParamField path="snapshotRef" type="PodSnapshotReference" required={true}>
-PodSnapshotRef is the back-pointer to the bound PodSnapshot. It may span namespaces because PodSnapshotContent is cluster-scoped.
-See [PodSnapshotReference](#podsnapshotreference).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="source" type="PodSnapshotContentSource" required={true}>
-Source describes what to capture: the source pod and the node it runs on.
-See [PodSnapshotContentSource](#podsnapshotcontentsource).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotcontentstatus" title="PodSnapshotContentStatus">
-PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotContent](#podsnapshotcontent)
-
-<ParamField path="conditions" type="Condition array">
-Conditions reflect the latest observations of the PodSnapshotContent's state. Standard types are Ready and Failed.
-See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotreference" title="PodSnapshotReference">
-PodSnapshotReference is a cross-namespace reference to a PodSnapshot.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotContentSpec](#podsnapshotcontentspec)
-
-<ParamField path="namespace" type="string" required={true}>
-Namespace of the referenced PodSnapshot.
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="name" type="string" required={true}>
-Name of the referenced PodSnapshot.
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="uid" type="UID">
-UID of the referenced PodSnapshot, recorded at binding time to detect a stale reference after a delete and recreate.
-See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotsource" title="PodSnapshotSource">
-PodSnapshotSource identifies the workload captured by a PodSnapshot.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotSpec](#podsnapshotspec)
-
-<ParamField path="podRef" type="PodReference" required={true}>
-PodRef references the pod, in the PodSnapshot's namespace, that is captured. The operator prepares the pod (control volume, checkpoint storage mount) before creating the PodSnapshot. The capture target container is carried on PodRef.Containers, not a pod annotation.
-See [PodReference](#podreference).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotspec" title="PodSnapshotSpec">
-PodSnapshotSpec defines the desired state of PodSnapshot.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshot](#podsnapshot)
-
-<ParamField path="source" type="PodSnapshotSource" required={true}>
-Source identifies the captured workload. It is a struct (rather than an inlined reference) so future source variants can be added additively.
-See [PodSnapshotSource](#podsnapshotsource).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotstatus" title="PodSnapshotStatus">
-PodSnapshotStatus defines the observed state of PodSnapshot.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshot](#podsnapshot)
-
-<ParamField path="boundSnapshotContentName" type="string">
-BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent this PodSnapshot is bound to. It is nil until the agent has created the content and recorded the binding.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="conditions" type="Condition array">
-Conditions reflect the latest observations of the PodSnapshot's state. Standard types are Ready and Failed.
-See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
 <Accordion id="profilingconfigspec" title="ProfilingConfigSpec">
 ProfilingConfigSpec defines configuration for the profiling process.
 This structure maps directly to the profile_sla.py config format.
@@ -1970,7 +1753,7 @@ See [ConfigMapKeySelector](#configmapkeyselector).
 </ParamField>
 
 <ParamField path="profilerImage" type="string" required={true}>
-ProfilerImage specifies the container image to use for profiling jobs. This image contains the profiler code and dependencies needed for SLA-based profiling. Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
+ProfilerImage specifies the container image to use for profiling jobs. This image contains the profiler code and dependencies needed for SLA-based profiling. Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
 
@@ -2180,15 +1963,18 @@ UpdatedServices is the list of services that have completed the rolling update. 
 
 <Accordion id="scalingadapter" title="ScalingAdapter">
 ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
-for replica management. When enabled, the DGDSA owns the replicas field and
-external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
+(DGDSA) for replica management. When enabled, the DGDSA owns the replicas field so that
+external autoscalers (HPA, KEDA, Planner) can drive scaling via the Scale subresource.
+
+Enable it with `scalingAdapter: {enabled: true}`. Because `enabled` defaults to false, a
+bare `scalingAdapter: {}` is disabled.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 <ParamField path="enabled" type="boolean" default="false">
-Enabled indicates whether the ScalingAdapter should be enabled for this service. When true, a DGDSA is created and owns the replicas field. When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
+Enabled turns the ScalingAdapter on for this service. When true, a DGDSA is created and owns the replicas field. When false (the default), no DGDSA is created and replicas are set directly on the DGD -- so a bare `scalingAdapter: \{\}` is disabled; set `enabled: true` to opt in.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2885,7 +2671,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2929,7 +2715,7 @@ See [ModelReference](#v1beta1-modelreference).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-scalingAdapter opts this component into using the DynamoGraphDeploymentScalingAdapter. When set (even as an empty object, `scalingAdapter: \{\}`), a DGDSA is created and owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource. Omit the field to opt out.
+scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter. Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource; omit the field to opt out.
 See [ScalingAdapter](#v1beta1-scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2988,7 +2774,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3032,7 +2818,7 @@ See [ModelReference](#v1beta1-modelreference).
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
-scalingAdapter opts this component into using the DynamoGraphDeploymentScalingAdapter. When set (even as an empty object, `scalingAdapter: \{\}`), a DGDSA is created and owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource. Omit the field to opt out.
+scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter. Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource; omit the field to opt out.
 See [ScalingAdapter](#v1beta1-scalingadapter).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -3200,7 +2986,7 @@ See [BackendType](#backendtype).
 </ParamField>
 
 <ParamField path="image" type="string">
-Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1". For Dynamo &lt; 1.1.0, use dynamo-frontend.
+Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0". For Dynamo &lt; 1.1.0, use dynamo-frontend.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -4197,11 +3983,11 @@ See [OptimizationType](#optimizationtype).
 </Accordion>
 
 <Accordion id="v1beta1-scalingadapter" title="ScalingAdapter">
-ScalingAdapter opts a component into using the DynamoGraphDeploymentScalingAdapter
-(DGDSA). When `scalingAdapter` is set on a component (even as an empty
-object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
-field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-the Scale subresource. Omitting the field opts the component out.
+ScalingAdapter opts a component into the DynamoGraphDeploymentScalingAdapter (DGDSA).
+It is a marker struct: setting `scalingAdapter` at all -- even as the empty object
+`scalingAdapter: {}` -- creates the DGDSA, which owns the `replicas` field so that
+external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource.
+Omit the field to opt out.
 
 
 **Kind:** `type`

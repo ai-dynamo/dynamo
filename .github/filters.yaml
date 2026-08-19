@@ -15,6 +15,7 @@
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
+#   examples -> recipe-check (Kustomize recipe generation and unit tests)
 #   sidecar  -> classification only; source and proto files also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
@@ -76,6 +77,7 @@ api_docs:
 
 examples:
   - 'recipes/**'
+  - 'recipes/**/.kustomize-matrix.yaml'
   - 'examples/**'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
@@ -83,8 +85,16 @@ examples:
   - 'dev/observability/**'
   - 'deploy/observability/**'
   - 'deploy/pre-deployment/**'
+  - 'scripts/generate_kustomize_openapi.py'
+  - 'scripts/kustomize-matrix.py'
+  - 'tests/test_generate_kustomize_openapi.py'
+  - 'tests/test_kustomize_matrix.py'
+  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
+  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
 
 ignore:
+  # CI filter documentation does not affect any CI job.
+  - '.github/FILTERS.md'
   - '.lycheeignore'
   - '.pre-commit-config.yaml'
   - '.coderabbit.yaml'
@@ -144,6 +154,7 @@ core:
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
@@ -166,6 +177,8 @@ core:
   # Rust sidecars have their own classification and do not use the framework
   # container or E2E pipelines triggered by `core`.
   - '!lib/sidecar/**'
+  - '!tests/test_generate_kustomize_openapi.py'
+  - '!tests/test_kustomize_matrix.py'
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
@@ -186,8 +199,6 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  # Operator imports the local snapshot module.
-  - 'deploy/snapshot/**'
   - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
@@ -196,11 +207,17 @@ operator:
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 snapshot:
-  - 'deploy/snapshot/**'
-  - 'deploy/snapshot/.*'
+  - 'deploy/checkpoint-placeholder/**'
   - 'components/src/dynamo/common/snapshot/**'
   - 'deploy/operator/internal/checkpoint/**'
+  - 'deploy/operator/internal/checkpointjob/**'
   - 'tests/deploy/test_dynamocheckpoint.py'
+  # Where the pinned github.com/ai-dynamo/snapshot chart version/values live --
+  # a version bump or install-config change must trigger the deploy-snapshot-
+  # agent-checkpoint-*/deploy-test-checkpoint-* jobs, not just 'operator'.
+  - 'deploy/helm/charts/platform/Chart.yaml'
+  - 'deploy/helm/charts/platform/Chart.lock'
+  - 'deploy/helm/charts/platform/values.yaml'
 
 # Framework-local snapshot lifecycle files, plus TRT-LLM's unit test. These gate
 # that framework's DynamoCheckpoint deploy jobs (and shared snapshot-agent/operator
@@ -226,6 +243,9 @@ deploy:
   - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
+  - 'deploy/checkpoint-placeholder/**'
+  # Nothing exists here anymore; kept so the coverage check below still
+  # classifies deletions under this now-defunct path.
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and
@@ -306,6 +326,7 @@ frontend:
   - 'container/deps/*'
   - 'container/compliance/**'
   - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'

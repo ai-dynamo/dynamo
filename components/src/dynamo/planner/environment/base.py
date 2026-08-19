@@ -443,7 +443,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     ) -> None:
         """Fail closed at startup if the minimum footprint can't fit the budget.
 
-        ``min_endpoint`` replicas of every required role must fit
+        Each required role's effective minimum replicas must fit
         ``total_gpu_power_limit``; otherwise the ceiling is unsatisfiable and
         the planner must not start rather than clamp to an impossible target.
         """
@@ -452,16 +452,24 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             return
         p_watts = prefill_cfg.watts_per_replica if prefill_cfg else None
         d_watts = decode_cfg.watts_per_replica if decode_cfg else None
+        prefill_min_endpoint = self.config.effective_prefill_min_endpoint
+        decode_min_endpoint = self.config.effective_decode_min_endpoint
         if not minimum_power_footprint_fits(
-            budget, self.config.min_endpoint, p_watts, d_watts
+            total_budget=budget,
+            prefill_min_endpoint=prefill_min_endpoint,
+            decode_min_endpoint=decode_min_endpoint,
+            p_watts=p_watts,
+            d_watts=d_watts,
         ):
             raise DeploymentValidationError(
                 [
                     "Infeasible power budget: minimum footprint "
-                    f"(min_endpoint={self.config.min_endpoint} of "
-                    f"prefill={p_watts}W, decode={d_watts}W per replica) exceeds "
+                    f"(prefill_min_endpoint={prefill_min_endpoint} at {p_watts}W, "
+                    f"decode_min_endpoint={decode_min_endpoint} at {d_watts}W "
+                    "per replica) exceeds "
                     f"total_gpu_power_limit={budget}W. Raise the budget or lower "
-                    "the per-GPU caps on the worker podTemplate annotations."
+                    "the endpoint minimums or per-GPU caps on the worker "
+                    "podTemplate annotations."
                 ]
             )
 

@@ -289,6 +289,13 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     }
                 }
             }
+            DiscoveryEvent::ModelTaintsUpdated(update) => {
+                tracing::debug!(
+                    instance_id = update.id.instance_id,
+                    "Ignoring model taint update in structural model discovery"
+                );
+                false
+            }
             DiscoveryEvent::Removed(DiscoveryInstanceId::Model(mcid)) => {
                 self.apply_removed(&mcid.to_path())
             }

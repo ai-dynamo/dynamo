@@ -13,7 +13,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -78,6 +78,11 @@ def _load_vllm_main() -> ModuleType:
         (True, dynamo_llm.ModelType.Prefill, 3),
         (True, dynamo_llm.ModelType.Chat, 3),
         (True, dynamo_llm.ModelType.Embedding, None),
+        (
+            True,
+            dynamo_llm.ModelType.Classify | dynamo_llm.ModelType.Pooling,
+            None,
+        ),
         (False, dynamo_llm.ModelType.Prefill, None),
     ],
 )
@@ -447,6 +452,38 @@ def test_should_prefetch_model_for_default_load_format():
     )
 
     assert should_prefetch_model(config) is True
+
+
+@pytest.mark.parametrize(
+    ("structured_outputs_config", "expected_excludes_reasoning"),
+    [
+        (
+            SimpleNamespace(enable_in_reasoning=False, reasoning_parser=""),
+            False,
+        ),
+        (
+            SimpleNamespace(enable_in_reasoning=False, reasoning_parser="qwen3"),
+            True,
+        ),
+        (
+            SimpleNamespace(enable_in_reasoning=True, reasoning_parser="qwen3"),
+            False,
+        ),
+    ],
+)
+def test_vllm_publishes_structural_tag_reasoning_policy(
+    structured_outputs_config, expected_excludes_reasoning
+):
+    vllm_main = _load_vllm_main()
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(structured_outputs_config=structured_outputs_config)
+
+    vllm_main.publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        vllm_main.TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+        json.dumps(expected_excludes_reasoning),
+    )
 
 
 @pytest.mark.parametrize("load_format", ["modelexpress", "mx"])
@@ -824,6 +861,7 @@ class TestBenchmarkConfig:
             "decode_max_kv_read_token_samples": 128,
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
+            "collect_imbalanced": False,
         }
 
     def test_benchmark_points_file_is_embedded_in_benchmark_config(
@@ -1399,6 +1437,24 @@ def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
     assert error.value.code == 400
 
 
+@pytest.mark.parametrize(
+    ("error_type", "expected_status"),
+    [
+        ("VLLMValidationError", 400),
+        ("VLLMNotFoundError", 404),
+        ("VLLMUnprocessableEntityError", 422),
+    ],
+)
+def test_vllm_client_error_preserves_http_status(error_type, expected_status):
+    from vllm import exceptions as vllm_exceptions
+
+    from dynamo.vllm.errors import vllm_client_error_to_http_error
+
+    error = getattr(vllm_exceptions, error_type)("invalid request")
+
+    assert vllm_client_error_to_http_error(error).code == expected_status
+
+
 def test_build_sampling_params_accepts_productive_recursive_guided_json():
     from dynamo.vllm.handlers import build_sampling_params
 
@@ -1469,6 +1525,7 @@ def _make_dynamo_config(**overrides):
         "use_kv_events": False,
         "enable_local_indexer": True,
         "embedding_worker": False,
+        "classify_worker": False,
         "headless": False,
         "enable_multimodal": False,
         "fpm_trace": False,
@@ -1481,6 +1538,7 @@ def _make_dynamo_config(**overrides):
         "decode_max_kv_read_token_samples": 128,
         "decode_max_batch_size_samples": 128,
         "prefix_max_batch_size_samples": 3,
+        "benchmark_collect_imbalanced": False,
         "_benchmark_points": None,
     }
     defaults.update(overrides)
@@ -1501,6 +1559,44 @@ def _make_engine_config_with_runner(runner="auto", **overrides):
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
+
+
+class TestPoolingWorkerPrefixCachingDefault:
+    """Pooling-family workers must not default prefix caching on: pooling
+    engines never decode, and force-enabling it crashes hybrid-attention
+    models (e.g. ModernBERT: "HybridKVCacheCoordinator requires at least two
+    attention groups") that bare `vllm serve` runs fine.
+    """
+
+    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    def test_pooling_family_defaults_to_disabled(self, role):
+        dynamo_cfg = _make_dynamo_config(**{role: True})
+        engine_cfg = _make_engine_config_with_runner(
+            runner="pooling", enable_prefix_caching=None
+        )
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is False
+
+    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    def test_explicit_enable_is_preserved(self, role):
+        dynamo_cfg = _make_dynamo_config(**{role: True})
+        engine_cfg = _make_engine_config_with_runner(
+            runner="pooling", enable_prefix_caching=True
+        )
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is True
+
+    def test_generative_worker_still_defaults_to_enabled(self):
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(enable_prefix_caching=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is True
 
 
 class TestRunnerPreservation:
@@ -1668,6 +1764,7 @@ class TestForwardPassMetricsActivation:
         ("overrides", "role"),
         [
             ({"embedding_worker": True}, "embedding"),
+            ({"classify_worker": True}, "classify"),
             ({"headless": True}, "headless"),
             (
                 {"disaggregation_mode": DisaggregationMode.ENCODE},

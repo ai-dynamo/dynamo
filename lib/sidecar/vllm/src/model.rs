@@ -21,6 +21,7 @@ struct ModelIdentity {
 pub(crate) struct DiscoveredModel {
     pub source: String,
     pub served_name: String,
+    pub supports_multimodal: bool,
     identity: ModelIdentity,
     server: pb::ServerInfo,
 }
@@ -35,6 +36,19 @@ impl DiscoveredModel {
                 "unsupported Control API version `{}`; expected `{SUPPORTED_API_VERSION}`",
                 server.api_version
             )));
+        }
+        if let Some(parallelism) = server.parallelism.as_ref() {
+            if parallelism.data_parallel_size == 0 {
+                return Err(client::protocol_error(
+                    "vLLM reports a data-parallel size of zero",
+                ));
+            }
+            if parallelism.data_parallel_rank != 0 {
+                return Err(client::protocol_error(format!(
+                    "vLLM reports data_parallel_rank {}; the sidecar currently requires one frontend hosting the complete data-parallel group starting at rank 0",
+                    parallelism.data_parallel_rank
+                )));
+            }
         }
         let source = required("model_id", model.model_id)?;
         let served_name = required("served_model_name", model.served_model_name)?;
@@ -55,22 +69,41 @@ impl DiscoveredModel {
         Ok(Self {
             source,
             served_name,
+            supports_multimodal: model.supports_multimodal,
             identity,
             server,
         })
     }
 
-    pub(crate) fn ensure_same_identity(&self, observed: &Self) -> Result<(), DynamoError> {
+    pub(crate) fn ensure_startup_compatible(&self, observed: &Self) -> Result<(), DynamoError> {
         if self.identity != observed.identity {
             return Err(client::protocol_error(format!(
                 "model identity changed between bootstrap and startup: expected {:?}, observed {:?}",
                 self.identity, observed.identity
             )));
         }
+        let expected_dp_size = self.data_parallel_size();
+        let observed_dp_size = observed.data_parallel_size();
+        if expected_dp_size != observed_dp_size {
+            return Err(client::protocol_error(format!(
+                "data-parallel size changed between bootstrap and startup: expected {expected_dp_size}, observed {observed_dp_size}"
+            )));
+        }
+        if self.server.rl_capabilities != observed.server.rl_capabilities {
+            return Err(client::protocol_error(format!(
+                "RL capabilities changed between bootstrap and startup: expected {:?}, observed {:?}",
+                self.server.rl_capabilities, observed.server.rl_capabilities
+            )));
+        }
         Ok(())
     }
 
+    pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {
+        self.server.rl_capabilities.as_ref()
+    }
+
     pub(crate) fn engine_config(&self) -> EngineConfig {
+        let parallelism = self.server.parallelism.as_ref();
         EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
@@ -82,9 +115,19 @@ impl DiscoveredModel {
                 total_kv_blocks: nonzero(self.server.total_kv_blocks),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
+                data_parallel_size: parallelism
+                    .and_then(|parallelism| nonzero(parallelism.data_parallel_size)),
+                data_parallel_start_rank: parallelism.map(|_| 0),
                 ..Default::default()
             }),
         }
+    }
+
+    pub(crate) fn data_parallel_size(&self) -> u32 {
+        self.server
+            .parallelism
+            .as_ref()
+            .map_or(1, |parallelism| parallelism.data_parallel_size)
     }
 }
 

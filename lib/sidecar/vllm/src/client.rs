@@ -8,6 +8,8 @@ use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
 };
 use tokio::time::{Instant, sleep_until, timeout_at};
+use tonic::metadata::MetadataValue;
+use tonic::transport::Channel;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
@@ -17,6 +19,7 @@ use crate::proto as pb;
 
 pub(crate) const CONTROL_SERVICE: &str = "vllm.Control";
 pub(crate) const INFERENCE_SERVICE: &str = "vllm.Inference";
+const DATA_PARALLEL_RANK_METADATA_KEY: &str = "x-data-parallel-rank";
 
 pub(crate) struct VllmClient {
     pool: GrpcChannelPool,
@@ -43,6 +46,12 @@ impl VllmClient {
 
     pub(crate) fn connection_count(&self) -> usize {
         self.pool.len()
+    }
+
+    pub(crate) fn control_client(&self) -> pb::control_client::ControlClient<Channel> {
+        pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
 
     pub(crate) async fn wait_for_services(
@@ -113,10 +122,7 @@ impl VllmClient {
         &self,
         startup_deadline: Instant,
     ) -> Result<(pb::ModelInfo, pb::ServerInfo), DynamoError> {
-        let channel = self.pool.next_channel();
-        let mut client = pb::control_client::ControlClient::new(channel)
-            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
-            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        let mut client = self.control_client();
         let model = timeout_at(
             startup_deadline,
             client.get_model_info(pb::GetModelInfoRequest {}),
@@ -147,15 +153,34 @@ impl VllmClient {
     pub(crate) async fn generate_stream(
         &self,
         request: pb::GenerateRequest,
+        data_parallel_rank: Option<u32>,
     ) -> Result<tonic::Streaming<pb::GenerateResponse>, DynamoError> {
         let mut client = pb::inference_client::InferenceClient::new(self.pool.next_channel())
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        let mut request = tonic::Request::new(request);
+        if let Some(rank) = data_parallel_rank {
+            request
+                .metadata_mut()
+                .insert(DATA_PARALLEL_RANK_METADATA_KEY, MetadataValue::from(rank));
+        }
         client
             .generate_stream(request)
             .await
             .map(tonic::Response::into_inner)
             .map_err(|status| status_to_dynamo("GenerateStream", status))
+    }
+
+    pub(crate) async fn kv_event_sources(&self) -> Result<Vec<pb::KvEventSource>, DynamoError> {
+        let mut client = pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        client
+            .get_kv_event_sources(pb::GetKvEventSourcesRequest {})
+            .await
+            .map(tonic::Response::into_inner)
+            .map(|response| response.sources)
+            .map_err(|status| status_to_dynamo("GetKvEventSources", status))
     }
 }
 

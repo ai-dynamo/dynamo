@@ -13,13 +13,14 @@ use dynamo_backend_common::{
     LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput, PreprocessedRequest,
     WorkerConfig, usage,
 };
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::stream::BoxStream;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::args::{Args, TransportConfig, normalize_endpoint};
+use crate::args::Args;
 use crate::client::{self, Client, Discovery, Pool};
 use crate::proto as pb;
 use crate::protocol::{
@@ -28,8 +29,8 @@ use crate::protocol::{
 };
 
 pub struct SglangSidecarEngine {
-    endpoint: String,
-    transport: TransportConfig,
+    endpoint: GrpcEndpoint,
+    transport: GrpcTransportConfig,
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
@@ -39,14 +40,14 @@ pub struct SglangSidecarEngine {
 
 impl SglangSidecarEngine {
     pub(crate) fn new(
-        endpoint: impl Into<String>,
-        transport: TransportConfig,
+        endpoint: GrpcEndpoint,
+        transport: GrpcTransportConfig,
         disaggregation_mode: DisaggregationMode,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
     ) -> Self {
         Self {
-            endpoint: endpoint.into(),
+            endpoint,
             transport,
             disaggregation_mode,
             bootstrap_host,
@@ -63,12 +64,22 @@ impl SglangSidecarEngine {
             None => <Args as clap::Parser>::parse(),
         };
 
-        let endpoint = normalize_endpoint(&args.sglang_endpoint).map_err(client::invalid_arg)?;
-        let transport = args.transport();
+        if args.sidecar.common.route_to_encoder {
+            return Err(client::invalid_arg(
+                "route-to-encoder is not supported by the SGLang sidecar",
+            ));
+        }
+
+        let endpoint = GrpcEndpoint::parse(&args.sglang_endpoint, "--sglang-endpoint")?;
+        let transport = args.sidecar.grpc.config();
         let discovery = bootstrap_discover(&endpoint, &transport)?;
         let disaggregation_mode = discovery_mode(&discovery)?;
         let bootstrap_host = if disaggregation_mode.is_prefill() {
-            resolve_bootstrap_host(args.bootstrap_host.as_deref(), &endpoint, &discovery)?
+            resolve_bootstrap_host(
+                args.bootstrap_host.as_deref(),
+                endpoint.as_str(),
+                &discovery,
+            )?
         } else {
             None
         };
@@ -85,18 +96,30 @@ impl SglangSidecarEngine {
             "sglang sidecar bootstrapped native gRPC discovery"
         );
 
+        let common = args.sidecar.common;
         let config = WorkerConfig {
-            namespace: args.namespace,
-            component: disaggregation_mode.discovery_component().to_string(),
-            endpoint: args.endpoint,
-            endpoint_types: args.endpoint_types,
-            custom_jinja_template: args.custom_jinja_template,
+            namespace: common.namespace,
+            component: if disaggregation_mode == DisaggregationMode::Aggregated {
+                common.component
+            } else {
+                disaggregation_mode.discovery_component().to_string()
+            },
+            endpoint: common.endpoint,
+            endpoint_types: common.endpoint_types,
+            custom_jinja_template: common.custom_jinja_template,
             disaggregation_mode,
             model_name: discovery.tokenizer_path.clone(),
             served_model_name: discovery.served_model_name.clone(),
             model_input: ModelInput::Tokens,
-            reasoning_parser: discovery_string(&discovery.server_info, "reasoning_parser"),
-            tool_call_parser: discovery_string(&discovery.server_info, "tool_call_parser"),
+            reasoning_parser: common
+                .dyn_reasoning_parser
+                .or_else(|| discovery_string(&discovery.server_info, "reasoning_parser")),
+            tool_call_parser: common
+                .dyn_tool_call_parser
+                .or_else(|| discovery_string(&discovery.server_info, "tool_call_parser")),
+            exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
+            route_to_encoder: false,
+            enable_rl: common.enable_rl,
             ..Default::default()
         };
 
@@ -126,11 +149,13 @@ impl SglangSidecarEngine {
             if Instant::now() >= deadline {
                 return Err(client::engine_shutdown(format!(
                     "SGLang did not become healthy within {:?}: {retry_message}",
-                    self.transport.deadline
+                    self.transport.startup_deadline
                 )));
             }
-            tokio::time::sleep_until((Instant::now() + self.transport.poll_interval).min(deadline))
-                .await;
+            tokio::time::sleep_until(
+                (Instant::now() + self.transport.retry_interval).min(deadline),
+            )
+            .await;
         }
     }
 }
@@ -142,14 +167,8 @@ impl LLMEngine for SglangSidecarEngine {
             return Err(client::engine_shutdown("sglang sidecar already started"));
         }
 
-        let deadline = Instant::now() + self.transport.deadline;
-        let pool = Pool::connect(
-            &self.endpoint,
-            &self.transport,
-            self.transport.connections,
-            deadline,
-        )
-        .await?;
+        let deadline = Instant::now() + self.transport.startup_deadline;
+        let pool = Pool::connect(&self.endpoint, &self.transport, deadline).await?;
         let mut control = pool.control_client();
         self.await_ready(&mut control, deadline).await?;
         let discovery = client::discover(&mut control, deadline).await?;
@@ -382,8 +401,12 @@ impl LLMEngine for SglangSidecarEngine {
             rid: ctx.id().to_string(),
             abort_all: false,
         };
-        if let Err(error) =
-            client::abort(&mut grpc_client, request, self.transport.connect_timeout).await
+        if let Err(error) = client::abort(
+            &mut grpc_client,
+            request,
+            self.transport.connect_attempt_timeout,
+        )
+        .await
         {
             tracing::debug!(
                 request_id = ctx.id(),
@@ -401,15 +424,15 @@ impl LLMEngine for SglangSidecarEngine {
 }
 
 fn bootstrap_discover(
-    endpoint: &str,
-    transport: &TransportConfig,
+    endpoint: &GrpcEndpoint,
+    transport: &GrpcTransportConfig,
 ) -> Result<Discovery, DynamoError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|err| client::engine_shutdown(format!("bootstrap runtime: {err}")))?;
     runtime.block_on(async {
-        let deadline = Instant::now() + transport.deadline;
+        let deadline = Instant::now() + transport.startup_deadline;
         let mut grpc_client = client::connect(endpoint, transport, deadline).await?;
         client::discover(&mut grpc_client, deadline).await
     })
@@ -541,6 +564,10 @@ fn build_engine_config(
     bootstrap_port: Option<u16>,
 ) -> Result<EngineConfig, DynamoError> {
     let page_size = client::json_u32(&discovery.server_info, "page_size");
+    let dcp_size = client::json_u32(&discovery.server_info, "dcp_size")
+        .unwrap_or(1)
+        .max(1);
+    let kv_cache_block_size = page_size.map(|size| size.saturating_mul(dcp_size));
     let max_total_tokens = client::json_u64(&discovery.server_info, "max_total_num_tokens");
     let total_kv_blocks = match (max_total_tokens, page_size) {
         (Some(tokens), Some(page_size)) if page_size > 0 => {
@@ -594,7 +621,7 @@ fn build_engine_config(
         runtime_data,
         llm: Some(LlmRegistration {
             context_length: discovery.max_model_len,
-            kv_cache_block_size: page_size,
+            kv_cache_block_size,
             total_kv_blocks,
             max_num_seqs,
             max_num_batched_tokens,
@@ -709,5 +736,24 @@ mod tests {
 
         assert_eq!(registration.data_parallel_start_rank, Some(0));
         assert_eq!(registration.data_parallel_size, Some(16));
+    }
+
+    #[test]
+    fn dcp_registers_logical_kv_block_size() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "page_size": 64,
+                "dcp_size": 8,
+                "max_total_num_tokens": 1024,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+        let registration = config.llm.unwrap();
+
+        assert_eq!(registration.kv_cache_block_size, Some(512));
+        assert_eq!(registration.total_kv_blocks, Some(16));
     }
 }

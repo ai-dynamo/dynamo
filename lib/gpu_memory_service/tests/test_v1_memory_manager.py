@@ -7,6 +7,14 @@ import threading
 from contextlib import ExitStack
 
 import pytest
+from _deps import HAS_GMS
+
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
+
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.v1 import device as device_identity
@@ -14,6 +22,12 @@ from gpu_memory_service.v1.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManager
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
+
+
+def _stop(server: GMSRPCServer, thread: threading.Thread) -> None:
+    server.shutdown()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
 
 
 @pytest.mark.timeout(10)
@@ -26,15 +40,12 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
     }
     vmms = {domain: FakeVMM(granularity=64) for domain in paths}
     with ExitStack() as stack:
-        servers = {}
-        threads = {}
         for domain, path in paths.items():
             manager = GMSServerMemoryManager("GPU-0", vmms[domain], 0)
-            server = GMSRPCServer(path, manager)
+            server = stack.enter_context(GMSRPCServer(path, manager))
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
-            servers[domain] = stack.enter_context(server)
-            threads[domain] = thread
+            stack.callback(_stop, server, thread)
 
         identity_events = []
         physical_uuid = ["GPU-0"]
@@ -106,8 +117,45 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
         with pytest.raises(RuntimeError, match="sidecar is on another physical GPU"):
             weights.connect(RequestedLockType.RO)
         kv_cache.close()
-        for server in servers.values():
-            server.shutdown()
-        for thread in threads.values():
-            thread.join(timeout=10)
-            assert not thread.is_alive()
+
+
+def test_identity_mismatch_wins_when_session_close_fails(monkeypatch) -> None:
+    class _Session:
+        identity = ("nonce", "GPU-1")
+
+        def close(self) -> None:
+            raise ConnectionError("close failed")
+
+    monkeypatch.setattr(device_identity, "invalidate_device_uuid_cache", lambda: None)
+    monkeypatch.setattr(device_identity, "get_device_uuid", lambda _device: "GPU-0")
+    manager = GMSClientMemoryManager(
+        "/unused.sock",
+        FakeVMM(granularity=64),
+        0,
+        session_factory=lambda *_args: _Session(),
+    )
+
+    with pytest.raises(RuntimeError, match="sidecar is on another physical GPU"):
+        manager.connect(RequestedLockType.RO)
+
+
+def test_latched_failure_raises_fresh_exceptions(monkeypatch) -> None:
+    monkeypatch.setattr(device_identity, "invalidate_device_uuid_cache", lambda: None)
+    monkeypatch.setattr(device_identity, "get_device_uuid", lambda _device: "GPU-0")
+
+    def fail_session(*_args):
+        raise ConnectionError("boom")
+
+    manager = GMSClientMemoryManager(
+        "/unused.sock",
+        FakeVMM(granularity=64),
+        0,
+        session_factory=fail_session,
+    )
+
+    with pytest.raises(RuntimeError) as first:
+        manager.connect(RequestedLockType.RO)
+    with pytest.raises(RuntimeError) as second:
+        manager.connect(RequestedLockType.RO)
+    assert first.value is not second.value
+    assert str(first.value) == str(second.value)

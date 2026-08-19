@@ -65,6 +65,22 @@ impl DerefMut for KvSourceMembershipWatch {
 }
 
 impl KvSourceMembershipWatch {
+    /// Fork this watch's current receiver channel instead of re-subscribing to
+    /// the coordinator's unfiltered anchor.
+    pub(crate) fn fork_receiver(&self) -> Self {
+        Self {
+            coordinator: self.coordinator.clone(),
+            receiver: self.receiver.clone(),
+        }
+    }
+
+    pub(crate) fn with_receiver(&self, receiver: watch::Receiver<KvSourceMembershipView>) -> Self {
+        Self {
+            coordinator: self.coordinator.clone(),
+            receiver,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn shares_coordinator_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.coordinator, &other.coordinator)
@@ -281,7 +297,9 @@ fn reconcile_discovery_event(
             }
             membership.remove_publisher(publisher_id);
         }
-        Ok(DiscoveryEvent::Added(_)) | Ok(DiscoveryEvent::Removed(_)) => {}
+        Ok(DiscoveryEvent::Added(_))
+        | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
+        | Ok(DiscoveryEvent::Removed(_)) => {}
         Err(error) => {
             tracing::error!(%error, "KV event-source discovery stream failed; rebinding");
             *membership = KvSourceMembership::new();
@@ -388,6 +406,34 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_receiver_preserves_a_derived_membership_channel() {
+        let serving = endpoint("generate");
+        let kv = endpoint("kv");
+        let configs = HashMap::from([(42, runtime_config(Some(kv)))]);
+        let (_configs_tx, configs_rx) = watch::channel(configs);
+        let discovery: Arc<dyn Discovery> =
+            Arc::new(MockDiscovery::new(Some(1), SharedMockRegistry::new()));
+        let coordinator = KvSourceMembershipCoordinator::start(serving, configs_rx, discovery);
+        let base = coordinator.subscribe();
+        let worker = WorkerWithDpRank::new(42, 4);
+        let mut filtered_view = base.borrow().clone();
+        filtered_view
+            .sources
+            .insert(worker, KvSourceStatus::Suppressed);
+        let (_filtered_tx, filtered_rx) = watch::channel(filtered_view);
+        let filtered = base.with_receiver(filtered_rx);
+
+        assert_eq!(
+            filtered.fork_receiver().borrow().status(&worker),
+            Some(&KvSourceStatus::Suppressed)
+        );
+        assert_eq!(
+            filtered.clone().borrow().status(&worker),
+            Some(&KvSourceStatus::Missing)
+        );
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
 from dynamo.common.utils.output_modalities import get_output_modalities
@@ -30,12 +31,28 @@ from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
+    kv_event_block_size,
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
+from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+
+
+def _supports_engine_generate(
+    input_type: ModelInput,
+    output_type: ModelType,
+    worker_type: WorkerType,
+) -> bool:
+    if input_type != ModelInput.Tokens:
+        return False
+    if worker_type == WorkerType.Prefill:
+        return output_type == ModelType.Prefill
+    return worker_type in (WorkerType.Decode, WorkerType.Aggregated) and (
+        output_type.supports_chat() or output_type == ModelType.Completions
+    )
 
 
 def _register_model_source_path(
@@ -132,6 +149,14 @@ async def _register_model_with_runtime_config(
         if output_type != ModelType.Embedding:
             output_type = ModelType.Chat
 
+    if runtime_config is not None and _supports_engine_generate(
+        input_type, output_type, worker_type
+    ):
+        runtime_config.set_engine_specific(
+            SGLANG_GENERATE_CAPABILITY,
+            json.dumps(True),
+        )
+        logging.info("Published SGLang engine-native generate capability")
     # Configure the Rust frontend's media decoder so it ships pre-decoded
     # images via NIXL RDMA instead of forwarding raw URLs / base64 to us.
     media_decoder = None
@@ -155,8 +180,24 @@ async def _register_model_with_runtime_config(
         if (serves_lora_load and lora_enabled)
         else None
     )
+    kv_cache_block_size = kv_event_block_size(server_args)
+    dcp_size = int(getattr(server_args, "dcp_size", 1) or 1)
+    if dcp_size > 1:
+        logging.info(
+            "Using DCP-aware SGLang paged KV-event block size %d "
+            "(page_size=%d, dcp_size=%d)",
+            kv_cache_block_size,
+            server_args.page_size,
+            dcp_size,
+        )
 
     aliases = list(getattr(dynamo_args, "served_model_aliases", []) or [])
+    # Built before the try: an invalid advertised configuration must fail
+    # startup, not be swallowed by the registration handler below and logged as
+    # a failed registration.
+    advertised_router_config = build_router_config(
+        getattr(dynamo_args, "router_advertisement", None)
+    )
     try:
         await register_model(
             input_type,
@@ -164,13 +205,18 @@ async def _register_model_with_runtime_config(
             endpoint,
             _register_model_source_path(engine, server_args),
             server_args.served_model_name,
-            kv_cache_block_size=server_args.page_size,
+            kv_cache_block_size=kv_cache_block_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
             media_decoder=media_decoder,
             media_fetcher=media_fetcher,
             worker_type=worker_type,
             needs=needs,
+            # Advertise this worker set's own routing when --router-mode is set;
+            # None inherits the frontend's global config. Combined with
+            # worker_type, this is what lets a disaggregated deployment route to
+            # its prefill and decode tiers differently.
+            router_config=advertised_router_config,
             ignore_weights=use_modelexpress_remote_instance(server_args),
             max_gpu_lora_count=max_gpu_lora_count,
             model_aliases=aliases or None,

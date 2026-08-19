@@ -575,7 +575,7 @@ models:
             Some(Arc::new(|config, worker_type, _partition| {
                 WorkerSelectionPolicy::new(
                     config.clone(),
-                    worker_type,
+                    worker_type.as_str(),
                     Vec::new(),
                     Box::new(FirstEligiblePicker),
                 )
