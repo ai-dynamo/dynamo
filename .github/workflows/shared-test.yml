@@ -80,11 +80,11 @@ on:
         required: false
         type: boolean
         default: true
-      run_arm_gpu_tests:
-        description: 'Whether to run GPU tests for arm64 matrix entries'
+      gpu_platforms:
+        description: 'Platforms whose matrix entries should run GPU tests, as a JSON array'
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: '["amd64"]'
       gpu_test_markers:
         description: 'GPU pytest markers. Selects the full GPU pool. When run_gpu_parallel_tests=true, profiled tests run in the parallel stage and are excluded from the sequential stage by appending "and not profiled_vram_gib".'
         required: false
@@ -231,7 +231,7 @@ jobs:
           gpu_tests: 'false'
       - name: Run GPU tests (parallel)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-        if: ${{ inputs.run_gpu_tests && inputs.run_gpu_parallel_tests && (matrix.platform == 'amd64' || (matrix.platform == 'arm64' && inputs.run_arm_gpu_tests)) }}
+        if: ${{ inputs.run_gpu_tests && inputs.run_gpu_parallel_tests && contains(fromJSON(inputs.gpu_platforms), matrix.platform) }}
         uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
@@ -252,7 +252,7 @@ jobs:
         # but require checkout to have succeeded so an infra/prereq failure (e.g. the
         # container/pod never coming online) skips this step cleanly instead of trying
         # to run the local pytest-local action against an un-checked-out workspace.
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_gpu_tests && (matrix.platform == 'amd64' || (matrix.platform == 'arm64' && inputs.run_arm_gpu_tests)) }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_gpu_tests && contains(fromJSON(inputs.gpu_platforms), matrix.platform) }}
         uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
