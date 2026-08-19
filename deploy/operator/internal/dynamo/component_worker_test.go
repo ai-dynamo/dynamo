@@ -14,33 +14,28 @@ import (
 
 func TestWorkerDefaultsCanaryHealthCheckVersionGate(t *testing.T) {
 	tests := []struct {
-		name                     string
-		runtimeVersion           *runtimeversion.Version
-		wantEnabled              string
-		wantLivenessFailureCount int32
+		name           string
+		runtimeVersion *runtimeversion.Version
+		wantEnabled    string
 	}{
 		{
-			name:                     "unknown legacy runtime",
-			wantEnabled:              "false",
-			wantLivenessFailureCount: 1,
+			name:        "unknown legacy runtime",
+			wantEnabled: "false",
 		},
 		{
-			name:                     "older runtime",
-			runtimeVersion:           &runtimeversion.Version{Major: 1, Minor: 4, Patch: 9},
-			wantEnabled:              "false",
-			wantLivenessFailureCount: 1,
+			name:           "older runtime",
+			runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 4, Patch: 9},
+			wantEnabled:    "false",
 		},
 		{
-			name:                     "minimum supported runtime",
-			runtimeVersion:           &runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
-			wantEnabled:              "true",
-			wantLivenessFailureCount: 3,
+			name:           "minimum supported runtime",
+			runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
+			wantEnabled:    "true",
 		},
 		{
-			name:                     "newer runtime",
-			runtimeVersion:           &runtimeversion.Version{Major: 2, Minor: 0, Patch: 0},
-			wantEnabled:              "true",
-			wantLivenessFailureCount: 3,
+			name:           "newer runtime",
+			runtimeVersion: &runtimeversion.Version{Major: 2, Minor: 0, Patch: 0},
+			wantEnabled:    "true",
 		},
 	}
 
@@ -51,7 +46,7 @@ func TestWorkerDefaultsCanaryHealthCheckVersionGate(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.NotNil(t, container.LivenessProbe)
-			require.Equal(t, tt.wantLivenessFailureCount, container.LivenessProbe.FailureThreshold)
+			require.EqualValues(t, 1, container.LivenessProbe.FailureThreshold)
 
 			for _, env := range container.Env {
 				if env.Name == "DYN_HEALTH_CHECK_ENABLED" {

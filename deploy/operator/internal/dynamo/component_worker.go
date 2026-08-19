@@ -28,10 +28,6 @@ func NewWorkerDefaults() *WorkerDefaults {
 func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
 	container := w.getCommonContainer(context)
 	canaryHealthChecksEnabled := runtimefeatures.CanaryHealthChecks.Enabled(context.RuntimeVersion)
-	livenessFailureThreshold := int32(1)
-	if canaryHealthChecksEnabled {
-		livenessFailureThreshold = 3
-	}
 
 	// Add system port
 	container.Ports = []corev1.ContainerPort{
@@ -56,7 +52,7 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		},
 		PeriodSeconds:    5,
 		TimeoutSeconds:   4, // TimeoutSeconds should be < PeriodSeconds
-		FailureThreshold: livenessFailureThreshold,
+		FailureThreshold: 1, // A single failed liveness check restarts the Pod.
 	}
 
 	// ReadinessProbe in Dynamo worker context doesn't determine that the worker is ready to receive traffic

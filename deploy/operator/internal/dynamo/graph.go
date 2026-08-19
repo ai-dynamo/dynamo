@@ -1570,7 +1570,10 @@ func GenerateBasePodSpec(
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
 	annotations := GetPodTemplateAnnotations(component)
-	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations))
+	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations))
+	if err != nil {
+		return nil, err
+	}
 	componentDefaults := ComponentDefaultsFactory(string(component.ComponentType))
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -1946,7 +1949,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1beta1.D
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext) ComponentContext {
+func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext) (ComponentContext, error) {
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
@@ -1961,6 +1964,8 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	var resolvedRuntimeVersion *runtimeversion.Version
 	if version, err := runtimeversion.Resolve(image, component.RuntimeVersionOverride); err == nil {
 		resolvedRuntimeVersion = &version
+	} else if component.RuntimeVersionOverride != "" {
+		return ComponentContext{}, fmt.Errorf("resolve runtime version override: %w", err)
 	}
 
 	componentContext := ComponentContext{
@@ -1974,7 +1979,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		WorkerHashSuffix:               workerHashSuffix,
 		RuntimeVersion:                 resolvedRuntimeVersion,
 	}
-	return componentContext
+	return componentContext, nil
 }
 
 // GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
