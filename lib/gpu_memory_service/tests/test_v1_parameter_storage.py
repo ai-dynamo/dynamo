@@ -6,14 +6,14 @@ from __future__ import annotations
 import pytest
 from _deps import HAS_GMS, HAS_TORCH
 
-if not HAS_TORCH:
-    pytest.skip("PyTorch is required", allow_module_level=True)
-
 if not HAS_GMS:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
         allow_module_level=True,
     )
+
+if not HAS_TORCH:
+    pytest.skip("PyTorch is required", allow_module_level=True)
 
 import torch
 from gpu_memory_service.v1.client.mapping import LocalMapping

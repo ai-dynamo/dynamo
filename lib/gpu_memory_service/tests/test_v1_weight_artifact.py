@@ -17,6 +17,7 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
+import msgspec
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.snapshot import disk as snapshot_disk
