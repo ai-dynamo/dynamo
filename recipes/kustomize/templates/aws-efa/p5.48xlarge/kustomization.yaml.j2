@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      group: nvidia.com
+      version: v1alpha1
+      kind: DynamoGraphDeployment
+    path: resources.yaml
+  - target:
+      group: nvidia.com
+      version: v1alpha1
+      kind: DynamoGraphDeployment
+    patch: |
+      {% set dgd = base.dynamographdeployment | only %}
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      metadata:
+        name: {{ dgd.metadata.name }}
+      spec:
+        services:
+        {% for name, service in dgd.spec.services.items() if service.componentType == "worker" %}
+          {{ name }}:
+            extraPodSpec:
+              affinity:
+                nodeAffinity:
+                  requiredDuringSchedulingIgnoredDuringExecution:
+                    nodeSelectorTerms:
+                      - matchExpressions:
+                          - key: node.kubernetes.io/instance-type
+                            operator: In
+                            values:
+                              - "{{ values.INSTANCE_TYPE }}"
+                              - "ml.{{ values.INSTANCE_TYPE }}"
+                podAffinity:
+                  requiredDuringSchedulingIgnoredDuringExecution:
+                    - labelSelector:
+                        matchExpressions:
+                          - key: nvidia.com/dynamo-graph-deployment-name
+                            operator: In
+                            values:
+                              - {{ dgd.metadata.name }}
+                          - key: nvidia.com/dynamo-component-type
+                            operator: In
+                            values:
+                              - worker
+                      topologyKey: topology.kubernetes.io/zone
+        {% endfor %}

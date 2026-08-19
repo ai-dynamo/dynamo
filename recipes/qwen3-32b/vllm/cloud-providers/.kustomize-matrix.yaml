@@ -9,6 +9,7 @@ matrix:
         - ../../../kustomize/components/aks-ib
     - name: aws-p5.48xlarge
       components:
+        - ../../../kustomize/components/disagg-workers/aws-efa
         - ../../../kustomize/components/vllm-disagg/aws-efa
         - kustomize/components/vllm-efa-runtime
       templates:

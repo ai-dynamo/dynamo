@@ -13,5 +13,6 @@ resources:
   - "../../base"
 components:
   - "components/efa"
+  - "../../../../../../kustomize/components/disagg-workers/aws-efa"
   - "../../../../../../kustomize/components/vllm-disagg/aws-efa"
   - "../../components/vllm-efa-runtime"
