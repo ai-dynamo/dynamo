@@ -228,8 +228,9 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		logs.Error(err, "Failed to get resource.")
 		return
 	}
-	err = nil
 
+	// Past this point err is either nil or the NotFound the branch below consumes, so it never
+	// leaks into a naked return.
 	if oldResourceIsNotFound {
 		return createResource(ctx, logs, r, parentResource, resource, toDelete, resourceType)
 	} else {
