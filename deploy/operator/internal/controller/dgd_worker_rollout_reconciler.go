@@ -127,6 +127,10 @@ func (h workerGenerationHashes) empty() bool {
 	return h.v1 == "" && h.v2 == ""
 }
 
+func (h workerGenerationHashes) v1Only() bool {
+	return h.v1 != "" && h.v2 == ""
+}
+
 func (h workerGenerationHashes) contains(hash string) bool {
 	if hash == "" {
 		return false
@@ -308,7 +312,12 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 	logger := log.FromContext(ctx)
 
 	current := r.currentWorkerHashes(dgd)
-	if current.v1 == "" || current.v2 != "" || current.v1 == consts.LegacyWorkerHash {
+	if !current.v1Only() || current.v1 == consts.LegacyWorkerHash {
+		return nil
+	}
+
+	// Let an active v1 rollout converge on v2 before recording it as current.
+	if isRollingUpdateInProgress(&dgd.Status) {
 		return nil
 	}
 
@@ -359,6 +368,12 @@ func activeWorkerHashCandidates(
 	current := currentWorkerHashes(dgd)
 	candidates := make([]string, 0, 2)
 	generated := workerHashForDCDGeneration(current, desired)
+
+	// Restart an active v1-only rollout under its canonical v2 generation.
+	if current.v1Only() && isRollingUpdateInProgress(&dgd.Status) {
+		generated = desired.v2
+	}
+
 	candidates = append(candidates, generated)
 	if current.v1 == desired.v1 && (current.v2 == "" || current.v2 == desired.v2) && desired.v1 != generated {
 		candidates = append(candidates, desired.v1)
@@ -478,7 +493,7 @@ func (r *dgdWorkerRolloutReconciler) getOrCreateRollingUpdateStatus(
 }
 
 // isRollingUpdateInProgress returns true if a rolling update is currently active.
-func (r *dgdWorkerRolloutReconciler) isRollingUpdateInProgress(
+func isRollingUpdateInProgress(
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) bool {
 	if status.RollingUpdate == nil {

@@ -390,6 +390,79 @@ func TestInitializeWorkerHashIfNeeded_MigratesOpaqueV1WithoutRollout(t *testing.
 	assert.False(t, trigger)
 }
 
+func TestActiveV1OnlyRolloutRerollsUnderV2(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase nvidiacomv1beta1.RollingUpdatePhase
+	}{
+		{
+			name:  "pending",
+			phase: nvidiacomv1beta1.RollingUpdatePhasePending,
+		},
+		{
+			name:  "in progress",
+			phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a v1-only DGD with an active rollout and a partially created target generation")
+			const activeV1 = "active-v1"
+			const targetV1 = "target-v1"
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			})
+			dgd.Annotations = map[string]string{
+				consts.AnnotationCurrentWorkerHash: activeV1,
+			}
+			dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{Phase: tt.phase}
+			desiredV2 := betaDGDWorkersSpecHash(t, dgd)
+
+			targetDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd-worker-target-v1",
+					Namespace: dgd.Namespace,
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+						consts.KubeLabelDynamoWorkerHash:          targetV1,
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						ComponentType: consts.ComponentTypeWorker,
+						ServiceName:   "worker",
+						Replicas:      ptr.To(int32(1)),
+					},
+				},
+			})
+			r := createTestReconcilerWithStatus(dgd, withObjects(targetDCD))
+
+			t.Log("Run two migration and rollout passes so Pending also reaches the former stuck-rollout path")
+			for range 2 {
+				require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
+				require.NoError(t, r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status))
+			}
+
+			t.Log("Verify the rollout remains active under v2 without committing or deleting the partial v1 target")
+			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
+			assert.Equal(t, activeV1, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
+			assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHashV2)
+			desired, err := desiredWorkerHashes(dgd)
+			require.NoError(t, err)
+			assert.Equal(t, desiredV2, activeWorkerHashForDCDGeneration(dgd, desired))
+			require.NoError(t, r.Get(
+				context.Background(),
+				client.ObjectKeyFromObject(targetDCD),
+				&nvidiacomv1beta1.DynamoComponentDeployment{},
+			))
+		})
+	}
+}
+
 func TestInitializeWorkerHashIfNeeded_PreservesLegacyAlphaHash(t *testing.T) {
 	alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -796,8 +869,7 @@ func TestIsRollingUpdateInProgress(t *testing.T) {
 			})
 			dgd.Status.RollingUpdate = tt.status
 
-			r := createTestReconcilerWithStatus(dgd)
-			result := r.isRollingUpdateInProgress(&dgd.Status)
+			result := isRollingUpdateInProgress(&dgd.Status)
 
 			assert.Equal(t, tt.expected, result)
 		})
