@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, patch
 import numpy as np
 import pytest
 from PIL import Image
-from redis.exceptions import RedisError
+from redis.exceptions import RedisClusterException, RedisError
 
 from dynamo.common.http import HttpConnectionError, HttpStatusError, HttpTimeoutError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
@@ -529,11 +529,21 @@ async def test_shared_cache_miss_writes_validated_origin_bytes(monkeypatch) -> N
     assert client.set.await_args.kwargs == {"ex": 123}
 
 
-async def test_shared_cache_errors_fall_back_to_origin(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "cache_error",
+    [
+        RedisError("cache unavailable"),
+        RedisClusterException("Timeout connecting to server"),
+    ],
+    ids=["redis-error", "redis-cluster-error"],
+)
+async def test_shared_cache_errors_fall_back_to_origin(
+    monkeypatch, cache_error: Exception
+) -> None:
     _enable_shared_image_cache(monkeypatch)
     client = AsyncMock()
-    client.get.side_effect = RedisError("read unavailable")
-    client.set.side_effect = RedisError("write unavailable")
+    client.get.side_effect = cache_error
+    client.set.side_effect = cache_error
     origin_fetch = _mock_fetch_bytes()
 
     with (
@@ -545,6 +555,29 @@ async def test_shared_cache_errors_fall_back_to_origin(monkeypatch) -> None:
 
     assert image.size == (2, 2)
     origin_fetch.assert_awaited_once()
+    client.set.assert_awaited_once()
+
+
+async def test_shared_cache_delete_cluster_error_falls_back_to_origin(
+    monkeypatch,
+) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = b"not an image"
+    client.delete.side_effect = RedisClusterException("Timeout connecting to server")
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        image = await shared_loader.load_image("https://example.com/img.png")
+
+    assert image.size == (2, 2)
+    client.delete.assert_awaited_once()
+    origin_fetch.assert_awaited_once()
+    client.set.assert_awaited_once()
 
 
 async def test_invalid_shared_cache_entry_is_deleted_and_refetched(monkeypatch) -> None:

@@ -12,7 +12,7 @@ from collections import defaultdict
 from typing import DefaultDict
 
 from redis.asyncio.cluster import RedisCluster
-from redis.exceptions import RedisError
+from redis.exceptions import RedisClusterException, RedisError
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,8 @@ _TTL_ENV = "DYN_MM_SHARED_IMAGE_CACHE_TTL_SECS"
 _CONNECT_TIMEOUT_ENV = "DYN_MM_SHARED_IMAGE_CACHE_CONNECT_TIMEOUT_SECS"
 _IO_TIMEOUT_ENV = "DYN_MM_SHARED_IMAGE_CACHE_IO_TIMEOUT_SECS"
 _MAX_PENDING_DURATIONS = 10_000
+# redis-py defines RedisClusterException outside the RedisError hierarchy.
+_REDIS_OPERATION_ERRORS = (RedisError, RedisClusterException)
 
 
 def _size_bucket(size_bytes: int | None) -> str:
@@ -124,7 +126,7 @@ class SharedImageCache:
         size_bucket = "unknown"
         try:
             value = await self._client.get(key)
-        except RedisError as exc:
+        except _REDIS_OPERATION_ERRORS as exc:
             logger.warning("Shared image cache read failed: %s", exc)
             return None
         else:
@@ -144,7 +146,7 @@ class SharedImageCache:
         size_bucket = _size_bucket(len(content))
         try:
             await self._client.set(key, content, ex=self._ttl_seconds)
-        except RedisError as exc:
+        except _REDIS_OPERATION_ERRORS as exc:
             logger.warning("Shared image cache write failed: %s", exc)
         else:
             outcome = "success"
@@ -158,5 +160,5 @@ class SharedImageCache:
         key = self._key(canonical_url)
         try:
             await self._client.delete(key)
-        except RedisError as exc:
+        except _REDIS_OPERATION_ERRORS as exc:
             logger.warning("Shared image cache delete failed: %s", exc)
