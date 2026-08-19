@@ -81,7 +81,7 @@ where
 {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<WorkerSelection, Error> {
         let outcome = self
-            .chooser
+            .kv_router()
             .find_best_match_details_with_policy_class_inner(
                 Some(args.context_id),
                 args.routing_parts.token_ids,
@@ -163,7 +163,7 @@ where
             .map(|state| state.excluded_worker_ids())
             .unwrap_or_default();
         if explicit_pin.is_none() && !migration_excluded_worker_ids.is_empty() {
-            let workers = self.chooser.workers_with_configs.borrow();
+            let workers = self.kv_router().workers_with_configs.borrow();
             let eligible =
                 allowed_worker_ids.get_or_insert_with(|| workers.keys().copied().collect());
             eligible.retain(|worker_id| {
@@ -181,7 +181,7 @@ where
             }
         }
         let return_routing_hashes =
-            !is_query_only && self.chooser.indexer().records_routing_decisions();
+            !is_query_only && self.kv_router().indexer().records_routing_decisions();
         let SelectionOptions {
             affinity_worker,
             policy_class,
@@ -216,7 +216,7 @@ where
                 let total_blocks = routing_parts
                     .token_ids
                     .len()
-                    .div_ceil(self.chooser.block_size() as usize);
+                    .div_ceil(self.kv_router().block_size() as usize);
                 // tests/utils/router_logs.py parses the structured fields on this event.
                 tracing::debug!(
                     request_id = %context_id,
@@ -239,10 +239,10 @@ where
         let pinned_worker = resolve_pinned_worker_rank(
             pinned_worker_id,
             requested_dp_rank,
-            self.chooser.unique_dp_rank_for_worker(pinned_worker_id),
+            self.kv_router().unique_dp_rank_for_worker(pinned_worker_id),
         )?;
         {
-            let configs = self.chooser.workers_with_configs.borrow();
+            let configs = self.kv_router().workers_with_configs.borrow();
             let eligibility = RoutingEligibility::new(
                 allowed_worker_ids.as_ref(),
                 None,

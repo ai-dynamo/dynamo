@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{marker::PhantomData, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerWithDpRank},
-    selector::WorkerSelector,
+    selector::{WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
-        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, BuiltinWorkerPicker, Error,
-        ManyOut, PushRouter, ResponseStream, SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
+        ResponseStream, RouterMode, SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
 };
@@ -29,9 +29,7 @@ use crate::{
     protocols::common::{
         FinishReason,
         llm_backend::LLMEngineOutput,
-        timing::{
-            RequestPhase, RequestTracker, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL,
-        },
+        timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
         AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
@@ -117,30 +115,70 @@ where
     }
 }
 
+fn into_monitored_response<Sel>(
+    response_stream: ManyOut<Annotated<LLMEngineOutput>>,
+    guard: RequestGuard<Sel>,
+) -> ManyOut<Annotated<LLMEngineOutput>>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    let stream_context = response_stream.context();
+    let wrapped_stream = Box::pin(monitor_response_stream(
+        response_stream,
+        stream_context.clone(),
+        guard,
+    ));
+    ResponseStream::new(wrapped_stream, stream_context)
+}
+
+/// First-party policies that need no KV-cache index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltinRoutingPolicy {
+    RoundRobin,
+    Random,
+}
+
+impl BuiltinRoutingPolicy {
+    pub fn from_router_mode(mode: RouterMode) -> Option<Self> {
+        match mode {
+            RouterMode::RoundRobin => Some(Self::RoundRobin),
+            RouterMode::Random => Some(Self::Random),
+            _ => None,
+        }
+    }
+
+    pub const fn required_worker_inputs(self) -> WorkerInputs {
+        WorkerInputs::NONE
+    }
+}
+
+enum RoutingPlane<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    Kv(Arc<KvRouter<Sel>>),
+    Builtin(BuiltinRoutingPolicy),
+}
+
 /// Owns request routing from worker selection through response cleanup.
 ///
-/// The host coordinates either KV-aware or cache-free builtin selection with
-/// request dispatch and lifecycle handling.
-///
 /// [`PushRouter`] owns discovery, fault detection, and transport. [`KvRouter`]
-/// owns KV candidate selection and scheduler state. `RoutingHost` coordinates
-/// them and owns request state through response completion or cancellation.
-pub struct RoutingHost<Sel = DefaultWorkerSelector, Plane = Arc<KvRouter<Sel>>>
+/// owns optional KV candidate state. `RoutingHost` owns the common request
+/// lifecycle regardless of which policy selected the worker.
+pub struct RoutingHost<Sel = DefaultWorkerSelector>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    pub chooser: Plane,
+    plane: RoutingPlane<Sel>,
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
-    _selector: PhantomData<fn() -> Sel>,
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
 pub type KvPushRouter<Sel = DefaultWorkerSelector> = RoutingHost<Sel>;
-pub type BuiltinRoutingHost = RoutingHost<DefaultWorkerSelector, Arc<BuiltinWorkerPicker>>;
 
-impl<Sel> RoutingHost<Sel, Arc<KvRouter<Sel>>>
+impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -169,16 +207,53 @@ where
 
         RoutingHost {
             inner,
-            chooser: kv_router,
+            plane: RoutingPlane::Kv(kv_router),
             request_metrics,
             affinity,
-            _selector: PhantomData,
+        }
+    }
+
+    pub(crate) fn new_builtin(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    ) -> Result<Self, Error> {
+        let policy =
+            BuiltinRoutingPolicy::from_router_mode(inner.router_mode()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{:?} routing is not a stateless builtin policy",
+                    inner.router_mode()
+                )
+            })?;
+        debug_assert_eq!(policy.required_worker_inputs(), WorkerInputs::NONE);
+        let request_metrics =
+            RouterRequestMetrics::from_component(inner.client.endpoint.component());
+        Ok(Self {
+            inner,
+            plane: RoutingPlane::Builtin(policy),
+            request_metrics,
+            affinity: None,
+        })
+    }
+
+    pub fn required_worker_inputs(&self) -> WorkerInputs {
+        match &self.plane {
+            RoutingPlane::Kv(chooser) => chooser.required_worker_inputs(),
+            RoutingPlane::Builtin(policy) => policy.required_worker_inputs(),
         }
     }
 
     /// The active KV-aware data plane.
     pub fn kv_router(&self) -> &Arc<KvRouter<Sel>> {
-        &self.chooser
+        match &self.plane {
+            RoutingPlane::Kv(chooser) => chooser,
+            RoutingPlane::Builtin(_) => panic!("builtin routing host has no KV router"),
+        }
+    }
+
+    pub(crate) fn peek_next_worker(&self) -> Option<u64> {
+        match &self.plane {
+            RoutingPlane::Builtin(_) => self.inner.peek_next_worker(),
+            RoutingPlane::Kv(_) => None,
+        }
     }
 
     pub(crate) fn query_affinity_worker(
@@ -301,10 +376,11 @@ where
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
-        let block_size = self.chooser.block_size() as usize;
+        let chooser = self.kv_router();
+        let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
-        let mut guard = RequestGuard::new(
-            self.chooser.clone(),
+        let mut guard = RequestGuard::new_kv(
+            Arc::clone(chooser),
             self.request_metrics.clone(),
             context_id.clone(),
             selected_worker,
@@ -313,21 +389,21 @@ where
         );
 
         let record_result: Result<(), Error> = async {
-            if !is_query_only && self.chooser.indexer().records_routing_decisions() {
+            if !is_query_only && chooser.indexer().records_routing_decisions() {
                 let worker = selected_worker;
                 let record_result = if let Some(hashes) = selection.routing_hashes.take() {
                     cancel_on_stop(
                         request_context.as_ref(),
-                        self.chooser.record_routing_decision_hashes(hashes, worker),
+                        chooser.record_routing_decision_hashes(hashes, worker),
                     )
                     .await?
                 } else {
                     let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
                     let mut tokens_with_hashes = TokensWithHashes::new(
                         routing_parts.token_ids.to_vec(),
-                        self.chooser.block_size(),
+                        chooser.block_size(),
                     )
-                    .with_is_eagle(self.chooser.is_eagle());
+                    .with_is_eagle(chooser.is_eagle());
                     if let Some(infos) = routing_parts.block_mm_infos {
                         tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
                     }
@@ -336,8 +412,7 @@ where
                     }
                     cancel_on_stop(
                         request_context.as_ref(),
-                        self.chooser
-                            .record_routing_decision(tokens_with_hashes, worker),
+                        chooser.record_routing_decision(tokens_with_hashes, worker),
                     )
                     .await?
                 };
@@ -359,9 +434,9 @@ where
                 tracker.record_worker(
                     selection.worker.worker_id,
                     Some(selection.worker.dp_rank),
-                    self.chooser.worker_type(),
+                    chooser.worker_type(),
                 );
-                tracker.record_router_queue_depth(self.chooser.pending_count());
+                tracker.record_router_queue_depth(chooser.pending_count());
                 if let Some(hit_rate) = tracker.kv_hit_rate() {
                     guard.request_metrics().kv_hit_rate.observe(hit_rate);
                 }
@@ -458,13 +533,7 @@ where
         };
 
         guard.mark_dispatched();
-        let stream_context = response_stream.context();
-        let wrapped_stream = Box::pin(monitor_response_stream(
-            response_stream,
-            stream_context.clone(),
-            guard,
-        ));
-        Ok(ResponseStream::new(wrapped_stream, stream_context))
+        Ok(into_monitored_response(response_stream, guard))
     }
 
     fn warn_if_output_replay_annotation_ignored(
@@ -476,7 +545,7 @@ where
             return;
         };
         let consumes_replay = self
-            .chooser
+            .kv_router()
             .workers_with_configs
             .borrow()
             .get(&selection.worker.worker_id)
@@ -499,7 +568,89 @@ where
         );
     }
 
-    pub(crate) async fn select_and_dispatch_prefill<M, F>(
+    async fn select_and_dispatch_builtin<M, F>(
+        &self,
+        mut request: SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        prepare: F,
+    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    where
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
+    {
+        let RoutingPlane::Builtin(policy) = &self.plane else {
+            unreachable!("builtin dispatch called for KV routing")
+        };
+        let policy = *policy;
+        debug_assert_eq!(policy.required_worker_inputs(), WorkerInputs::NONE);
+
+        let phase_label = phase.to_string();
+        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let explicit = explicit_target(&request, phase)?;
+        let initial_worker = match explicit {
+            Some(target) => target.worker_id,
+            None => self.inner.select_next_worker().ok_or_else(|| {
+                anyhow::anyhow!("no eligible worker available for {policy:?} routing")
+            })?,
+        };
+        let mut guard: RequestGuard<Sel> =
+            RequestGuard::new_stateless(self.request_metrics.clone(), initial_worker, &request);
+        let tracker = request.tracker.clone();
+        self.request_metrics
+            .input_sequence_tokens
+            .observe(request.token_ids.len() as f64);
+        drop(route_guard);
+
+        guard.start_dispatch(&phase_label);
+        guard.record_prefill_start();
+        let dispatch_result = if let Some(target) = explicit {
+            request.routing_mut().dp_rank = target.dp_rank;
+            let metadata = match prepare(&mut request, target) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    guard.abort().await;
+                    return Err(error);
+                }
+            };
+            self.inner
+                .dispatch_exact(request, target.worker_id)
+                .await
+                .map(|stream| (metadata, target, stream))
+        } else {
+            self.inner
+                .dispatch_selected_untracked(initial_worker, request, |request, worker_id| {
+                    let target = AffinityTarget::new(worker_id, None);
+                    request.routing_mut().dp_rank = None;
+                    prepare(request, target).map(|metadata| (metadata, target))
+                })
+                .await
+                .map(|((metadata, target), stream)| (metadata, target, stream))
+        };
+
+        let (metadata, target, response_stream) = match dispatch_result {
+            Ok(result) => result,
+            Err(error) => {
+                let typed_error = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
+                guard.record_migration_failure(typed_error);
+                guard.abort().await;
+                return Err(error);
+            }
+        };
+        guard.set_stateless_worker(target.worker_id);
+        if let Some(tracker) = tracker {
+            let worker_type = if tracker.phase() == RequestPhase::Prefill {
+                WORKER_TYPE_PREFILL
+            } else {
+                WORKER_TYPE_DECODE
+            };
+            tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
+        }
+        guard.mark_dispatched();
+        Ok((metadata, into_monitored_response(response_stream, guard)))
+    }
+
+    async fn select_and_dispatch_kv_prefill<M, F>(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
         prepare: F,
@@ -549,11 +700,28 @@ where
         };
         Ok((metadata, operation.into_stream(selected_target, stream)?))
     }
+
+    pub(crate) async fn select_and_dispatch_prefill<M, F>(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+        prepare: F,
+    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    where
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
+    {
+        match &self.plane {
+            RoutingPlane::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
+            RoutingPlane::Builtin(_) => {
+                self.select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
+                    .await
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl<Sel> AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for RoutingHost<Sel, Arc<KvRouter<Sel>>>
+    for RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -580,6 +748,18 @@ where
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        if matches!(&self.plane, RoutingPlane::Builtin(_)) {
+            let phase = request
+                .tracker
+                .as_ref()
+                .map(|tracker| tracker.phase())
+                .unwrap_or(RequestPhase::Aggregated);
+            return self
+                .select_and_dispatch_builtin(request, phase, |_, _| Ok(()))
+                .await
+                .map(|(_, stream)| stream);
+        }
+
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let phase = request
             .tracker
@@ -597,15 +777,15 @@ where
                 let isl_blocks = routing_parts
                     .token_ids
                     .len()
-                    .div_ceil(self.chooser.block_size() as usize);
+                    .div_ceil(self.kv_router().block_size() as usize);
                 tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
                 tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
                 tracker.record_worker(
                     selection.worker.worker_id,
                     Some(selection.worker.dp_rank),
-                    self.chooser.worker_type(),
+                    self.kv_router().worker_type(),
                 );
-                tracker.record_router_queue_depth(self.chooser.pending_count());
+                tracker.record_router_queue_depth(self.kv_router().pending_count());
             }
             self.request_metrics
                 .input_sequence_tokens
@@ -660,99 +840,6 @@ where
             None => Ok(stream),
         }
     }
-}
-
-impl RoutingHost<DefaultWorkerSelector, Arc<BuiltinWorkerPicker>> {
-    pub(crate) fn new_builtin(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    ) -> Result<Self, Error> {
-        let chooser = inner
-            .builtin_picker()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("cache-free RoutingHost requires a builtin picker"))?;
-        let request_metrics =
-            RouterRequestMetrics::from_component(inner.client.endpoint.component());
-        Ok(Self {
-            inner,
-            chooser,
-            request_metrics,
-            affinity: None,
-            _selector: PhantomData,
-        })
-    }
-
-    async fn select_and_dispatch_builtin<M, F>(
-        &self,
-        mut request: SingleIn<PreprocessedRequest>,
-        phase: RequestPhase,
-        prepare: F,
-    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
-    where
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
-    {
-        let phase_label = phase.to_string();
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let requested = explicit_target(&request, phase)?;
-        let reservation = match requested {
-            Some(target) => self.chooser.reserve_exact(target.worker_id)?,
-            None => self.chooser.select()?,
-        };
-        let target = AffinityTarget {
-            worker_id: reservation.worker_id(),
-            dp_rank: requested.and_then(|target| target.dp_rank),
-        };
-        request.routing_mut().dp_rank = target.dp_rank;
-        let metadata = prepare(&mut request, target)?;
-        let tracker = request.tracker.take();
-        drop(route_guard);
-
-        let stream = self.inner.dispatch_exact(request, target.worker_id).await?;
-        record_builtin_target(tracker.as_deref(), target);
-        Ok((metadata, reservation.into_tracked_stream(stream)))
-    }
-
-    pub(crate) async fn select_and_dispatch_prefill<M, F>(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-        prepare: F,
-    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
-    where
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
-    {
-        self.select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
-            .await
-    }
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for RoutingHost<DefaultWorkerSelector, Arc<BuiltinWorkerPicker>>
-{
-    async fn generate(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        let phase = request
-            .tracker
-            .as_ref()
-            .map(|tracker| tracker.phase())
-            .unwrap_or(RequestPhase::Aggregated);
-        self.select_and_dispatch_builtin(request, phase, |_, _| Ok(()))
-            .await
-            .map(|(_, stream)| stream)
-    }
-}
-
-fn record_builtin_target(tracker: Option<&RequestTracker>, target: AffinityTarget) {
-    let Some(tracker) = tracker else {
-        return;
-    };
-    let worker_type = if tracker.phase() == RequestPhase::Prefill {
-        WORKER_TYPE_PREFILL
-    } else {
-        WORKER_TYPE_DECODE
-    };
-    tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
 }
 
 fn affinity_worker(target: AffinityTarget) -> Option<WorkerWithDpRank> {
@@ -886,40 +973,41 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
 
         assert_send_sync::<RoutingHost<WorkerSelectionPolicy>>();
-        assert_send_sync::<BuiltinRoutingHost>();
+    }
+
+    #[test]
+    fn stateless_builtin_policies_request_no_optional_capabilities() {
+        assert_eq!(
+            BuiltinRoutingPolicy::RoundRobin.required_worker_inputs(),
+            WorkerInputs::NONE
+        );
+        assert_eq!(
+            BuiltinRoutingPolicy::Random.required_worker_inputs(),
+            WorkerInputs::NONE
+        );
     }
 
     #[tokio::test]
-    async fn builtin_host_owns_cache_free_picker_state() {
+    async fn builtin_host_does_not_construct_kv_capabilities() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
                 .await
                 .unwrap();
         let endpoint = distributed
-            .namespace("builtin-routing-host".to_string())
+            .namespace("builtin-capabilities".to_string())
             .unwrap()
             .component("workers".to_string())
             .unwrap()
             .endpoint("generate".to_string());
         let client = endpoint.client().await.unwrap();
-        endpoint.register_endpoint_instance().await.unwrap();
-        client.wait_for_instances().await.unwrap();
-
-        let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
+        let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
             .await
             .unwrap();
-        let host = BuiltinRoutingHost::new_builtin(inner).unwrap();
-        let first = host.chooser.select().unwrap();
-        assert_eq!(first.load(), 1);
-        let second = host.chooser.select().unwrap();
-        assert_eq!(second.load(), 2);
-        drop(second);
-        drop(first);
-        let after_completion = host.chooser.select().unwrap();
-        assert_eq!(after_completion.load(), 1);
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner).unwrap();
 
-        drop(after_completion);
+        assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
+
         drop(host);
         runtime.shutdown();
     }
@@ -928,6 +1016,10 @@ mod tests {
     #[serial_test::serial]
     async fn terminal_item_does_not_skip_transport_eof() {
         let (router, runtime) = router(None).await;
+        let inputs = router.required_worker_inputs();
+        assert!(inputs.contains(WorkerInputs::CACHE));
+        assert!(inputs.contains(WorkerInputs::LOAD));
+        assert!(inputs.contains(WorkerInputs::ROUTING));
         let context = Context::new(()).context();
         let drained = Arc::new(AtomicBool::new(false));
         let source_drained = Arc::clone(&drained);
@@ -941,8 +1033,8 @@ mod tests {
             }),
             Arc::clone(&context),
         );
-        let guard = RequestGuard::new(
-            Arc::clone(&router.chooser),
+        let guard = RequestGuard::new_kv(
+            Arc::clone(router.kv_router()),
             Arc::clone(&router.request_metrics),
             "terminal-drain".to_string(),
             WorkerWithDpRank::from_worker_id(0),
@@ -1376,7 +1468,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(selection.worker.worker_id, 8);
-        router.chooser.free(retry_request.id()).await.unwrap();
+        router.kv_router().free(retry_request.id()).await.unwrap();
         drop(operation);
 
         let mut exhausted_input = request();

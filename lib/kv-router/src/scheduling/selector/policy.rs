@@ -61,7 +61,7 @@ impl WorkerInputs {
     pub(super) const MIN_ACTIVE_PREFILL_TOKENS: Self = Self(1 << 3);
     pub(super) const DEFAULT_POLICY_CACHE: Self = Self(1 << 4);
 
-    pub(super) const fn contains(self, other: Self) -> bool {
+    pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
@@ -630,6 +630,18 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        match &self.state {
+            WorkerSelectionPolicyState::Default(_) => {
+                WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::ROUTING
+            }
+            WorkerSelectionPolicyState::Custom(state) => {
+                let state = state.borrow();
+                state.filter_inputs | state.scorer_picker_inputs
+            }
+        }
+    }
+
     #[inline(always)]
     fn select_worker(
         &self,
@@ -1017,5 +1029,69 @@ mod tests {
             panic!("expected custom policy state");
         };
         assert!(state.borrow().unscored_candidates.is_empty());
+    }
+
+    #[test]
+    fn policy_requirements_union_all_components() {
+        struct CacheFilter;
+        impl WorkerFilter for CacheFilter {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CACHE
+            }
+
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                _candidate: &WorkerCandidate,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                Ok(true)
+            }
+        }
+
+        struct LoadScorer;
+        impl WorkerScorer for LoadScorer {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::LOAD
+            }
+
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                _candidate: &WorkerCandidate,
+            ) -> Result<f64, WorkerSelectionPolicyError> {
+                Ok(0.0)
+            }
+        }
+
+        struct RoutingPicker;
+        impl WorkerPicker for RoutingPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::ROUTING
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                _input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(0)
+            }
+        }
+
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(CacheFilter)],
+            vec![Box::new(LoadScorer)],
+            Box::new(RoutingPicker),
+        );
+        let inputs =
+            <WorkerSelectionPolicy as WorkerSelector<TaintedWorkerConfig>>::required_worker_inputs(
+                &policy,
+            );
+
+        assert!(inputs.contains(WorkerInputs::CACHE));
+        assert!(inputs.contains(WorkerInputs::LOAD));
+        assert!(inputs.contains(WorkerInputs::ROUTING));
     }
 }

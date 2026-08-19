@@ -305,10 +305,8 @@ where
         let threshold = self.conditional_disagg_prefill_busy_threshold?;
         let binding = self.binding.load_full()?;
         let router = match &binding.router {
-            InnerPrefillRouter::Kv(router) => router,
-            InnerPrefillRouter::Builtin(_) | InnerPrefillRouter::Simple(_) => {
-                return None;
-            }
+            InnerPrefillRouter::KvRouter(router) => router,
+            InnerPrefillRouter::Builtin(_) | InnerPrefillRouter::SimpleRouter(_) => return None,
         };
 
         let lora_name = req

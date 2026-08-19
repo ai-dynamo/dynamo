@@ -24,8 +24,8 @@
 //!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
 //!   the streaming response (TTFT on first token, ITL per output block,
 //!   ISL/OSL/kv_hit_rate at routing and completion).
-//!   - Frontend, non-KV modes (direct/random/round-robin): always zero (registered
-//!     on default port 8000, but never populated since RoutingHost is not used)
+//!   - Frontend, random/round-robin modes without affinity or LoRA filtering: populated by
+//!     `RoutingHost`; modes that still bypass the host remain registered as zeros
 //!   - Frontend, KV mode (aggregated and disaggregated): available on default port
 //!     8000 via the `drt_metrics` bridge, populated per-request
 //!   - Standalone router (`python -m dynamo.router`): available on `DYN_SYSTEM_PORT`
