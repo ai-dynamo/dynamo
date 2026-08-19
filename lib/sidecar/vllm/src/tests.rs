@@ -470,11 +470,10 @@ fn discovered_model_advertises_token_native_generate() {
         Some(&serde_json::Value::Bool(true))
     );
     assert!(
-        model
+        !model
             .engine_config()
             .runtime_data
-            .get("vllm_exact_mm_routing")
-            .is_none(),
+            .contains_key("vllm_exact_mm_routing"),
         "feature transport must not advertise exact routing"
     );
 }
