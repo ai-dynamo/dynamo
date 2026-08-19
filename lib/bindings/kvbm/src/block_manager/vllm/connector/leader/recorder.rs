@@ -112,7 +112,9 @@ pub struct ResetCacheOutput {
 /// Recording is consequently **lossy under overload**: the JSONL output can
 /// contain a gap. The gap is announced rather than silent, through
 /// [`Self::dropped_count`], a throttled warning, and the total logged when the
-/// ingress is dropped.
+/// ingress is dropped. The same counter covers the other way an action can go
+/// missing — the recorder shutting down while producers are still calling —
+/// so an action is always either written or counted.
 ///
 /// The *newest* action is discarded, not the oldest. That keeps whatever is
 /// retained a FIFO prefix of the action stream instead of a shuffled window,
@@ -124,7 +126,8 @@ struct ActionRecorderIngress<T: Send + 'static> {
     capacity: usize,
     // Held rather than detached so the forwarding task's lifetime is tied to
     // this value. It is never aborted: dropping `tx` ends the loop only after
-    // it has drained the actions it already accepted.
+    // it has drained the actions it already accepted. The loop can also end
+    // on its own, when the recorder's channel closes under it.
     _forwarder: JoinHandle<()>,
 }
 
@@ -135,11 +138,12 @@ impl<T: Send + 'static> ActionRecorderIngress<T> {
     /// no GPU, no pyo3 state, and no leader/worker barrier.
     fn new(rt: &Handle, downstream: mpsc::Sender<T>, capacity: usize) -> Self {
         let (tx, rx) = mpsc::channel(capacity);
-        let forwarder = rt.spawn(Self::forward_to_downstream(rx, downstream));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let forwarder = rt.spawn(Self::forward_to_downstream(rx, downstream, dropped.clone()));
 
         Self {
             tx,
-            dropped: Arc::new(AtomicU64::new(0)),
+            dropped,
             capacity,
             _forwarder: forwarder,
         }
@@ -177,10 +181,40 @@ impl<T: Send + 'static> ActionRecorderIngress<T> {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    async fn forward_to_downstream(mut rx: mpsc::Receiver<T>, downstream: mpsc::Sender<T>) {
+    /// Move accepted actions to the recorder's own channel until either the
+    /// ingress or the recorder goes away.
+    ///
+    /// A failed `send` means the recorder's receiver has been dropped — after
+    /// cancellation, or once a `max_count`/`max_time` limit ends its writer
+    /// task. That is terminal, never transient, so the loop stops there
+    /// instead of continuing to receive actions it could only throw away: a
+    /// forwarder that kept draining would leave `tx` open, so producers would
+    /// go on succeeding while every action vanished uncounted, which is the
+    /// silent gap the drop counter exists to rule out.
+    ///
+    /// Closing `rx` on the way out converts that into the accounted case. The
+    /// action in flight and everything still buffered are added to `dropped`,
+    /// and later `record` calls see `Closed` and count themselves.
+    async fn forward_to_downstream(
+        mut rx: mpsc::Receiver<T>,
+        downstream: mpsc::Sender<T>,
+        dropped: Arc<AtomicU64>,
+    ) {
         while let Some(msg) = rx.recv().await {
             if downstream.send(msg).await.is_err() {
-                tracing::error!("Failed to send message to bounded channel");
+                rx.close();
+                let mut lost: u64 = 1;
+                while rx.try_recv().is_ok() {
+                    lost += 1;
+                }
+                let total = dropped.fetch_add(lost, Ordering::Relaxed) + lost;
+                tracing::error!(
+                    lost,
+                    dropped = total,
+                    "kvbm recorder channel is closed; discarding buffered actions and \
+                     stopping the forwarder"
+                );
+                return;
             }
         }
     }
@@ -611,5 +645,43 @@ mod tests {
             "a sink that keeps up, fed fewer actions than the queue holds, must lose nothing"
         );
         assert_eq!(received, (0..PUSHED).collect::<Vec<_>>());
+    }
+
+    /// T4: the other way an action can go missing. When the recorder's own
+    /// receiver is gone, nothing downstream can be delivered any more, so
+    /// every push must show up in the drop count -- none of it may be
+    /// discarded quietly inside the forwarding task.
+    #[tokio::test]
+    async fn a_departed_recorder_counts_the_actions_it_can_no_longer_take() {
+        const CAPACITY: usize = 4;
+        const PUSHED: usize = 64;
+
+        let (downstream_tx, downstream_rx) = mpsc::channel::<usize>(1);
+        let ingress = ActionRecorderIngress::new(&Handle::current(), downstream_tx, CAPACITY);
+
+        // What `Recorder`'s writer task does when it is cancelled or hits a
+        // `max_count`/`max_time` limit: its `event_rx` is dropped.
+        drop(downstream_rx);
+
+        for i in 0..PUSHED {
+            ingress.record(i);
+        }
+
+        // The forwarding task has to be polled before it can notice the
+        // closure, so the accounting settles asynchronously. The timeout is a
+        // failure bound, not a delay -- it is reached only if some action was
+        // neither delivered nor counted.
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while ingress.dropped_count() != PUSHED as u64 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            settled.is_ok(),
+            "with the recorder gone, all {PUSHED} actions must be counted as dropped, got {}",
+            ingress.dropped_count()
+        );
     }
 }
