@@ -50,6 +50,7 @@ from tests.utils.payload_builder import (
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
+    ChatPayload,
     ImageGenerationPayload,
     LoraTestChatPayload,
     ResponsesPayload,
@@ -166,6 +167,45 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+        ],
+    ),
+    "disaggregated_dp_attention": SGLangConfig(
+        # Prefill and decode each run two DP-attention ranks over the same
+        # two-GPU pair. PR #13464 excludes h100 tests from non-H100 multi-GPU
+        # lanes; leaving this unprofiled routes it through sequential H100 CI.
+        name="disaggregated_dp_attention",
+        directory=sglang_dir,
+        script_name="disagg_dp_attn.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_2,
+            pytest.mark.h100,
+            pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.timeout(600),
+            pytest.mark.nightly,
+        ],
+        model="silence09/DeepSeek-R1-Small-2layers",
+        script_args=["--model", "silence09/DeepSeek-R1-Small-2layers"],
+        timeout=480,
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            ChatPayload(
+                body={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "What is a mixture-of-experts model?",
+                        }
+                    ],
+                    "max_tokens": 32,
+                    "temperature": 0.0,
+                    "stream": False,
+                },
+                repeat_count=2,
+                expected_response=[],
+                expected_log=[],
+            )
         ],
     ),
     "disaggregated_router": SGLangConfig(
@@ -1004,8 +1044,8 @@ def sglang_config_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.sglang
-# Allocate 4 system ports: disaggregated_router runs 4 workers each needing a
-# unique DYN_SYSTEM_PORT; other configs use <=2 (extra ports are harmless).
+# Allocate 4 system ports: disaggregated_router runs 4 workers, while the
+# two-GPU DP-attention config uses ports 1/2 for metrics and 3/4 for NCCL.
 @pytest.mark.parametrize("num_system_ports", [4], indirect=True)
 def test_sglang_deployment(
     sglang_config_test,
@@ -1024,22 +1064,6 @@ def test_sglang_deployment(
         sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
-
-
-@pytest.mark.e2e
-@pytest.mark.sglang
-@pytest.mark.core
-@pytest.mark.gpu_2
-@pytest.mark.nightly
-@pytest.mark.skip(
-    reason="Requires 4 GPUs - enable when hardware is consistently available"
-)
-def test_sglang_disagg_dp_attention(
-    request, runtime_services_dynamic_ports, dynamo_dynamic_ports, predownload_models
-):
-    """Test sglang disaggregated with DP attention (requires 4 GPUs)"""
-
-    # Kept for reference; this test uses a different launch path and is skipped
 
 
 # ── LoRA Tests ──────────────────────────────────────────────────────────────
