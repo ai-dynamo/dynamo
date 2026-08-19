@@ -246,52 +246,46 @@ Kimi-K3 reasons before answering, and tool calling is supported — the deployme
 
 ## Benchmark
 
-<div data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
+See [perf/README.md](https://github.com/milesial/dynamo/blob/docs/kimi-k3-framework-selector/recipes/kimi-k3/perf/README.md) for the full benchmark workflow: staging the trace on the PVC, running the AIPerf trace-replay Job, running a concurrency sweep, and fetching artifacts.
 
-TBD
+### Optimization Targets
 
-</div>
+Recipes are optimized for the following agentic workload and target user interactivity:
+
+| Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Agentic | 64k | 400 | 90% | 50 |
+
+The benchmark replays the Mooncake-format agentic trace described in [perf/README.md](https://github.com/milesial/dynamo/blob/docs/kimi-k3-framework-selector/recipes/kimi-k3/perf/README.md).
+
+### Performance Results
+
+| Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| Agentic (15% subset) | SGLang | Aggregated (&lt;N&gt; workers) | GB200 | | | | |
+| Agentic (15% subset) | SGLang | Disaggregated (&lt;N&gt;P&lt;M&gt;D) | GB200 | | | | |
+| Agentic (15% subset) | SGLang | Aggregated (3 workers) | GB300 | 54 | 80.78 | 51.43 | 513 |
+| Agentic (15% subset) | SGLang | Disaggregated (&lt;N&gt;P&lt;M&gt;D) | GB300 | | | | |
+| Agentic (15% subset) | vLLM | Aggregated (&lt;N&gt; workers) | GB200 | | | | |
+| Agentic (15% subset) | vLLM | Disaggregated (&lt;N&gt;P&lt;M&gt;D) | GB200 | | | | |
+| Agentic (15% subset) | vLLM | Aggregated (&lt;N&gt; workers) | GB300 | | | | |
+| Agentic (15% subset) | vLLM | Disaggregated (&lt;N&gt;P&lt;M&gt;D) | GB300 | | | | |
 
 ## Compare All Targets
 
-<div data-recipe-framework="vllm">
+| | vLLM GB200 aggregated | vLLM GB200 disaggregated | vLLM GB300 aggregated | vLLM GB300 disaggregated | SGLang GB200 aggregated | SGLang GB200 disaggregated | SGLang GB300 aggregated | SGLang GB300 disaggregated |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **GPUs** | | | | | | | | |
+| **Workers** | | | | | | | | |
+| **Parallelism** | | | | | | | | |
+| **KV transfer** | | | | | | | | |
+| **Attention** | | | | | | | | |
+| **Precision** | | | | | | | | |
+| **Max context** | | | | | | | | |
 
-All four targets serve Kimi-K3 on vLLM with FP8 KV cache, KV-aware routing, prefix caching, and the FlashInfer TRT-LLM MoE backend, with tensor parallelism over NVLink (MNNVL):
+## Limitations
 
-| | GB200 aggregated | GB200 disaggregated | GB300 aggregated | GB300 disaggregated |
-|---|---|---|---|---|
-| **GPUs** | 16x GB200 (4 nodes) | 16x prefill + 16x decode | 16x GB300 (2 replicas) | 8x prefill + 16x decode |
-| **Workers** | 1 | 1P + 1D | 2 (KV-routed) | 1P + 2D |
-| **Parallelism** | TP16 | TP16 / TP16 | TP8 per replica | TP8 per replica |
-| **KV transfer** | — | NIXL over RDMA (IB) | — | NIXL over MNNVL |
-| **Attention** | FlashInfer MLA | FlashInfer MLA | FlashInfer MLA | FlashInfer MLA |
-| **Precision** | MXFP4 + BF16, FP8 KV | MXFP4 + BF16, FP8 KV | MXFP4 + BF16, FP8 KV | MXFP4 + BF16, FP8 KV |
-| **Max context** | 1,048,576 | 1,048,576 | 1,048,576 | 1,048,576 |
-
-</div>
-
-<div data-recipe-framework="sglang">
-
-TBD
-
-</div>
-
-## Notes
-
-<div data-recipe-framework="vllm">
-
-- All targets use KV-aware routing at the Dynamo frontend with prefix caching and KV events enabled.
-- Kimi-K3 is multimodal — the deployments enable the multimodal encoder (`--enable-multimodal`) with data-parallel encoder sharding.
-- Multi-node tensor parallelism runs over NVLink (MNNVL) via Kubernetes ComputeDomains (DRA). Disaggregated KV transfer uses NIXL — over NVLink on GB300, over RDMA InfiniBand on GB200 (`UCX_TLS=^cuda_ipc`, GKE `rdma-*` network resources).
-- Kimi-K3 support requires the updated Dynamo frontend (tokenizer, `kimi_k3` reasoning and tool-call parsers) that ships with this release.
-
-</div>
-
-<div data-recipe-framework="sglang">
-
-TBD
-
-</div>
+- With JSON structured decoding, output for non-object top-level items can appear in `reasoning_content` instead of `content`.
 
 ## Source
 
