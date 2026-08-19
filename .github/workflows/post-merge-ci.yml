@@ -455,7 +455,7 @@ jobs:
       dd_env: post-merge
       test_suite_name: vllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]'
@@ -576,7 +576,7 @@ jobs:
       dd_env: post-merge
       test_suite_name: trtllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]'
@@ -858,6 +858,8 @@ jobs:
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
       with:
+        # Sole writer of this vCluster name; every other caller recovers into it.
+        reset_existing: 'true'
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
         repository: ${{ vars.ACR_REPOSITORY }}
         operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
@@ -938,6 +940,8 @@ jobs:
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
       with:
+        # Sole writer of this vCluster name; every other caller recovers into it.
+        reset_existing: 'true'
         vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
         vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -966,6 +970,8 @@ jobs:
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
       with:
+        # Sole writer of this vCluster name; every other caller recovers into it.
+        reset_existing: 'true'
         vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
         vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -994,6 +1000,8 @@ jobs:
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
       with:
+        # Sole writer of this vCluster name; every other caller recovers into it.
+        reset_existing: 'true'
         vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
         vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-trtllm-dt
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
