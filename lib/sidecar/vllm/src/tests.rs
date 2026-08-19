@@ -841,8 +841,7 @@ fn token_native_compatibility_envelope_rejects_unprojected_fields() {
     );
 }
 
-#[test]
-fn token_native_compatibility_envelope_rejects_multimodal_features_without_support() {
+fn request_with_preprocessed_features(features: serde_json::Value) -> PreprocessedRequest {
     let mut request = request();
     request.extra_args = Some(json!({
         "vllm_tito": {
@@ -850,21 +849,160 @@ fn token_native_compatibility_envelope_rejects_multimodal_features_without_suppo
             "sampling_params": {},
             "stream": false,
             "priority": 0,
-            "features": {"mm_hashes": {"image": ["untrusted"]}}
+            "features": features
         }
     }));
+    request
+}
+
+fn image_features(kwargs: serde_json::Value) -> serde_json::Value {
+    json!({
+        "mm_hashes": {"image": ["producer-controlled-hash"]},
+        "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+        "kwargs_data": {"image": [kwargs]}
+    })
+}
+
+#[test]
+fn preprocessed_multimodal_features_use_vllm_derived_identifiers() {
+    let request = request_with_preprocessed_features(image_features(json!("AQIDBA==")));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("preprocessed feature should be forwarded");
+
+    let feature = match wire.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature,
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert_eq!(feature.kwargs.as_deref(), Some(&[1, 2, 3, 4][..]));
+    assert_eq!(
+        feature.identifier,
+        "grpc-mm:c280b3ce06886fca7341a5da70b0e8beaf2b4f1d6904232891683ce1dc2b638f"
+    );
+    assert_eq!(
+        feature.mm_hash.as_deref(),
+        Some(feature.identifier.as_str())
+    );
+    assert_eq!((feature.offset, feature.length), (1, 2));
+}
+
+#[test]
+fn preprocessed_multimodal_features_reject_unknown_nested_fields() {
+    let mut features = image_features(json!("AQIDBA=="));
+    features["future_field"] = json!(true);
+    let root_error = build_generate_request(
+        request_with_preprocessed_features(features),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unknown feature fields must fail closed");
+    assert!(root_error.to_string().contains("future_field"));
+
+    let mut features = image_features(json!("AQIDBA=="));
+    features["mm_placeholders"]["image"][0]["future_field"] = json!(true);
+    let placeholder_error = build_generate_request(
+        request_with_preprocessed_features(features),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unknown placeholder fields must fail closed");
+    assert!(placeholder_error.to_string().contains("future_field"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_require_inline_kwargs() {
+    for kwargs in [
+        serde_json::Value::Null,
+        serde_json::Value::String(String::new()),
+    ] {
+        let error = build_generate_request(
+            request_with_preprocessed_features(image_features(kwargs)),
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("cache-only or empty feature kwargs must be rejected");
+        assert!(error.to_string().contains("kwargs_data"));
+    }
+}
+
+#[test]
+fn preprocessed_multimodal_features_enforce_count_and_byte_limits() {
+    let hashes = vec!["producer-controlled-hash"; 65];
+    let placeholders = (0..65)
+        .map(|offset| json!({"offset": offset, "length": 1}))
+        .collect::<Vec<_>>();
+    let kwargs = vec!["AQIDBA=="; 65];
+    let too_many = json!({
+        "mm_hashes": {"image": hashes},
+        "mm_placeholders": {"image": placeholders},
+        "kwargs_data": {"image": kwargs}
+    });
+    let count_error = build_generate_request(
+        request_with_preprocessed_features(too_many),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("feature count must be bounded");
+    assert!(count_error.to_string().contains("at most 64"));
+
+    let oversized = "AAAA".repeat((16 * 1024 * 1024) / 3 + 1);
+    let byte_error = build_generate_request(
+        request_with_preprocessed_features(image_features(json!(oversized))),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("decoded feature bytes must be bounded");
+    assert!(byte_error.to_string().contains("16 MiB"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_cannot_mix_with_raw_media() {
+    let mut request = request_with_preprocessed_features(image_features(json!("AQIDBA==")));
+    request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,iVBORw0KGgo=".to_string(),
+        )],
+    )]));
 
     let error = build_generate_request(
         request,
         "request-1".to_string(),
         DisaggregationMode::Aggregated,
     )
-    .expect_err("preprocessed features must fail until their transport is enabled");
+    .expect_err("raw media and preprocessed features must not be mixed");
+
+    assert!(error.to_string().contains("cannot be mixed"));
+}
+
+#[tokio::test]
+async fn preprocessed_multimodal_features_require_model_support() {
+    let engine = engine(
+        "http://127.0.0.1:9",
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    let context = dynamo_backend_common::testing::mock_context();
+    let result = engine
+        .generate(
+            request_with_preprocessed_features(image_features(json!("AQIDBA=="))),
+            GenerateContext::new(context, None),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("a text-only model must reject preprocessed media before RPC submission"),
+        Err(error) => error,
+    };
 
     assert!(
         error
             .to_string()
-            .contains("requires preprocessed multimodal")
+            .contains("does not advertise multimodal support")
     );
 }
 
