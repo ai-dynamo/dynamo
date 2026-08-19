@@ -185,7 +185,17 @@ pub enum BackendStatusAction {
 impl BackendStatusAction {
     /// Triage a worker-asserted status, applying [`keeps_retry_semantics`] on
     /// top of [`SanitizedError::for_backend_status`].
+    ///
+    /// `DYN_HTTP_OVERLOAD_STATUS_CODE` is not restricted to 5xx (see
+    /// [`parse_overload_status_code`]), so a configured non-5xx overload code
+    /// (e.g. 429) would otherwise fall through
+    /// [`SanitizedError::for_backend_status`]'s 4xx branch and be forwarded
+    /// as a plain client error instead of sanitized and preserved as the
+    /// overload response. Check it first, before that classification runs.
     pub fn triage(status: StatusCode) -> Self {
+        if status == overload_status_code() && !status.is_server_error() {
+            return BackendStatusAction::Sanitize(SanitizedError::Overloaded);
+        }
         match SanitizedError::for_backend_status(status) {
             None => BackendStatusAction::ForwardClientError,
             Some(SanitizedError::PreserveServerError(asserted))
