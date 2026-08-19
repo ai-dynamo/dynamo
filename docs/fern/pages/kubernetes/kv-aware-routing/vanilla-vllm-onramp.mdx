@@ -527,6 +527,8 @@ For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVIC
 | `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | No | Maximum render response size; defaults to `16777216`. |
 | `DYN_EPP_MAX_INFLIGHT_REQUESTS` | No | Concurrent EPP request guardrail; defaults to `1024`, and excess requests receive `503`. |
 | `DYN_EPP_PEER_SERVICE` | No | EPP Service used to discover sibling replicas. |
+| `DYN_EPP_RECOVERY_HTTP_TIMEOUT_MS` | No | Timeout for one peer `/dump` recovery fetch (request + body); defaults to `30000` ms. Raise it when a large KV index snapshot would otherwise exceed the deadline. |
+| `DYN_EPP_RECOVERY_MAX_DUMP_BYTES` | No | Maximum accepted `/dump` snapshot body; defaults to `536870912` (512 MiB). Recovery fails fast with a clear error when a peer snapshot exceeds this, instead of buffering unbounded memory. |
 | `POD_IP` | With peer service | EPP pod IP used to exclude the local replica from its peer set. |
 
 ## Scope and Limitations
