@@ -1974,6 +1974,10 @@ mod tests {
     }
 
     impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> for InspectingSelector {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::CACHE | WorkerInputs::LOAD
+        }
+
         fn select_worker(
             &self,
             _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
@@ -2003,6 +2007,10 @@ mod tests {
     struct OverloadedSelector;
 
     impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> for OverloadedSelector {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::NONE
+        }
+
         fn select_worker(
             &self,
             _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
