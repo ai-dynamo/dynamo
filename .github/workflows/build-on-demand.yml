@@ -198,6 +198,8 @@ jobs:
           docker buildx build --push \
               --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_REGISTRY}/dockerhub/ \
+              --build-arg BASELINE_SBOM_FILE=go@66dcc593 \
+              --build-context compliance=../../container/compliance \
               ${TAGGING_FLAGS} -f Dockerfile .
 
           echo "### Operator Container Images" >> $GITHUB_STEP_SUMMARY
