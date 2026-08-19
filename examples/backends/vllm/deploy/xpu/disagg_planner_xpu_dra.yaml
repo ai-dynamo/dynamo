@@ -87,8 +87,6 @@ spec:
           - decode
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"xpu"}'
-          - --block-size
-          - "64"
           command:
           - python3
           - -m
@@ -123,8 +121,6 @@ spec:
           - prefill
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"xpu"}'
-          - --block-size
-          - "64"
           command:
           - python3
           - -m
