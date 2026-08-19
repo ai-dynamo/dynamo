@@ -546,7 +546,7 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
         }
 
         let additional_inputs = scorer_picker_inputs.without(*filter_inputs);
-        let additional = input.row(worker, preferred_taint_multiplier, additional_inputs);
+        let additional = input.row(worker, None, additional_inputs);
         let candidate = filter_candidate.with_inputs_from(&additional, *scorer_picker_inputs);
         if needs_filtered_baseline {
             min_active_prefill_tokens =
