@@ -1204,10 +1204,7 @@ impl ModelDeploymentCard {
                 // when the capability is enabled.
                 if self
                     .runtime_config
-                    .runtime_data
-                    .get(VLLM_EXACT_MM_ROUTING_CAPABILITY)
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
+                    .supports_runtime_capability(VLLM_EXACT_MM_ROUTING_CAPABILITY)
                 {
                     bytes_to_hash.extend_from_slice(b"dynamo/model-card/vllm-exact-mm-routing/v1");
                 }

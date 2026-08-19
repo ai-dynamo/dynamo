@@ -1351,7 +1351,7 @@ mod tests {
 
     #[test]
     fn generate_mm_routing_hash_matches_normalized_vllm_worker_event() {
-        let mm_identifier = "1234567890abcdef".repeat(2);
+        let mm_identifier = "1234567890abcdef".repeat(4);
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [10, 99, 99, 20],
             "sampling_params": {},
@@ -1372,16 +1372,15 @@ mod tests {
         let event_mm_info =
             dynamo_kv_router::zmq_wire::extra_keys_to_block_mm_infos(Some(vec![Some(vec![
                 dynamo_kv_router::zmq_wire::ExtraKeyItem::HashWithUnsignedOffset((
-                    mm_identifier.clone(),
+                    mm_identifier,
                     1,
                 )),
             ])]))
-            .expect("parse offset-bearing MM extra key")
+            .expect("parse canonical offset-bearing MM extra key")
             .into_iter()
             .next()
             .flatten()
             .expect("block MM metadata");
-
         let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
             4,
             7,
@@ -1397,7 +1396,7 @@ mod tests {
     }
 
     #[test]
-    fn sparse_mm_embed_mask_matches_normalized_vllm_worker_event() {
+    fn sparse_mm_embed_mask_projects_opaque_identifier() {
         let mm_identifier = "opaque-renderer-image-0";
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [10, 99, 42, 99, 20],
@@ -1419,36 +1418,6 @@ mod tests {
             .expect("non-empty identifier");
         let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash);
         assert_eq!(routing.routing_token_ids, vec![10, pad, 42, pad, 20]);
-
-        let request_hash = dynamo_kv_router::protocols::compute_block_hash_for_seq(
-            &routing.routing_token_ids,
-            5,
-            dynamo_kv_router::protocols::BlockHashOptions::default(),
-        )[0];
-        let event_mm_info =
-            dynamo_kv_router::zmq_wire::extra_keys_to_block_mm_infos(Some(vec![Some(vec![
-                dynamo_kv_router::zmq_wire::ExtraKeyItem::HashWithUnsignedOffset((
-                    mm_identifier.to_string(),
-                    1,
-                )),
-            ])]))
-            .expect("parse opaque offset-bearing MM extra key")
-            .into_iter()
-            .next()
-            .flatten()
-            .expect("block MM metadata");
-        let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
-            5,
-            7,
-            &[10, 99, 42, 99, 20],
-            dynamo_kv_router::zmq_wire::StoredBlockOptions {
-                mm_extra_info: Some(event_mm_info),
-                image_token_id: Some(99),
-                ..Default::default()
-            },
-        );
-
-        assert_eq!(request_hash, event_block.tokens_hash);
     }
 
     #[test]
