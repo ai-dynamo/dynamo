@@ -11,7 +11,7 @@ use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
     conditional_disagg::make_conditional_disagg_policy,
     config::KvRouterConfig,
-    selector::{DefaultWorkerSelector, WorkerInputs, WorkerSelector},
+    selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -25,8 +25,8 @@ use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillR
 use crate::{
     discovery::ModelManager,
     kv_router::{
-        BuiltinRoutingPolicy, KvRouter, RoutingHost, WorkerSelectorFactory,
-        push_router::RoutingLoadState,
+        KvRouter, RoutingHost, RoutingLoadState, WorkerSelectorFactory,
+        builtin_policy_requires_load,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
@@ -321,11 +321,7 @@ where
             )
             .await?;
 
-            let builtin_policy = BuiltinRoutingPolicy::from_router_mode(context.router_mode);
-            debug_assert!(builtin_policy.is_some());
-            let load_state = if builtin_policy
-                .is_some_and(|policy| policy.required_worker_inputs().contains(WorkerInputs::LOAD))
-            {
+            let load_state = if builtin_policy_requires_load(context.router_mode) {
                 Some(
                     RoutingLoadState::start(
                         endpoint,

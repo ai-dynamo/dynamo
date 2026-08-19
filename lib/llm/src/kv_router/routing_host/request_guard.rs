@@ -12,10 +12,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, push_router::load::RoutingLoadReservation,
-        scheduler::DefaultWorkerSelector,
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -25,6 +22,8 @@ use crate::{
         timing::{RequestPhase, RequestTracker},
     },
 };
+
+use super::load::RoutingLoadReservation;
 
 pub(super) struct LoraLoadGuard {
     estimator: Arc<LoadEstimator>,

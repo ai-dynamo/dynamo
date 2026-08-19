@@ -14,8 +14,8 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{
-        BuiltinRoutingPolicy, EncoderRouter, KvRouter, PrefillRouter, RoutingHost,
-        metrics::RouterRequestMetrics, push_router::RoutingLoadState,
+        EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadState,
+        builtin_policy_requires_load, metrics::RouterRequestMetrics,
     },
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -35,7 +35,7 @@ use crate::{
 
 use dynamo_kv_router::{
     config::{KvRouterConfig, min_initial_workers_from_env},
-    selector::{DefaultWorkerSelector, WorkerInputs, WorkerSelector},
+    selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
     DistributedRuntime,
@@ -273,9 +273,7 @@ where
     )
     .await?;
 
-    let load_state = if BuiltinRoutingPolicy::from_router_mode(router_mode)
-        .is_some_and(|policy| policy.required_worker_inputs().contains(WorkerInputs::LOAD))
-    {
+    let load_state = if builtin_policy_requires_load(router_mode) {
         let workers = model_manager
             .get_or_create_runtime_config_watcher(&router_client.endpoint)
             .await?;

@@ -97,9 +97,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use dynamo_kv_router::{
-        config::KvRouterConfig, protocols::WorkerWithDpRank, selector::WorkerInputs,
-    };
+    use dynamo_kv_router::{config::KvRouterConfig, protocols::WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         component::Instance,
@@ -119,7 +117,7 @@ mod tests {
     use crate::{
         discovery::ModelManager,
         kv_router::{
-            BuiltinRoutingPolicy, RoutingHost, push_router::RoutingLoadState,
+            RoutingHost, RoutingLoadState, builtin_policy_requires_load,
             scheduler::DefaultWorkerSelector,
         },
         protocols::common::{
@@ -298,9 +296,7 @@ mod tests {
         .expect("all four workers must be discovered");
         let mut workers = instances.iter().map(Instance::id).collect::<Vec<_>>();
         workers.sort_unstable();
-        let load_state = if BuiltinRoutingPolicy::from_router_mode(mode)
-            .is_some_and(|policy| policy.required_worker_inputs().contains(WorkerInputs::LOAD))
-        {
+        let load_state = if builtin_policy_requires_load(mode) {
             let (_workers_tx, workers_watch) = watch::channel(
                 workers
                     .iter()
