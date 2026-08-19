@@ -21,7 +21,7 @@ on:
 
 jobs:
   label:
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
+    runs-on: &internal_pr_runner ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
     permissions:
       contents: read
       pull-requests: write
