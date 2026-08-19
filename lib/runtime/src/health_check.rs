@@ -82,13 +82,23 @@ impl HealthCheckManager {
         let canary_wait = self.config.canary_wait_time;
         let endpoint_subject_clone = endpoint_subject.clone();
 
-        // Get the endpoint-specific notifier
-        let notifier = self
+        // Get the endpoint-specific notifier.
+        //
+        // Its absence is not a bug: registration announces the endpoint on a channel, and
+        // the endpoint can be released again — a start that rolls back, a shutdown —
+        // before this monitor gets to it. There is then nothing left to monitor.
+        let Some(notifier) = self
             .drt
             .system_health()
             .lock()
             .get_endpoint_health_check_notifier(&endpoint_subject)
-            .expect("Notifier should exist for registered endpoint");
+        else {
+            debug!(
+                "Endpoint '{}' was deregistered before its health check task started; skipping",
+                endpoint_subject
+            );
+            return;
+        };
 
         let task = tokio::spawn(async move {
             let endpoint_subject = endpoint_subject_clone;
@@ -109,9 +119,11 @@ impl HealthCheckManager {
                                 error!("Failed to send health check for {}: {}", endpoint_subject, e);
                             }
                         } else {
-                            // This should never happen - targets are registered at startup and never removed
-                            error!(
-                                "CRITICAL: Health check target for {} disappeared unexpectedly! This indicates a bug. Stopping health check task.",
+                            // The target is gone because the endpoint was released: it shut
+                            // down, or a start rolled back. That is the ordinary end of an
+                            // endpoint's life, so this task ends with it.
+                            debug!(
+                                "Health check target for {} is gone; endpoint is no longer registered, stopping health check task",
                                 endpoint_subject
                             );
                             break;
@@ -131,6 +143,10 @@ impl HealthCheckManager {
                 }
             }
 
+            // Drop the bookkeeping entry with the task, so a subject whose endpoint has
+            // gone away does not look like it is still being monitored.
+            manager.forget_endpoint_task(&endpoint_subject, tokio::task::id());
+
             info!("Health check task for {} exiting", endpoint_subject);
         });
 
@@ -145,8 +161,24 @@ impl HealthCheckManager {
         );
     }
 
+    /// Drop the recorded task for `endpoint_subject`, but only while it is still `task_id`'s
+    ///
+    /// A re-arm replaces the entry for a subject, so a task that outlives its own
+    /// replacement must not remove the entry that succeeded it.
+    fn forget_endpoint_task(&self, endpoint_subject: &str, task_id: tokio::task::Id) {
+        let mut tasks = self.endpoint_tasks.lock();
+        if tasks
+            .get(endpoint_subject)
+            .is_some_and(|handle| handle.id() == task_id)
+        {
+            tasks.remove(endpoint_subject);
+        }
+    }
+
     /// Spawn a task to monitor for newly registered endpoints
-    /// Returns an error if duplicate endpoints are detected, indicating a bug in the system
+    ///
+    /// Returns an error if the registration receiver has already been taken, since only one
+    /// monitor may own it.
     async fn spawn_new_endpoint_monitor(self: &Arc<Self>) -> anyhow::Result<()> {
         let manager = self.clone();
 
@@ -169,21 +201,23 @@ impl HealthCheckManager {
                     endpoint_subject
                 );
 
-                let already_exists = {
-                    let tasks = manager.endpoint_tasks.lock();
-                    tasks.contains_key(&endpoint_subject)
-                };
-
-                if already_exists {
-                    error!(
-                        "CRITICAL: Received registration for endpoint '{}' that already has a health check task!",
+                // A registration for a subject that already has a task is a re-arm, not an
+                // error: an endpoint that restarts under the same name registers again, and
+                // the running task is monitoring on behalf of an incarnation that is gone.
+                // Retire it and monitor the new one. This loop must keep running whatever
+                // arrives — it is the only path by which any later endpoint, under any
+                // name, is ever monitored.
+                let previous = manager.endpoint_tasks.lock().remove(&endpoint_subject);
+                if let Some(previous) = previous {
+                    debug!(
+                        "Re-arming health check for endpoint '{}': retiring the previous task",
                         endpoint_subject
                     );
-                    break;
+                    previous.abort();
                 }
 
                 info!(
-                    "Spawning health check task for new endpoint: {}",
+                    "Spawning health check task for endpoint: {}",
                     endpoint_subject
                 );
                 manager.spawn_endpoint_health_check_task(endpoint_subject);

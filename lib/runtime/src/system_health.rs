@@ -31,6 +31,26 @@ use crate::metrics::{MetricsHierarchy, prometheus_names::distributed_runtime};
 pub struct HealthCheckTarget {
     pub instance: component::Instance,
     pub payload: serde_json::Value,
+    /// Which registration installed this target.
+    ///
+    /// Registering a subject replaces whatever target already held it, so undoing a
+    /// registration has to know *which* registration it is undoing. Instance and payload
+    /// cannot tell two registrations apart — an endpoint that restarts re-registers the
+    /// very same values — so each registration is stamped with its own id.
+    registration: u64,
+}
+
+/// Receipt for one [`register_health_check_target`](SystemHealth::register_health_check_target)
+/// call, to be handed back to
+/// [`release_health_check_target`](SystemHealth::release_health_check_target).
+///
+/// Carries what the registration displaced, because releasing a registration has to be the
+/// inverse of the replace it performed and not simply a delete.
+#[derive(Debug)]
+pub struct HealthCheckRegistration {
+    subject: String,
+    registration: u64,
+    displaced: Option<HealthCheckTarget>,
 }
 
 /// Current Health Status
@@ -43,6 +63,9 @@ pub struct SystemHealth {
     endpoint_health: Arc<std::sync::RwLock<HashMap<String, HealthStatus>>>,
     /// Maps endpoint subject to health check target (instance + payload)
     health_check_targets: Arc<std::sync::RwLock<HashMap<String, HealthCheckTarget>>>,
+    /// Stamps each health check target registration so a release can tell its own
+    /// registration from a later one under the same subject
+    next_registration: Arc<std::sync::atomic::AtomicU64>,
     /// Maps endpoint subject to its specific health check notifier
     health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
     /// Channel for new endpoint registrations
@@ -84,6 +107,7 @@ impl SystemHealth {
             system_health: starting_health_status,
             endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            next_registration: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
@@ -166,21 +190,33 @@ impl SystemHealth {
     /// incarnation replaces the previous target and is announced to the health check
     /// manager so the canary re-arms against it. Its health resets to `NotReady`, since
     /// the earlier incarnation's verdict says nothing about the process now serving.
+    ///
+    /// Returns a receipt for [`release_health_check_target`](Self::release_health_check_target).
+    /// Callers that never release the target may discard it.
     pub fn register_health_check_target(
         &self,
         endpoint_subject: &str,
         instance: component::Instance,
         payload: serde_json::Value,
-    ) {
+    ) -> HealthCheckRegistration {
         let key = endpoint_subject.to_owned();
+        let registration = self
+            .next_registration
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Atomically replace under a single write lock to avoid races.
-        let replaced = {
+        let displaced = {
             let mut targets = self.health_check_targets.write().unwrap();
-            targets
-                .insert(key.clone(), HealthCheckTarget { instance, payload })
-                .is_some()
+            targets.insert(
+                key.clone(),
+                HealthCheckTarget {
+                    instance,
+                    payload,
+                    registration,
+                },
+            )
         };
+        let replaced = displaced.is_some();
 
         if replaced {
             tracing::debug!("Re-registering health check for endpoint '{key}'; replacing target.");
@@ -216,6 +252,71 @@ impl SystemHealth {
                 e
             );
         }
+
+        HealthCheckRegistration {
+            subject: key,
+            registration,
+            displaced,
+        }
+    }
+
+    /// Undo one [`register_health_check_target`](Self::register_health_check_target)
+    ///
+    /// Two things make a plain delete wrong here. Subjects are endpoint names, so two
+    /// endpoints in one process that share a name (`backend/generate` and
+    /// `prefill/generate`) register under the same subject; and registration replaces
+    /// rather than rejects. Undoing therefore has to be the inverse of that replace:
+    /// touch the subject only while this registration's target is still the installed
+    /// one, and put back whatever it displaced, so an endpoint that rolls back cannot
+    /// take a live endpoint's canary down with it.
+    ///
+    /// The notifier survives a restore because it is shared across registrations of a
+    /// subject — the handler that holds it keeps signalling the monitor.
+    pub fn release_health_check_target(&self, registration: HealthCheckRegistration) {
+        let HealthCheckRegistration {
+            subject,
+            registration,
+            displaced,
+        } = registration;
+
+        let restored = {
+            let mut targets = self.health_check_targets.write().unwrap();
+            let is_current = targets
+                .get(&subject)
+                .is_some_and(|current| current.registration == registration);
+            if !is_current {
+                tracing::debug!(
+                    "Health check target for endpoint '{subject}' belongs to a later \
+                     registration; leaving it in place."
+                );
+                return;
+            }
+            match displaced {
+                Some(previous) => {
+                    targets.insert(subject.clone(), previous);
+                    true
+                }
+                None => {
+                    targets.remove(&subject);
+                    false
+                }
+            }
+        };
+
+        if restored {
+            tracing::debug!(
+                "Released health check target for endpoint '{subject}'; restored the \
+                 target it displaced."
+            );
+            return;
+        }
+
+        self.health_check_notifiers
+            .write()
+            .unwrap()
+            .remove(&subject);
+        self.endpoint_health.write().unwrap().remove(&subject);
+        tracing::debug!("Deregistered health check target for endpoint '{subject}'");
     }
 
     /// Deregister an endpoint's health check target

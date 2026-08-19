@@ -126,7 +126,7 @@ struct EndpointScopedState {
     registry: crate::local_endpoint_registry::LocalEndpointRegistry,
     system_health: Arc<parking_lot::Mutex<crate::system_health::SystemHealth>>,
     local_engine: Option<crate::local_endpoint_registry::LocalAsyncEngine>,
-    health_check_registered: bool,
+    health_check_registration: Option<crate::system_health::HealthCheckRegistration>,
 }
 
 impl EndpointScopedState {
@@ -148,12 +148,13 @@ impl EndpointScopedState {
             tracing::debug!("Registered engine for endpoint '{endpoint_name}' in local registry");
         }
 
-        let health_check_registered = health_check_target.is_some();
-        let notifier = health_check_target.and_then(|(instance, payload)| {
+        let mut notifier = None;
+        let health_check_registration = health_check_target.map(|(instance, payload)| {
             tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
             let guard = system_health.lock();
-            guard.register_health_check_target(&endpoint_name, instance, payload);
-            guard.get_endpoint_health_check_notifier(&endpoint_name)
+            let registration = guard.register_health_check_target(&endpoint_name, instance, payload);
+            notifier = guard.get_endpoint_health_check_notifier(&endpoint_name);
+            registration
         });
 
         (
@@ -162,7 +163,7 @@ impl EndpointScopedState {
                 registry,
                 system_health,
                 local_engine,
-                health_check_registered,
+                health_check_registration,
             },
             notifier,
         )
@@ -174,10 +175,14 @@ impl EndpointScopedState {
     /// endpoint has to leave the process as it found it, and an endpoint that has stopped
     /// must stop being dispatchable and stop counting towards worker health.
     fn release(self) {
-        if self.health_check_registered {
+        if let Some(registration) = self.health_check_registration {
+            // Conditional on registration identity, and restoring what this start
+            // displaced: the target map is keyed by endpoint name alone, so an unrelated
+            // endpoint sharing that name must not lose its canary because this one went
+            // away.
             self.system_health
                 .lock()
-                .deregister_health_check_target(&self.endpoint_name);
+                .release_health_check_target(registration);
         }
         if let Some(engine) = &self.local_engine {
             // Conditional on engine identity: an endpoint that restarted under the same

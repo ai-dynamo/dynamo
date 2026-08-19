@@ -98,8 +98,12 @@ pub(crate) mod test_support {
     struct StubEngine;
 
     #[async_trait]
-    impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, anyhow::Error>
-        for StubEngine
+    impl
+        AsyncEngine<
+            SingleIn<serde_json::Value>,
+            ManyOut<Annotated<serde_json::Value>>,
+            anyhow::Error,
+        > for StubEngine
     {
         async fn generate(
             &self,
