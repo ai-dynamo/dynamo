@@ -542,6 +542,18 @@ pub mod llm {
         /// `request_payload`, `tool`.
         pub const DYN_REQUEST_TRACE_RECORDS: &str = "DYN_REQUEST_TRACE_RECORDS";
 
+        /// Redact media (image / video / audio) request content parts to text
+        /// placeholders before the trace snapshot is taken. Truthy enables redaction.
+        ///
+        /// **Off by default**: records otherwise carry inbound media verbatim --
+        /// including multi-MB base64 data URIs -- to every configured sink, and the
+        /// `otel` sink forwards them off-box to a collector. Enable this on
+        /// deployments where raw media must not leave the process.
+        ///
+        /// Only the trace snapshot is rewritten; the request forwarded to the engine
+        /// is untouched either way.
+        pub const DYN_REQUEST_TRACE_REDACT_MEDIA: &str = "DYN_REQUEST_TRACE_REDACT_MEDIA";
+
         /// NATS subject the request trace sink publishes to.
         pub const DYN_REQUEST_TRACE_NATS_SUBJECT: &str = "DYN_REQUEST_TRACE_NATS_SUBJECT";
 
