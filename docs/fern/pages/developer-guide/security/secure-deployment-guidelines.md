@@ -13,7 +13,7 @@ describes Dynamo's trust model and how to secure each part of a deployment.
 
 Dynamo assumes it runs inside a trusted network boundary: untrusted clients reach
 only the frontend, through an authenticating gateway, while the internal
-internal communication planes and infrastructure run on a network the operator isolates.
+communication planes and infrastructure run on a network the operator isolates.
 The sections below explain that boundary and how to harden each component and
 plane. The [Security Configuration Reference](#security-configuration-reference)
 at the end lists every security-related setting in one place.
