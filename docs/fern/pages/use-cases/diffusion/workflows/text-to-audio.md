@@ -95,7 +95,7 @@ curl -X POST http://localhost:8000/v1/audio/speech \
   }' --output audex.wav
 ```
 
-Audex serves a single built-in voice, so it rejects `voice` (unless omitted or set to `default`), `ref_audio`, and `ref_text` instead of synthesizing a different-sounding result. The Qwen3-TTS fields `language`, `instructions`, and `task_type` do not apply. Omit `cfg_scale`, or set it to `1.0`, to decode without guidance.
+Audex serves a single built-in voice, so it accepts `voice` only when omitted or set to `default`, and rejects `ref_audio` and `ref_text` instead of synthesizing a different-sounding result. The Qwen3-TTS fields `language`, `instructions`, and `task_type` do not apply. Omit `cfg_scale`, or set it to `1.0`, to decode without guidance.
 
 </Tab>
 </Tabs>
@@ -141,7 +141,7 @@ The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/pro
   Classifier-free guidance scale for Nemotron Audex (1.0–10.0). `1.0` disables guidance, and omitting the field decodes unguided. Ignored by other audio models.
 </ParamField>
 
-Available voices and languages are loaded dynamically from the model's `config.json` at startup. Nemotron Audex builds its own prompt and accepts only `input`, `model`, `response_format`, `max_new_tokens`, and `cfg_scale`. Other non-Qwen3-TTS audio models (e.g., MiMo-Audio) use a generic text prompt and ignore TTS-specific parameters.
+Available voices and languages are loaded dynamically from the model's `config.json` at startup. Nemotron Audex builds its own prompt and accepts only `input`, `model`, `response_format`, `max_new_tokens`, and `cfg_scale`; speech models additionally tolerate `voice` when it is omitted or `default`, while text-to-audio rejects `voice` outright. Other non-Qwen3-TTS audio models (e.g., MiMo-Audio) use a generic text prompt and ignore TTS-specific parameters.
 
 > [!NOTE]
 > Audio streaming (`stream: true`) and the Base task (voice cloning) are not yet supported.

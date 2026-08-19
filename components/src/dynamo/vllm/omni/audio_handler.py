@@ -8,7 +8,9 @@ OmniHandler holds an instance as ``self.audio`` (composition).
 """
 
 import base64
+import copy
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from transformers import AutoTokenizer
@@ -51,7 +53,10 @@ _AUDEX_CODE2WAV_STAGE = "audex_code2wav"
 _AUDEX_CFG_SCALE_MIN = 1.0
 _AUDEX_CFG_SCALE_MAX = 10.0
 _AUDEX_TTA_DEFAULT_CFG_SCALE = 3.0
-# Official TTA generation cap (decode truncates at 500 frames).
+# Official TTA generation cap, in codec tokens: 4000 tokens is 1000 frames at
+# XCodec1's 4 RVQ codebooks per frame. Decode caps the result again — the
+# XCodec1 stage keeps at most ``max_tta_frames`` (default 500, roughly 10 s),
+# so this bound governs generation length, not output duration.
 _AUDEX_TTA_CODEC_CAP = 4000
 
 # Fallback language set used when model config is unavailable.
@@ -195,6 +200,19 @@ class AudioGenerationHandler:
                 continue
             return "audex"
         return None
+
+    def emits_cumulative_waveforms(self) -> bool:
+        """True when the decoder streams cumulative waveform snapshots.
+
+        Audex's code2wav/XCodec1 stages re-emit the whole waveform decoded so
+        far on every yield, so the snapshots must be de-duplicated to the
+        longest one rather than concatenated. Other audio models served through
+        this handler (Qwen3-TTS, MiMo-Audio) are left on the per-payload path
+        they already used: concatenating cumulative snapshots multiplies the
+        duration, but de-duplicating incremental frames would silently drop
+        audio, so the buffering is scoped to the pipeline known to need it.
+        """
+        return self._audex_model_type() is not None
 
     def _is_tts_model(self) -> bool:
         """Check if the loaded model is a Qwen3-TTS-style model.
@@ -371,8 +389,6 @@ class AudioGenerationHandler:
         next. Returns ``None`` when there is nothing to override, which leaves
         the engine on its own defaults.
         """
-        import copy
-
         defaults = list(
             getattr(self.engine_client, "default_sampling_params_list", None) or []
         )
@@ -443,7 +459,15 @@ class AudioGenerationHandler:
         return params_list
 
     def _audex_tta_rvq_contract(self) -> Dict[str, Any]:
-        """Build (once per process) the TTA RVQ phase-mask contract."""
+        """Build (once per process) the TTA RVQ phase-mask contract.
+
+        The same dict is handed to every request, unlike the surrounding
+        sampling params which are deep-copied. That is safe because the
+        contract is read-only downstream: vLLM-Omni's
+        ``TTARVQPhaseMaskLogitsProcessor`` copies the scalars into its own
+        per-sequence state and only reads ``phase_token_ids``. vLLM-Omni's own
+        adapter shares one cached dict the same way.
+        """
         if self._audex_tta_rvq is None:
             from vllm_omni.model_executor.models.audex.tta import (
                 build_tta_phase_token_ids,
@@ -468,10 +492,15 @@ class AudioGenerationHandler:
         of per-stage subfolders, and the stage's model_config may already point
         at the resolved subfolder (joining again would yield a missing path that
         transformers then mistakes for a repo id).
+
+        The TTS and TTA thinkers both tokenize with
+        ``checkpoint_folder_audiogen`` — only the full ``audex_omni`` pipeline
+        uses ``checkpoint_folder_full``. The snapshot *profile* still differs
+        between TTS and TTA (it decides which stage weights are fetched), which
+        is why the two are not interchangeable even though the tokenizer folder
+        is shared.
         """
         if self._audex_tokenizer is None:
-            import os
-
             from vllm_omni.model_executor.models.audex.checkpoint import (
                 ensure_audex_snapshot,
             )

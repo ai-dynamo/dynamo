@@ -16,6 +16,22 @@ try:
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
+try:
+    import vllm_omni.model_executor.models.audex.prompt  # noqa: F401
+    import vllm_omni.model_executor.models.audex.tta  # noqa: F401
+
+    _AUDEX_AVAILABLE = True
+except ImportError:
+    _AUDEX_AVAILABLE = False
+
+# The Audex tests exercise vLLM-Omni's model-owned prompt and RVQ builders,
+# which only ship in Audex-capable builds. Skip rather than fail on a build
+# without them, matching the optional-dependency guard above.
+requires_audex = pytest.mark.skipif(
+    not _AUDEX_AVAILABLE,
+    reason="vLLM-Omni build has no Audex support (model_executor.models.audex)",
+)
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
@@ -264,10 +280,12 @@ class TestAudexModelDetection:
     """Tests for _audex_model_type."""
 
     def test_tts_pipeline_detected(self):
+        """thinker + code2wav is the speech pipeline."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
         assert handler._audex_model_type() == "audex"
 
     def test_tta_pipeline_detected(self):
+        """tta_thinker + xcodec is the text-to-audio pipeline."""
         handler = _make_audex_handler("audex_tta_thinker", "audex_xcodec")
         assert handler._audex_model_type() == "audex_tta"
 
@@ -282,6 +300,7 @@ class TestAudexModelDetection:
         assert handler._audex_model_type() is None
 
     def test_non_audex_pipeline(self):
+        """A non-Audex stage name must not take the Audex path."""
         handler = _make_audex_handler("qwen3_tts")
         assert handler._audex_model_type() is None
 
@@ -296,6 +315,7 @@ class TestAudexModelDetection:
         assert handler._audex_model_type() == "audex"
 
 
+@requires_audex
 class TestAudexEngineInputs:
     """Tests for the Audex prompt/param contract."""
 
@@ -331,6 +351,7 @@ class TestAudexEngineInputs:
 
     @pytest.mark.asyncio
     async def test_tts_cfg_scale_one_stays_unguided(self):
+        """cfg_scale=1.0 is a no-op scale, so it must not start a CFG pair."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
         req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=1.0)
         inputs = await handler.build_engine_inputs(req, request_id="r1")
@@ -413,9 +434,11 @@ class TestAudexEngineInputs:
 class TestAudexValidation:
     """Audex rejects parameters it cannot honor instead of ignoring them."""
 
+    @requires_audex
     @pytest.mark.asyncio
     @pytest.mark.parametrize("voice", [None, "", "default", "DEFAULT"])
     async def test_default_voice_accepted(self, voice):
+        """An omitted or ``default`` voice names the one built-in voice."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
         req = NvCreateAudioSpeechRequest(input="hello", voice=voice)
         inputs = await handler.build_engine_inputs(req, request_id="r1")
@@ -431,6 +454,7 @@ class TestAudexValidation:
 
     @pytest.mark.asyncio
     async def test_tta_voice_rejected(self):
+        """Text-to-audio has no voices at all, not even ``default``."""
         handler = _make_audex_handler("audex_tta_thinker", "audex_xcodec")
         req = NvCreateAudioSpeechRequest(input="rain", voice="vivian")
         with pytest.raises(ValueError, match="no voices"):
@@ -438,6 +462,7 @@ class TestAudexValidation:
 
     @pytest.mark.asyncio
     async def test_ref_audio_rejected(self):
+        """Audex cannot clone a reference voice, so ref_audio is an error."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
         req = NvCreateAudioSpeechRequest(
             input="hello", ref_audio="data:audio/wav;base64,AAAA"
@@ -447,6 +472,7 @@ class TestAudexValidation:
 
     @pytest.mark.asyncio
     async def test_cfg_scale_out_of_range_rejected(self):
+        """cfg_scale outside the supported range fails fast."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
         req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=50.0)
         with pytest.raises(ValueError, match="cfg_scale"):
@@ -454,6 +480,7 @@ class TestAudexValidation:
 
     @pytest.mark.asyncio
     async def test_max_new_tokens_out_of_range_rejected(self):
+        """max_new_tokens above the codec cap fails fast."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
         req = NvCreateAudioSpeechRequest(input="hello", max_new_tokens=99999)
         with pytest.raises(ValueError, match="max_new_tokens"):
@@ -461,6 +488,7 @@ class TestAudexValidation:
 
     @pytest.mark.asyncio
     async def test_empty_input_rejected(self):
+        """Whitespace-only input is rejected before the prompt is built."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
         req = NvCreateAudioSpeechRequest(input="   ")
         with pytest.raises(ValueError, match="empty"):

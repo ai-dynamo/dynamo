@@ -174,6 +174,7 @@ class TestBuildEngineInputs:
         seen = {}
 
         async def mock_engine_inputs(req, request_id=None):
+            """Record the request id the handler forwarded to the audio handler."""
             seen["request_id"] = request_id
             return expected
 
@@ -197,6 +198,7 @@ class TestStreamedAudioIsResolved:
 
     @staticmethod
     def _audio_output(samples):
+        """One streamed audio stage output carrying the given samples."""
         import numpy as np
 
         return SimpleNamespace(
@@ -208,6 +210,11 @@ class TestStreamedAudioIsResolved:
         )
 
     async def _run(self, handler, stage_outputs):
+        """Drive the handler over ``stage_outputs`` and collect the responses.
+
+        Uses a real OutputFormatter so the buffering path under test is the
+        production one; only the engine and the abort monitor are stubbed.
+        """
         from contextlib import asynccontextmanager
 
         from dynamo.vllm.omni.output_formatter import OutputFormatter
@@ -215,6 +222,7 @@ class TestStreamedAudioIsResolved:
         handler.output_formatter = OutputFormatter(model_name="test-model")
 
         async def fake_generate(**kwargs):
+            """Replay the scripted stage outputs as the engine's stream."""
             for so in stage_outputs:
                 yield so
 
@@ -222,6 +230,7 @@ class TestStreamedAudioIsResolved:
 
         @asynccontextmanager
         async def no_abort_monitor(context, request_id):
+            """Abort monitor that never fires."""
             yield None
 
         handler._abort_monitor = no_abort_monitor
@@ -242,6 +251,7 @@ class TestStreamedAudioIsResolved:
 
     @pytest.mark.asyncio
     async def test_complete_waveform_is_returned_once(self):
+        """The client gets the longest snapshot, not a partial or a concatenation."""
         import base64
         import io
 
@@ -288,9 +298,11 @@ class _AsyncReturn:
     """Awaitable stub that ignores its arguments and returns a fixed value."""
 
     def __init__(self, value):
+        """Store the value every call resolves to."""
         self._value = value
 
     async def __call__(self, *args, **kwargs):
+        """Return the fixed value, ignoring the arguments."""
         return self._value
 
 

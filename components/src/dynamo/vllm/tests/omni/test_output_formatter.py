@@ -376,12 +376,14 @@ class TestAudioFormatterObserveChunk:
 
     @pytest.fixture
     def formatter(self):
+        """A bare AudioFormatter with no media sink configured."""
         from dynamo.vllm.omni.output_formatter import AudioFormatter
 
         return AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
 
     @staticmethod
     def _chunk(samples, sr=24000):
+        """One streamed audio payload holding the given samples."""
         import numpy as np
 
         return {"audio": np.asarray(samples, dtype=np.float32), "sr": sr}
@@ -417,6 +419,7 @@ class TestAudioFormatterObserveChunk:
         np.testing.assert_allclose(formatter.take_pending("req-1")[0], [0.1, 0.2])
 
     def test_shorter_late_payload_cannot_truncate_the_result(self, formatter):
+        """Snapshots are kept by length, so a short late one cannot win."""
         import numpy as np
 
         formatter.observe_chunk(self._chunk([0.1, 0.2, 0.3]), "req-1")
@@ -425,6 +428,7 @@ class TestAudioFormatterObserveChunk:
         np.testing.assert_allclose(formatter.take_pending("req-1")[0], [0.1, 0.2, 0.3])
 
     def test_missing_audio_payload_is_skipped(self, formatter):
+        """A payload with no audio key is skipped rather than raising."""
         import numpy as np
 
         assert formatter.observe_chunk({"sr": 24000}, "req-1") is False
@@ -449,10 +453,12 @@ class TestAudioFormatterObserveChunk:
         assert np.size(formatter.take_pending("req-1")[0]) == 0
 
     def test_discard_pending_is_safe_when_nothing_recorded(self, formatter):
+        """Error and abort paths discard state that may never have existed."""
         formatter.discard_pending("never-seen")  # must not raise
 
     @pytest.mark.asyncio
     async def test_observed_audio_encodes_to_one_response(self, formatter):
+        """The buffered snapshots encode to a single completed response."""
         formatter.observe_chunk(self._chunk([0.1] * 1200), "req-1")
         formatter.observe_chunk(self._chunk([0.1] * 2400), "req-1")
 

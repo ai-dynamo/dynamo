@@ -305,7 +305,11 @@ class AudioFormatter:
             return False
         try:
             audio_np, sample_rate = self._extract_audio_tensor(mm_output)
-        except ValueError:
+        except (ValueError, TypeError, RuntimeError):
+            # Same failure modes format() treats as expected. An unusable
+            # mid-stream snapshot is skipped rather than failing the request:
+            # if none is ever usable, take_pending() yields a zero-length
+            # waveform and format_audio() reports the failure at end of stream.
             return False
         if np.size(audio_np) == 0:
             return False
@@ -342,7 +346,10 @@ class AudioFormatter:
 
         try:
             audio_np, sample_rate = self._extract_audio_tensor(mm_output)
-        except Exception as e:
+        except (ValueError, TypeError, RuntimeError) as e:
+            # The concrete failure modes of the extractor: a missing audio key
+            # or a ragged array (ValueError), a payload that is not tensor-like
+            # (TypeError), and a torch.cat shape mismatch (RuntimeError).
             logger.error("Failed to process audio for request %s: %s", request_id, e)
             return self._error_response(request_id, str(e))
 
@@ -542,6 +549,7 @@ class OutputFormatter:
 
     @staticmethod
     def is_audio_output(stage_output: Any) -> bool:
+        """True when this stage output is a final audio payload."""
         return getattr(stage_output, "final_output_type", None) == "audio"
 
     async def format(

@@ -402,6 +402,9 @@ class OmniHandler(BaseOmniHandler):
                 speed=inputs.speed,
             )
 
+            # Scoped to the pipelines whose decoder re-emits the full waveform
+            # each yield; every other audio model keeps its per-payload path.
+            buffer_audio = self.audio.emits_cumulative_waveforms()
             saw_audio_output = False
 
             async for stage_output in self.engine_client.generate(**per_request_kwargs):
@@ -409,7 +412,7 @@ class OmniHandler(BaseOmniHandler):
                 # codec decodes, each payload a cumulative snapshot and some of
                 # them empty. Encode once at the end from the complete snapshot,
                 # or the response can carry a partial or silent waveform.
-                if self.output_formatter.is_audio_output(stage_output):
+                if buffer_audio and self.output_formatter.is_audio_output(stage_output):
                     saw_audio_output = True
                     self.output_formatter.audio.observe_chunk(stage_output, request_id)
                     continue

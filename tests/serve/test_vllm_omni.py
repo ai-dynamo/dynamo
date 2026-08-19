@@ -208,6 +208,12 @@ vllm_omni_configs = {
             pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
+            # Profiled with tests/utils/profile_pytest.py on 1x H200 (140 GiB).
+            # No requested_vllm_kv_cache_bytes marker: the Audex stage config
+            # pins gpu_memory_utilization per stage, so the engine ignores
+            # --kv-cache-memory-bytes/--gpu-memory-utilization from the CLI and
+            # the peak was 117.6 GiB at every probed cap (9-75 GiB).
+            pytest.mark.profiled_vram_gib(117.6),  # actual profiled peak
         ],
         model="nvidia/Nemotron-Labs-Audex-2B",
         request_payloads=[
