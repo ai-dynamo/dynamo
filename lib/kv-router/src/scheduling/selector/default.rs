@@ -567,6 +567,10 @@ impl WorkerPicker for DefaultWorkerPicker {
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::ROUTING
+    }
+
     #[inline(always)]
     fn select_worker(
         &self,
