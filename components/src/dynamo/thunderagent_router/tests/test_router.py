@@ -419,3 +419,102 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
         if p.lifecycle == ProgramLifecycle.PAUSED
     )
     assert paused == 6
+
+
+@pytest.mark.asyncio
+async def test_cancelled_admission_of_new_program_leaves_no_trace():
+    """A cancelled first-turn admission must not outlive the request.
+
+    The parked program is small and the program holding the worker is large, so
+    a tick after the blocker is released has room to resume the phantom -- which
+    is what makes the phantom's absence, rather than a lucky capacity shortage,
+    the reason nothing is assigned to it.
+    """
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=0.5,
+        pause_threshold=1.0,
+        pause_target=1.0,
+        resume_hysteresis=0.0,
+    )
+    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+
+    decision = await router.before_request("existing", estimated_prompt_tokens=850)
+    assert decision.assigned_worker_hint == 1
+    assert router._worker_used(1) == 950
+
+    waiter = asyncio.create_task(
+        router.before_request("new", estimated_prompt_tokens=50)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+    assert "new" in router._table.paused
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert "new" not in router._table.programs
+    assert "new" not in router._table.paused
+
+    assert await router.end_program("existing") is True
+    decision = await asyncio.wait_for(
+        router.before_request("other", estimated_prompt_tokens=50), timeout=1.5
+    )
+    assert decision.was_paused is False
+    assert decision.assigned_worker_hint == 1
+
+    assignments_before_tick = router._stat_worker_assignments
+    await router._scheduler_tick()
+
+    assert "new" not in router._table.programs
+    assert router._worker_used(1) == 150
+    assert router._stat_worker_assignments == assignments_before_tick
+
+
+@pytest.mark.asyncio
+async def test_cancelled_admission_of_existing_program_restores_prior_turn():
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=2.0,
+    )
+    router, _ = make_router(config=cfg)
+
+    await router.before_request("p1")
+    await router.assign_worker("p1", 1)
+    await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
+    await router._pause_acting("p1")
+
+    program = router._table.programs["p1"]
+    assert program.lifecycle == ProgramLifecycle.PAUSED
+    assert program.status == ProgramStatus.ACTING
+    assert program.step_count == 1
+    assert program.token_total == 110
+    assert program.assigned_worker_id is None
+    assert "p1" in router._table.paused
+    waiting_before = program.waiting
+    acting_since_before = program.acting_since
+    assert waiting_before is not None
+    assert not waiting_before.is_set()
+
+    waiter = asyncio.create_task(
+        router.before_request("p1", estimated_prompt_tokens=500)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    # Session history survives: the cancelled turn is undone, not the program.
+    assert router._table.programs["p1"] is program
+    assert program.lifecycle == ProgramLifecycle.PAUSED
+    assert program.status == ProgramStatus.ACTING
+    assert program.step_count == 1
+    assert program.token_total == 110
+    assert program.assigned_worker_id is None
+    assert program.acting_since == acting_since_before
+    assert "p1" in router._table.paused
+    assert program.waiting is waiting_before
+    assert not program.waiting.is_set()
