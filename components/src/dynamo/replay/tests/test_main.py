@@ -417,3 +417,74 @@ def test_zero_accept_rate_is_not_treated_as_unset() -> None:
     )
 
     assert merged == {"aic_nextn": 1, "aic_nextn_accept_rates": "0"}
+
+
+def test_disagg_run_keeps_the_aggregated_engine_args_empty(
+    monkeypatch, tmp_path
+) -> None:
+    # validate_replay_args_mode rejects extra_engine_args combined with
+    # prefill/decode args, so defaulting the speculation flags into the
+    # aggregated slot would abort a disaggregated run instead of simulating it.
+    seen: dict = {}
+    _stub_cli_dependencies(monkeypatch, seen)
+
+    def run_synthetic(*args, **kwargs):
+        seen["native_kwargs"] = kwargs
+        return ReplayReport(
+            summary={"completed_requests": 1}, per_request=[], coverage={}, planner=None
+        )
+
+    monkeypatch.setattr(replay_main, "run_synthetic_trace_replay", run_synthetic)
+
+    assert (
+        replay_main.main(
+            [
+                "--input-tokens",
+                "8",
+                "--output-tokens",
+                "4",
+                "--request-count",
+                "1",
+                "--replay-concurrency",
+                "1",
+                "--prefill-engine-args",
+                json.dumps({"engine_type": "vllm"}),
+                "--decode-engine-args",
+                json.dumps({"engine_type": "vllm"}),
+                "--aic-nextn",
+                "5",
+                "--aic-nextn-accept-rates",
+                "1,1,1,1,1",
+            ]
+        )
+        == 0
+    )
+
+    assert seen["native_kwargs"]["extra_engine_args"] is None
+    # The decode worker is where the burst sampler reads them.
+    assert '"aic_nextn": 5' in seen["native_kwargs"]["decode_engine_args"]
+    assert "aic_nextn" not in seen["native_kwargs"]["prefill_engine_args"]
+
+
+def test_accept_rates_without_nextn_is_a_usage_error(monkeypatch) -> None:
+    # The engine args validator rejects the pair, but it raises from
+    # MockEngineArgs.from_json, outside the handling that produces a usage
+    # message, so the user would see a traceback instead.
+    seen: dict = {}
+    _stub_cli_dependencies(monkeypatch, seen)
+
+    with pytest.raises(SystemExit):
+        replay_main.main(
+            [
+                "--input-tokens",
+                "8",
+                "--output-tokens",
+                "4",
+                "--request-count",
+                "1",
+                "--replay-concurrency",
+                "1",
+                "--aic-nextn-accept-rates",
+                "1,1",
+            ]
+        )

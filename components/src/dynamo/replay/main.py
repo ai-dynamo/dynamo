@@ -657,10 +657,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(
                 "--max-sim-time-seconds is not supported with --planner-config"
             )
+    if args.aic_nextn_accept_rates is not None and args.aic_nextn is None:
+        # The engine args validator rejects this pair, but it raises from
+        # MockEngineArgs.from_json below, which is outside the error handling
+        # that turns a bad value into a usage message.
+        parser.error("--aic-nextn-accept-rates requires --aic-nextn")
+
     # Speculation is a decode-side concept, so the flags are defaulted into the
-    # aggregated and decode engine args only. Prefill does not speculate, and
-    # modelling it there would change prefill timing.
-    extra_raw = _with_aic_speculation(base_config.extra_engine_args, args)
+    # aggregated or the decode engine args, never prefill: prefill does not
+    # speculate and modelling it there would change prefill timing.
+    #
+    # The aggregated slot has to stay empty for a disaggregated run.
+    # validate_replay_args_mode rejects extra_engine_args combined with
+    # prefill/decode args, so inventing aggregated args here would abort the run
+    # rather than simulate it.
+    disagg_engine_args = (
+        base_config.prefill_engine_args is not None
+        or base_config.decode_engine_args is not None
+    )
+    extra_raw = (
+        base_config.extra_engine_args
+        if disagg_engine_args
+        else _with_aic_speculation(base_config.extra_engine_args, args)
+    )
     extra_engine_args = _load_engine_args(
         json.dumps(extra_raw) if extra_raw is not None else None
     )
@@ -669,7 +688,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if base_config.prefill_engine_args is not None
         else None
     )
-    decode_raw = _with_aic_speculation(base_config.decode_engine_args, args)
+    # Only when decode args already exist. Creating them from the flags alone
+    # would turn "prefill and decode must be provided together" into a
+    # different failure.
+    decode_raw = (
+        _with_aic_speculation(base_config.decode_engine_args, args)
+        if base_config.decode_engine_args is not None
+        else None
+    )
     decode_engine_args = _load_engine_args(
         json.dumps(decode_raw) if decode_raw is not None else None
     )
