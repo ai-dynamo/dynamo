@@ -376,11 +376,11 @@ fn generate_mm_routing_info(
     // If it does not, retain correctness by using ordinary token routing.
     let block_size = kv_cache_block_size as usize;
     let mut first_intersecting = 0;
+    let mut worker_objects = Vec::new();
+    let mut expected_by_position = Vec::new();
+    let mut expected_runs = Vec::new();
     for block_start in (0..request.token_ids.len()).step_by(block_size) {
         let block_end = (block_start + block_size).min(request.token_ids.len());
-        let mut worker_objects = Vec::new();
-        let mut expected_by_position = vec![None; block_end - block_start];
-
         let block_ranges = intersecting_mm_ranges(
             &ranges,
             block_start,
@@ -388,6 +388,14 @@ fn generate_mm_routing_info(
             &mut first_intersecting,
             || {},
         );
+        if block_ranges.is_empty() {
+            continue;
+        }
+
+        worker_objects.clear();
+        expected_by_position.clear();
+        expected_by_position.resize(block_end - block_start, None);
+        expected_runs.clear();
         for (offset, end, hash, is_embed) in block_ranges {
             let intersection_start = (*offset).max(block_start);
             let intersection_end = (*end).min(block_end);
@@ -402,9 +410,8 @@ fn generate_mm_routing_info(
             }
         }
 
-        let mut expected_runs = Vec::new();
         let mut current_run = None;
-        for expected_hash in expected_by_position {
+        for expected_hash in expected_by_position.iter().copied() {
             match (current_run, expected_hash) {
                 (None, Some(hash)) => {
                     current_run = Some(hash);
@@ -418,7 +425,7 @@ fn generate_mm_routing_info(
             }
         }
 
-        for (run_index, expected_hash) in expected_runs.into_iter().enumerate() {
+        for (run_index, expected_hash) in expected_runs.iter().copied().enumerate() {
             let worker_hash = worker_objects
                 .get(run_index)
                 .or_else(|| worker_objects.last())
@@ -1362,19 +1369,25 @@ mod tests {
             4,
             dynamo_kv_router::protocols::BlockHashOptions::default(),
         );
+        let event_mm_info =
+            dynamo_kv_router::zmq_wire::extra_keys_to_block_mm_infos(Some(vec![Some(vec![
+                dynamo_kv_router::zmq_wire::ExtraKeyItem::HashWithUnsignedOffset((
+                    mm_identifier.clone(),
+                    1,
+                )),
+            ])]))
+            .expect("parse offset-bearing MM extra key")
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("block MM metadata");
 
         let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
             4,
             7,
             &[10, 99, 99, 20],
             dynamo_kv_router::zmq_wire::StoredBlockOptions {
-                mm_extra_info: Some(dynamo_kv_router::protocols::BlockExtraInfo {
-                    mm_objects: vec![dynamo_kv_router::protocols::BlockMmObjectInfo {
-                        mm_hash: dynamo_kv_router::protocols::hash_mm_identifier(&mm_identifier)
-                            .expect("non-empty identifier"),
-                        offsets: vec![(1, 3)],
-                    }],
-                }),
+                mm_extra_info: Some(event_mm_info),
                 image_token_id: Some(99),
                 ..Default::default()
             },
@@ -1412,17 +1425,24 @@ mod tests {
             5,
             dynamo_kv_router::protocols::BlockHashOptions::default(),
         )[0];
+        let event_mm_info =
+            dynamo_kv_router::zmq_wire::extra_keys_to_block_mm_infos(Some(vec![Some(vec![
+                dynamo_kv_router::zmq_wire::ExtraKeyItem::HashWithUnsignedOffset((
+                    mm_identifier.to_string(),
+                    1,
+                )),
+            ])]))
+            .expect("parse opaque offset-bearing MM extra key")
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("block MM metadata");
         let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
             5,
             7,
             &[10, 99, 42, 99, 20],
             dynamo_kv_router::zmq_wire::StoredBlockOptions {
-                mm_extra_info: Some(dynamo_kv_router::protocols::BlockExtraInfo {
-                    mm_objects: vec![dynamo_kv_router::protocols::BlockMmObjectInfo {
-                        mm_hash,
-                        offsets: vec![],
-                    }],
-                }),
+                mm_extra_info: Some(event_mm_info),
                 image_token_id: Some(99),
                 ..Default::default()
             },
