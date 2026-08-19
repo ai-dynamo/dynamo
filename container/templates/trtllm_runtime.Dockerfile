@@ -289,21 +289,45 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     done; \
     /usr/bin/python3 -c 'import nvidia.dali'
 
-# Upgrade PyNvVideoCodec past the release that stopped bundling a full FFmpeg.
-# rc24 is the first TensorRT-LLM base image to ship this package at all, and it
-# ships 2.1.0, which bundles libavcodec, libavdevice, libavfilter, libswresample
-# and libswscale alongside the libavformat and libavutil it actually uses. 2.2.0
-# drops everything except those two.
+# Upgrade PyNvVideoCodec past the release that stopped shipping a separate
+# libavcodec. rc24 is the first TensorRT-LLM base image to ship this package at
+# all, and it ships 2.1.0, which bundles libavcodec, libavdevice, libavfilter,
+# libswresample and libswscale alongside the libavformat and libavutil it
+# actually uses. 2.2.0 ships only the latter two -- but libavcodec is not gone,
+# it is statically linked into libavformat.so.62. That distinction drives the
+# content check below: after the upgrade no file is named libavcodec*, so a
+# filename test cannot see a future release that re-enables decoders inside
+# libavformat.
 #
 # This is a surface reduction, not a codec removal, and the difference from the
-# DALI block above matters because the two look identical. Measured with
-# enumerate_bundled_decoders.py against the rc24 image, 2.1.0's libavcodec
+# DALI block above matters because the two look identical. 2.1.0's libavcodec
 # registers exactly one decoder -- vp9 -- and no encoders: none of h264, hevc,
-# aac, aac_fixed or aac_latm. Nothing prohibited ships today. What fails is
-# container/compliance/policy/codec_policy.yaml, whose deny globs match on a
-# libavcodec being present at all, and whose two PyNvVideoCodec waivers are
-# deliberately scoped to libavutil and libavformat so that a bundled libavcodec
-# has to be looked at rather than absorbed silently.
+# aac, aac_fixed or aac_latm. That is by construction, not by luck: the vendor's
+# own configure line ships in the image at /usr/local/external/ffmpeg/readme.txt
+# and reads --disable-encoders --disable-decoders --enable-decoder=vp9. Measured
+# with enumerate_bundled_decoders.py on both arches, and 2.2.0 drops even vp9.
+#
+# So no prohibited *decoder implementation* ships in either version -- but that
+# is a narrower statement than "nothing prohibited ships". --disable-decoders
+# disables decoders, not FFmpeg code in general: the h264/hevc/aac parsers,
+# demuxers, muxers and bitstream filters (h264_metadata, hevc_metadata,
+# h264_mp4toannexb, h264_redundant_pps -- these do full parameter-set parse and
+# rewrite) remain enabled in both. Do not read the vp9-only finding as "no
+# H.264 code present".
+#
+# What actually fails the build is container/compliance/policy/codec_policy.yaml,
+# whose deny globs match on a libavcodec being present at all, and whose two
+# PyNvVideoCodec waivers are deliberately scoped to libavutil and libavformat so
+# that a bundled libavcodec has to be looked at rather than absorbed silently.
+#
+# Beyond the gate, two concrete defects in 2.1.0 that 2.2.0 fixes: it carries
+# GPL-only libpostproc sources while NOTICES.txt declares LGPLv3 only, and on
+# aarch64 its binaries are FFmpeg 7.1 against a 7.0.2 source tarball -- an LGPL
+# source-correspondence mismatch. 2.2.0 is 8.1.2 binaries against 8.1.2 source.
+# Package size drops 52M -> 24M (2.1.0's bundled libs are real copies, not
+# symlinks). Do NOT justify this upgrade as removing royalty exposure: the only
+# decoder it removes is vp9, the royalty-free one, and royalties for the
+# GPU-accelerated families are covered by the hardware licensing model.
 #
 # Upgrade rather than waive. A waiver has to be written as a glob, and a glob
 # cannot say "this version's libavcodec is empty" -- it would carry forward to a
@@ -313,9 +337,21 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # A floor rather than an exact pin, unlike DALI above: requirements.trtllm.txt
 # already installs PyNvVideoCodec>=2.2.0 into /opt/dynamo/venv, and pinning the
 # system copy exactly would let the two diverge inside one image. Keep this
-# specifier identical to the one there. The assertion below is content-based, so
-# a future release that reintroduces libavcodec fails the build rather than
-# shipping.
+# specifier identical to the one there. Two assertions follow: a filename test
+# that mirrors the codec gate's deny glob (so a reintroduced libavcodec fails
+# here, with a clear message, rather than later in the scan), and a content test
+# that enumerates what the shipped FFmpeg libraries actually register.
+#
+# Reading the content test's output: for 2.2.0 it reports "0 decoders, 0
+# encoders" and prints every entry of its "expected present (sanity check)"
+# block as ABSENT. That is the correct answer here, not a broken probe -- 2.2.0
+# registers no codecs at all, vp9 included. The probe is proved live a different
+# way: enumerate_bundled_decoders.py resolves av_codec_iterate through ctypes,
+# so a library that does not export it raises AttributeError and fails the
+# build rather than reporting a reassuring zero. The check is fail-closed by
+# design; if a future release hides that symbol, this stops the build and wants
+# a human, which is the right outcome for a check whose whole job is to see
+# inside the file.
 #
 # This deliberately overrides a dependency of TensorRT-LLM's, which is why the
 # build log carries a pip resolver complaint here:
@@ -366,7 +402,16 @@ RUN set -eu; \
         echo "ERROR: PyNvVideoCodec $v still bundles a libavcodec:" >&2; \
         find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' >&2; \
         exit 1; \
-    fi
+    fi; \
+    examined=0; \
+    for lib in $(find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
+            -name 'libavcodec*.so*' -o -name 'libavformat*.so*'); do \
+        examined=$((examined + 1)); \
+        /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
+    done; \
+    [ "$examined" -gt 0 ] \
+        || { echo "ERROR: found no FFmpeg libraries under PyNvVideoCodec to examine;" >&2; \
+             echo "       the package layout changed and this check went blind." >&2; exit 1; }
 
 # Align the base image's aiohttp with the floor requirements.common.txt sets for
 # the other Dynamo images. The base ships an older release and the --no-deps
@@ -453,6 +498,21 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # upgrade (pynvvideocodec-2.1.0.dist-info -> -2.2.0.dist-info), so the glob takes
 # that and the stray `pynvvideocodec.` entry beside it.
 #
+# /usr/local/external/ffmpeg is the same package, in a place that is easy to
+# miss: PyNvVideoCodec's wheel installs an FFmpeg source tarball through a
+# `../../../external/ffmpeg/src/ffmpeg-<version>.tar.xz` RECORD entry, so it
+# lands OUTSIDE dist-packages and the two globs above do not reach it. It is
+# version-stamped, so this is the aiohttp rename problem again rather than the
+# opencv one: runtime_full's pip upgrade removes ffmpeg-7.0.2.tar.xz and writes
+# ffmpeg-8.1.2.tar.xz, the overlay COPY cannot express that deletion, and the
+# image would ship BOTH -- ~10.8 MB of dead weight whose real cost is that the
+# stale tarball is the LGPL source-correspondence artifact for binaries that are
+# no longer present. The codec scan does not catch this: its deny globs match
+# libav*.so*/libsw*.so*, never a .tar.xz, and allow_paths lists
+# /usr/local/src/ffmpeg (our in-tree build), not this path. Dropping the whole
+# directory is right -- the overlay restores runtime_full's 8.1.2 copy, which is
+# the one that corresponds to the shipped binaries.
+#
 # Its runtime dependencies are listed for the same reason. pip upgrades those too
 # when the new aiohttp requires versions the base does not carry, and each rename
 # has the same doubling problem. Dropping them here is free: the overlay restores
@@ -471,6 +531,7 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/nvidia_dali_* \
     /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
     /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
+    /usr/local/external/ffmpeg \
     /usr/local/lib/python3.12/dist-packages/aiohttp \
     /usr/local/lib/python3.12/dist-packages/aiohttp-* \
     /usr/local/lib/python3.12/dist-packages/multidict \
@@ -514,6 +575,18 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         echo "       missing or misspelled. The upgrade in runtime_full cannot fix this" >&2; \
         echo "       on its own: COPY cannot represent a deletion." >&2; \
         find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' >&2; \
+        exit 1; \
+    fi; \
+    for lib in $(find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
+            -name 'libavcodec*.so*' -o -name 'libavformat*.so*' 2>/dev/null); do \
+        /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
+    done; \
+    tarballs=$(find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' 2>/dev/null | wc -l); \
+    if [ "$tarballs" -gt 1 ]; then \
+        echo "ERROR: more than one FFmpeg source tarball survived the overlay, so the" >&2; \
+        echo "       base image's copy came back alongside the upgraded one -- the" >&2; \
+        echo "       /usr/local/external/ffmpeg whiteout entry is missing." >&2; \
+        find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' >&2; \
         exit 1; \
     fi
 
