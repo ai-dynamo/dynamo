@@ -244,6 +244,9 @@ func (r *dgdWorkerRolloutReconciler) shouldTriggerRollingUpdate(
 // managed rolling updates may already have worker DCDs without a hash label; in
 // that case we label those DCDs with the legacy sentinel and let the normal
 // rolling update path migrate from that sentinel to the desired compatibility hash.
+// A DGD whose annotations are missing but which already owns hash-labelled worker
+// DCDs is not a first deploy: its active generation is recovered from those DCDs so
+// that a pending spec change still rolls through the managed lifecycle.
 func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -292,11 +295,38 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 		return nil
 	}
 
-	// Normal first deploy — set the canonical v2 hash.
 	hashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
 	}
+
+	// Hash-labelled worker DCDs without annotations mean the annotations were lost
+	// (for example the DGD was replaced instead of patched). Recover the active
+	// generation from the observed DCDs; assuming the desired generation here would
+	// leave the running one outside the rolling update lifecycle for good.
+	existingDCDs, err := r.listOldWorkerDCDs(ctx, dgd, "") // every hash-labelled worker DCD; legacy ones were handled above
+	if err != nil {
+		return fmt.Errorf("failed to list worker DCDs for hash recovery: %w", err)
+	}
+	legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return fmt.Errorf("failed to compute v1 worker hash for hash recovery: %w", err)
+	}
+	if recovered, found := recoverWorkerHashes(existingDCDs, hashes, legacyHash); found {
+		r.setCurrentWorkerHashes(dgd, recovered)
+		if err := r.Update(ctx, dgd); err != nil {
+			return fmt.Errorf("failed to recover worker hash: %w", err)
+		}
+		logger.Info("Recovered current worker hashes from existing worker DCDs",
+			"v1Hash", recovered.v1, "v2Hash", recovered.v2, "dcdCount", len(existingDCDs))
+		if r.recorder != nil {
+			r.recorder.Eventf(dgd, nil, corev1.EventTypeNormal, "WorkerHashRecovered", "Update",
+				"Recovered current worker hash from %d existing worker DCDs", len(existingDCDs))
+		}
+		return nil
+	}
+
+	// Normal first deploy — set the canonical v2 hash.
 	r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(hashes.v2, hashes))
 
 	if err := r.Update(ctx, dgd); err != nil {
@@ -306,6 +336,83 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 	logger.Info("Initialized current worker hashes", "v1Hash", hashes.v1, "v2Hash", hashes.v2)
 
 	return nil
+}
+
+// recoverWorkerHashes derives the active worker generation of a DGD from its existing
+// hash-labelled worker DCDs. It reports found=false when there are none, which is a
+// genuine first deploy.
+//
+// A generation counts as current when its label is one of the desired hashes or the
+// legacy alpha hash of the same spec (workers created by a pre-dual operator). When only
+// current generations exist the DGD has converged and the annotations are recorded the
+// way the annotation path would leave them: v2 only for a canonical generation, the
+// legacy alpha hash in v1 next to the canonical v2 for a pre-dual one, so nothing rolls.
+// Otherwise the non-desired generation with the most available replicas (the newest on
+// ties, the hash as the last tie-break) is recorded as current, so the next reconcile
+// starts a rolling update from it and the coordinator drains and removes it. A generation
+// still labelled with the legacy sentinel is recorded as that sentinel in v1 so the
+// existing legacy migration handles it.
+func recoverWorkerHashes(
+	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
+	desired workerGenerationHashes,
+	legacyHash string,
+) (workerGenerationHashes, bool) {
+	// Group the DCDs by generation hash, summing availability and keeping the latest
+	// creation time per generation.
+	type generation struct {
+		hash      string
+		available int32
+		createdAt metav1.Time
+	}
+	generations := make(map[string]*generation)
+	for i := range dcds {
+		hash := dcds[i].Labels[consts.KubeLabelDynamoWorkerHash]
+		if hash == "" {
+			continue
+		}
+		state := dcdComponentStateFromDCD(&dcds[i])
+		g, ok := generations[hash]
+		if !ok {
+			g = &generation{hash: hash, createdAt: dcds[i].CreationTimestamp}
+			generations[hash] = g
+		}
+		g.available += state.Available
+		if dcds[i].CreationTimestamp.After(g.createdAt.Time) {
+			g.createdAt = dcds[i].CreationTimestamp
+		}
+	}
+	if len(generations) == 0 {
+		return workerGenerationHashes{}, false
+	}
+
+	// Pick the serving generation among those that are neither desired nor the legacy
+	// alpha form of the desired spec; the hash breaks full ties so the choice does not
+	// depend on map order.
+	var active *generation
+	for _, g := range generations {
+		if desired.contains(g.hash) || g.hash == legacyHash {
+			continue
+		}
+		if active == nil ||
+			g.available > active.available ||
+			(g.available == active.available && g.createdAt.After(active.createdAt.Time)) ||
+			(g.available == active.available && g.createdAt.Equal(&active.createdAt) && g.hash < active.hash) {
+			active = g
+		}
+	}
+	switch {
+	case active != nil && active.hash == consts.LegacyWorkerHash:
+		return workerGenerationHashes{v1: consts.LegacyWorkerHash}, true
+	case active != nil:
+		return workerGenerationHashes{v2: active.hash}, true
+	}
+	if _, ok := generations[desired.v2]; ok {
+		return workerGenerationHashes{v2: desired.v2}, true
+	}
+	if _, ok := generations[legacyHash]; ok && desired.v1 == desired.v2 {
+		return workerGenerationHashes{v1: legacyHash, v2: desired.v2}, true
+	}
+	return desired, true
 }
 
 // migrateCurrentWorkerHashIfNeeded fills in additive v2 worker-hash state while
