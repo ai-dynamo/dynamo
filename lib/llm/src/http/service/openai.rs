@@ -165,6 +165,18 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
     }
 }
 
+/// `error_type` for a genuine 503 (readiness, model-unavailable, no routable
+/// worker) that is not itself a load-shed rejection. `map_error_code_to_error_type`
+/// cannot be reused here: it checks `code == overload_status_code()` first, and
+/// when an operator configures `DYN_HTTP_OVERLOAD_STATUS_CODE=503` that check
+/// would relabel every one of these unrelated 503s as "Overloaded".
+fn unavailable_error_type() -> String {
+    StatusCode::SERVICE_UNAVAILABLE
+        .canonical_reason()
+        .expect("503 is IANA-registered")
+        .to_string()
+}
+
 /// Classify error for metrics based on status code and message
 fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
     // Same reason as `map_error_code_to_error_type`: the configured overload
@@ -291,17 +303,23 @@ impl ErrorMessage {
 
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
+    ///
+    /// Always reports the plain "Service Unavailable" type and
+    /// `ErrorType::Unavailable`, even when `DYN_HTTP_OVERLOAD_STATUS_CODE` is
+    /// configured to 503 — `map_error_code_to_error_type` and
+    /// `classify_error_for_metrics` would otherwise relabel this readiness
+    /// failure as "Overloaded", though it has nothing to do with load
+    /// shedding.
     pub fn _service_unavailable() -> ErrorResponse {
         let code = StatusCode::SERVICE_UNAVAILABLE;
-        let error_type = map_error_code_to_error_type(code);
         (
             code,
             Json(ErrorMessage {
                 message: "Service is not ready".to_string(),
-                error_type,
+                error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
-                metric_error_type: None,
+                metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
     }
@@ -309,17 +327,19 @@ impl ErrorMessage {
     /// Service Unavailable with a structured message body. Used by readiness
     /// reporting to distinguish "model registered but not ready" from generic
     /// "service not ready".
+    ///
+    /// See [`Self::_service_unavailable`] for why `error_type` and
+    /// `metric_error_type` are set directly rather than derived from `code`.
     pub fn service_unavailable_with_body(message: String) -> ErrorResponse {
         let code = StatusCode::SERVICE_UNAVAILABLE;
-        let error_type = map_error_code_to_error_type(code);
         (
             code,
             Json(ErrorMessage {
                 message,
-                error_type,
+                error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
-                metric_error_type: None,
+                metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
     }
@@ -383,14 +403,22 @@ impl ErrorMessage {
         } else {
             tracing::debug!(status = %status, "{err}: {details}");
         }
+        // SanitizedError::Unavailable and SanitizedError::Overloaded both
+        // carry StatusCode::SERVICE_UNAVAILABLE when the configured overload
+        // status is 503 (see `unavailable_error_type`), so the variant, not
+        // just the status, decides error_type/metric_error_type here.
+        let (error_type, metric_error_type) = match err {
+            SanitizedError::Unavailable => (unavailable_error_type(), Some(ErrorType::Unavailable)),
+            _ => (map_error_code_to_error_type(status), None),
+        };
         (
             status,
             Json(ErrorMessage {
                 message: err.to_string(),
-                error_type: map_error_code_to_error_type(status),
+                error_type,
                 code: status.as_u16(),
                 details: None,
-                metric_error_type: None,
+                metric_error_type,
             }),
         )
     }
