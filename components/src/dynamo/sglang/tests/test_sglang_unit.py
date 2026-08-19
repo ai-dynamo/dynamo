@@ -1588,15 +1588,15 @@ def test_real_server_args_rejects_bare_assignment(tmp_path, monkeypatch):
         server_args.enable_memory_saver = True
 
 
-def test_set_resolved_server_args_applies_gms_fields_on_real_server_args(tmp_path):
-    """The ``--load-format gms`` pair, applied the way ``main.py`` applies it."""
+def test_set_resolved_server_args_applies_fields_on_real_server_args(tmp_path):
+    """A multi-field override on a real resolved instance, as publisher.py does."""
     server_args = _resolved_server_args(tmp_path)
     if not hasattr(server_args, "override"):
         pytest.skip("SGLang < 0.5.16 has no ServerArgs.override")
 
     set_resolved_server_args(
         server_args,
-        "dynamo_gms_load_format",
+        "dynamo_test",
         load_format="dummy",
         enable_memory_saver=True,
     )

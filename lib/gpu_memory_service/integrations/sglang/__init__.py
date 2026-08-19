@@ -7,9 +7,7 @@ Usage:
     from gpu_memory_service.integrations.sglang import setup_gms
 
     if server_args.load_format == "gms":
-        server_args.override(
-            "gms", load_format=setup_gms(server_args), enable_memory_saver=True
-        )
+        server_args.override("gms", load_format=setup_gms(server_args))
 """
 
 from __future__ import annotations
@@ -43,10 +41,9 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
     Args:
         server_args: SGLang ServerArgs instance.
 
-    The caller applies the result, and must also enable memory saver: GMS
-    releases GPU memory through SGLang's memory-saver path. This function does
-    not touch ``server_args`` because SGLang freezes it once resolved, and this
-    package deliberately does not depend on Dynamo's SGLang compatibility layer.
+    Enables the memory saver on ``server_args`` -- GMS releases GPU memory
+    through SGLang's memory-saver path -- and leaves ``load_format`` to the
+    caller, which is the value this returns.
 
     Returns:
         GMSModelLoader class to use as load_format.
@@ -63,6 +60,16 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
         raise ValueError(
             "Cannot use --enable-draft-weights-cpu-backup with --load-format gms."
         )
+
+    # SGLang >= 0.5.16 freezes ServerArgs once resolved and offers override()
+    # as the mutation point; the guard is opt-in there and unconditional from
+    # 0.5.17. This package cannot import Dynamo's SGLang compat helper, so it
+    # repeats the same two-line check.
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override("gms", enable_memory_saver=True)
+    else:  # SGLang < 0.5.16 has neither override() nor the guard.
+        server_args.enable_memory_saver = True
 
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
     # before patches fire.

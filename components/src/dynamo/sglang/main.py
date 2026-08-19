@@ -49,7 +49,6 @@ async def worker(argv: list[str] | None = None):
             config.server_args,
             "dynamo_gms_load_format",
             load_format=setup_gms(config.server_args),
-            enable_memory_saver=True,
         )
 
     # Snapshot mode: engine must be created before runtime so CRIU captures no
