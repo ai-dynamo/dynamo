@@ -135,6 +135,9 @@ where
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
+///
+/// This alias remains supported through the Dynamo 1.x series. It may be
+/// removed only in a 2.0.0 (or later) breaking release.
 pub type KvPushRouter<Sel = DefaultWorkerSelector> = RoutingHost<Sel>;
 
 impl<Sel> RoutingHost<Sel>
