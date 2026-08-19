@@ -44,7 +44,8 @@
 //!
 //! See also: `docs/observability/metrics.md` (Router Metrics section).
 
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use dynamo_runtime::component::Component;
@@ -470,6 +471,70 @@ impl RouterWorkerStatusMetrics {
                 target_endpoint,
             ])
             .set(count as i64);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Router queue lifecycle metrics (component-scoped counters)
+// ---------------------------------------------------------------------------
+
+/// Component-scoped counters for requests that are cancelled before admission or
+/// force-expired by sequence bookkeeping in the router queue.
+pub(crate) struct RouterQueueLifecycleMetrics {
+    /// Total number of requests cancelled before admission while in or waiting for the router queue.
+    pub cancelled_requests_total: IntCounterVec,
+    /// Total number of requests force-expired by router sequence bookkeeping.
+    pub force_expired_requests_total: IntCounterVec,
+}
+
+static ROUTER_QUEUE_LIFECYCLE_METRICS: LazyLock<Mutex<HashMap<Component, Arc<RouterQueueLifecycleMetrics>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+impl RouterQueueLifecycleMetrics {
+    /// Create component-scoped queue lifecycle counters for router observability.
+    ///
+    /// These metrics are labeled by `worker_type` ("prefill", "decode", "aggregated")
+    /// so operators can distinguish cancellation/force-expiry behavior across pools.
+    pub fn from_component(component: &Component) -> Arc<Self> {
+        let mut cache = ROUTER_QUEUE_LIFECYCLE_METRICS.lock().unwrap();
+        cache.get(component).cloned().unwrap_or_else(|| {
+            let metrics = component.metrics();
+            let cancelled_requests_total = metrics
+                .create_intcountervec(
+                    router::QUEUE_CANCELLED_REQUESTS_TOTAL,
+                    "Total number of requests cancelled before admission while in or waiting for the router queue",
+                    &[labels::WORKER_TYPE],
+                    &[],
+                )
+                .expect("failed to create router_queue_cancelled_requests_total");
+            let force_expired_requests_total = metrics
+                .create_intcountervec(
+                    router::FORCE_EXPIRED_REQUESTS_TOTAL,
+                    "Total number of requests force-expired by router sequence bookkeeping",
+                    &[labels::WORKER_TYPE],
+                    &[],
+                )
+                .expect("failed to create router_force_expired_requests_total");
+
+            let metrics = Arc::new(Self {
+                cancelled_requests_total,
+                force_expired_requests_total,
+            });
+            cache.insert(component.clone(), Arc::clone(&metrics));
+            metrics
+        })
+    }
+
+    pub fn record_cancelled_requests(&self, worker_type: &str, count: usize) {
+        self.cancelled_requests_total
+            .with_label_values(&[worker_type])
+            .inc_by(count as u64);
+    }
+
+    pub fn record_force_expired_requests(&self, worker_type: &str, count: usize) {
+        self.force_expired_requests_total
+            .with_label_values(&[worker_type])
+            .inc_by(count as u64);
     }
 }
 
@@ -1349,6 +1414,70 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
             Duration::from_millis(1),
         );
         // Reaching here without panic confirms saturating_sub works
+    }
+
+    #[test]
+    fn test_router_queue_lifecycle_metrics_pef() {
+        let registry = prometheus::Registry::new();
+        let cancelled = IntCounterVec::new(
+            Opts::new(
+                format!(
+                    "{}_{}",
+                    name_prefix::COMPONENT,
+                    router::QUEUE_CANCELLED_REQUESTS_TOTAL
+                ),
+                "Total number of requests cancelled before admission while in or waiting for the router queue",
+            ),
+            &[labels::WORKER_TYPE],
+        )
+        .unwrap();
+        let force_expired = IntCounterVec::new(
+            Opts::new(
+                format!(
+                    "{}_{}",
+                    name_prefix::COMPONENT,
+                    router::FORCE_EXPIRED_REQUESTS_TOTAL
+                ),
+                "Total number of requests force-expired by router sequence bookkeeping",
+            ),
+            &[labels::WORKER_TYPE],
+        )
+        .unwrap();
+        registry.register(Box::new(cancelled.clone())).unwrap();
+        registry.register(Box::new(force_expired.clone())).unwrap();
+
+        let metrics = RouterQueueLifecycleMetrics {
+            cancelled_requests_total: cancelled,
+            force_expired_requests_total: force_expired,
+        };
+
+        metrics.record_cancelled_requests("decode", 2);
+        metrics.record_cancelled_requests("prefill", 1);
+        metrics.record_force_expired_requests("decode", 3);
+
+        let output = gather_pef(&registry);
+        assert!(
+            output.contains("# HELP dynamo_component_router_queue_cancelled_requests_total"),
+            "PEF missing HELP for cancelled requests. Got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_queue_cancelled_requests_total{worker_type=\"decode\"} 2"
+            ),
+            "PEF missing decode cancelled count. Got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_queue_cancelled_requests_total{worker_type=\"prefill\"} 1"
+            ),
+            "PEF missing prefill cancelled count. Got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_force_expired_requests_total{worker_type=\"decode\"} 3"
+            ),
+            "PEF missing force-expired count. Got:\n{output}"
+        );
     }
 
     #[test]

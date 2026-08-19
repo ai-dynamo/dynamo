@@ -675,6 +675,12 @@ pub mod router {
 
     /// Whether the router currently has a worker/dp_rank registered (1 = registered)
     pub const WORKER_REGISTERED: &str = "router_worker_registered";
+
+    /// Total number of requests cancelled before admission while in or waiting for the router queue
+    pub const QUEUE_CANCELLED_REQUESTS_TOTAL: &str = "router_queue_cancelled_requests_total";
+
+    /// Total number of requests force-expired by router sequence bookkeeping
+    pub const FORCE_EXPIRED_REQUESTS_TOTAL: &str = "router_force_expired_requests_total";
 }
 
 /// Frontend pipeline stage and event-loop metrics

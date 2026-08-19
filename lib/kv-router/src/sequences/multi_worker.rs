@@ -123,6 +123,12 @@ pub trait SequencePublisher: Send + Sync {
 
     /// Observe that a worker/dp_rank was removed from the router.
     fn observe_worker_removed(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
+
+    /// Record requests that were abandoned before admission (response path closed or queued entry pruned).
+    fn record_cancelled_requests(&self, _worker_type: &str, _count: usize) {}
+
+    /// Record requests that were force-expired by sequence bookkeeping.
+    fn record_force_expired_requests(&self, _worker_type: &str, _count: usize) {}
 }
 
 /// Admission failures reported by bounded active-sequence publisher queues.
@@ -918,6 +924,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.worker_type
     }
 
+    /// Get the publisher used for sequence events and metric observation.
+    pub fn publisher(&self) -> &Arc<P> {
+        &self.publisher
+    }
+
     /// Query all workers for the potential blocks and tokens.
     pub fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
@@ -1078,6 +1089,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 self.publish_worker_load_snapshot(slot.worker, load, now);
             }
         }
+        if removed_request_count > 0 {
+            self.publisher
+                .record_force_expired_requests(self.worker_type, removed_request_count);
+        }
         drop(table);
         let duration = now.elapsed();
         tracing::debug!(
@@ -1197,6 +1212,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             );
             break (outcome.expired_request_ids, load);
         };
+
+        if !expired_request_ids.is_empty() {
+            self.publisher
+                .record_force_expired_requests(self.worker_type, expired_request_ids.len());
+        }
 
         self.request_index
             .remove_requests(expired_request_ids.iter());

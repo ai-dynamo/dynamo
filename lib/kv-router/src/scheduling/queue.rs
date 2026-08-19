@@ -871,6 +871,7 @@ impl<
             }
             unmanaged_request_ids.insert(cleanup.request_id);
         }
+        let mut cancelled_from_pending = 0;
         if !unmanaged_request_ids.is_empty() {
             for class_index in 0..self.profile.classes().len() {
                 let (removed, class_head_removed) =
@@ -882,10 +883,16 @@ impl<
                             .is_some_and(|request_id| unmanaged_request_ids.contains(request_id))
                     });
                 removed_ready_head |= class_head_removed;
+                cancelled_from_pending += removed.len();
                 for entry in removed {
                     self.subtract_pending_counters(class_index, entry.snapshot());
                 }
             }
+        }
+        if cancelled_from_pending > 0 {
+            self.slots
+                .publisher()
+                .record_cancelled_requests(self.slots.worker_type(), cancelled_from_pending);
         }
         made_ready || (removed_ready_head && self.has_dispatchable_ready_head())
     }
@@ -1165,6 +1172,9 @@ impl<
                 request_id = %sequence_request.request_id,
                 "Skipping scheduler booking for cancelled request"
             );
+            self.slots
+                .publisher()
+                .record_cancelled_requests(self.slots.worker_type(), 1);
             return false;
         }
 
@@ -1182,7 +1192,10 @@ impl<
             return true;
         }
 
-        tracing::debug!(%request_id, "Rolling back undelivered scheduler booking");
+        tracing::debug!(%request_id, "Rolling back undelivered scheduler booking after caller dropped");
+        self.slots
+            .publisher()
+            .record_cancelled_requests(self.slots.worker_type(), 1);
         if let Err(error) = self.slots.free(&request_id, Instant::now()) {
             tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
         }

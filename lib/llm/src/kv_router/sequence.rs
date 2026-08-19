@@ -33,7 +33,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
+use super::metrics::{RouterQueueLifecycleMetrics, RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 #[cfg(test)]
@@ -114,6 +114,7 @@ pub struct RuntimeSequencePublisher {
     event_sender: Option<ActiveSequenceEventSender>,
     metrics_publisher: Arc<EventPublisher>,
     worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
+    queue_lifecycle_metrics: Arc<RouterQueueLifecycleMetrics>,
 }
 
 impl SequencePublisher for RuntimeSequencePublisher {
@@ -176,6 +177,16 @@ impl SequencePublisher for RuntimeSequencePublisher {
     fn observe_worker_removed(&self, worker: &WorkerWithDpRank, worker_type: &str) {
         self.worker_status_metrics
             .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
+    }
+
+    fn record_cancelled_requests(&self, worker_type: &str, count: usize) {
+        self.queue_lifecycle_metrics
+            .record_cancelled_requests(worker_type, count);
+    }
+
+    fn record_force_expired_requests(&self, worker_type: &str, count: usize) {
+        self.queue_lifecycle_metrics
+            .record_force_expired_requests(worker_type, count);
     }
 }
 
@@ -427,11 +438,19 @@ pub async fn create_multi_worker_sequences(
     let metrics_publisher =
         Arc::new(EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?);
     let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
+    let queue_lifecycle_metrics = RouterQueueLifecycleMetrics::from_component(endpoint.component());
+    // Eagerly create the worker_type series for this router so the families
+    // appear in /metrics scrapes even before any cancellation or force-expiry
+    // event has occurred. Without this, an IntCounterVec with no children is
+    // omitted from Prometheus output, making the metric invisible at startup.
+    queue_lifecycle_metrics.record_cancelled_requests(worker_type, 0);
+    queue_lifecycle_metrics.record_force_expired_requests(worker_type, 0);
 
     let publisher = RuntimeSequencePublisher {
         event_sender,
         metrics_publisher,
         worker_status_metrics,
+        queue_lifecycle_metrics,
     };
 
     let dp_range: HashMap<u64, (u32, u32)> = workers_with_configs
