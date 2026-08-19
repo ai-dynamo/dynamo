@@ -1420,6 +1420,29 @@ mod tests {
             "absent and explicit-false capability values are equivalent"
         );
 
+        let mut string_false = card_with_capability(false);
+        string_false.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::VLLM_EXACT_MM_ROUTING_CAPABILITY.to_string(),
+            "false".into(),
+        );
+        assert_eq!(
+            absent.mdcsum(),
+            string_false.mdcsum(),
+            "absent and string-false capability values are equivalent"
+        );
+
+        let bool_true = card_with_capability(true);
+        let mut string_true = card_with_capability(false);
+        string_true.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::VLLM_EXACT_MM_ROUTING_CAPABILITY.to_string(),
+            "true".into(),
+        );
+        assert_eq!(
+            bool_true.mdcsum(),
+            string_true.mdcsum(),
+            "boolean and string-true capability values are equivalent"
+        );
+
         assert_second_worker_is_incompatible(false, true);
         assert_second_worker_is_incompatible(true, false);
     }

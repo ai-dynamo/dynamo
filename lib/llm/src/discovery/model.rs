@@ -637,12 +637,7 @@ impl Model {
                     kv_cache_block_size: ws.card().kv_cache_block_size,
                     lora_name: ws.card().lora.as_ref().map(|lora| lora.name.clone()),
                     supports_exact_mm_routing: ws
-                        .card()
-                        .runtime_config
-                        .runtime_data
-                        .get(VLLM_EXACT_MM_ROUTING_CAPABILITY)
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
+                        .supports_runtime_capability(VLLM_EXACT_MM_ROUTING_CAPABILITY),
                 })
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
@@ -847,7 +842,7 @@ mod tests {
         namespace: &str,
         block_size: u32,
         lora_name: Option<&str>,
-        supports_exact_mm_routing: bool,
+        supports_exact_mm_routing: serde_json::Value,
     ) -> (
         Arc<WorkerSet>,
         GenerateStreamingEngine,
@@ -862,7 +857,7 @@ mod tests {
         });
         card.runtime_config.runtime_data.insert(
             VLLM_EXACT_MM_ROUTING_CAPABILITY.to_string(),
-            supports_exact_mm_routing.into(),
+            supports_exact_mm_routing,
         );
         card.runtime_config.runtime_data.insert(
             VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
@@ -1031,9 +1026,9 @@ mod tests {
     fn test_generate_engine_selection_keeps_worker_set_metadata_atomic() {
         let model = Model::new("generate-model".to_string());
         let (worker_set_a, engine_a, worker_tx_a) =
-            make_generate_worker_set("ns-a", 16, None, false);
+            make_generate_worker_set("ns-a", 16, None, false.into());
         let (worker_set_b, engine_b, worker_tx_b) =
-            make_generate_worker_set("ns-b", 32, Some("adapter-b"), true);
+            make_generate_worker_set("ns-b", 32, Some("adapter-b"), "true".into());
         worker_tx_b.send(vec![]).expect("disable worker set B");
         model.add_worker_set("ns-a".to_string(), worker_set_a);
         model.add_worker_set("ns-b".to_string(), worker_set_b);
