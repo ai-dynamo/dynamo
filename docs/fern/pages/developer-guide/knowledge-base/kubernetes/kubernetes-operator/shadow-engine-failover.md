@@ -153,8 +153,10 @@ UUIDs from the ResourceSlices as shown in the manifest comments), then
 deploy the GMS example as usual and confirm the allocation with
 `kubectl get resourceclaims`. The blocker pod holds the devices in the DRA
 ledger without starting any CUDA process, so the occupied GPUs keep serving
-their existing workloads. Delete the blocker when the verification is done, and
-update its expression whenever the set of occupied GPUs changes.
+their existing workloads. Delete the blocker Pod and ResourceClaim when the
+verification is done. The ResourceClaim spec is immutable, so when the set of
+occupied GPUs changes, delete both objects and apply the manifest again with
+the updated UUIDs.
 
 ## Limitations
 

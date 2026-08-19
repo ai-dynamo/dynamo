@@ -12,6 +12,8 @@
 # below is resource.k8s.io/v1; querying the version explicitly fails loudly on
 # clusters that do not serve it):
 #   kubectl get resourceslices.v1.resource.k8s.io -o jsonpath='{range .items[*].spec.devices[*]}{.name}{" "}{.attributes.uuid.string}{"\n"}{end}'
+# The ResourceClaim spec is immutable: to change the UUIDs or count later,
+# delete both objects and apply the manifest again.
 # Replace the UUIDs and count below with the occupied GPUs on your node, then:
 #   kubectl apply -n <namespace> -f gms-dra-blocker.yaml
 # The busybox pod holds the devices in the DRA ledger without starting any CUDA
@@ -47,6 +49,14 @@ spec:
     - name: hold
       image: busybox:1.36
       command: ["sleep", "infinity"]
+      # Guaranteed QoS keeps the holder off the node-pressure eviction list;
+      # evicting the only consumer would release the claim's reservation.
       resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 10m
+          memory: 16Mi
         claims:
           - name: blocker
