@@ -7,9 +7,7 @@ use anyhow::Result;
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
 use dynamo_kv_router::selector::WorkerSelector;
 
-use super::{
-    InnerPrefillRouter, PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter,
-};
+use super::{PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 impl<Sel> PrefillRouter<Sel>
@@ -40,63 +38,50 @@ where
             .load_full()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
 
-        match &binding.router {
-            InnerPrefillRouter::RoutingHost(router) => {
-                let Some(kv_router) = router.kv_router_if_enabled() else {
-                    let worker_id = router
-                        .peek_next_worker()
-                        .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-                    return Ok(PrefillQueryOutcome::Routed {
-                        worker_id,
-                        dp_rank: None,
-                    });
-                };
-                let outcome = kv_router
-                    .find_best_match_details(
-                        None,
-                        token_ids,
-                        block_mm_infos,
-                        None,
-                        false,
-                        false,
-                        lora_name,
-                        cache_namespace,
-                        priority_jump,
-                        strict_priority,
-                        None,
-                        None,
-                        allowed_worker_ids,
-                        routing_constraints,
-                    )
-                    .await?;
-                match outcome {
-                    crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
-                        Ok(PrefillQueryOutcome::Routed {
-                            worker_id: worker.worker_id,
-                            dp_rank: Some(worker.dp_rank),
-                        })
-                    }
-                    crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
-                        Ok(PrefillQueryOutcome::QueueRejected { rejection })
-                    }
-                }
-            }
-            InnerPrefillRouter::SimpleRouter(router) => {
-                let worker_id = router
-                    .peek_next_worker()
-                    .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+        let router = &binding.router;
+        let Some(kv_router) = router.kv_router_if_enabled() else {
+            let worker_id = router
+                .peek_next_worker()
+                .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+            return Ok(PrefillQueryOutcome::Routed {
+                worker_id,
+                dp_rank: None,
+            });
+        };
+        let outcome = kv_router
+            .find_best_match_details(
+                None,
+                token_ids,
+                block_mm_infos,
+                None,
+                false,
+                false,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                None,
+                None,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await?;
+        match outcome {
+            crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
                 Ok(PrefillQueryOutcome::Routed {
-                    worker_id,
-                    dp_rank: None,
+                    worker_id: worker.worker_id,
+                    dp_rank: Some(worker.dp_rank),
                 })
+            }
+            crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                Ok(PrefillQueryOutcome::QueueRejected { rejection })
             }
         }
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         if let Some(binding) = self.binding.load_full()
-            && let InnerPrefillRouter::RoutingHost(router) = &binding.router
-            && let Some(kv_router) = router.kv_router_if_enabled()
+            && let Some(kv_router) = binding.router.kv_router_if_enabled()
         {
             kv_router.register_workers(worker_ids);
         }
@@ -106,11 +91,15 @@ where
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         sync::{Arc, Mutex},
         time::Duration,
     };
 
     use async_trait::async_trait;
+    use dynamo_kv_router::{
+        config::KvRouterConfig, protocols::WorkerWithDpRank, selector::WorkerInputs,
+    };
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         component::Instance,
@@ -124,14 +113,19 @@ mod tests {
         storage::kv,
     };
     use futures::{StreamExt, future::join_all};
+    use tokio::sync::watch;
 
     use super::*;
     use crate::{
         discovery::ModelManager,
+        kv_router::{
+            BuiltinRoutingPolicy, RoutingHost, push_router::RoutingLoadState,
+            scheduler::DefaultWorkerSelector,
+        },
         protocols::common::{
             FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
+            timing::WORKER_TYPE_PREFILL,
         },
-        session_affinity::SessionAffinityPushRouter,
     };
 
     type LlmResponse = dynamo_runtime::protocols::annotated::Annotated<LLMEngineOutput>;
@@ -250,7 +244,8 @@ mod tests {
         mode: RouterMode,
         dispatch: Arc<RecordingDispatch>,
     ) -> (
-        Arc<SessionAffinityPushRouter>,
+        Arc<RoutingHost>,
+        Option<Arc<RoutingLoadState>>,
         Arc<PrefillRouter>,
         Vec<DistributedRuntime>,
         Vec<u64>,
@@ -279,15 +274,13 @@ mod tests {
             DistributedRuntime::new(runtime.clone(), distributed_config(discovery_root))
                 .await
                 .unwrap();
-        let client = router_runtime
+        let endpoint = router_runtime
             .namespace(namespace.to_string())
             .unwrap()
             .component(component.to_string())
             .unwrap()
-            .endpoint(endpoint_name)
-            .client()
-            .await
-            .unwrap();
+            .endpoint(endpoint_name);
+        let client = endpoint.client().await.unwrap();
         let instances = tokio::time::timeout(Duration::from_secs(5), async {
             let mut source = client.instance_source.as_ref().clone();
             loop {
@@ -305,10 +298,41 @@ mod tests {
         .expect("all four workers must be discovered");
         let mut workers = instances.iter().map(Instance::id).collect::<Vec<_>>();
         workers.sort_unstable();
+        let load_state = if BuiltinRoutingPolicy::from_router_mode(mode)
+            .is_some_and(|policy| policy.required_worker_inputs().contains(WorkerInputs::LOAD))
+        {
+            let (_workers_tx, workers_watch) = watch::channel(
+                workers
+                    .iter()
+                    .copied()
+                    .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+                    .collect::<HashMap<_, _>>(),
+            );
+            Some(
+                RoutingLoadState::start(
+                    endpoint,
+                    16,
+                    workers_watch,
+                    KvRouterConfig::default(),
+                    WORKER_TYPE_PREFILL,
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            None
+        };
         let push_router = PushRouter::from_client_with_dispatch(client, mode, dispatch)
             .await
             .unwrap();
-        let shared = Arc::new(SessionAffinityPushRouter::new(push_router, None, false).unwrap());
+        let shared = Arc::new(
+            RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+                push_router,
+                load_state.clone(),
+                None,
+            )
+            .unwrap(),
+        );
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
@@ -317,7 +341,7 @@ mod tests {
                     component: component.to_string(),
                     name: endpoint_name.to_string(),
                 },
-                router: InnerPrefillRouter::SimpleRouter(shared.clone()),
+                router: shared.clone(),
             },
         )));
         prefill.lifecycle.store(
@@ -325,7 +349,7 @@ mod tests {
             std::sync::atomic::Ordering::Release,
         );
         worker_runtimes.push(router_runtime);
-        (shared, prefill, worker_runtimes, workers)
+        (shared, load_state, prefill, worker_runtimes, workers)
     }
 
     #[tokio::test]
@@ -334,14 +358,16 @@ mod tests {
         let discovery_root = tempfile::tempdir().unwrap();
         let namespace = "prefill-query-rr";
         let dispatch = Arc::new(RecordingDispatch::completed());
-        let (shared_router, prefill_router, worker_runtimes, expected_workers) = shared_router(
-            &runtime,
-            discovery_root.path(),
-            namespace,
-            RouterMode::RoundRobin,
-            dispatch.clone(),
-        )
-        .await;
+        let (shared_router, load_state, prefill_router, worker_runtimes, expected_workers) =
+            shared_router(
+                &runtime,
+                discovery_root.path(),
+                namespace,
+                RouterMode::RoundRobin,
+                dispatch.clone(),
+            )
+            .await;
+        assert!(load_state.is_none());
 
         let concurrent_peeks = join_all((0..16).map(|_| query_worker(&prefill_router))).await;
         assert!(
@@ -379,7 +405,7 @@ mod tests {
         .enumerate()
         {
             let dispatch = Arc::new(RecordingDispatch::pending());
-            let (shared, prefill, runtimes, workers) = shared_router(
+            let (shared, load_state, prefill, runtimes, workers) = shared_router(
                 &runtime,
                 discovery_root.path(),
                 &format!("prefill-query-occupancy-{index}"),
@@ -387,13 +413,16 @@ mod tests {
                 dispatch,
             )
             .await;
+            let load_state = load_state.expect("load-aware builtin must construct LOAD state");
 
             let _ = join_all((0..16).map(|_| query_worker(&prefill))).await;
             assert_eq!(
                 workers
                     .iter()
-                    .map(|worker| shared.occupancy_for_test(*worker))
-                    .sum::<u64>(),
+                    .map(|worker| {
+                        load_state.active_request_count_for_test(WorkerWithDpRank::new(*worker, 0))
+                    })
+                    .sum::<usize>(),
                 0,
                 "{mode:?} advisory queries must not acquire occupancy"
             );
@@ -402,8 +431,10 @@ mod tests {
             assert_eq!(
                 workers
                     .iter()
-                    .map(|worker| shared.occupancy_for_test(*worker))
-                    .sum::<u64>(),
+                    .map(|worker| {
+                        load_state.active_request_count_for_test(WorkerWithDpRank::new(*worker, 0))
+                    })
+                    .sum::<usize>(),
                 1,
                 "{mode:?} committed dispatch must retain exactly one lease"
             );
@@ -411,8 +442,10 @@ mod tests {
             assert_eq!(
                 workers
                     .iter()
-                    .map(|worker| shared.occupancy_for_test(*worker))
-                    .sum::<u64>(),
+                    .map(|worker| {
+                        load_state.active_request_count_for_test(WorkerWithDpRank::new(*worker, 0))
+                    })
+                    .sum::<usize>(),
                 0,
                 "{mode:?} dropping the response stream must release the lease"
             );
