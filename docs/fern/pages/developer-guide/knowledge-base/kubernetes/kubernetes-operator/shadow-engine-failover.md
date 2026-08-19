@@ -146,11 +146,10 @@ Most existing clusters run the device plugin, so this situation is easy to hit
 when trying GMS out. Since Shadow Engine Failover is still experimental, a
 temporary workaround is enough to verify the feature: reserve the occupied GPUs
 with a blocker ResourceClaim before deploying the GMS workload, so the
-generated claims land on free devices. Apply
 [gms-dra-blocker.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/gms-dra-blocker.yaml)
-with the CEL expression adjusted to the occupied device UUIDs on your node
-(list them with `nvidia-smi -L`, or map DRA device names to UUIDs from the
-ResourceSlices as shown in the manifest comments), then
+with the CEL expression and the request `count` adjusted to the occupied device
+UUIDs on your node (list them with `nvidia-smi -L`, or map DRA device names to
+UUIDs from the ResourceSlices as shown in the manifest comments), then
 deploy the GMS example as usual and confirm the allocation with
 `kubectl get resourceclaims`. The blocker pod holds the devices in the DRA
 ledger without starting any CUDA process, so the occupied GPUs keep serving
