@@ -5,7 +5,8 @@ import asyncio
 import logging
 import os
 import time
-from typing import Awaitable, Callable, Optional
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Optional
 
 import sglang as sgl
 from sglang.srt.observability.trace import set_global_trace_level
@@ -41,14 +42,37 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
 
 
-async def init_decode(
+@dataclass
+class _WorkerSetup:
+    """Common state shared by decode/prefill worker init, built by
+    `_init_worker_common`."""
+
+    server_args: Any
+    dynamo_args: Any
+    generate_endpoint: Any
+    clear_endpoint: Any
+    load_lora_endpoint: Any
+    unload_lora_endpoint: Any
+    list_loras_endpoint: Any
+    engine: sgl.Engine
+    load_time: float
+    publisher: Any
+    metrics_task: Any
+    metrics_labels: Any
+
+
+async def _init_worker_common(
     runtime: DistributedRuntime,
     config: Config,
-    shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
-    run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-    snapshot_engine: Optional[sgl.Engine] = None,
-) -> None:
+    snapshot_engine: Optional[sgl.Engine],
+) -> Optional[_WorkerSetup]:
+    """Setup shared by `init_decode` and `init_prefill`: endpoint creation,
+    engine acquisition (fresh or snapshot), trace level, and metrics.
+
+    Handles the non-leader-node early return itself (`node_rank >= 1`) and
+    signals it to the caller by returning `None`.
+    """
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
@@ -101,11 +125,102 @@ async def init_decode(
     assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
-    logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     if server_args.node_rank >= 1:
         await handle_non_leader_node(engine, publisher, metrics_task)
+        return None
+
+    return _WorkerSetup(
+        server_args=server_args,
+        dynamo_args=dynamo_args,
+        generate_endpoint=generate_endpoint,
+        clear_endpoint=clear_endpoint,
+        load_lora_endpoint=load_lora_endpoint,
+        unload_lora_endpoint=unload_lora_endpoint,
+        list_loras_endpoint=list_loras_endpoint,
+        engine=engine,
+        load_time=load_time,
+        publisher=publisher,
+        metrics_task=metrics_task,
+        metrics_labels=metrics_labels,
+    )
+
+
+def _lora_and_clear_serve_tasks(setup: _WorkerSetup, handler) -> list:
+    """The four LoRA/clear-kv endpoint serve coroutines shared verbatim by
+    every LLM worker's `asyncio.gather(...)` call."""
+    return [
+        setup.load_lora_endpoint.serve_endpoint(
+            handler.load_lora,
+            metrics_labels=setup.metrics_labels,
+        ),
+        setup.unload_lora_endpoint.serve_endpoint(
+            handler.unload_lora,
+            metrics_labels=setup.metrics_labels,
+        ),
+        setup.list_loras_endpoint.serve_endpoint(
+            handler.list_loras,
+            metrics_labels=setup.metrics_labels,
+        ),
+        setup.clear_endpoint.serve_endpoint(
+            handler.clear_kv_blocks,
+            metrics_labels=setup.metrics_labels,
+        ),
+    ]
+
+
+async def _cancel_metrics_task(metrics_task) -> None:
+    """Cancel the metrics task and await its (expected) `CancelledError`.
+
+    Shared by `_teardown_worker` and by `init_prefill`'s warmup error path,
+    which aborts before a handler exists to hand off to `_teardown_worker`.
+    """
+    metrics_task.cancel()
+    try:
+        await metrics_task
+    except asyncio.CancelledError:
+        logging.info("Metrics task successfully cancelled")
+
+
+async def _teardown_worker(
+    handler,
+    metrics_task,
+    run_deferred_handlers: Callable[[], Awaitable[None]] | None,
+) -> None:
+    """The `finally` block shared verbatim by `init_decode` and
+    `init_prefill`: cancel the metrics task, clean up the handler, and run
+    any deferred handlers."""
+    await _cancel_metrics_task(metrics_task)
+    handler.cleanup()
+    if run_deferred_handlers is not None:
+        logging.info("Running deferred handlers")
+        await run_deferred_handlers()
+
+
+async def init_decode(
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    shutdown_endpoints: list,
+    run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    snapshot_engine: Optional[sgl.Engine] = None,
+) -> None:
+    setup = await _init_worker_common(
+        runtime, config, shutdown_endpoints, snapshot_engine
+    )
+    if setup is None:
+        # Non-leader node: already handled by _init_worker_common.
         return
+
+    server_args, dynamo_args = setup.server_args, setup.dynamo_args
+    generate_endpoint = setup.generate_endpoint
+    engine = setup.engine
+    publisher, metrics_task, metrics_labels = (
+        setup.publisher,
+        setup.metrics_task,
+        setup.metrics_labels,
+    )
+    logging.debug("SGLang model load time: %.2fs", setup.load_time)
 
     ready_event = asyncio.Event()
 
@@ -151,22 +266,7 @@ async def init_decode(
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            load_lora_endpoint.serve_endpoint(
-                handler.load_lora,
-                metrics_labels=metrics_labels,
-            ),
-            unload_lora_endpoint.serve_endpoint(
-                handler.unload_lora,
-                metrics_labels=metrics_labels,
-            ),
-            list_loras_endpoint.serve_endpoint(
-                handler.list_loras,
-                metrics_labels=metrics_labels,
-            ),
-            clear_endpoint.serve_endpoint(
-                handler.clear_kv_blocks,
-                metrics_labels=metrics_labels,
-            ),
+            *_lora_and_clear_serve_tasks(setup, handler),
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
@@ -185,16 +285,7 @@ async def init_decode(
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+        await _teardown_worker(handler, metrics_task, run_deferred_handlers)
 
 
 async def init_prefill(
@@ -205,71 +296,32 @@ async def init_prefill(
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
 ) -> None:
-    server_args, dynamo_args = config.server_args, config.dynamo_args
-
-    if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
-
-    generate_endpoint = runtime.endpoint(
-        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
+    setup = await _init_worker_common(
+        runtime, config, shutdown_endpoints, snapshot_engine
     )
-    clear_endpoint = runtime.endpoint(
-        f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
-    )
-
-    # Use pre-created engine if provided (snapshot mode)
-    if snapshot_engine is not None:
-        engine = snapshot_engine
-        load_time = 0.0
-        if getattr(server_args, "enable_forward_pass_metrics", False):
-            logging.warning(
-                "Forward pass metrics disabled in snapshot mode: the engine was "
-                "created before the endpoint existed, so its FPM publisher bound "
-                "a different IPC path than the relay would subscribe to."
-            )
-            server_args.enable_forward_pass_metrics = False
-    else:
-        set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
-        start_time = time.time()
-        engine = sgl.Engine(server_args=server_args)
-        load_time = time.time() - start_time
-
-    if server_args.enable_trace:
-        set_global_trace_level(dynamo_args.sglang_trace_level)
-
-    load_lora_endpoint = runtime.endpoint(
-        f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
-    )
-    unload_lora_endpoint = runtime.endpoint(
-        f"{dynamo_args.namespace}.{dynamo_args.component}.unload_lora"
-    )
-    list_loras_endpoint = runtime.endpoint(
-        f"{dynamo_args.namespace}.{dynamo_args.component}.list_loras"
-    )
-
-    shutdown_endpoints[:] = [generate_endpoint]
-
-    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, generate_endpoint
-    )
-    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
-    # which take a different init path entirely. Narrow for mypy.
-    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
-
-    publisher.component_gauges.set_model_load_time(load_time)
-
-    if server_args.node_rank >= 1:
-        await handle_non_leader_node(engine, publisher, metrics_task)
+    if setup is None:
+        # Non-leader node: already handled by _init_worker_common.
         return
+
+    server_args, dynamo_args = setup.server_args, setup.dynamo_args
+    generate_endpoint = setup.generate_endpoint
+    engine = setup.engine
+    publisher, metrics_task, metrics_labels = (
+        setup.publisher,
+        setup.metrics_task,
+        setup.metrics_labels,
+    )
 
     try:
         await _warmup_prefill_engine(engine, server_args)
     except asyncio.TimeoutError as e:
+        await _cancel_metrics_task(metrics_task)
         logging.error("Prefill warmup timed out after 1800s — aborting worker startup")
         raise RuntimeError(
             "Prefill warmup timed out; worker cannot serve requests"
         ) from e
     except Exception as e:
+        await _cancel_metrics_task(metrics_task)
         logging.error(f"Prefill warmup failed: {e} — aborting worker startup")
         raise RuntimeError(f"Prefill warmup failed: {e}") from e
 
@@ -290,22 +342,7 @@ async def init_prefill(
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            load_lora_endpoint.serve_endpoint(
-                handler.load_lora,
-                metrics_labels=metrics_labels,
-            ),
-            unload_lora_endpoint.serve_endpoint(
-                handler.unload_lora,
-                metrics_labels=metrics_labels,
-            ),
-            list_loras_endpoint.serve_endpoint(
-                handler.list_loras,
-                metrics_labels=metrics_labels,
-            ),
-            clear_endpoint.serve_endpoint(
-                handler.clear_kv_blocks,
-                metrics_labels=metrics_labels,
-            ),
+            *_lora_and_clear_serve_tasks(setup, handler),
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
@@ -331,13 +368,4 @@ async def init_prefill(
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+        await _teardown_worker(handler, metrics_task, run_deferred_handlers)
