@@ -185,7 +185,7 @@ class ImageLoader:
             # MAX_IMAGE_PIXELS is at or above Pillow's threshold. Map it to the
             # same client error rather than letting the generic handler below
             # flatten it into a ValueError that the batch caller reports as 500.
-            logger.error(f"Image too large loading: '{image_url}': {e}")
+            logger.error("Image too large loading: '%s': %s", image_url, e)
             raise HttpStatusError(413, str(e), image_url) from e
         except UrlValidationError as e:
             # Keep the type (must precede ValueError, its base) so the batch
@@ -266,6 +266,11 @@ class ImageLoader:
                         raise ValueError(f"Invalid base64 encoding: {e}") from e
                     image_data = BytesIO(image_bytes)
                 return await self._open_image(image_data)
+            except HttpStatusError:
+                raise
+            except Image.DecompressionBombError as e:
+                logger.error("Image too large decoding: '%s': %s", image_url, e)
+                raise HttpStatusError(413, str(e), image_url) from e
             except Image.UnidentifiedImageError as e:
                 logger.error(f"Unsupported image format decoding: '{image_url}'")
                 raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
