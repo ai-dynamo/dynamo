@@ -2629,7 +2629,7 @@ fn apply_chat_completions_request_template(
         if request.temperature.is_none() {
             request.temperature = Some(template.temperature);
         }
-        if request.max_completion_tokens.unwrap_or(0) == 0 {
+        if request.max_completion_tokens.is_none() {
             request.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
@@ -4798,6 +4798,27 @@ mod tests {
         request.temperature = None;
         apply_chat_completions_request_template(&mut request, Some(&template));
         assert_eq!(request.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn test_chat_completions_template_preserves_explicit_zero_max_completion_tokens() {
+        let template = RequestTemplate {
+            model: "template-model".to_string(),
+            temperature: 0.7,
+            max_completion_tokens: 128,
+        };
+        let mut request = CreateChatCompletionRequest {
+            max_completion_tokens: Some(0),
+            ..Default::default()
+        };
+
+        apply_chat_completions_request_template(&mut request, Some(&template));
+
+        assert_eq!(request.max_completion_tokens, Some(0));
+
+        request.max_completion_tokens = None;
+        apply_chat_completions_request_template(&mut request, Some(&template));
+        assert_eq!(request.max_completion_tokens, Some(128));
     }
 
     #[test]
