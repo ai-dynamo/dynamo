@@ -37,7 +37,6 @@ const disaggregatedSetEligibleConditionType = "DisaggregatedSetEligible"
 type disaggregatedSetProgram struct {
 	sharedResources *dgdSharedResourcesReconciler
 	rollout         *dgdWorkerRolloutReconciler
-	restart         *dgdRestartReconciler
 	workloads       *disaggregatedSetWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
 	gate            features.Gate
@@ -57,7 +56,6 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggre
 			r.RBACManager,
 		),
 		rollout:         rollout,
-		restart:         newDGDRestartReconciler(),
 		workloads:       r.newDisaggregatedSetWorkloadsReconciler(rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		gate:            r.RuntimeConfig.Gate,
@@ -126,7 +124,7 @@ func (p *disaggregatedSetProgram) Reconcile(
 	}
 
 	previousRestart := programResult.Status.Restart
-	restart := p.workloads.ResolveRestart(ctx, req.DGD, &programResult.Status, p.restart)
+	restart := p.workloads.ResolveRestart(ctx, req.DGD, &programResult.Status)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 

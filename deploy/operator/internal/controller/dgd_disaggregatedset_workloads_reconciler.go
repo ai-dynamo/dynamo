@@ -32,11 +32,6 @@ import (
 
 type disaggregatedSetWorkloadsReconciler struct {
 	client.Client
-	// reader defaults to the cached client. The graph reconciler replaces it
-	// with the uncached API reader because compatibility cleanup must act on
-	// the authoritative DisaggregatedSet at a pathway switch even when the
-	// informer has not yet observed a write from a previous reconcile.
-	reader                   client.Reader
 	Config                   *configv1alpha1.OperatorConfiguration
 	RuntimeConfig            *commoncontroller.RuntimeConfig
 	Recorder                 events.EventRecorder
@@ -58,9 +53,6 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetWorkloadsReconciler
 		r.DockerSecretRetriever,
 		rollout,
 	)
-	if r.APIReader != nil {
-		workloads.reader = r.APIReader
-	}
 	return workloads
 }
 func newDisaggregatedSetWorkloadsReconciler(
@@ -74,7 +66,6 @@ func newDisaggregatedSetWorkloadsReconciler(
 	componentWorkloads := newComponentWorkloadsReconciler(k8sClient, recorder, rollout)
 	return &disaggregatedSetWorkloadsReconciler{
 		Client:                   k8sClient,
-		reader:                   k8sClient,
 		Config:                   config,
 		RuntimeConfig:            runtimeConfig,
 		Recorder:                 recorder,
@@ -94,9 +85,7 @@ func (r *disaggregatedSetWorkloadsReconciler) ResolveRestart(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-	restart *dgdRestartReconciler,
 ) programRestart {
-	_ = restart
 	statusView := dgd.DeepCopy()
 	statusView.Status = *status
 	restartStatus := r.computeRestartStatus(ctx, statusView)

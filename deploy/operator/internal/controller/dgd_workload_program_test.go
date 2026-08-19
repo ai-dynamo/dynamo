@@ -98,7 +98,6 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 			if disaggregatedSet, ok := got.(*disaggregatedSetProgram); ok {
 				assert.NotNil(t, disaggregatedSet.sharedResources)
 				assert.NotNil(t, disaggregatedSet.rollout)
-				assert.NotNil(t, disaggregatedSet.restart)
 				assert.NotNil(t, disaggregatedSet.workloads)
 				assert.NotNil(t, disaggregatedSet.scalingAdapters)
 			}

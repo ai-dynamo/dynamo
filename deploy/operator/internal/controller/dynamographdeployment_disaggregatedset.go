@@ -265,7 +265,7 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
-	rollingUpdateCtx, err := r.buildRollingUpdateContext(ctx, dgd)
+	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
 	}
@@ -274,7 +274,7 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources
 		return ReconcileResult{}, fmt.Errorf("failed to select DisaggregatedSet roles: %s", reason)
 	}
 
-	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
+	existingRestartAnnotations, err := r.componentWorkloads.getExistingRestartAnnotationsDCD(ctx, dgd)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
@@ -364,7 +364,7 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources
 		}
 	}
 
-	result := r.checkResourcesReadiness(resources)
+	result := checkResourcesReadiness(resources)
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
 		if err := r.deleteStaleDisaggregatedSetServices(ctx, dgd, desiredServiceNames); err != nil {
 			return ReconcileResult{}, err
@@ -437,7 +437,7 @@ func (r *disaggregatedSetWorkloadsReconciler) applyDisaggregatedSetCheckpointSta
 	selection disaggregatedSetSelection,
 ) (bool, error) {
 	for _, componentName := range sortedDCDKeys(dcds) {
-		if err := r.applyDCDCheckpointStartupPolicy(dcds[componentName], checkpointInfos[componentName]); err != nil {
+		if err := r.componentWorkloads.applyCheckpointStartupPolicy(dcds[componentName], checkpointInfos[componentName]); err != nil {
 			return false, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", componentName, err)
 		}
 	}
@@ -478,7 +478,7 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetNonSelect
 		if _, selected := selection.componentToRole[componentName]; selected {
 			continue
 		}
-		if err := r.preserveExistingDCDBackendFramework(ctx, dcd); err != nil {
+		if err := r.componentWorkloads.preserveExistingBackendFramework(ctx, dcd); err != nil {
 			return nil, fmt.Errorf("failed to preserve existing DynamoComponentDeployment backendFramework: %w", err)
 		}
 		_, syncedDCD, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
@@ -556,15 +556,6 @@ func setDisaggregatedSetServiceSelector(service *corev1.Service, setName, roleNa
 		disaggregatedsetv1.RoleLabelKey:     roleName,
 		disaggregatedsetv1.RevisionLabelKey: revision,
 	}
-}
-
-func isDisaggregatedSetServiceSelector(service *corev1.Service) bool {
-	if service == nil {
-		return false
-	}
-	return service.Spec.Selector[disaggregatedsetv1.SetNameLabelKey] != "" &&
-		service.Spec.Selector[disaggregatedsetv1.RoleLabelKey] != "" &&
-		service.Spec.Selector[disaggregatedsetv1.RevisionLabelKey] != ""
 }
 
 func setDesiredDisaggregatedSetServiceSelector(
@@ -1529,7 +1520,7 @@ func (r *disaggregatedSetWorkloadsReconciler) getUpdatedInProgressForDisaggregat
 	updatedInProgress := make([]string, 0, len(inProgress))
 	for _, componentName := range inProgress {
 		if _, selected := selection.componentToRole[componentName]; !selected {
-			isFullyUpdated, reason := r.checkComponentFullyUpdated(ctx, dgd, componentName)
+			isFullyUpdated, reason := r.componentRestartProgress.checkComponentFullyUpdated(ctx, dgd, componentName)
 			if !isFullyUpdated {
 				logger.V(1).Info("component not fully updated", "componentName", componentName, "reason", reason)
 				updatedInProgress = append(updatedInProgress, componentName)
@@ -1553,44 +1544,4 @@ func (r *disaggregatedSetWorkloadsReconciler) getUpdatedInProgressForDisaggregat
 		}
 	}
 	return updatedInProgress
-}
-
-func (r *disaggregatedSetWorkloadsReconciler) buildRollingUpdateContext(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) (dynamo.RollingUpdateContext, error) {
-	return r.rollout.buildRollingUpdateContext(ctx, dgd)
-}
-
-func (r *disaggregatedSetWorkloadsReconciler) getExistingRestartAnnotationsDCD(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) (map[string]string, error) {
-	return r.componentWorkloads.getExistingRestartAnnotationsDCD(ctx, dgd)
-}
-
-func (r *disaggregatedSetWorkloadsReconciler) preserveExistingDCDBackendFramework(
-	ctx context.Context,
-	desired *nvidiacomv1beta1.DynamoComponentDeployment,
-) error {
-	return r.componentWorkloads.preserveExistingBackendFramework(ctx, desired)
-}
-
-func (r *disaggregatedSetWorkloadsReconciler) checkResourcesReadiness(resources []Resource) ReconcileResult {
-	return checkResourcesReadiness(resources)
-}
-
-func (r *disaggregatedSetWorkloadsReconciler) applyDCDCheckpointStartupPolicy(
-	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
-	checkpointInfo *checkpoint.CheckpointInfo,
-) error {
-	return r.componentWorkloads.applyCheckpointStartupPolicy(dcd, checkpointInfo)
-}
-
-func (r *disaggregatedSetWorkloadsReconciler) checkComponentFullyUpdated(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	componentName string,
-) (bool, string) {
-	return r.componentRestartProgress.checkComponentFullyUpdated(ctx, dgd, componentName)
 }

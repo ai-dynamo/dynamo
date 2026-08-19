@@ -5,8 +5,8 @@ go 1.26.6
 require (
 	emperror.dev/errors v0.8.1
 	github.com/Masterminds/semver/v3 v3.4.0
-	github.com/ai-dynamo/dynamo/deploy/snapshot v0.0.0
 	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.12-rc1
+	github.com/ai-dynamo/snapshot/api v0.1.0-alpha.1
 	github.com/bsm/gomega v1.27.10
 	github.com/evanphx/json-patch/v5 v5.9.11
 	github.com/go-logr/logr v1.4.3
@@ -43,8 +43,6 @@ require (
 	sigs.k8s.io/yaml v1.6.0
 	volcano.sh/apis v1.12.2
 )
-
-replace github.com/ai-dynamo/dynamo/deploy/snapshot => ../snapshot
 
 require (
 	cel.dev/expr v0.25.1 // indirect
