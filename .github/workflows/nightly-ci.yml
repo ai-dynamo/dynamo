@@ -565,6 +565,8 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          # Sole writer of this vCluster name; every other caller recovers into it.
+          reset_existing: 'true'
           vcluster_name: nightly-ci-${{ github.run_id }}
           vcluster_namespace: nightly-ci-${{ github.run_id }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
