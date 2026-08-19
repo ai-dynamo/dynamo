@@ -32,7 +32,7 @@ Run the gateway and both workers:
 examples/custom_backend/workflow_hello_world/bespoke/launch.sh
 ```
 
-## Dynamo Orchestration
+## Dynamo Workflow Embedded in the Frontend
 
 The Dynamo implementation declares the graph and binds all three stages to
 discovery-backed remote endpoints. The existing frontend owns the OpenAI
@@ -50,22 +50,24 @@ Run the frontend and three workers:
 examples/custom_backend/workflow_hello_world/dynamo/launch.sh
 ```
 
-## Dynamo with Bespoke Worker Orchestration
+## Dynamo with a Dedicated Orchestrator Worker
 
-This implementation keeps Dynamo's existing frontend, model discovery, and
-routing, but registers one aggregated worker at `dyn://my.endpoint.generate`.
-The worker owns the application control flow: it runs Hello and World
-concurrently, then runs Merge locally. It does not construct a `WorkflowIR`.
+This implementation places the same declarative `WorkflowOrchestrator` in a
+discovered worker at `dyn://workflow-hello-world.orchestrator.generate`. The
+existing frontend starts without a workflow provider or explicit model
+configuration, discovers the orchestrator as a normal model worker, and sends it
+the preprocessed request. The orchestrator runs Hello and World concurrently,
+then calls Merge; all three stages remain remote.
 
 ```text
-OpenAI client -> Dynamo frontend -> aggregated worker --+--> Hello --+
-                                                       +--> World --+--> Merge
+OpenAI client -> Dynamo frontend -> orchestrator worker --+--> remote Hello --+
+                                                         +--> remote World --+--> remote Merge
 ```
 
-Run the frontend and aggregated worker:
+Run the frontend, orchestrator, and three stage workers:
 
 ```bash
-examples/custom_backend/workflow_hello_world/dynamo_bespoke/launch.sh
+examples/custom_backend/workflow_hello_world/dynamo_orchestrator/launch.sh
 ```
 
 ## Send a Request
@@ -81,11 +83,12 @@ Override `--base-url` when the selected launcher uses another port.
 
 ## Responsibility Comparison
 
-| Concern | Bespoke HTTP | Dynamo workflow | Dynamo bespoke |
+| Concern | Bespoke HTTP | Embedded Dynamo workflow | Orchestrator worker |
 | --- | --- | --- | --- |
 | OpenAI request and response handling | Gateway code | Existing frontend | Existing frontend |
-| Worker location | Configured URLs | Three discovery endpoint IDs | One discovery endpoint ID |
-| Fan-out and join | Gateway tasks | Graph scheduler | Aggregated worker code |
-| Merge placement | Inline gateway code | Remote binding | Inline worker code |
-| Cancellation and stage failure | Gateway code | Workflow attempt | Aggregated worker code |
-| Stage input and output checks | HTTP adapter code | Stage contracts | User code |
+| Frontend model configuration | Gateway code | Explicit frontend flags | Discovered orchestrator model card |
+| Worker location | Configured URLs | Three stage endpoint IDs | One model plus three stage endpoint IDs |
+| Fan-out and join | Gateway tasks | Frontend graph scheduler | Worker graph scheduler |
+| Merge placement | Inline gateway code | Remote binding | Remote binding |
+| Cancellation and stage failure | Gateway code | Frontend workflow attempt | Worker workflow attempt |
+| Stage input and output checks | HTTP adapter code | Stage contracts | Stage contracts |
