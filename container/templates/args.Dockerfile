@@ -70,6 +70,13 @@ ARG NIXL_REF={{ context[framework][device_key].nixl_ref }}
 {% elif "nixl_ref" in context[framework] -%}
 ARG NIXL_REF={{ context[framework].nixl_ref }}
 {% endif -%}
+{# NIXL installed from PyPI rather than built from source; target-scoped so a
+   target opts in by declaring nixl_version, e.g. dynamo.frontend. #}
+{% if "nixl_version" in context[framework].get(target, {}) -%}
+ARG NIXL_VERSION={{ context[framework][target].nixl_version }}
+{% elif "nixl_version" in context[framework] -%}
+ARG NIXL_VERSION={{ context[framework].nixl_version }}
+{% endif -%}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
 ARG NIXL_LIBFABRIC_REPO={{ context.dynamo.nixl_libfabric_repo }}
@@ -84,7 +91,6 @@ ARG FRAMEWORK={{ framework }}
 {% if target == "frontend" %}
 ARG EPP_IMAGE={{ context.dynamo.epp_image }}
 ARG FRONTEND_IMAGE={{ context.dynamo.frontend_image }}
-ARG NIXL_VERSION={{ context.dynamo.nixl_version }}
 {% endif %}
 
 {% if target == "planner" %}

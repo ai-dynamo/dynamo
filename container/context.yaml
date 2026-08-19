@@ -21,6 +21,11 @@ dynamo:
     # is a STEM; the licenses stage appends -${TARGETARCH}.cdx.json so each arch
     # of a multi-arch build subtracts its own-arch floor (the @<digest8> is the
     # shared multi-arch index digest).
+  frontend:
+    # The frontend installs NIXL from PyPI instead of the wheel_builder source
+    # build; scoped here so it can move independently of nixl_ref, which pins
+    # the C++ SDK the runtime target's nixl-sys links against.
+    nixl_version: "1.3.2"
   epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.2
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
   # Self-baseline of the ubuntu frontend base; the licenses stage subtracts it so
@@ -42,9 +47,6 @@ dynamo:
   etcd_version: v3.5.33
 
   nixl_ref: v1.0.1
-  # NIXL release the frontend image installs from PyPI; independent of nixl_ref,
-  # which drives the from-source build used by the runtime target.
-  nixl_version: "1.3.2"
   nixl_ucx_ref: v1.21.0
   nixl_gdrcopy_ref: v2.5.2
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
