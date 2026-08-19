@@ -89,6 +89,32 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     raw.update(lowered)
 
 
+def _with_aic_speculation(raw: dict | None, args) -> dict | None:
+    """Default the speculative-decoding engine args from the ``--aic-*`` flags.
+
+    ``--aic-nextn`` and ``--aic-nextn-accept-rates`` are routed into
+    ``AicPerfConfig``, which only feeds the router's prefill-load estimator. The
+    engine timing and the speculative burst sampler read them off the engine
+    args instead, which is why the same values passed through
+    ``--extra-engine-args`` take effect while the dedicated flags did not.
+
+    An explicit value in the engine args wins, so a caller can still override
+    per worker type. Returns ``raw`` untouched when neither flag was given, so
+    a run with no engine args and no speculation keeps passing ``None``.
+    """
+    nextn = getattr(args, "aic_nextn", None)
+    accept_rates = getattr(args, "aic_nextn_accept_rates", None)
+    if nextn is None and accept_rates is None:
+        return raw
+
+    merged = dict(raw or {})
+    if nextn is not None:
+        merged.setdefault("aic_nextn", nextn)
+    if accept_rates is not None:
+        merged.setdefault("aic_nextn_accept_rates", accept_rates)
+    return merged
+
+
 def _load_engine_args(raw_args: str | None):
     if raw_args is None:
         return None
@@ -631,20 +657,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(
                 "--max-sim-time-seconds is not supported with --planner-config"
             )
+    # Speculation is a decode-side concept, so the flags are defaulted into the
+    # aggregated and decode engine args only. Prefill does not speculate, and
+    # modelling it there would change prefill timing.
+    extra_raw = _with_aic_speculation(base_config.extra_engine_args, args)
     extra_engine_args = _load_engine_args(
-        json.dumps(base_config.extra_engine_args)
-        if base_config.extra_engine_args is not None
-        else None
+        json.dumps(extra_raw) if extra_raw is not None else None
     )
     prefill_engine_args = _load_engine_args(
         json.dumps(base_config.prefill_engine_args)
         if base_config.prefill_engine_args is not None
         else None
     )
+    decode_raw = _with_aic_speculation(base_config.decode_engine_args, args)
     decode_engine_args = _load_engine_args(
-        json.dumps(base_config.decode_engine_args)
-        if base_config.decode_engine_args is not None
-        else None
+        json.dumps(decode_raw) if decode_raw is not None else None
     )
     router_config = _load_router_config(
         args.router_config,

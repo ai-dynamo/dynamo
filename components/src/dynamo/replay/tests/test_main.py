@@ -369,3 +369,51 @@ def test_engine_and_dynamo_mains_apply_identical_aic_capacity_lowering(
     assert engine_blocks == dynamo_blocks == 444
     assert len(estimator_calls) == 2
     assert all("nextn" not in call for call in estimator_calls)
+
+
+class _AicSpecArgs:
+    """Only the two attributes `_with_aic_speculation` reads."""
+
+    def __init__(self, aic_nextn=None, aic_nextn_accept_rates=None) -> None:
+        self.aic_nextn = aic_nextn
+        self.aic_nextn_accept_rates = aic_nextn_accept_rates
+
+
+def test_aic_speculation_flags_reach_the_engine_args() -> None:
+    # The flags are routed into AicPerfConfig, which only feeds the router's
+    # prefill-load estimator. The burst sampler reads them off the engine args,
+    # so without this the simulation modelled no speculation at all.
+    merged = replay_main._with_aic_speculation(
+        None, _AicSpecArgs(aic_nextn=5, aic_nextn_accept_rates="1,1,1,1,1")
+    )
+
+    assert merged == {"aic_nextn": 5, "aic_nextn_accept_rates": "1,1,1,1,1"}
+
+
+def test_aic_speculation_does_not_invent_engine_args() -> None:
+    # A run with no engine args and no speculation must keep passing None
+    # rather than an empty dict.
+    assert replay_main._with_aic_speculation(None, _AicSpecArgs()) is None
+
+
+def test_explicit_engine_args_win_over_the_aic_flags() -> None:
+    # --extra-engine-args is the documented per-worker override, so a value
+    # already present there is not overwritten by the CLI default.
+    merged = replay_main._with_aic_speculation(
+        {"aic_nextn": 2, "block_size": 16},
+        _AicSpecArgs(aic_nextn=5, aic_nextn_accept_rates="1,1,1,1,1"),
+    )
+
+    assert merged["aic_nextn"] == 2
+    assert merged["block_size"] == 16
+    assert merged["aic_nextn_accept_rates"] == "1,1,1,1,1"
+
+
+def test_zero_accept_rate_is_not_treated_as_unset() -> None:
+    # "--aic-nextn 1 --aic-nextn-accept-rates 0" is a meaningful configuration
+    # (draft never accepted); a falsy check would silently drop it.
+    merged = replay_main._with_aic_speculation(
+        None, _AicSpecArgs(aic_nextn=1, aic_nextn_accept_rates="0")
+    )
+
+    assert merged == {"aic_nextn": 1, "aic_nextn_accept_rates": "0"}
