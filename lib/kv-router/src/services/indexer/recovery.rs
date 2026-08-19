@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -11,19 +12,48 @@ use crate::protocols::RouterEvent;
 
 use super::registry::WorkerRegistry;
 
+/// Timeout for one peer `/dump` fetch (HTTP request + body transfer). A full
+/// KV-index snapshot can be tens of MB on a busy deployment; 10s only fits
+/// small indexes once serialization and parsing are counted. Configurable via
+/// `DYN_EPP_RECOVERY_HTTP_TIMEOUT_MS` for larger clusters.
+const DEFAULT_RECOVERY_HTTP_TIMEOUT_MS: u64 = 30_000;
+const RECOVERY_HTTP_TIMEOUT_ENV: &str = "DYN_EPP_RECOVERY_HTTP_TIMEOUT_MS";
+/// Safety ceiling on the accepted `/dump` response body. The whole snapshot is
+/// materialized in memory on both sides today (streaming is a follow-up), so
+/// an unbounded body either OOMs or trips the timeout and then the retry loop.
+/// Fail fast with a clear error instead. Configurable via
+/// `DYN_EPP_RECOVERY_MAX_DUMP_BYTES`.
+const DEFAULT_MAX_DUMP_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_DUMP_BYTES_ENV: &str = "DYN_EPP_RECOVERY_MAX_DUMP_BYTES";
+
 #[derive(Deserialize)]
 struct DumpEntry {
     block_size: u32,
     events: Vec<RouterEvent>,
 }
 
+fn parse_u64(value: Option<String>, default: u64) -> u64 {
+    value
+        .as_deref()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    parse_u64(std::env::var(key).ok(), default)
+}
+
 pub async fn recover_from_peers(peers: &[String], registry: &WorkerRegistry) -> Result<bool> {
+    let timeout = Duration::from_millis(env_u64(
+        RECOVERY_HTTP_TIMEOUT_ENV,
+        DEFAULT_RECOVERY_HTTP_TIMEOUT_MS,
+    ));
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(timeout)
         .build()
         .context("failed to build HTTP client")?;
 
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     for peer_url in peers {
         match try_recover_from_peer(&client, peer_url, registry).await {
@@ -56,6 +86,20 @@ async fn try_recover_from_peer(
 
     if !resp.status().is_success() {
         anyhow::bail!("peer returned status {}", resp.status());
+    }
+
+    // Fail fast on an oversized snapshot before reading the body: the dump is
+    // materialized fully in memory on both sides, so a large body either OOMs
+    // or trips the request timeout and the retry loop. A clear error is more
+    // actionable than either.
+    let max_dump_bytes = env_u64(MAX_DUMP_BYTES_ENV, DEFAULT_MAX_DUMP_BYTES);
+    if let Some(len) = resp.content_length()
+        && len > max_dump_bytes
+    {
+        anyhow::bail!(
+            "peer dump is too large: {len} bytes exceeds limit {max_dump_bytes} \
+             (raise {MAX_DUMP_BYTES_ENV} to accept larger snapshots)"
+        );
     }
 
     let dump: HashMap<String, DumpEntry> =
@@ -91,4 +135,24 @@ async fn try_recover_from_peer(
     // serving peer holds.
     tracing::info!(total_events, "applied dump events from peer");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_u64_falls_back_on_missing_or_invalid() {
+        assert_eq!(parse_u64(None, 30_000), 30_000);
+        assert_eq!(parse_u64(Some("not-a-number".to_string()), 30_000), 30_000);
+        assert_eq!(parse_u64(Some(" 123 ".to_string()), 30_000), 123);
+        assert_eq!(parse_u64(Some("0".to_string()), 30_000), 0);
+    }
+
+    #[test]
+    fn parse_u64_accepts_zero() {
+        // Zero is a valid explicit value (e.g. disabling a cap); it must not be
+        // treated as a parse failure that falls back to the default.
+        assert_eq!(parse_u64(Some("0".to_string()), 512), 0);
+    }
 }
