@@ -10,10 +10,10 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 181 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 171 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">83 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">73 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">66 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
@@ -38,8 +38,6 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 <Card title="DynamoGraphDeploymentRequest" href="#dynamographdeploymentrequest" />
 <Card title="DynamoGraphDeploymentScalingAdapter" href="#dynamographdeploymentscalingadapter" />
 <Card title="DynamoModel" href="#dynamomodel" />
-<Card title="PodSnapshot" href="#podsnapshot" />
-<Card title="PodSnapshotContent" href="#podsnapshotcontent" />
 </CardGroup>
 
 <Accordion id="autoscaling" title="Autoscaling">
@@ -1732,221 +1730,6 @@ Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0] where
 State indicates placement score reporting state.
 See [PlacementScoreState](#placementscorestate).
 **Validation:** Enum: [Reported Partial Unsupported Unknown]  Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podreference" title="PodReference">
-PodReference names a pod in the same namespace as the referencing PodSnapshot.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotContentSource](#podsnapshotcontentsource), [PodSnapshotSource](#podsnapshotsource)
-
-<ParamField path="name" type="string" required={true}>
-Name of the source pod.
-**Validation:** MinLength: 1  Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="uid" type="UID">
-UID of the source pod, recorded so the node agent dumps that specific pod and not a same-named recreation.
-See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="containers" type="string array" required={true}>
-Containers narrows the capture to these containers of the source pod. The node agent reads this instead of the source pod's target-container annotation. v1alpha1 supports exactly one container; the cap is lifted when the runtime supports multi-container capture.
-**Validation:** MaxItems: 1  MinItems: 1  Required: \&#123;\&#125;  items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshot" title="PodSnapshot">
-PodSnapshot is the Schema for the snapshots API. It is the namespaced binding
-for a captured container checkpoint and is consumed by restore paths.
-
-No conversion: this type exists only in v1alpha1 (no other API version), so it
-is not part of any conversion scheme.
-
-
-**Kind:** `resource`
-
-<ParamField path="apiVersion" type="string">
-`nvidia.com/v1alpha1`
-</ParamField>
-
-<ParamField path="kind" type="string">
-`PodSnapshot`
-</ParamField>
-
-<ParamField path="metadata" type="ObjectMeta">
-Refer to Kubernetes API documentation for fields of `metadata`.
-See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
-</ParamField>
-
-<ParamField path="spec" type="PodSnapshotSpec">
-See [PodSnapshotSpec](#podsnapshotspec).
-</ParamField>
-
-<ParamField path="status" type="PodSnapshotStatus">
-See [PodSnapshotStatus](#podsnapshotstatus).
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotcontent" title="PodSnapshotContent">
-PodSnapshotContent is the Schema for the snapshotcontents API. It is the
-cluster-scoped artifact-of-record for a captured container checkpoint.
-
-No conversion: this type exists only in v1alpha1 (no other API version), so it
-is not part of any conversion scheme.
-
-
-**Kind:** `resource`
-
-<ParamField path="apiVersion" type="string">
-`nvidia.com/v1alpha1`
-</ParamField>
-
-<ParamField path="kind" type="string">
-`PodSnapshotContent`
-</ParamField>
-
-<ParamField path="metadata" type="ObjectMeta">
-Refer to Kubernetes API documentation for fields of `metadata`.
-See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
-</ParamField>
-
-<ParamField path="spec" type="PodSnapshotContentSpec">
-See [PodSnapshotContentSpec](#podsnapshotcontentspec).
-</ParamField>
-
-<ParamField path="status" type="PodSnapshotContentStatus">
-See [PodSnapshotContentStatus](#podsnapshotcontentstatus).
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotcontentsource" title="PodSnapshotContentSource">
-PodSnapshotContentSource is the immutable source descriptor: what to dump
-(PodRef) and where it runs (NodeName).
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotContentSpec](#podsnapshotcontentspec)
-
-<ParamField path="podRef" type="PodReference" required={true}>
-PodRef identifies the pod to dump. Its UID guards against dumping a same-named recreation of the pod.
-See [PodReference](#podreference).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="nodeName" type="string" required={true}>
-NodeName is the node the source pod runs on, denormalized from the live pod so it travels with PodRef as one immutable unit and selects the node agent that performs the dump.
-**Validation:** MinLength: 1  Required: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotcontentspec" title="PodSnapshotContentSpec">
-PodSnapshotContentSpec defines the desired state of PodSnapshotContent. It is
-populated by the PodSnapshotReconciler (operator) at creation time and is
-immutable thereafter.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotContent](#podsnapshotcontent)
-
-<ParamField path="snapshotRef" type="PodSnapshotReference" required={true}>
-PodSnapshotRef is the back-pointer to the bound PodSnapshot. It may span namespaces because PodSnapshotContent is cluster-scoped.
-See [PodSnapshotReference](#podsnapshotreference).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="source" type="PodSnapshotContentSource" required={true}>
-Source describes what to capture: the source pod and the node it runs on.
-See [PodSnapshotContentSource](#podsnapshotcontentsource).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotcontentstatus" title="PodSnapshotContentStatus">
-PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotContent](#podsnapshotcontent)
-
-<ParamField path="conditions" type="Condition array">
-Conditions reflect the latest observations of the PodSnapshotContent's state. Standard types are Ready and Failed.
-See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotreference" title="PodSnapshotReference">
-PodSnapshotReference is a cross-namespace reference to a PodSnapshot.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotContentSpec](#podsnapshotcontentspec)
-
-<ParamField path="namespace" type="string" required={true}>
-Namespace of the referenced PodSnapshot.
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="name" type="string" required={true}>
-Name of the referenced PodSnapshot.
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="uid" type="UID">
-UID of the referenced PodSnapshot, recorded at binding time to detect a stale reference after a delete and recreate.
-See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotsource" title="PodSnapshotSource">
-PodSnapshotSource identifies the workload captured by a PodSnapshot.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshotSpec](#podsnapshotspec)
-
-<ParamField path="podRef" type="PodReference" required={true}>
-PodRef references the pod, in the PodSnapshot's namespace, that is captured. The operator prepares the pod (control volume, checkpoint storage mount) before creating the PodSnapshot. The capture target container is carried on PodRef.Containers, not a pod annotation.
-See [PodReference](#podreference).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotspec" title="PodSnapshotSpec">
-PodSnapshotSpec defines the desired state of PodSnapshot.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshot](#podsnapshot)
-
-<ParamField path="source" type="PodSnapshotSource" required={true}>
-Source identifies the captured workload. It is a struct (rather than an inlined reference) so future source variants can be added additively.
-See [PodSnapshotSource](#podsnapshotsource).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="podsnapshotstatus" title="PodSnapshotStatus">
-PodSnapshotStatus defines the observed state of PodSnapshot.
-
-
-**Kind:** `type`
-**Appears in:** [PodSnapshot](#podsnapshot)
-
-<ParamField path="boundSnapshotContentName" type="string">
-BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent this PodSnapshot is bound to. It is nil until the agent has created the content and recorded the binding.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="conditions" type="Condition array">
-Conditions reflect the latest observations of the PodSnapshot's state. Standard types are Ready and Failed.
-See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

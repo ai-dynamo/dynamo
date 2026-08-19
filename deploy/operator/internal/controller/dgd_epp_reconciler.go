@@ -104,7 +104,10 @@ func (r *dgdEPPReconciler) Reconcile(
 	meshEnabled := r.runtimeConfig.Gate.Enabled(features.Istio)
 	istioAvailable := meshEnabled
 	if !meshEnabled {
-		istioAvailable = features.DetectIstioDestinationRuleAvailability(ctx, r.restConfig)
+		istioAvailable, err = features.DetectIstioDestinationRuleAvailability(ctx, r.restConfig)
+		if err != nil {
+			return fmt.Errorf("detect Istio DestinationRule API availability: %w", err)
+		}
 	}
 	if istioAvailable {
 		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.config.ServiceMesh)

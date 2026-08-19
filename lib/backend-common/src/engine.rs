@@ -334,7 +334,24 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Validate an engine-control request before the Backend SDK applies any
+    /// discovery lifecycle policy. Implementations must not mutate engine
+    /// state. Override this for controls whose request fields can be rejected
+    /// before an `UnregisterBefore` transition.
+    fn validate_engine_control(
+        &self,
+        _control: &str,
+        _body: &serde_json::Value,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
     /// Handle one semantic engine-control request.
+    ///
+    /// Wake/resume controls whose Backend SDK policy re-registers the serving
+    /// endpoint must return `is_sleeping: true` whenever the engine is not yet
+    /// serving-ready (for example, after a partial wake). A non-error response
+    /// without that field is treated as ready and allows endpoint registration.
     async fn engine_control(
         &self,
         control: String,
