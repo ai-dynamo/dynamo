@@ -1301,9 +1301,18 @@ class HandlerBase(BaseGenerativeHandler):
                             out["top_logprobs"] = top_logprobs
 
                         if prompt_logprobs_payload is None:
-                            prompt_logprobs_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                            payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
                                 output
                             )
+                            if payload:
+                                # TRT-LLM aligns prompt logprobs to
+                                # `prompt_token_ids[1:] + first_generation_token`,
+                                # so index i describes prompt token i+1 and the
+                                # last entry describes the first *generated*
+                                # token. Drop that entry and prepend `None` to
+                                # restore Dynamo's `PromptLogprobs` contract
+                                # (index i -> prompt token i, BOS = None).
+                                prompt_logprobs_payload = [None, *payload[:-1]]
 
                         if output.finish_reason:
                             out["finish_reason"] = output.finish_reason
