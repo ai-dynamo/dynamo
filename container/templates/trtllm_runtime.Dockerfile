@@ -320,14 +320,31 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # PyNvVideoCodec waivers are deliberately scoped to libavutil and libavformat so
 # that a bundled libavcodec has to be looked at rather than absorbed silently.
 #
-# Beyond the gate, two concrete defects in 2.1.0 that 2.2.0 fixes: it carries
-# GPL-only libpostproc sources while NOTICES.txt declares LGPLv3 only, and on
-# aarch64 its binaries are FFmpeg 7.1 against a 7.0.2 source tarball -- an LGPL
-# source-correspondence mismatch. 2.2.0 is 8.1.2 binaries against 8.1.2 source.
-# Package size drops 52M -> 24M (2.1.0's bundled libs are real copies, not
-# symlinks). Do NOT justify this upgrade as removing royalty exposure: the only
-# decoder it removes is vp9, the royalty-free one, and royalties for the
-# GPU-accelerated families are covered by the hardware licensing model.
+# The version of those libraries is the main reason to move, and it is easy to
+# miss because the package ships no ffmpeg executable -- only shared libraries.
+# 2.1.0's libavcodec.so.61.3.100 and libavformat.so.61.1.100 embed "FFmpeg
+# version 7.0.2", and they are on the runtime path rather than inert: readelf -d
+# on PyNvVideoCodec_130.cpython-312-x86_64-linux-gnu.so lists libavformat.so.61,
+# libavcodec.so.61, libswresample.so.5 and libavutil.so.59 as NEEDED. 2.2.0's
+# libavformat.so.62.12.102 embeds "FFmpeg version 8.1.2", which is the floor
+# deny_components sets for ffmpeg in codec_policy.yaml. 2.1.0 sits below it.
+#
+# Note that the gate did not tell us this. deny_components is evaluated against
+# SBOM components (scan_codecs.scan_sbom), and the SBOM does not enumerate
+# wheel-bundled .so files as an "ffmpeg" component -- the rc24 failure produced
+# zero sbom: findings, and all 20 violations were filename globs. So the floor
+# is unenforced for every wheel-vendored FFmpeg in every image, not just this
+# one. Worth fixing in the scanner; do not assume this check has your back.
+#
+# Two further defects in 2.1.0 that 2.2.0 fixes: GPL-only libpostproc sources
+# while NOTICES.txt declares LGPLv3 only, and on aarch64 binaries built from
+# FFmpeg 7.1 shipped against a 7.0.2 source tarball -- an LGPL
+# source-correspondence mismatch. Package size drops 52M -> 24M (2.1.0's
+# bundled libs are real copies, not symlinks).
+#
+# Do NOT justify this upgrade as removing royalty exposure: the only decoder it
+# removes is vp9, the royalty-free one, and royalties for the GPU-accelerated
+# families are covered by the hardware licensing model.
 #
 # Upgrade rather than waive. A waiver has to be written as a glob, and a glob
 # cannot say "this version's libavcodec is empty" -- it would carry forward to a
@@ -505,13 +522,22 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # version-stamped, so this is the aiohttp rename problem again rather than the
 # opencv one: runtime_full's pip upgrade removes ffmpeg-7.0.2.tar.xz and writes
 # ffmpeg-8.1.2.tar.xz, the overlay COPY cannot express that deletion, and the
-# image would ship BOTH -- ~10.8 MB of dead weight whose real cost is that the
-# stale tarball is the LGPL source-correspondence artifact for binaries that are
-# no longer present. The codec scan does not catch this: its deny globs match
-# libav*.so*/libsw*.so*, never a .tar.xz, and allow_paths lists
-# /usr/local/src/ffmpeg (our in-tree build), not this path. Dropping the whole
-# directory is right -- the overlay restores runtime_full's 8.1.2 copy, which is
-# the one that corresponds to the shipped binaries.
+# image would ship BOTH.
+#
+# Keep the scope of that honest: a source tarball is inert, nothing on the
+# runtime path reads it, and the exposure discussed above is in the shipped .so
+# files, not here. This entry buys ~10.8 MB and a tree that matches what
+# actually ships -- a stale 7.0.2 source sitting beside 8.1.2 binaries invites a
+# future reader to conclude the wrong thing about either. The codec scan cannot
+# arbitrate: its deny globs match libav*.so*/libsw*.so*, never a .tar.xz, and
+# allow_paths lists /usr/local/src/ffmpeg (our in-tree build), not this path.
+#
+# Delete the directory rather than a single file, and note that the tarball is
+# not junk: NOTICES.txt declares LGPLv3 for the bundled FFmpeg, so the source is
+# the corresponding-source obligation for the .so files the extension links
+# against. That is why the overlay must restore runtime_full's copy -- the point
+# is to ship exactly one tarball, the one matching the shipped binaries, not to
+# ship none.
 #
 # Its runtime dependencies are listed for the same reason. pip upgrades those too
 # when the new aiohttp requires versions the base does not carry, and each rename
