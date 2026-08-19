@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from vllm.engine.arg_utils import AsyncEngineArgs
 
 from dynamo.common.constants import (
+    ROUTER_HINT_GUARD_CONTROL_ENDPOINTS_RUNTIME_KEY,
     ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
     ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
@@ -118,6 +119,33 @@ def _router_hint_source_control_endpoints(
     return endpoints
 
 
+def _router_hint_guard_control_endpoints(
+    tier: Mapping[str, Any], dp_range: tuple[int, int]
+) -> dict[str, str] | None:
+    """Discover service-owned Guard endpoints keyed by global DP rank."""
+    socket_path = tier.get("kvcr_service_socket_path")
+    if not socket_path:
+        return None
+
+    from kvcr import KVCRClient
+
+    guard_endpoints = KVCRClient(socket_path).guard_endpoints()
+    if not guard_endpoints:
+        return None
+
+    dp_start, dp_size = dp_range
+    if len(guard_endpoints) != dp_size:
+        raise ValueError(
+            "KVCR-Service must advertise exactly "
+            f"{dp_size} Guard endpoints for the worker-local DP ranks; "
+            f"got {len(guard_endpoints)}"
+        )
+    return {
+        str(dp_start + local_dp_rank): endpoint
+        for local_dp_rank, endpoint in enumerate(guard_endpoints)
+    }
+
+
 def _router_hint_worker_type(worker_type: WorkerType) -> str | None:
     """Normalize a Dynamo WorkerType value into router-hint runtime metadata."""
     role = getattr(worker_type, "value", None)
@@ -150,12 +178,14 @@ def enable_router_hint_support(
             "secondary tier; found multiple tiers advertising router_hint"
         )
 
-    endpoints = _router_hint_source_control_endpoints(router_hint_tiers[0], dp_range)
+    tier = router_hint_tiers[0]
+    endpoints = _router_hint_source_control_endpoints(tier, dp_range)
     if endpoints is None:
         raise ValueError(
             "router_hint support requires advertisable source control endpoints "
             "for all managed DP ranks"
         )
+    guard_endpoints = _router_hint_guard_control_endpoints(tier, dp_range)
 
     # set_engine_specific expects JSON text; the PyO3 binding parses each value
     # with serde_json::from_str, so Python strings must be json.dumps'ed first.
@@ -164,6 +194,11 @@ def enable_router_hint_support(
     runtime_config.set_engine_specific(
         ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, json.dumps(endpoints)
     )
+    if guard_endpoints is not None:
+        runtime_config.set_engine_specific(
+            ROUTER_HINT_GUARD_CONTROL_ENDPOINTS_RUNTIME_KEY,
+            json.dumps(guard_endpoints),
+        )
     runtime_config.set_engine_specific(
         ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, json.dumps(router_hint_worker_type)
     )

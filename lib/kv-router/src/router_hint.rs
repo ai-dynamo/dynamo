@@ -20,9 +20,15 @@ pub const ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY: &str = "router_hint_worker_type";
 pub const ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
     "router_hint_source_control_endpoints";
 
+/// Worker runtime_data key for per-global-DP-rank KVCR Guard control endpoints.
+pub const ROUTER_HINT_GUARD_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
+    "router_hint_guard_control_endpoints";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RouterHint {
     pub source_control_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_control_endpoint: Option<String>,
     /// Root-aligned source-side KV block hashes. `block_hashes[i]`
     /// corresponds to request block `i`; the target decides which suffix to fetch.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,

@@ -557,6 +557,7 @@ mod tests {
             .unwrap();
         let hint = RouterHint {
             source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+            guard_control_endpoint: Some("tcp://127.0.0.1:24280".to_string()),
             block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
         };
 
@@ -571,6 +572,10 @@ mod tests {
         assert_eq!(
             extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["source_control_endpoint"],
             "tcp://127.0.0.1:23280"
+        );
+        assert_eq!(
+            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["guard_control_endpoint"],
+            "tcp://127.0.0.1:24280"
         );
         assert_eq!(
             extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
@@ -604,6 +609,7 @@ mod tests {
                 .unwrap();
             let hint = RouterHint {
                 source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+                guard_control_endpoint: None,
                 block_hashes: vec![ExternalSequenceBlockHash(33)],
             };
 
@@ -614,6 +620,11 @@ mod tests {
             assert_eq!(
                 extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
                 serde_json::json!([33])
+            );
+            assert!(
+                extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]
+                    .get("guard_control_endpoint")
+                    .is_none()
             );
         }
     }

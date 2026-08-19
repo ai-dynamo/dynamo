@@ -275,6 +275,7 @@ fn compute_seq_hash_for_block_with(
 pub struct RouterHintWorkerMetadata<'a> {
     pub worker_type: &'a str,
     pub source_control_endpoint: Option<&'a str>,
+    pub guard_control_endpoint: Option<&'a str>,
 }
 
 /// Trait abstracting the worker configuration fields needed by the scheduling layer.

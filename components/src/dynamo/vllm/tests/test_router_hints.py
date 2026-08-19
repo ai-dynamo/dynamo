@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from dynamo.common.constants import (
+    ROUTER_HINT_GUARD_CONTROL_ENDPOINTS_RUNTIME_KEY,
     ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
     ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
@@ -126,6 +128,57 @@ def test_enable_router_hint_support_publishes_runtime_metadata(
         ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
         json.dumps(expected_endpoints),
     )
+
+
+def test_enable_router_hint_support_discovers_service_guard_endpoints(monkeypatch):
+    kvcr_client = MagicMock()
+    kvcr_client.return_value.guard_endpoints.return_value = (
+        "tcp://guard-a:24280",
+        "tcp://guard-a:24281",
+    )
+    monkeypatch.setitem(sys.modules, "kvcr", SimpleNamespace(KVCRClient=kvcr_client))
+    runtime_config = MagicMock()
+    tier = {
+        "router_capabilities": ["router_hint"],
+        "control_advertise_host": "worker-a",
+        "control_ports": [23280, 23281],
+        "kvcr_service_socket_path": "/run/kvcr-service.sock",
+    }
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={"secondary_tiers": [tier]}
+        )
+    )
+
+    enable_router_hint_support(
+        runtime_config, engine_args, WorkerType.Prefill, dp_range=(4, 2)
+    )
+
+    kvcr_client.assert_called_once_with("/run/kvcr-service.sock")
+    runtime_config.set_engine_specific.assert_any_call(
+        ROUTER_HINT_GUARD_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        json.dumps({"4": "tcp://guard-a:24280", "5": "tcp://guard-a:24281"}),
+    )
+
+    kvcr_client.return_value.guard_endpoints.return_value = []
+    runtime_config.reset_mock()
+    enable_router_hint_support(
+        runtime_config, engine_args, WorkerType.Prefill, dp_range=(4, 2)
+    )
+
+    assert all(
+        call.args[0] != ROUTER_HINT_GUARD_CONTROL_ENDPOINTS_RUNTIME_KEY
+        for call in runtime_config.set_engine_specific.call_args_list
+    )
+
+    kvcr_client.return_value.guard_endpoints.return_value = ("tcp://guard-a:24280",)
+    runtime_config.reset_mock()
+    with pytest.raises(ValueError, match="exactly 2 Guard endpoints"):
+        enable_router_hint_support(
+            runtime_config, engine_args, WorkerType.Prefill, dp_range=(4, 2)
+        )
+
+    runtime_config.set_engine_specific.assert_not_called()
 
 
 # Skip cases: without both router-hint capability and a supported worker role,

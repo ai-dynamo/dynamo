@@ -13,8 +13,8 @@ use validator::{Validate, ValidationError};
 use dynamo_kv_router::{
     protocols::{KvTransferEnforcement, RouterHintWorkerMetadata},
     router_hint::{
-        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
+        ROUTER_HINT_GUARD_CONTROL_ENDPOINTS_RUNTIME_KEY, ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
+        ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
     },
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
@@ -391,11 +391,11 @@ impl ModelRuntimeConfig {
         }
     }
 
-    fn router_hint_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
+    fn router_hint_endpoint_for_dp_rank(&self, runtime_key: &str, dp_rank: u32) -> Option<&str> {
         let dp_rank = dp_rank.to_string();
         let endpoint = self
             .runtime_data
-            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
+            .get(runtime_key)?
             .as_object()?
             .get(&dp_rank)?
             .as_str()?;
@@ -438,7 +438,14 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
 
         Some(RouterHintWorkerMetadata {
             worker_type,
-            source_control_endpoint: self.router_hint_endpoint_for_dp_rank(dp_rank),
+            source_control_endpoint: self.router_hint_endpoint_for_dp_rank(
+                ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                dp_rank,
+            ),
+            guard_control_endpoint: self.router_hint_endpoint_for_dp_rank(
+                ROUTER_HINT_GUARD_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                dp_rank,
+            ),
         })
     }
 

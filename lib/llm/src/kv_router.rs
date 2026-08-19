@@ -668,7 +668,7 @@ where
     ) -> Option<RouterHint> {
         let candidates = candidates?;
 
-        let (block_hashes, source_control_endpoint) = {
+        let (block_hashes, source_control_endpoint, guard_control_endpoint) = {
             let configs = self.workers_with_configs.borrow();
             let target_config = configs.get(&target.worker_id)?;
             let target_metadata = target_config.router_hint_metadata_for_dp_rank(target.dp_rank)?;
@@ -687,12 +687,16 @@ where
                                 })
                         })
                 })?;
-            let source_control_endpoint = configs
+            let source_metadata = configs
                 .get(&source.worker_id)?
-                .router_hint_metadata_for_dp_rank(source.dp_rank)?
-                .source_control_endpoint?
-                .to_string();
-            (block_hashes, source_control_endpoint)
+                .router_hint_metadata_for_dp_rank(source.dp_rank)?;
+            let source_control_endpoint = source_metadata.source_control_endpoint?.to_string();
+            let guard_control_endpoint = source_metadata.guard_control_endpoint.map(str::to_string);
+            (
+                block_hashes,
+                source_control_endpoint,
+                guard_control_endpoint,
+            )
         };
 
         if block_hashes.is_empty() {
@@ -701,6 +705,7 @@ where
 
         Some(RouterHint {
             source_control_endpoint,
+            guard_control_endpoint,
             block_hashes,
         })
     }
@@ -2163,13 +2168,20 @@ mod tests {
     #[tokio::test]
     async fn router_hint_allows_other_dp_ranks_of_selected_target_worker() {
         let mut workers = HashMap::new();
-        workers.insert(
-            7,
-            router_hint_runtime_config_with_dp_endpoints(&[
-                (0, "tcp://127.0.0.1:23280"),
-                (1, "tcp://127.0.0.1:23281"),
-            ]),
-        );
+        let mut source = router_hint_runtime_config_with_dp_endpoints(&[
+            (0, "tcp://127.0.0.1:23280"),
+            (1, "tcp://127.0.0.1:23281"),
+        ]);
+        source
+            .set_engine_specific(
+                dynamo_kv_router::router_hint::ROUTER_HINT_GUARD_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                serde_json::json!({
+                    "0": "tcp://127.0.0.1:24280",
+                    "1": "tcp://127.0.0.1:24281",
+                }),
+            )
+            .unwrap();
+        workers.insert(7, source);
         let router = make_test_router_with_workers(
             InspectingSelector {
                 expected_hits: None,
@@ -2194,6 +2206,7 @@ mod tests {
             hint,
             Some(RouterHint {
                 source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
+                guard_control_endpoint: Some("tcp://127.0.0.1:24281".to_string()),
                 block_hashes: vec![
                     ExternalSequenceBlockHash(101),
                     ExternalSequenceBlockHash(102)
@@ -2312,6 +2325,7 @@ mod tests {
             prefill_hint,
             Some(RouterHint {
                 source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
+                guard_control_endpoint: None,
                 block_hashes: vec![
                     ExternalSequenceBlockHash(101),
                     ExternalSequenceBlockHash(102),
@@ -2325,6 +2339,7 @@ mod tests {
             decode_hint,
             Some(RouterHint {
                 source_control_endpoint: "tcp://127.0.0.1:23282".to_string(),
+                guard_control_endpoint: None,
                 block_hashes: vec![
                     ExternalSequenceBlockHash(101),
                     ExternalSequenceBlockHash(102),

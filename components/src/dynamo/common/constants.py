@@ -10,6 +10,7 @@ ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY = "router_hint_worker_type"
 ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY = (
     "router_hint_source_control_endpoints"
 )
+ROUTER_HINT_GUARD_CONTROL_ENDPOINTS_RUNTIME_KEY = "router_hint_guard_control_endpoints"
 
 
 class DisaggregationMode(Enum):
