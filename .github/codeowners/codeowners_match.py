@@ -389,13 +389,23 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
             )
 
     raw_unowned = spec.get("unowned", []) or []
+    if not isinstance(raw_unowned, list):
+        # A scalar string would iterate per-character below and silently
+        # emit ownerless rules like ``/d`` ``/o`` ``/c`` ``/s``.
+        raise SystemExit(
+            f"areas.yaml: unowned must be a LIST of glob strings, got {raw_unowned!r}"
+        )
     for g in raw_unowned:
         if not isinstance(g, str) or not g.strip():
             raise SystemExit(
                 f"areas.yaml: unowned entry {g!r} must be a non-empty glob string"
             )
-    unowned = sorted(set(raw_unowned))
-    shared_globs = {s["glob"] for s in spec_shared}
+    # Store anchored so the conflict check below compares the canonical
+    # spelling emission uses -- ``docs/x/`` and ``/docs/x/`` are the same
+    # emitted rule and must collide here (anchor() is idempotent, so the
+    # emitter and coverage gate re-anchoring is a no-op).
+    unowned = sorted({anchor(g) for g in raw_unowned})
+    shared_globs = {anchor(s["glob"]) for s in spec_shared}
     conflict = shared_globs & set(unowned)
     if conflict:
         raise SystemExit(

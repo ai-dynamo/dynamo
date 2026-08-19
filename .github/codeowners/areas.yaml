@@ -1099,5 +1099,5 @@ classify:
   - pattern: '*Dockerfile*'
     coowner: ops
 unowned:
-- docs/fern/pages/reference/api/python/
-- docs/fern/pages/reference/api/rust/
+- docs/fern/pages/reference/api/python/*.mdx
+- docs/fern/pages/reference/api/rust/README.mdx

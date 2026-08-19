@@ -725,5 +725,5 @@
 # Deterministic generator outputs whose integrity is guarded by CI
 # (freshness --check gates), so human review of the artifact is redundant
 # and would route source-only PRs to unrelated reviewers. ---
-/docs/fern/pages/reference/api/rust/
-/docs/fern/pages/reference/api/python/
+/docs/fern/pages/reference/api/python/*.mdx
+/docs/fern/pages/reference/api/rust/README.mdx

@@ -1173,3 +1173,37 @@ class TestUnowned:
         spec["unowned"] = ["  "]
         with pytest.raises(SystemExit, match="non-empty glob"):
             compute_resolution(spec)
+
+    def test_scalar_unowned_is_fatal(self) -> None:
+        # A scalar would iterate per-character and emit /d /o /c /s rules.
+        spec = self._spec()
+        spec["unowned"] = "docs/generated/"
+        with pytest.raises(SystemExit, match="LIST of glob strings"):
+            compute_resolution(spec)
+
+    def test_shared_unowned_conflict_detected_across_anchor_spellings(self) -> None:
+        # docs/x/ and /docs/x/ are the same emitted rule; the guard must
+        # compare canonical (anchored) forms, not raw spellings.
+        spec = self._spec()
+        spec["unowned"] = ["/docs/fern/pages/reference/api/python/"]
+        spec["shared"] = [
+            {"glob": "docs/fern/pages/reference/api/python/", "owners": ["docs"]},
+        ]
+        with pytest.raises(SystemExit, match="shared and unowned"):
+            compute_resolution(spec)
+
+    def test_star_glob_exempts_only_direct_mdx_files(self) -> None:
+        spec = self._spec()
+        spec["unowned"] = ["docs/fern/pages/reference/api/python/*.mdx"]
+        rules = parse_codeowners(self._rendered(spec))
+        assert (
+            resolve_owners(rules, "docs/fern/pages/reference/api/python/frontend.mdx")
+            == []
+        )
+        # A smuggled non-generated file in the same dir stays docs-owned.
+        assert resolve_owners(
+            rules, "docs/fern/pages/reference/api/python/custom.txt"
+        ) == ["@docs"]
+        assert resolve_owners(
+            rules, "docs/fern/pages/reference/api/python/sub/deep.mdx"
+        ) == ["@docs"]
