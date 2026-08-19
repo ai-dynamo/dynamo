@@ -809,7 +809,21 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
-      gpu_test_markers: pre_merge and sglang and gpu_1
+      # Widened from `pre_merge` to also cover `post_merge`, for this lane only.
+      # The post_merge-only tests here are 8 extra test_sglang_deployment cases,
+      # and their absence is why pre_merge never saw the parallel-stage hang that
+      # failed 63% of post_merge and 82% of nightly sglang GPU jobs over
+      # 2026-07-26..07-31 -- ~220 runner-hours, all invisible on PRs. Catching
+      # that class of failure before merge is worth the extra stage time.
+      gpu_test_markers: (pre_merge or post_merge) and sglang and gpu_1
+      # 30m default -> 90m, because the widened marker set roughly doubles this
+      # stage. Measured over the same window: the narrow pre_merge pool ran
+      # p50 20m / max 29m (already grazing the 30m default), while the same
+      # widened pool in post_merge ran p50 32m / p90 58m. 90m clears p90 with
+      # headroom without masking a hang -- the orchestrator now hard-kills any
+      # child that outlives its own timeout, so a hang costs one failed test
+      # rather than the whole stage.
+      gpu_test_timeout_minutes: 90
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
