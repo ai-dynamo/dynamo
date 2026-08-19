@@ -104,8 +104,19 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 
 <ParamField path="--load-aware / --no-load-aware" type="boolean" default="false">
   Preset for KV load-aware routing without cache-reuse signals; implies `--router-mode kv`.
+  See [Router Presets](../../developer-guide/knowledge-base/modular-components/router/router-presets.md#load-aware).
 
   Environment variable: `DYN_ROUTER_LOAD_AWARE`
+</ParamField>
+
+<ParamField path="--agentic / --no-agentic" type="boolean" default="false">
+  **Experimental.** Preset optimized for long-running aggregate agentic workloads where cache
+  colocation is preferred. It implies `--router-mode kv` and sets overlap credit to `2`, prefill
+  load scale to `4`, and active-request decode weight to `64` block-equivalents per request.
+  `--agentic` and `--load-aware` are mutually exclusive. See
+  [Router Presets](../../developer-guide/knowledge-base/modular-components/router/router-presets.md#agentic).
+
+  Environment variable: `DYN_ROUTER_AGENTIC`
 </ParamField>
 
 <ParamField path="--router-kv-overlap-score-credit" type="float" default="1.0">

@@ -42,7 +42,7 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AicPerfConfigBase):
     """Squeeze-Evolve config: the SE knobs + the shared per-tier KvRouter knobs.
 
     Inherits the KvRouter/AicPerf bases directly (NOT ``DynamoRouterConfig``) so we
-    reuse ``kv_router_kwargs()`` / ``aic_perf_kwargs()`` + the load-aware preset
+    reuse ``kv_router_kwargs()`` / ``aic_perf_kwargs()`` + the shared router presets
     without ``DynamoRouterConfig``'s single-``--endpoint`` requirement — Squeeze-Evolve
     has N tier endpoints (in ``--tiers``).
     """
@@ -74,7 +74,8 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AicPerfConfigBase):
         )
 
     def validate(self) -> None:  # type: ignore[override]
-        self.apply_load_aware_preset()  # shared KvRouter preset (KvRouterConfigBase)
+        self.apply_load_aware_preset()
+        self.apply_agentic_preset()
         if not self.tiers:
             raise ValueError("--tiers is required (JSON array, cheapest first)")
         self.confidence_percentiles = [float(p) for p in self.confidence_percentiles]

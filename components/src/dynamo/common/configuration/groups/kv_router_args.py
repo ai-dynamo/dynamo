@@ -100,6 +100,12 @@ _LOAD_AWARE_KWARG_OVERRIDES = {
     "shared_cache_type": "none",
     "router_predicted_ttl_secs": None,
 }
+_AGENTIC_KWARG_OVERRIDES = {
+    "overlap_score_weight": None,
+    "overlap_score_credit": 2.0,
+    "prefill_load_scale": 4.0,
+    "decode_active_request_weight": 64.0,
+}
 
 
 class _DeprecatedOverlapScoreWeightAction(argparse.Action):
@@ -227,12 +233,26 @@ class KvRouterConfigBase(ConfigBase):
     conditional_disagg_decode_busy_threshold: Optional[float] = None
     router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
+    agentic: bool = False
+
+    def _validate_router_presets(self) -> None:
+        if self.load_aware and self.agentic:
+            raise ValueError("--load-aware and --agentic are mutually exclusive")
 
     def apply_load_aware_preset(self) -> None:
+        self._validate_router_presets()
         if not self.load_aware:
             return
 
         for field, value in _LOAD_AWARE_KWARG_OVERRIDES.items():
+            setattr(self, field, value)
+
+    def apply_agentic_preset(self) -> None:
+        self._validate_router_presets()
+        if not self.agentic:
+            return
+
+        for field, value in _AGENTIC_KWARG_OVERRIDES.items():
             setattr(self, field, value)
 
     def apply_conditional_disagg_config(self) -> None:
@@ -274,6 +294,7 @@ class KvRouterConfigBase(ConfigBase):
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         self.apply_load_aware_preset()
+        self.apply_agentic_preset()
         self.apply_conditional_disagg_config()
         return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
 
@@ -296,6 +317,25 @@ class KvRouterArgGroup(ArgGroup):
                 "This preset sets overlap_score_credit=0, disables KV events and "
                 "KV-reuse assumptions, enables active-block "
                 "and prefill-token load tracking, and disables remote/shared cache indexers."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--agentic",
+            env_var="DYN_ROUTER_AGENTIC",
+            default=False,
+            dest="agentic",
+            help=(
+                "[EXPERIMENTAL] KV Router: Apply cost-function weights tuned for "
+                "aggregate agentic workloads. On the frontend, this implies "
+                "--router-mode kv. "
+                "This preset takes precedence over the corresponding individual CLI "
+                "options and environment variables, clears the deprecated overlap-score "
+                "weight, and sets overlap_score_credit=2, prefill_load_scale=4, and "
+                "decode_active_request_weight=64 block-equivalents per active request. "
+                "Queueing and cache-tracking controls retain their normal defaults. "
+                "These weights were validated with 16-token router blocks; the "
+                "active-request weight may need retuning for other block sizes."
             ),
         )
         add_argument(

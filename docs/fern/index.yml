@@ -668,6 +668,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/router/worker-filtering.md
                   - page: Configuration and Tuning
                     path: pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md
+                  - page: Router Presets
+                    path: pages/developer-guide/knowledge-base/modular-components/router/router-presets.md
                   - page: Deficit Round Robin
                     path: pages/developer-guide/knowledge-base/modular-components/router/deficit-round-robin.md
                   - page: Disaggregated Serving

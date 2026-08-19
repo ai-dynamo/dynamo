@@ -243,6 +243,48 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
     assert kwargs["prefill_load_scale"] == 2.5
 
 
+def test_agentic_cli_applies_tuned_cost_function() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    with pytest.warns(FutureWarning, match="overlap score weight is deprecated"):
+        args = parser.parse_args(
+            [
+                "--agentic",
+                "--router-kv-overlap-score-weight",
+                "2.5",
+                "--router-kv-overlap-score-credit",
+                "0.5",
+                "--router-prefill-load-scale",
+                "1.5",
+                "--router-decode-active-request-weight",
+                "8",
+            ]
+        )
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["overlap_score_weight"] is None
+    assert kwargs["overlap_score_credit"] == 2.0
+    assert kwargs["prefill_load_scale"] == 4.0
+    assert kwargs["decode_active_request_weight"] == 64.0
+    assert kwargs["router_queue_threshold"] is None
+    assert kwargs["use_kv_events"] is True
+    assert kwargs["router_assume_kv_reuse"] is True
+
+
+def test_agentic_rejects_load_aware_preset() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    config = KvRouterConfigBase.from_cli_args(
+        parser.parse_args(["--agentic", "--load-aware"])
+    )
+
+    with pytest.raises(
+        ValueError, match="--load-aware and --agentic are mutually exclusive"
+    ):
+        config.kv_router_kwargs()
+
+
 def test_tracking_hash_cli_flows_to_binding_kwargs(tmp_path: Path) -> None:
     key_file = tmp_path / "tracking-key"
     parser = argparse.ArgumentParser()
@@ -389,6 +431,19 @@ def test_load_aware_frontend_implies_kv_router_mode() -> None:
     assert config.overlap_score_credit == 0.0
     assert config.use_kv_events is False
     assert config.router_assume_kv_reuse is False
+
+
+def test_agentic_frontend_implies_kv_router_mode() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args(["--agentic"]))
+    config.validate()
+
+    assert config.router_mode == "kv"
+    assert config.overlap_score_credit == 2.0
+    assert config.prefill_load_scale == 4.0
+    assert config.decode_active_request_weight == 64.0
 
 
 def test_frontend_reasoning_field_name_cli_and_environment(

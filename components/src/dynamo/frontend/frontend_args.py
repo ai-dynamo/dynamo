@@ -98,9 +98,10 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
-        if self.load_aware:
+        if self.load_aware or self.agentic:
             self.router_mode = "kv"
         self.apply_load_aware_preset()
+        self.apply_agentic_preset()
         self.apply_conditional_disagg_config()
 
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
