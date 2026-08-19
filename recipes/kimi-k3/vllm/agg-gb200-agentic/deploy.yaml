@@ -231,6 +231,11 @@ spec:
         - name: acr-token-secret
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-GB200
+          # On clusters with multiple NVLink domains (cliques), all worker pods must land
+          # on the same clique or MNNVL rendezvous fails at model load. Find your clique:
+          #   kubectl get nodes -L nvidia.com/gpu.clique
+          # Then uncomment and set the label below:
+          # nvidia.com/gpu.clique: <clique-uuid>
         tolerations:
         - effect: NoSchedule
           key: kubernetes.io/arch
