@@ -31,13 +31,26 @@ use crate::metrics::{MetricsHierarchy, prometheus_names::distributed_runtime};
 pub struct HealthCheckTarget {
     pub instance: component::Instance,
     pub payload: serde_json::Value,
-    /// Which registration installed this target.
-    ///
-    /// A subject can hold several outstanding registrations at once, so a release has to
-    /// find *its own* among them. Instance and payload cannot tell two registrations
-    /// apart — an endpoint that restarts re-registers the very same values — so each
-    /// registration is stamped with its own id.
+}
+
+/// One outstanding registration of a [`HealthCheckTarget`] under a subject
+///
+/// A subject can hold several outstanding registrations at once, so a release has to find
+/// *its own* among them. Instance and payload cannot tell two registrations apart — an
+/// endpoint that restarts re-registers the very same values — so each registration is
+/// stamped with its own id. The stamp lives here rather than on [`HealthCheckTarget`],
+/// which stays the public payload DTO callers can still build a struct literal for.
+#[derive(Clone, Debug)]
+struct RegisteredHealthCheckTarget {
+    target: HealthCheckTarget,
     registration: u64,
+    /// The notifier this registration's handler signals through
+    ///
+    /// Registration-scoped, not subject-scoped. Overlapping registrations under one
+    /// subject each get their own, so a departing endpoint's handler cannot signal the
+    /// monitor now probing somebody else's target and have it record ready over traffic
+    /// that target never served.
+    notifier: Arc<tokio::sync::Notify>,
 }
 
 /// Receipt for one [`register_health_check_target`](SystemHealth::register_health_check_target)
@@ -74,12 +87,10 @@ pub struct SystemHealth {
     /// and a subject with no outstanding registrations is absent from the map entirely. A
     /// released registration is therefore never observable, whether or not a later
     /// registration displaced it first.
-    health_check_targets: Arc<std::sync::RwLock<HashMap<String, Vec<HealthCheckTarget>>>>,
+    health_check_targets: Arc<std::sync::RwLock<HashMap<String, Vec<RegisteredHealthCheckTarget>>>>,
     /// Stamps each health check target registration so a release can find its own entry
     /// among the other registrations of the same subject
     next_registration: Arc<std::sync::atomic::AtomicU64>,
-    /// Maps endpoint subject to its specific health check notifier
-    health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
     /// Channel for new endpoint registrations
     /// This solves the race condition where HealthCheckManager starts before endpoints are registered
     /// Using a channel ensures no registrations are lost.
@@ -120,7 +131,6 @@ impl SystemHealth {
             endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             next_registration: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
@@ -218,15 +228,17 @@ impl SystemHealth {
 
         // Push under a single write lock to avoid races. Pushing rather than inserting keeps
         // any registration that has not yet been released, so this registration's own
-        // release can be undone without guessing at what should take its place.
+        // release can be undone without guessing at what should take its place. The
+        // notifier is created here, with the registration it belongs to, so an outgoing
+        // monitor keeps signalling and being signalled on its own handle.
         let replaced = {
             let mut targets = self.health_check_targets.write().unwrap();
             let outstanding = targets.entry(key.clone()).or_default();
             let replaced = !outstanding.is_empty();
-            outstanding.push(HealthCheckTarget {
-                instance,
-                payload,
+            outstanding.push(RegisteredHealthCheckTarget {
+                target: HealthCheckTarget { instance, payload },
                 registration,
+                notifier: Arc::new(tokio::sync::Notify::new()),
             });
             replaced
         };
@@ -235,20 +247,16 @@ impl SystemHealth {
             tracing::debug!("Re-registering health check for endpoint '{key}'; replacing target.");
         }
 
-        // Create and store a unique notifier for this endpoint (idempotent). The existing
-        // notifier is kept on replace so an outgoing monitor is not left holding a handle
-        // nobody signals.
-        {
-            let mut notifiers = self.health_check_notifiers.write().unwrap();
-            notifiers
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Notify::new()));
-        }
-
         // Initialize endpoint health status conservatively to NotReady.
+        //
+        // Displacing an earlier registration resets the subject only when the canary is
+        // running, for the reason given on `release_health_check_target`: with no canary
+        // there is nothing that would ever lift the reset, and readiness then means only
+        // "registered on the request plane" — which the displaced incarnation still is
+        // until its own push loop exits and reports otherwise.
         {
             let mut endpoint_health = self.endpoint_health.write().unwrap();
-            if replaced {
+            if replaced && self.health_check_enabled {
                 endpoint_health.insert(key.clone(), HealthStatus::NotReady);
             } else {
                 endpoint_health
@@ -289,13 +297,22 @@ impl SystemHealth {
     /// one their handlers signal, and the health entry is still the subject's.
     ///
     /// A release that re-exposes an earlier registration resets that subject's health to
-    /// `NotReady`, the same as a registration that displaces one does. Readiness here
-    /// means "the canary probed the target now installed and it answered": the verdict
-    /// standing at that moment was earned by the registration that is leaving, and
-    /// nothing has probed the re-exposed target since it came back into view. Without the
-    /// reset the worker would report ready over an unprobed target for up to one canary
-    /// interval. The monitor re-reads the target every tick and the handler signals on
-    /// any successful stream, so the entry is re-decided from there.
+    /// `NotReady`, the same as a registration that displaces one does — but only while
+    /// the canary is enabled. Readiness with a canary means "the canary probed the target
+    /// now installed and it answered": the verdict standing at that moment was earned by
+    /// the registration that is leaving, and nothing has probed the re-exposed target
+    /// since it came back into view. Without the reset the worker would report ready over
+    /// an unprobed target for up to one canary interval, and the monitor re-reads the
+    /// target every tick and the handler signals on any successful stream, so the entry
+    /// is re-decided from there.
+    ///
+    /// With the canary disabled — the default — that re-decision never comes: the only
+    /// writer of `Ready` is [`set_endpoint_registered`](Self::set_endpoint_registered),
+    /// which the re-exposed endpoint ran once when its push loop started and will not run
+    /// again. Resetting there would strand a still-serving endpoint at `NotReady` for the
+    /// life of the process and take the worker out of rotation over a departure that had
+    /// nothing to do with it. Readiness without a canary means "registered on the request
+    /// plane", which the re-exposed endpoint still is, so its entry is left alone.
     pub fn release_health_check_target(&self, registration: HealthCheckRegistration) {
         let HealthCheckRegistration {
             subject,
@@ -309,7 +326,7 @@ impl SystemHealth {
             };
             let Some(position) = outstanding
                 .iter()
-                .position(|target| target.registration == registration)
+                .position(|registered| registered.registration == registration)
             else {
                 return;
             };
@@ -326,7 +343,7 @@ impl SystemHealth {
         };
 
         if !subject_vacated {
-            if re_exposed {
+            if re_exposed && self.health_check_enabled {
                 self.endpoint_health
                     .write()
                     .unwrap()
@@ -339,11 +356,25 @@ impl SystemHealth {
             return;
         }
 
-        self.health_check_notifiers
-            .write()
-            .unwrap()
-            .remove(&subject);
-        self.endpoint_health.write().unwrap().remove(&subject);
+        // A subject named in `use_endpoint_health_status` keeps its entry. That list is
+        // fixed for the life of the process and `get_health_status` requires every name on
+        // it to read `Ready`, so a removed entry and a `NotReady` one produce the same
+        // verdict — but only the latter keeps the endpoint in the status map the health
+        // response reports. Dropping the name from the list instead would be the one
+        // change that alters the verdict, and in the wrong direction: it would let the
+        // worker report healthy once the endpoint backing that name had gone.
+        {
+            let mut endpoint_health = self.endpoint_health.write().unwrap();
+            if self
+                .use_endpoint_health_status
+                .iter()
+                .any(|configured| configured == &subject)
+            {
+                endpoint_health.insert(subject.clone(), HealthStatus::NotReady);
+            } else {
+                endpoint_health.remove(&subject);
+            }
+        }
         tracing::debug!("Deregistered health check target for endpoint '{subject}'");
     }
 
@@ -355,7 +386,7 @@ impl SystemHealth {
             .filter_map(|(subject, outstanding)| {
                 outstanding
                     .last()
-                    .map(|target| (subject.clone(), target.clone()))
+                    .map(|registered| (subject.clone(), registered.target.clone()))
             })
             .collect()
     }
@@ -380,7 +411,7 @@ impl SystemHealth {
         targets
             .get(endpoint)
             .and_then(|outstanding| outstanding.last())
-            .cloned()
+            .map(|registered| registered.target.clone())
     }
 
     /// Get the endpoint health status (Ready/NotReady)
@@ -390,12 +421,21 @@ impl SystemHealth {
     }
 
     /// Get the endpoint-specific health check notifier
+    ///
+    /// The notifier belonging to the registration the canary probes — the most recent one
+    /// that has not been released. Deriving it from the target rather than keeping a
+    /// second map makes the pairing structural: a handler is handed the notifier of the
+    /// registration it was started for, and a release takes that notifier out of view
+    /// exactly when it takes its target out of view.
     pub fn get_endpoint_health_check_notifier(
         &self,
         endpoint_subject: &str,
     ) -> Option<Arc<tokio::sync::Notify>> {
-        let notifiers = self.health_check_notifiers.read().unwrap();
-        notifiers.get(endpoint_subject).cloned()
+        let targets = self.health_check_targets.read().unwrap();
+        targets
+            .get(endpoint_subject)
+            .and_then(|outstanding| outstanding.last())
+            .map(|registered| registered.notifier.clone())
     }
 
     /// Take the receiver for new endpoint registrations (can only be called once)
@@ -448,11 +488,19 @@ mod tests {
     const ENDPOINT: &str = "generate";
 
     fn system_health(health_check_enabled: bool) -> SystemHealth {
+        configured_system_health(health_check_enabled, Vec::new())
+    }
+
+    /// `use_endpoint_health_status` is empty unless `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS`
+    /// names endpoints, which `RuntimeConfig::from_settings` still honours, so both the
+    /// empty and the configured case are reachable.
+    fn configured_system_health(
+        health_check_enabled: bool,
+        use_endpoint_health_status: Vec<String>,
+    ) -> SystemHealth {
         SystemHealth::new(
             HealthStatus::NotReady,
-            // Deprecated and ignored in practice (see RuntimeConfig::from_settings),
-            // so the realistic case is an empty vector.
-            Vec::new(),
+            use_endpoint_health_status,
             health_check_enabled,
             "/health".to_string(),
             "/live".to_string(),
@@ -822,5 +870,171 @@ mod tests {
             .get_health_check_target(ENDPOINT)
             .expect("the restart's registration is untouched by the stale release");
         assert_eq!(target.payload, serde_json::json!({"generation": "restart"}));
+    }
+
+    /// Without a canary, nothing re-decides readiness after startup: `set_endpoint_registered`
+    /// runs once when an endpoint's push loop starts and never again. Resetting a re-exposed
+    /// subject to `NotReady` there would be terminal — the endpoint still serving under that
+    /// name would answer unhealthy for the life of the process because a *different* endpoint
+    /// sharing its name went away.
+    #[test]
+    fn a_re_exposed_registration_keeps_its_readiness_when_the_canary_is_off() {
+        let health = system_health(false);
+        let live = health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "live"}),
+        );
+        health.set_endpoint_registered(ENDPOINT);
+        let mut departing_instance = instance();
+        departing_instance.instance_id = 2;
+        let departing = health.register_health_check_target(
+            ENDPOINT,
+            departing_instance,
+            serde_json::json!({"generation": "departing"}),
+        );
+        health.set_endpoint_registered(ENDPOINT);
+        assert!(health.get_health_status().0);
+
+        health.release_health_check_target(departing);
+
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::Ready),
+            "no canary will ever lift a reset, so the still-serving endpoint keeps its verdict"
+        );
+        assert!(
+            health.get_health_status().0,
+            "a worker must not be pulled from rotation by another endpoint's departure"
+        );
+
+        health.release_health_check_target(live);
+    }
+
+    /// The same hazard reached through the start path this change exists to protect: a start
+    /// that displaces an earlier registration and then rolls back. Displacing must not strand
+    /// the endpoint it displaced, since with no canary the rollback leaves nobody to re-decide.
+    #[test]
+    fn a_rolled_back_start_leaves_the_endpoint_it_displaced_ready_when_the_canary_is_off() {
+        let health = system_health(false);
+        let live = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_registered(ENDPOINT);
+
+        // The displacing start never reaches its push loop, so it never reports registered.
+        let rolled_back =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.release_health_check_target(rolled_back);
+
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::Ready),
+            "the rollback must leave the process as it found it"
+        );
+        assert!(health.get_health_status().0);
+
+        health.release_health_check_target(live);
+    }
+
+    /// With a canary running the reset still applies: something will probe the re-exposed
+    /// target and re-decide, so reporting ready over it first would be a claim nothing earned.
+    #[test]
+    fn a_re_exposed_registration_is_still_reset_when_the_canary_is_on() {
+        let health = system_health(true);
+        let live = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let departing =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+
+        health.release_health_check_target(departing);
+
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::NotReady)
+        );
+        health.release_health_check_target(live);
+    }
+
+    /// A subject named in `use_endpoint_health_status` is judged for the life of the process,
+    /// so releasing its last target must leave it visible in the reported status map rather
+    /// than silently absent. The verdict is unhealthy either way — the endpoint has gone — but
+    /// a health response that simply omits a configured endpoint says less than one that
+    /// reports it not ready.
+    #[test]
+    fn a_configured_endpoint_stays_in_the_status_map_after_its_last_release() {
+        let health = configured_system_health(false, vec![ENDPOINT.to_string()]);
+        let registration =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_registered(ENDPOINT);
+        assert!(health.get_health_status().0);
+
+        health.release_health_check_target(registration);
+
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::NotReady),
+            "a configured endpoint whose target is gone is not ready, not unknown"
+        );
+        let (healthy, endpoints) = health.get_health_status();
+        assert!(
+            !healthy,
+            "a configured endpoint with no target cannot be ready"
+        );
+        assert_eq!(
+            endpoints.get(ENDPOINT).map(String::as_str),
+            Some("notready")
+        );
+    }
+
+    /// An unconfigured subject is judged only while it holds a target, so its entry goes with
+    /// the last one — otherwise a stopped endpoint would hold the worker unhealthy forever.
+    #[test]
+    fn an_unconfigured_endpoint_leaves_the_status_map_after_its_last_release() {
+        let health = system_health(false);
+        let registration =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+
+        health.release_health_check_target(registration);
+
+        assert_eq!(health.get_endpoint_health_status(ENDPOINT), None);
+        assert!(!health.get_health_status().1.contains_key(ENDPOINT));
+    }
+
+    /// Overlapping registrations must not share a notifier. A shared one lets the departing
+    /// endpoint's handler signal the monitor that is now probing the other registration's
+    /// target, which would record ready over traffic that target never served.
+    #[test]
+    fn overlapping_registrations_get_their_own_notifiers() {
+        let health = system_health(true);
+        let earlier =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let earlier_notifier = health
+            .get_endpoint_health_check_notifier(ENDPOINT)
+            .expect("the first registration's handler needs a notifier");
+
+        let later =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let later_notifier = health
+            .get_endpoint_health_check_notifier(ENDPOINT)
+            .expect("the displacing registration's handler needs one of its own");
+        assert!(
+            !Arc::ptr_eq(&earlier_notifier, &later_notifier),
+            "a restart's handler must not be handed the outgoing incarnation's notifier"
+        );
+
+        health.release_health_check_target(later);
+        let re_exposed = health
+            .get_endpoint_health_check_notifier(ENDPOINT)
+            .expect("the re-exposed registration still has its notifier");
+        assert!(
+            Arc::ptr_eq(&re_exposed, &earlier_notifier),
+            "the re-exposed registration is signalled on the notifier its own handler holds"
+        );
+
+        health.release_health_check_target(earlier);
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_none()
+        );
     }
 }
