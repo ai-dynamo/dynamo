@@ -48,6 +48,28 @@ class Program:
     acting_since: float = 0.0
 
 
+@dataclass(frozen=True)
+class RequestSnapshot:
+    """State of a Program immediately before ``begin_request`` mutates it.
+
+    ``program`` is captured so a rollback can tell "the program I mutated" from
+    "a program with the same id that a later request created": the two are
+    different objects and only the first may be restored.
+    """
+
+    program: Program
+    status: ProgramStatus
+    lifecycle: ProgramLifecycle
+    assigned_worker_id: Optional[int]
+    token_total: int
+    step_count: int
+    marked_for_pause: bool
+    soft_demoted_until: float
+    waiting: Optional[asyncio.Event]
+    acting_since: float
+    was_paused: bool
+
+
 @dataclass
 class ProgramTable:
     programs: dict[str, Program] = field(default_factory=dict)
@@ -68,6 +90,70 @@ class ProgramTable:
         program.status = ProgramStatus.REASONING
         program.acting_since = 0.0
         return program
+
+    def snapshot_request(self, program_id: str) -> Optional[RequestSnapshot]:
+        """Record what a following ``begin_request``/admission attempt will change.
+
+        Returns None when the program does not exist yet: that is the signal to
+        ``rollback_request`` that the attempt is what created it, so undoing the
+        attempt means removing it rather than restoring fields.
+        """
+        program = self.programs.get(program_id)
+        if program is None:
+            return None
+        return RequestSnapshot(
+            program=program,
+            status=program.status,
+            lifecycle=program.lifecycle,
+            assigned_worker_id=program.assigned_worker_id,
+            token_total=program.token_total,
+            step_count=program.step_count,
+            marked_for_pause=program.marked_for_pause,
+            soft_demoted_until=program.soft_demoted_until,
+            waiting=program.waiting,
+            acting_since=program.acting_since,
+            was_paused=program_id in self.paused,
+        )
+
+    def rollback_request(
+        self, program_id: str, snapshot: Optional[RequestSnapshot]
+    ) -> None:
+        """Undo one abandoned request's mutations, given its pre-request snapshot.
+
+        With ``snapshot`` None the program did not exist before the attempt, so
+        it is dropped from both tables; dropping it from ``programs`` is what
+        releases the capacity the scheduler had accounted to it. Otherwise the
+        recorded fields — including ``paused`` membership — are put back, which
+        preserves a live session's history that ``release`` would discard.
+
+        Restoration is skipped when a different Program object now holds the id:
+        the recorded one was released meanwhile and a newer request owns it.
+        """
+        if snapshot is None:
+            self.paused.pop(program_id, None)
+            self.programs.pop(program_id, None)
+            return
+
+        program = self.programs.get(program_id)
+        if program is not snapshot.program:
+            return
+
+        program.status = snapshot.status
+        program.lifecycle = snapshot.lifecycle
+        program.assigned_worker_id = snapshot.assigned_worker_id
+        program.token_total = snapshot.token_total
+        program.step_count = snapshot.step_count
+        program.marked_for_pause = snapshot.marked_for_pause
+        program.soft_demoted_until = snapshot.soft_demoted_until
+        program.acting_since = snapshot.acting_since
+        # A concurrent admission for the same program may have installed its own
+        # Event; leave that one in place rather than stranding its waiter.
+        if program.waiting is None or program.waiting is snapshot.waiting:
+            program.waiting = snapshot.waiting
+        if snapshot.was_paused:
+            self.paused[program_id] = None
+        else:
+            self.paused.pop(program_id, None)
 
     def end_request(
         self, program_id: str, prompt_tokens: int, completion_tokens: int
