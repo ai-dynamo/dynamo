@@ -13,7 +13,7 @@ describes Dynamo's trust model and how to secure each part of a deployment.
 
 Dynamo assumes it runs inside a trusted network boundary: untrusted clients reach
 only the frontend, through an authenticating gateway, while the internal
-communication planes and infrastructure run on a network the operator isolates.
+internal communication planes and infrastructure run on a network the operator isolates.
 The sections below explain that boundary and how to harden each component and
 plane. The [Security Configuration Reference](#security-configuration-reference)
 at the end lists every security-related setting in one place.
@@ -30,13 +30,13 @@ Dynamo separates client-facing traffic from internal coordination:
 
 - The **external-facing inference API** — the frontend's OpenAI-compatible HTTP
   endpoint, which serves inference requests to clients.
-- The **communication planes** — internal discovery, event, and request planes,
+- The **internal communication planes** — discovery, event, and request planes,
   plus infrastructure services (NATS, ModelExpress, and the NIXL/RDMA
   data-transfer fabric) that components use to find each other and coordinate.
 
 The security posture rests on two assumptions:
 
-1. The **communication planes and infrastructure services** are deployed by the
+1. The **internal communication planes and infrastructure services** are deployed by the
    operator in a secure fashion and reside within a **trusted network** that
    untrusted clients cannot reach.
 2. **Untrusted clients reach only the frontend**, and only through a gateway or
@@ -63,7 +63,7 @@ note that its Endpoint Picker selects a backend for load and KV-cache reasons an
 does not authenticate clients, so it still sits behind your authenticating
 gateway.
 
-## Securing the Communication Planes
+## Securing the Internal Communication Planes
 
 Dynamo components coordinate over three internal communication planes —
 **discovery**, **event**, and **request**. All three are intended to run within
@@ -177,7 +177,7 @@ privileges.
 
 - Use **RBAC** and grant each component's ServiceAccount only the permissions it
   needs. The Dynamo operator ships with scoped roles; do not broaden them.
-- Apply **NetworkPolicies** so the communication planes, the workers, and the
+- Apply **NetworkPolicies** so the internal communication planes, the workers, and the
   NIXL/RDMA fabric are reachable only by the components that need them, and never
   from outside the cluster boundary.
 - Run pods as **non-root** with a read-only root filesystem where possible, drop
