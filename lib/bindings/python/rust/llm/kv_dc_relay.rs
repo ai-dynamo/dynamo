@@ -63,11 +63,20 @@ impl KvDcRelay {
                         endpoint.component().clone(),
                         dc_id,
                         llm_rs::kv_dc_relay::KvDcRelayConfig {
-                            namespace_filter,
-                            endpoint_prefix,
-                            publication_threshold,
-                            publication_delay_ms,
-                            recovery_attempt_timeout_ms,
+                            discovery: llm_rs::kv_dc_relay::KvDcRelayDiscoveryConfig {
+                                // The historical namespace_filter=None default means
+                                // "watch every namespace" and must stay explicit now
+                                // that discovery validates watch_all XOR namespaces.
+                                watch_all: namespace_filter.is_none(),
+                                namespaces: namespace_filter.into_iter().collect(),
+                                endpoint_prefixes: endpoint_prefix.into_iter().collect(),
+                            },
+                            producer: llm_rs::kv_dc_relay::KvDcRelayProducerConfig {
+                                publication_threshold,
+                                publication_delay_ms,
+                                recovery_attempt_timeout_ms,
+                                ..Default::default()
+                            },
                         },
                     )
                     .await
