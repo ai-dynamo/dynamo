@@ -3317,7 +3317,11 @@ impl OpenAIPreprocessor {
     /// The jail can still emit structured tool-call deltas while doing that
     /// decoding, so parser activation alone is not an output-policy boundary.
     /// Apply the policy to the shared stream before the HTTP streaming and
-    /// non-streaming paths diverge.
+    /// non-streaming paths diverge. This policy deliberately fails closed: when
+    /// a decoder consumes a tool-only turn, suppressing the unauthorized call
+    /// may leave an empty assistant turn with `finish_reason: stop`. Reconstructing
+    /// parser-specific wire markup as assistant content would leak internal
+    /// protocol tokens and could still be mistaken for an actionable call.
     fn apply_tool_call_response_policy<S>(
         stream: S,
         tool_call_parsing_enabled: bool,
@@ -5577,6 +5581,17 @@ mod tests {
                 .iter()
                 .any(|choice| choice.finish_reason == Some(FinishReason::Stop))
         );
+        let content = choices
+            .iter()
+            .filter_map(|choice| match &choice.delta.content {
+                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(
+            content.is_empty(),
+            "a suppressed tool-only turn deliberately fails closed instead of exposing raw XTML"
+        );
         assert_eq!(
             choices
                 .iter()
@@ -5593,6 +5608,12 @@ mod tests {
             .await
             .unwrap();
         let choice = &response.inner.choices[0];
+        assert!(
+            choice.message.content.as_ref().is_none_or(|content| {
+                matches!(content, ChatCompletionMessageContent::Text(text) if text.is_empty())
+            }),
+            "batch output must not reconstruct the suppressed call as assistant content"
+        );
         assert!(choice.message.tool_calls.is_none());
         assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
         assert_eq!(

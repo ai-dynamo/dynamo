@@ -2736,8 +2736,9 @@ async fn chat_completions(
             err_response
         })?;
 
-    // A model-level parser is only active when this request permits tool calls.
-    // In particular, auto choice yields to assistant response/guided constraints.
+    // Request policy controls whether parser-produced tool calls may be exposed.
+    // Assistant response/guided constraints are handled separately during
+    // preprocessing and do not revoke an auto request's tool-call permission.
     let tool_call_parsing_enabled =
         crate::preprocessor::OpenAIPreprocessor::tool_call_parsing_enabled(&request);
     let parsing_options = parsing_options

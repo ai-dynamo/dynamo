@@ -399,14 +399,17 @@ impl ParsingOptions {
     /// Enforce request-level tool-call permission while preserving independent
     /// reasoning parsing and any parser needed for whole-response decoding.
     /// `tool_call_parser` originates in model configuration, so HTTP handlers
-    /// must narrow it to requests that actually permit tool calls. Harmony is
-    /// retained because its aggregate parser also removes internal channel
-    /// markup from ordinary content; `suppress_tool_calls` remains the output
-    /// policy boundary for that case.
+    /// must narrow it to requests that actually permit tool calls. Harmony and
+    /// Kimi K3 are retained because their aggregate parsers also remove internal
+    /// channel markup from ordinary content; `suppress_tool_calls` remains the
+    /// output policy boundary for those cases.
     pub fn with_tool_call_parsing_enabled(mut self, enabled: bool) -> Self {
         if !enabled {
             self.suppress_tool_calls = true;
-            if self.tool_call_parser.as_deref() != Some("harmony") {
+            if !matches!(
+                self.tool_call_parser.as_deref(),
+                Some("harmony" | "kimi_k3" | "kimi-k3")
+            ) {
                 self.tool_call_parser = None;
             }
             self.experimental_v2_batch_eligible = false;
@@ -457,5 +460,20 @@ mod parsing_options_tests {
         assert_eq!(options.reasoning_parser.as_deref(), Some("gpt_oss"));
         assert!(options.suppress_tool_calls);
         assert!(!options.experimental_v2_batch_eligible);
+    }
+
+    #[test]
+    fn disabling_tool_calls_retains_kimi_k3_for_content_decoding() {
+        for parser in ["kimi_k3", "kimi-k3"] {
+            let options =
+                ParsingOptions::new(Some(parser.to_string()), Some("kimi_k3".to_string()))
+                    .with_experimental_v2_batch_eligible(true)
+                    .with_tool_call_parsing_enabled(false);
+
+            assert_eq!(options.tool_call_parser.as_deref(), Some(parser));
+            assert_eq!(options.reasoning_parser.as_deref(), Some("kimi_k3"));
+            assert!(options.suppress_tool_calls);
+            assert!(!options.experimental_v2_batch_eligible);
+        }
     }
 }

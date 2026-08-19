@@ -23,6 +23,10 @@ fn is_harmony_parser(parser: &str) -> bool {
     parser == "harmony"
 }
 
+fn is_kimi_k3_parser(parser: &str) -> bool {
+    matches!(parser, "kimi_k3" | "kimi-k3")
+}
+
 fn contains_harmony_protocol(text: &str) -> bool {
     text.contains("<|channel|>")
 }
@@ -84,6 +88,9 @@ struct DeltaChoice {
 }
 
 fn suppress_tool_call_output(choice: &mut DeltaChoice) {
+    // Fail closed when the decoded turn contains only an unauthorized tool call.
+    // We cannot safely reconstruct parser-specific wire markup as assistant text;
+    // in that case content remains empty and the terminal reason becomes `stop`.
     choice.tool_calls = None;
     if choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls) {
         choice.finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
@@ -442,7 +449,9 @@ impl DeltaAggregator {
                             .collect(),
                     );
                     choice.text = content.unwrap_or_default();
-                } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
+                } else if (is_harmony_parser(parser) && contains_harmony_protocol(&choice.text))
+                    || is_kimi_k3_parser(parser)
+                {
                     choice.text = content.unwrap_or_default();
                 } else if parser == "glm47"
                     && matches!(
@@ -2124,6 +2133,47 @@ mod tests {
             ))
         );
         assert!(choice.message.tool_calls.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_disabled_kimi_k3_aggregate_decodes_tool_free_response() {
+        let raw = concat!(
+            "<|open|>response<|sep|>",
+            "323",
+            "<|close|>response<|sep|>",
+            "<|close|>message<|sep|>",
+            "<|end_of_msg|>"
+        );
+
+        for parser in ["kimi_k3", "kimi-k3"] {
+            let annotated_delta = create_test_delta(
+                0,
+                raw,
+                Some(dynamo_protocols::types::Role::Assistant),
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+                None,
+            );
+            let response = DeltaAggregator::apply(
+                Box::pin(stream::iter(vec![annotated_delta])),
+                ParsingOptions::new(Some(parser.to_string()), Some("kimi_k3".to_string()))
+                    .with_tool_call_parsing_enabled(false),
+            )
+            .await
+            .expect("Kimi K3 response decoding should succeed");
+            let choice = &response.inner.choices[0];
+
+            assert_eq!(
+                choice.message.content,
+                Some(ChatCompletionMessageContent::Text("323".to_string())),
+                "parser alias {parser} must strip K3 XTML wrappers"
+            );
+            assert!(choice.message.tool_calls.is_none());
+            assert_eq!(
+                choice.finish_reason,
+                Some(dynamo_protocols::types::FinishReason::Stop)
+            );
+        }
     }
 
     #[test]
