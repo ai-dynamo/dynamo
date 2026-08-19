@@ -97,6 +97,7 @@ vllm:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
+  enable_nixl_wheel_override: "false"
   enable_modelexpress: "true"
   modelexpress_version: "0.5.0"
   # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
@@ -139,6 +140,7 @@ sglang:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
+  enable_nixl_wheel_override: "false"
   enable_modelexpress: "true"
   modelexpress_version: "0.5.0"
 
