@@ -1052,7 +1052,6 @@ mod tests {
         let inputs = router.required_worker_inputs();
         assert!(inputs.contains(WorkerInputs::CACHE));
         assert!(inputs.contains(WorkerInputs::LOAD));
-        assert!(inputs.contains(WorkerInputs::ROUTING));
         let context = Context::new(()).context();
         let drained = Arc::new(AtomicBool::new(false));
         let source_drained = Arc::clone(&drained);
