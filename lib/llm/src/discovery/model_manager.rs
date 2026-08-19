@@ -15,7 +15,7 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    selector::WorkerSelector,
+    selector::{WorkerInputs, WorkerSelector},
 };
 
 use super::worker_monitor::LoadThresholdConfig;
@@ -1956,23 +1956,31 @@ impl ModelManager {
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
-        // Build shared cache client based on shared_cache_type.
-        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
-            .as_ref()
-            .map(|c| c.shared_cache_type)
-            .unwrap_or_default()
+        // A selector that does not consume cache input must not create a shared-cache client or
+        // subscribe to its updates.
+        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = if selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::CACHE)
         {
-            dynamo_kv_router::SharedCacheType::None => None,
-            dynamo_kv_router::SharedCacheType::Hicache => {
-                let worker_component_name = &endpoint.id().component;
-                tracing::info!(
-                    worker_component = worker_component_name,
-                    "Using HiCache shared KV cache"
-                );
-                Some(Box::new(
-                    self.hicache_cache_for(endpoint, workers_with_configs.clone()),
-                ))
+            match kv_router_config
+                .as_ref()
+                .map(|c| c.shared_cache_type)
+                .unwrap_or_default()
+            {
+                dynamo_kv_router::SharedCacheType::None => None,
+                dynamo_kv_router::SharedCacheType::Hicache => {
+                    let worker_component_name = &endpoint.id().component;
+                    tracing::info!(
+                        worker_component = worker_component_name,
+                        "Using HiCache shared KV cache"
+                    );
+                    Some(Box::new(
+                        self.hicache_cache_for(endpoint, workers_with_configs.clone()),
+                    ))
+                }
             }
+        } else {
+            None
         };
 
         let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();

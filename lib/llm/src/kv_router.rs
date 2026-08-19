@@ -619,6 +619,13 @@ where
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
         let required_worker_inputs = selector.required_worker_inputs();
+        // ModelManager gates client construction as well, but preserve the capability boundary for
+        // direct KvRouter callers.
+        let shared_cache = if required_worker_inputs.contains(WorkerInputs::CACHE) {
+            shared_cache
+        } else {
+            None
+        };
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate().map_err(anyhow::Error::msg)?;
         let tracking_hash = TrackingHashContext::from_config(&kv_router_config)?;
@@ -2362,7 +2369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_only_selector_skips_indexer_and_event_subscription() {
+    async fn load_only_selector_skips_cache_inputs() {
         let component = make_test_component("load-only-capability").await;
         let endpoint = component.endpoint("backend");
         let client = endpoint.client().await.unwrap();
@@ -2386,7 +2393,10 @@ mod tests {
             "prefill",
             None,
             false,
-            None,
+            Some(Box::new(FakeSharedCache {
+                hits: None,
+                should_error: false,
+            })),
             None,
         )
         .await
@@ -2395,6 +2405,7 @@ mod tests {
         assert_eq!(router.required_worker_inputs(), WorkerInputs::LOAD);
         assert!(matches!(router.indexer, Indexer::None));
         assert!(router.kv_event_subscription.is_none());
+        assert!(router.shared_cache.is_none());
     }
 
     async fn make_test_router_with_workers(
