@@ -20,6 +20,8 @@ policy crate -> catalog crate -> router-policy YAML -> frontend or EPP binary
 
 Dynamo owns discovery, eligibility, queueing, validation, reservations, accounting, and metrics. A policy sees only eligible workers and returns one candidate row.
 
+Preferred routing taints are ordinary candidate metadata. A filter, scorer, or picker can read `preferred_taint_multiplier()` from a candidate without declaring `WorkerInputs`; only cache and load input groups need a capability declaration. Required routing taints remain Dynamo eligibility rules.
+
 ## Pick a Starting Point
 
 | Crate | Use it for |
