@@ -14,8 +14,6 @@ if TYPE_CHECKING:
     from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
-from huggingface_hub import try_to_load_from_cache
-from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -68,6 +66,7 @@ from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKE
 from .kv_connector_protocols import (
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
 )
+from .kv_event_utils import resolve_image_token_id
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
@@ -354,52 +353,6 @@ def setup_metrics_collection(
             )
 
 
-def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional[int]:
-    """Routing-side image-placeholder token id for the served model.
-
-    Resolved via the SAME Rust logic the frontend uses
-    (`dynamo._core.resolve_routing_image_token_id` ->
-    `lightseek_mm::resolve_routing_tokens`), returning `chat_placeholder_token_id`
-    so the KV-event normalizer keys on the identical token the frontend
-    substitutes `pad_value` over — no per-family drift between the two.
-
-    Returns None when the bindings lack the `mm-routing` feature or the model
-    isn't in the MM-routing registry — in both cases the frontend also skips MM
-    routing, so a worker-side no-op is consistent (events pass through).
-    """
-    try:
-        from dynamo._core import resolve_routing_image_token_id
-    except ImportError:
-        return None
-
-    # `model_config.model` is the user-supplied `--model` argument verbatim, so
-    # for HF ids ("Qwen/Qwen3.5-0.8B") it points nowhere on disk. Resolve via
-    # huggingface_hub's public cache lookup with vLLM's revision so we pick
-    # the same snapshot vLLM is using; fall through to the raw path for
-    # local-path users (where the lookup raises HFValidationError).
-    model_dir = None
-    try:
-        revision = vllm_config.model_config.revision
-        cfg = try_to_load_from_cache(
-            repo_id=config.model, filename="config.json", revision=revision
-        )
-        if cfg and isinstance(cfg, str):
-            model_dir = os.path.dirname(cfg)
-    except (HFValidationError, OSError) as exc:
-        logger.debug(
-            "HF cache lookup for %s failed (%s); falling back to raw model arg",
-            config.model,
-            exc,
-        )
-    if model_dir is None:
-        logger.debug(
-            "Resolved model_dir via raw arg fallback: %s",
-            vllm_config.model_config.model,
-        )
-        model_dir = vllm_config.model_config.model
-    return resolve_routing_image_token_id(config.model, model_dir)
-
-
 def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
@@ -444,7 +397,7 @@ def setup_kv_event_publisher(
     # runs in vLLM BlockStored events to the same canonical pad_value scheme.
     # None (no mm-routing, model not in registry, text-only) leaves events
     # unchanged — consistent with the frontend also skipping MM routing.
-    image_token_id = _resolve_image_token_id(config, vllm_config)
+    image_token_id = resolve_image_token_id(config.model, vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -491,7 +444,7 @@ async def setup_kv_state_attachment_owner(
         config,
         generate_endpoint,
         vllm_config,
-        _resolve_image_token_id(config, vllm_config),
+        resolve_image_token_id(config.model, vllm_config),
     )
 
 

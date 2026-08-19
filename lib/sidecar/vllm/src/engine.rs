@@ -581,6 +581,7 @@ impl LLMEngine for VllmSidecarEngine {
                 endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
                 topic: source.topic,
                 dp_rank,
+                image_token_id: None,
             });
         }
         if ranks.len() != expected_dp_size as usize {
