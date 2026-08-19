@@ -156,14 +156,8 @@ static CONFIGURED_SLEEP_BACKEND: LazyLock<SleepBackend> = LazyLock::new(|| {
     }
 });
 
-static SLEEP_DRIFT_ENABLED: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var(SLEEP_DRIFT_ENV).is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-});
+static SLEEP_DRIFT_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| dynamo_truthy::env_is_truthy(SLEEP_DRIFT_ENV));
 
 /// The backend [`sleep_until_precise`] uses, resolved once from the environment.
 pub fn configured_sleep_backend() -> SleepBackend {
@@ -221,17 +215,19 @@ impl DriftHistogram {
         }
     }
 
-    fn observe(&self, drift: Duration) {
+    /// Returns the number of observations recorded so far, this one included.
+    fn observe(&self, drift: Duration) -> u64 {
         let secs = drift.as_secs_f64();
         for (bucket, bound) in self.buckets.iter().zip(DRIFT_BUCKET_BOUNDS_SECS) {
             if secs <= bound {
                 bucket.fetch_add(1, Ordering::Relaxed);
             }
         }
-        self.count.fetch_add(1, Ordering::Relaxed);
+        let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
         let nanos = drift.as_nanos().min(u64::MAX as u128) as u64;
         self.total_nanos.fetch_add(nanos, Ordering::Relaxed);
         self.max_nanos.fetch_max(nanos, Ordering::Relaxed);
+        count
     }
 
     fn snapshot(&self, backend: SleepBackend) -> SleepDriftStats {
@@ -283,13 +279,39 @@ pub fn sleep_drift_stats(backend: SleepBackend) -> SleepDriftStats {
 /// The per-record log line is the readout for a bimodal distribution: the
 /// aggregate says how many wakes were late, the lines say which ones.
 pub fn record_sleep_drift(record: &SleepDriftRecord) {
-    histogram_for(record.backend).observe(record.drift);
+    let count = histogram_for(record.backend).observe(record.drift);
     tracing::debug!(
         backend = record.backend.label(),
         requested_ms = record.requested.as_secs_f64() * 1_000.0,
         actual_ms = record.actual.as_secs_f64() * 1_000.0,
         drift_ms = record.drift.as_secs_f64() * 1_000.0,
         "precise sleep drift"
+    );
+    if count.is_multiple_of(DRIFT_SUMMARY_EVERY) {
+        log_sleep_drift_summary(record.backend);
+    }
+}
+
+/// Observations between aggregate readouts, so a run that ends without anyone
+/// calling [`sleep_drift_stats`] still leaves the distribution in the log.
+const DRIFT_SUMMARY_EVERY: u64 = 1_000;
+
+/// Log one aggregate snapshot. The per-wake lines say which wakes were late;
+/// this says how many were, which is the question an ablation actually asks.
+fn log_sleep_drift_summary(backend: SleepBackend) {
+    let stats = sleep_drift_stats(backend);
+    let mean_ms = if stats.count == 0 {
+        0.0
+    } else {
+        stats.total.as_secs_f64() * 1_000.0 / stats.count as f64
+    };
+    tracing::info!(
+        backend = stats.backend.label(),
+        count = stats.count,
+        mean_ms,
+        max_ms = stats.max.as_secs_f64() * 1_000.0,
+        buckets = ?stats.buckets,
+        "precise sleep drift summary"
     );
 }
 
@@ -353,18 +375,18 @@ async fn sleep_until_backend(deadline: Instant, backend: SleepBackend) -> Option
 
     #[cfg(target_os = "linux")]
     if backend.resolve() == SleepBackend::Timerfd {
-        return match tokio_timerfd::Delay::new(deadline) {
-            Ok(delay) => {
-                let _ = delay.await;
-                Some(SleepBackend::Timerfd)
-            }
-            Err(_) => {
-                // A timerfd may be unavailable (fd exhaustion, restricted sandbox). The
-                // fallback is the time driver, and the record has to say so.
-                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-                Some(SleepBackend::TimeDriver)
-            }
+        // A timerfd may be unavailable (fd exhaustion, restricted sandbox), and an armed
+        // one may still fail on read. Either way the fallback is the time driver, which
+        // has to finish the sleep before the record can claim which backend served it.
+        let timerfd_served = match tokio_timerfd::Delay::new(deadline) {
+            Ok(delay) => delay.await.is_ok(),
+            Err(_) => false,
         };
+        if timerfd_served {
+            return Some(SleepBackend::Timerfd);
+        }
+        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        return Some(SleepBackend::TimeDriver);
     }
 
     #[cfg(not(target_os = "linux"))]
