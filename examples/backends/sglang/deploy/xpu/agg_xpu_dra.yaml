@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-agg-xpu-dra
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          name: main
+    replicas: 1
+    runtimeVersionOverride: 1.4.0
+    type: frontend
+  - name: decode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --device
+          - xpu
+          - --disable-cuda-graph
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            claims:
+            - name: gpu
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/sglang
+        resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+    replicas: 1
+    runtimeVersionOverride: 1.4.0
+    type: worker
