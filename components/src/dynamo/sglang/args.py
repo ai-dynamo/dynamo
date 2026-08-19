@@ -564,6 +564,10 @@ async def parse_args(args: list[str]) -> Config:
         server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
         server_args.tp_size = getattr(parsed_args, "tp_size", 1)
         server_args.dp_size = getattr(parsed_args, "dp_size", 1)
+        # DiffGenerator calls this ``master_port``. Preserve SGLang's existing
+        # --nccl-port CLI value on the lightweight diffusion config so the init
+        # path can map a test-allocated port into torch.distributed.
+        server_args.nccl_port = getattr(parsed_args, "nccl_port", None)
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False

@@ -38,6 +38,7 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.init_diffusion import _diffusion_generator_kwargs
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
@@ -66,6 +67,36 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
+    kwargs = _diffusion_generator_kwargs(
+        SimpleNamespace(
+            model_path="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+            tp_size=2,
+            dp_size=1,
+            dist_timeout=120,
+            nccl_port=23456,
+        )
+    )
+
+    assert kwargs == {
+        "model_path": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        "num_gpus": 2,
+        "tp_size": 2,
+        "dp_size": 1,
+        "dist_timeout": 120,
+        "master_port": 23456,
+    }
+
+
+def test_diffusion_generator_kwargs_omits_unset_master_port():
+    kwargs = _diffusion_generator_kwargs(
+        SimpleNamespace(model_path="Tongyi-MAI/Z-Image-Turbo")
+    )
+
+    assert kwargs["num_gpus"] == 1
+    assert "master_port" not in kwargs
 
 
 @pytest.fixture(autouse=True)
