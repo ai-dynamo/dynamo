@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, MultimodalData,
     PrefillResult, PreprocessedRequest, StopReason, TopLogprob, usage,
@@ -703,6 +704,11 @@ impl ResponseState {
         } else {
             None
         };
+        let routed_experts = output
+            .routed_experts
+            .as_ref()
+            .map(routed_experts_to_json)
+            .transpose()?;
         let pb::SequenceOutput {
             text,
             num_tokens,
@@ -732,6 +738,11 @@ impl ResponseState {
         }
 
         let Some(finish) = finish_info else {
+            if routed_experts.is_some() {
+                return Err(client::protocol_error(
+                    "routed_experts are only valid on a terminal sequence output",
+                ));
+            }
             return if self.is_prefill || num_tokens == 0 {
                 Ok(None)
             } else {
@@ -797,6 +808,15 @@ impl ResponseState {
             );
         }
         self.attach_prompt_data(&mut mapped);
+        if let Some(routed_experts) = routed_experts {
+            let engine_data = mapped
+                .engine_data
+                .get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            let engine_data = engine_data.as_object_mut().ok_or_else(|| {
+                client::protocol_error("terminal engine_data is not a JSON object")
+            })?;
+            engine_data.insert("routed_experts".to_string(), routed_experts);
+        }
         Ok(Some(mapped))
     }
 
@@ -848,6 +868,44 @@ impl ResponseState {
         self.prompt_info = Some(prompt);
         Ok(())
     }
+}
+
+fn routed_experts_to_json(routed: &pb::RoutedExperts) -> Result<serde_json::Value, DynamoError> {
+    if routed.shape.len() != 3 {
+        return Err(client::protocol_error(format!(
+            "routed_experts shape must have rank 3, got {:?}",
+            routed.shape
+        )));
+    }
+    let item_size = match routed.dtype.as_str() {
+        "uint8" => 1usize,
+        "uint16" => 2usize,
+        dtype => {
+            return Err(client::protocol_error(format!(
+                "routed_experts dtype must be uint8 or uint16, got {dtype:?}"
+            )));
+        }
+    };
+    let expected = routed
+        .shape
+        .iter()
+        .try_fold(1usize, |count, dimension| {
+            count.checked_mul(*dimension as usize)
+        })
+        .and_then(|count| count.checked_mul(item_size))
+        .ok_or_else(|| client::protocol_error("routed_experts byte length overflow"))?;
+    if routed.data.len() != expected {
+        return Err(client::protocol_error(format!(
+            "routed_experts byte length mismatch: expected {expected}, got {}",
+            routed.data.len()
+        )));
+    }
+    Ok(serde_json::json!({
+        "data": BASE64_STANDARD.encode(&routed.data),
+        "shape": routed.shape,
+        "start": routed.start,
+        "dtype": routed.dtype,
+    }))
 }
 
 fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
