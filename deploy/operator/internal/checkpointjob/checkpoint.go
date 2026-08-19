@@ -162,6 +162,7 @@ fi
 umask 077
 cat "$CUDA_CHECKPOINT_JOB_FILE" > "$job_file"
 export CUDA_CHECKPOINT_JOB_FILE="$job_file"
+export SPT_NOENV=1
 exec "$@"`
 
 	wrappedArgs := make([]string, 0, len(command)+len(args)+7)
