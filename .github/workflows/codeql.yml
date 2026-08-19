@@ -6,7 +6,7 @@ on:
 jobs:
   codeql:
     name: Analyze Codebase
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
     permissions:
       actions: read
       contents: read
@@ -31,4 +31,3 @@ jobs:
         uses: github/codeql-action/analyze@v3
         with:
             category: "/language:${{matrix.language}}"
-

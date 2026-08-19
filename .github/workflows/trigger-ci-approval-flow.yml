@@ -66,7 +66,7 @@ permissions:
 jobs:
   ok-to-test:
     if: github.event.pull_request.head.repo.fork
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
     environment: external_collaborator
     steps:
       - name: Validate approved contributor
