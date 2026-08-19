@@ -6,7 +6,7 @@ one or more subsystem areas, and is added as a co-owner on those areas'
 paths alongside the owning NVIDIA team.
 
 Generated from `.github/codeowners/external_contributors.yaml`. Do not
-hand-edit â€” update that file and regenerate (see
+hand-edit — update that file and regenerate (see
 `.github/codeowners/README.md`).
 
 _No external contributors yet._

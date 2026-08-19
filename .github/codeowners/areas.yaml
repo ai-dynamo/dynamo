@@ -436,6 +436,7 @@ areas:
   path_globs:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
+  - components/src/dynamo/common/tests/test_snapshot*
   - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/checkpointjob/
@@ -881,6 +882,10 @@ shared:
   owners:
   - backend-sglang
   - gms
+- glob: components/src/dynamo/trtllm/snapshot.py
+  owners:
+  - backend-trtllm
+  - gms
 - glob: components/src/dynamo/trtllm/workers/llm_worker.py
   owners:
   - backend-trtllm
@@ -905,6 +910,10 @@ shared:
   owners:
   - backend-trtllm
   - gms
+- glob: components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py
+  owners:
+  - backend-trtllm
+  - gms
 - glob: deploy/inference-gateway/ext-proc/
   owners:
   - epp
@@ -925,6 +934,26 @@ shared:
   owners:
   - operator
   - observability
+- glob: deploy/operator/api/v1alpha1/dynamocheckpoint*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/config/**/*dynamocheckpoint*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/*checkpoint*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/**/*podsnapshot*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/webhook/**/*checkpoint*
+  owners:
+  - operator
+  - gms
 - glob: dev/docker-compose.yml
   owners:
   - ops
@@ -1034,6 +1063,11 @@ shared:
   owners:
   - ops
   - operator
+- glob: tests/deploy/test_dynamocheckpoint.py
+  owners:
+  - ops
+  - operator
+  - gms
 - glob: tests/fault_tolerance/cancellation/utils.py
   owners:
   - fault-tolerance
