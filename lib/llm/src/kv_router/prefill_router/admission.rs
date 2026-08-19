@@ -30,8 +30,7 @@ pub(super) enum InnerPrefillRouter<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    KvRouter(Arc<RoutingHost<Sel>>),
-    Builtin(Arc<RoutingHost<Sel>>),
+    RoutingHost(Arc<RoutingHost<Sel>>),
     SimpleRouter(Arc<SessionAffinityPushRouter>),
 }
 
@@ -48,10 +47,7 @@ where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M>,
     {
         match self {
-            InnerPrefillRouter::KvRouter(router) => {
-                router.select_and_dispatch_prefill(request, prepare).await
-            }
-            InnerPrefillRouter::Builtin(router) => {
+            InnerPrefillRouter::RoutingHost(router) => {
                 router.select_and_dispatch_prefill(request, prepare).await
             }
             InnerPrefillRouter::SimpleRouter(router) => {
