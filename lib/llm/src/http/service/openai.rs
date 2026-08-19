@@ -33,7 +33,7 @@ use http_body_util::LengthLimitError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
-    RouteDoc,
+    RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
         ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
         monitor_for_disconnects_with_activity,
@@ -2739,15 +2739,7 @@ async fn chat_completions(
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during
     // preprocessing and do not revoke an auto request's tool-call permission.
-    let tool_call_parsing_enabled =
-        crate::preprocessor::OpenAIPreprocessor::tool_call_parsing_enabled(&request);
-    let parsing_options = parsing_options
-        .with_experimental_v2_batch_eligible(
-            crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
-                request.inner.tool_choice.as_ref(),
-            ),
-        )
-        .with_tool_call_parsing_enabled(tool_call_parsing_enabled);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
 
     // When parallel_tool_calls is false, limit the response to a single tool call.
     let parsing_options =
@@ -3343,15 +3335,7 @@ async fn responses(
 
     // The Responses API is converted to the same chat request contract. Narrow
     // the model parser before unary aggregation just as the streaming path does.
-    let tool_call_parsing_enabled =
-        crate::preprocessor::OpenAIPreprocessor::tool_call_parsing_enabled(&request);
-    let parsing_options = parsing_options
-        .with_experimental_v2_batch_eligible(
-            crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
-                request.inner.tool_choice.as_ref(),
-            ),
-        )
-        .with_tool_call_parsing_enabled(tool_call_parsing_enabled);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
 
     // Responses requests share the chat-completions aggregator for the unary
     // path. Thread this option through so its post-parse fallback also caps a
