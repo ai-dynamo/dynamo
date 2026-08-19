@@ -33,10 +33,10 @@ pub struct HealthCheckTarget {
     pub payload: serde_json::Value,
     /// Which registration installed this target.
     ///
-    /// Registering a subject replaces whatever target already held it, so undoing a
-    /// registration has to know *which* registration it is undoing. Instance and payload
-    /// cannot tell two registrations apart — an endpoint that restarts re-registers the
-    /// very same values — so each registration is stamped with its own id.
+    /// A subject can hold several outstanding registrations at once, so a release has to
+    /// find *its own* among them. Instance and payload cannot tell two registrations
+    /// apart — an endpoint that restarts re-registers the very same values — so each
+    /// registration is stamped with its own id.
     registration: u64,
 }
 
@@ -44,13 +44,13 @@ pub struct HealthCheckTarget {
 /// call, to be handed back to
 /// [`release_health_check_target`](SystemHealth::release_health_check_target).
 ///
-/// Carries what the registration displaced, because releasing a registration has to be the
-/// inverse of the replace it performed and not simply a delete.
+/// Names the registration to undo rather than the state to restore: what a subject should
+/// hold after a release depends on which *other* registrations are still outstanding at that
+/// moment, which only [`SystemHealth`] knows.
 #[derive(Debug)]
 pub struct HealthCheckRegistration {
     subject: String,
     registration: u64,
-    displaced: Option<HealthCheckTarget>,
 }
 
 /// Current Health Status
@@ -61,10 +61,22 @@ pub struct HealthCheckRegistration {
 pub struct SystemHealth {
     system_health: HealthStatus,
     endpoint_health: Arc<std::sync::RwLock<HashMap<String, HealthStatus>>>,
-    /// Maps endpoint subject to health check target (instance + payload)
-    health_check_targets: Arc<std::sync::RwLock<HashMap<String, HealthCheckTarget>>>,
-    /// Stamps each health check target registration so a release can tell its own
-    /// registration from a later one under the same subject
+    /// Maps endpoint subject to the registrations holding it, oldest first
+    ///
+    /// A subject is a bare endpoint *name*, so registrations under one subject can overlap:
+    /// two endpoints in a process that share a name register under the same subject, and a
+    /// restart can register before the outgoing incarnation's release runs. The last entry
+    /// is the target the canary probes; the earlier ones are outstanding registrations whose
+    /// releases have not arrived yet.
+    ///
+    /// The invariant this shape exists to hold, in any interleaving of registrations and
+    /// releases: every entry present belongs to a registration that has not been released,
+    /// and a subject with no outstanding registrations is absent from the map entirely. A
+    /// released registration is therefore never observable, whether or not a later
+    /// registration displaced it first.
+    health_check_targets: Arc<std::sync::RwLock<HashMap<String, Vec<HealthCheckTarget>>>>,
+    /// Stamps each health check target registration so a release can find its own entry
+    /// among the other registrations of the same subject
     next_registration: Arc<std::sync::atomic::AtomicU64>,
     /// Maps endpoint subject to its specific health check notifier
     health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
@@ -170,7 +182,7 @@ impl SystemHealth {
             if !health_check_targets.is_empty() {
                 health_check_targets
                     .iter()
-                    .all(|(endpoint_subject, _target)| {
+                    .all(|(endpoint_subject, _outstanding)| {
                         endpoint_health
                             .get(endpoint_subject)
                             .is_some_and(|status| *status == HealthStatus::Ready)
@@ -204,19 +216,20 @@ impl SystemHealth {
             .next_registration
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Atomically replace under a single write lock to avoid races.
-        let displaced = {
+        // Push under a single write lock to avoid races. Pushing rather than inserting keeps
+        // any registration that has not yet been released, so this registration's own
+        // release can be undone without guessing at what should take its place.
+        let replaced = {
             let mut targets = self.health_check_targets.write().unwrap();
-            targets.insert(
-                key.clone(),
-                HealthCheckTarget {
-                    instance,
-                    payload,
-                    registration,
-                },
-            )
+            let outstanding = targets.entry(key.clone()).or_default();
+            let replaced = !outstanding.is_empty();
+            outstanding.push(HealthCheckTarget {
+                instance,
+                payload,
+                registration,
+            });
+            replaced
         };
-        let replaced = displaced.is_some();
 
         if replaced {
             tracing::debug!("Re-registering health check for endpoint '{key}'; replacing target.");
@@ -256,57 +269,62 @@ impl SystemHealth {
         HealthCheckRegistration {
             subject: key,
             registration,
-            displaced,
         }
     }
 
     /// Undo one [`register_health_check_target`](Self::register_health_check_target)
     ///
-    /// Two things make a plain delete wrong here. Subjects are endpoint names, so two
-    /// endpoints in one process that share a name (`backend/generate` and
-    /// `prefill/generate`) register under the same subject; and registration replaces
-    /// rather than rejects. Undoing therefore has to be the inverse of that replace:
-    /// touch the subject only while this registration's target is still the installed
-    /// one, and put back whatever it displaced, so an endpoint that rolls back cannot
-    /// take a live endpoint's canary down with it.
+    /// Removes only this registration's own entry, wherever it sits among the subject's
+    /// outstanding registrations. A plain delete by name would be wrong twice over:
+    /// subjects are bare endpoint names, so two endpoints that share a name (`backend/
+    /// generate` and `prefill/generate`) share a subject, and a restart can register
+    /// before the outgoing incarnation's release runs — in both cases a delete would take
+    /// a live endpoint's canary down with the departing one.
     ///
-    /// The notifier survives a restore because it is shared across registrations of a
-    /// subject — the handler that holds it keeps signalling the monitor.
+    /// Releases may arrive in any order, including out of registration order. Whatever
+    /// the order, what the subject holds afterwards is the most recent registration that
+    /// has *not* been released, so a released registration can never come back into view.
+    /// Notifier and endpoint health are endpoint-scoped and so go only when the subject
+    /// has no outstanding registrations left: while any remain, the notifier is still the
+    /// one their handlers signal, and the health entry is still the subject's.
+    ///
+    /// A release that re-exposes an earlier registration deliberately leaves that
+    /// subject's health status where the displacing registration put it, `NotReady`,
+    /// rather than trying to restore a verdict from before. Readiness here means "the
+    /// canary probed the target now installed and it answered", and nothing has probed
+    /// this target since it came back into view. The monitor task re-reads the target
+    /// every tick and the handler signals on any successful stream, so the entry is
+    /// re-decided within one canary interval, in the conservative direction.
     pub fn release_health_check_target(&self, registration: HealthCheckRegistration) {
         let HealthCheckRegistration {
             subject,
             registration,
-            displaced,
         } = registration;
 
-        let restored = {
+        let subject_vacated = {
             let mut targets = self.health_check_targets.write().unwrap();
-            let is_current = targets
-                .get(&subject)
-                .is_some_and(|current| current.registration == registration);
-            if !is_current {
-                tracing::debug!(
-                    "Health check target for endpoint '{subject}' belongs to a later \
-                     registration; leaving it in place."
-                );
+            let Some(outstanding) = targets.get_mut(&subject) else {
                 return;
-            }
-            match displaced {
-                Some(previous) => {
-                    targets.insert(subject.clone(), previous);
-                    true
-                }
-                None => {
-                    targets.remove(&subject);
-                    false
-                }
+            };
+            let Some(position) = outstanding
+                .iter()
+                .position(|target| target.registration == registration)
+            else {
+                return;
+            };
+            outstanding.remove(position);
+            if outstanding.is_empty() {
+                targets.remove(&subject);
+                true
+            } else {
+                false
             }
         };
 
-        if restored {
+        if !subject_vacated {
             tracing::debug!(
-                "Released health check target for endpoint '{subject}'; restored the \
-                 target it displaced."
+                "Released one health check registration for endpoint '{subject}'; other \
+                 registrations still hold the subject."
             );
             return;
         }
@@ -319,37 +337,16 @@ impl SystemHealth {
         tracing::debug!("Deregistered health check target for endpoint '{subject}'");
     }
 
-    /// Deregister an endpoint's health check target
-    ///
-    /// Clears the target, its notifier, and its health status together. Worker health is
-    /// derived from the registered targets, so a target left behind for an endpoint that
-    /// never finished starting — or that has shut down — holds the whole worker unhealthy
-    /// against an endpoint nobody can reach.
-    pub fn deregister_health_check_target(&self, endpoint_subject: &str) {
-        let removed = {
-            let mut targets = self.health_check_targets.write().unwrap();
-            targets.remove(endpoint_subject).is_some()
-        };
-        {
-            let mut notifiers = self.health_check_notifiers.write().unwrap();
-            notifiers.remove(endpoint_subject);
-        }
-        {
-            let mut endpoint_health = self.endpoint_health.write().unwrap();
-            endpoint_health.remove(endpoint_subject);
-        }
-
-        if removed {
-            tracing::debug!("Deregistered health check target for endpoint '{endpoint_subject}'");
-        }
-    }
-
     /// Get all health check targets
     pub fn get_health_check_targets(&self) -> Vec<(String, HealthCheckTarget)> {
         let targets = self.health_check_targets.read().unwrap();
         targets
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .filter_map(|(subject, outstanding)| {
+                outstanding
+                    .last()
+                    .map(|target| (subject.clone(), target.clone()))
+            })
             .collect()
     }
 
@@ -366,9 +363,14 @@ impl SystemHealth {
     }
 
     /// Get health check target for a specific endpoint
+    ///
+    /// The most recent registration that has not been released — what the canary probes.
     pub fn get_health_check_target(&self, endpoint: &str) -> Option<HealthCheckTarget> {
         let targets = self.health_check_targets.read().unwrap();
-        targets.get(endpoint).cloned()
+        targets
+            .get(endpoint)
+            .and_then(|outstanding| outstanding.last())
+            .cloned()
     }
 
     /// Get the endpoint health status (Ready/NotReady)
@@ -598,16 +600,17 @@ mod tests {
     /// forever: it is never probed, so it never becomes ready, and worker health is
     /// the conjunction over registered targets.
     #[test]
-    fn deregistering_a_stopped_endpoint_releases_the_worker() {
+    fn releasing_a_stopped_endpoints_registration_releases_the_worker() {
         let mut health = system_health(true);
         health.set_health_status(HealthStatus::Ready);
-        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let registration =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
         assert!(
             !health.get_health_status().0,
             "an unverified target holds the worker unhealthy"
         );
 
-        health.deregister_health_check_target(ENDPOINT);
+        health.release_health_check_target(registration);
 
         assert!(health.get_health_check_target(ENDPOINT).is_none());
         assert!(
@@ -623,5 +626,135 @@ mod tests {
             "with the stopped endpoint's target gone the worker is judged on what remains"
         );
         assert!(!endpoints.contains_key(ENDPOINT));
+        assert!(!health.has_health_check_targets());
+        assert!(health.get_health_check_targets().is_empty());
+    }
+
+    /// A release names one registration, not a subject. Once a later registration has
+    /// displaced this one, releasing it must leave the live endpoint's canary alone:
+    /// target, notifier and health entry all stay as the later registration left them.
+    #[test]
+    fn releasing_a_displaced_registration_leaves_the_live_endpoint_alone() {
+        let health = system_health(true);
+        let displaced = health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "first"}),
+        );
+        let mut live_instance = instance();
+        live_instance.instance_id = 2;
+        health.register_health_check_target(
+            ENDPOINT,
+            live_instance,
+            serde_json::json!({"generation": "second"}),
+        );
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+
+        health.release_health_check_target(displaced);
+
+        let target = health
+            .get_health_check_target(ENDPOINT)
+            .expect("the live registration still holds the subject");
+        assert_eq!(target.payload, serde_json::json!({"generation": "second"}));
+        assert_eq!(target.instance.instance_id, 2);
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_some(),
+            "the live endpoint's handler still signals through this notifier"
+        );
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::Ready),
+            "the live endpoint's canary verdict must survive the other one's release"
+        );
+        assert!(health.get_health_status().0);
+    }
+
+    /// The interleaving that a snapshot-and-restore release gets wrong: A registers, B
+    /// displaces A, then A releases *before* B does. A's release is a no-op — but B's
+    /// release must not then reinstate A, whose engine is long gone. A reinstated target
+    /// is a phantom the canary can never satisfy, and worker health is the conjunction
+    /// over registered targets, so the worker would stay unhealthy for the life of the
+    /// process with no endpoint to blame.
+    #[test]
+    fn releasing_out_of_order_cannot_reinstate_a_released_registration() {
+        let mut health = system_health(true);
+        health.set_health_status(HealthStatus::Ready);
+
+        let first = health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "first"}),
+        );
+        let mut second_instance = instance();
+        second_instance.instance_id = 2;
+        let second = health.register_health_check_target(
+            ENDPOINT,
+            second_instance,
+            serde_json::json!({"generation": "second"}),
+        );
+
+        health.release_health_check_target(first);
+        health.release_health_check_target(second);
+
+        assert!(
+            health.get_health_check_target(ENDPOINT).is_none(),
+            "both registrations are released, so nothing may hold the subject"
+        );
+        assert!(health.get_endpoint_health_check_notifier(ENDPOINT).is_none());
+        assert!(health.get_endpoint_health_status(ENDPOINT).is_none());
+        assert!(
+            health.get_health_status().0,
+            "a phantom target would hold the worker unhealthy forever"
+        );
+    }
+
+    /// The same interleaving with the releases the other way round. Both orders have to
+    /// land on the same end state, since neither release can see the other coming.
+    #[test]
+    fn releasing_in_order_also_clears_the_subject() {
+        let health = system_health(true);
+        let first = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let second =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+
+        health.release_health_check_target(second);
+        assert!(
+            health.get_health_check_target(ENDPOINT).is_some(),
+            "the older registration is still outstanding and takes the subject back"
+        );
+
+        health.release_health_check_target(first);
+        assert!(health.get_health_check_target(ENDPOINT).is_none());
+        assert!(health.get_endpoint_health_check_notifier(ENDPOINT).is_none());
+        assert!(health.get_endpoint_health_status(ENDPOINT).is_none());
+    }
+
+    /// Releasing twice must not consume a later registration's entry. Registration ids
+    /// are unique per registration, so the second release finds nothing of its own.
+    #[test]
+    fn a_repeated_release_does_not_disturb_a_later_registration() {
+        let health = system_health(true);
+        let registration =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let subject = registration.subject.clone();
+        let id = registration.registration;
+        health.release_health_check_target(registration);
+
+        health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "restart"}),
+        );
+        health.release_health_check_target(HealthCheckRegistration {
+            subject,
+            registration: id,
+        });
+
+        let target = health
+            .get_health_check_target(ENDPOINT)
+            .expect("the restart's registration is untouched by the stale release");
+        assert_eq!(target.payload, serde_json::json!({"generation": "restart"}));
     }
 }
