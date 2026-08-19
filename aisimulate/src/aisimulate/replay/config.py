@@ -182,6 +182,8 @@ def parse_base_replay_config(args: argparse.Namespace) -> ReplayCliConfig:
         _positive_int(args.trace_block_size, "trace_block_size")
     if args.agentic_lanes is not None:
         _positive_int(args.agentic_lanes, "agentic_lanes")
+        if not trace_files:
+            raise ValueError("--agentic-lanes requires trace-file replay")
         if args.trace_format not in {"agentic_mooncake", "weka", "dynamo"}:
             raise ValueError(
                 "--agentic-lanes requires --trace-format=agentic_mooncake, weka, or dynamo"

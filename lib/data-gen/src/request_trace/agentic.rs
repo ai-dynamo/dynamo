@@ -321,6 +321,15 @@ where
             );
         }
     }
+    for edges in &mut dependencies {
+        edges.sort_by(|left, right| {
+            left.request_id
+                .cmp(&right.request_id)
+                .then_with(|| left.trigger.cmp(&right.trigger))
+                .then_with(|| left.relation.cmp(&right.relation))
+                .then_with(|| left.delay_ms.total_cmp(&right.delay_ms))
+        });
+    }
     validate_dependency_dag(&loaded.requests, &dependencies, &id_to_index)?;
 
     let play_by_session = resolve_play_ids(&session_to_indices, &parent_by_session)?;

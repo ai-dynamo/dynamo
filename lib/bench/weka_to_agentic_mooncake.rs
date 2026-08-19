@@ -65,7 +65,7 @@ fn main() -> Result<()> {
         );
     }
     temporary_path
-        .persist(&args.output)
+        .persist_noclobber(&args.output)
         .with_context(|| format!("failed to publish {}", args.output.display()))?;
 
     println!(

@@ -676,7 +676,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "num_prefill_workers": base_config.num_prefill_workers,
         "num_decode_workers": base_config.num_decode_workers,
         "replay_concurrency": workload.get("replay_concurrency"),
-        "agentic_lanes": workload.get("agentic_lanes"),
         "replay_mode": base_config.replay_mode,
         "router_mode": args.router_mode,
         "arrival_speedup_ratio": workload.get("arrival_speedup_ratio", 1.0),
@@ -698,6 +697,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trace_num_prefix_groups=workload.get("trace_num_prefix_groups", 0),
             report_jsonl_path=per_request_jsonl,
             max_sim_time_ms=workload.get("max_sim_time_ms"),
+            agentic_lanes=workload.get("agentic_lanes"),
             **replay_options,
         )
     else:

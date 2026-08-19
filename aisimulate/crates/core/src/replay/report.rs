@@ -1519,11 +1519,11 @@ impl TraceCollector {
         // paths even when runtime UUIDs differ. Legacy requests retain their
         // historical arrival-time ordering.
         records.sort_by(|a, b| {
-            match (a.request_id.as_deref(), b.request_id.as_deref()) {
-                (Some(left), Some(right)) => left.cmp(right),
-                _ => a.arrival_time_ms.total_cmp(&b.arrival_time_ms),
-            }
-            .then_with(|| a.uuid.cmp(&b.uuid))
+            a.request_id
+                .as_deref()
+                .cmp(&b.request_id.as_deref())
+                .then_with(|| a.arrival_time_ms.total_cmp(&b.arrival_time_ms))
+                .then_with(|| a.uuid.cmp(&b.uuid))
         });
         records
     }
@@ -2104,6 +2104,48 @@ mod tests {
             .map(|r| r.arrival_time_ms)
             .collect();
         assert_eq!(arrivals, vec![0.0, 10.0, 30.0]);
+    }
+
+    #[test]
+    fn per_request_records_have_total_order_with_mixed_authored_ids() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        for (uuid_n, arrival, request_id) in [
+            (1_u128, 30.0, Some("request-b")),
+            (2, 20.0, None),
+            (3, 10.0, Some("request-a")),
+            (4, 0.0, None),
+        ] {
+            let uuid = Uuid::from_u128(uuid_n);
+            collector.on_arrival(uuid, arrival, 100, 1);
+            if let Some(request_id) = request_id {
+                collector.on_agentic_metadata(
+                    uuid,
+                    request_id.to_string(),
+                    "play".to_string(),
+                    arrival,
+                );
+            }
+            collector.on_admit(uuid, arrival + 1.0, 0);
+            collector.on_decode_assigned(uuid, 0);
+            collector.on_token(uuid, arrival + 5.0);
+            collector.on_terminal(uuid, arrival + 5.0, ReplayTerminalStatus::Completed);
+        }
+
+        let report = collector.finish();
+        assert_eq!(
+            report
+                .per_request
+                .iter()
+                .map(|record| (record.request_id.as_deref(), record.arrival_time_ms))
+                .collect::<Vec<_>>(),
+            vec![
+                (None, 0.0),
+                (None, 20.0),
+                (Some("request-a"), 10.0),
+                (Some("request-b"), 30.0),
+            ]
+        );
     }
 
     #[test]

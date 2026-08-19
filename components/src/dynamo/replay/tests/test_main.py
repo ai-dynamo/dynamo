@@ -86,6 +86,7 @@ def test_offline_cli_serializes_report_and_per_request_jsonl(
     )
 
     assert seen["native_kwargs"]["capture_per_request"] is True
+    assert "agentic_lanes" not in seen["native_kwargs"]
     assert seen["report_payload"] == {
         "summary": {"completed_requests": 1},
         "per_request": [{"request_id": "request-1"}],
@@ -93,6 +94,26 @@ def test_offline_cli_serializes_report_and_per_request_jsonl(
         "planner": None,
     }
     assert json.loads(per_request_path.read_text()) == {"request_id": "request-1"}
+
+
+def test_agentic_lanes_reject_synthetic_replay() -> None:
+    args = replay_main.build_parser().parse_args(
+        [
+            "--input-tokens",
+            "8",
+            "--output-tokens",
+            "4",
+            "--request-count",
+            "1",
+            "--replay-concurrency",
+            "1",
+            "--agentic-lanes",
+            "1",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="requires trace-file replay"):
+        parse_base_replay_config(args)
 
 
 def test_online_cli_keeps_flat_report(monkeypatch) -> None:

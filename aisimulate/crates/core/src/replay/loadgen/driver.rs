@@ -37,6 +37,7 @@ struct ConcurrencyState {
 struct AgenticState {
     node_states: Vec<AgenticNodeState>,
     remaining_dependencies: Vec<usize>,
+    authored_not_before_ms: Vec<f64>,
     ready_after_ms: Vec<f64>,
     dispatch_dependents: Vec<Vec<AgenticDependentEdge>>,
     completion_dependents: Vec<Vec<AgenticDependentEdge>>,
@@ -289,6 +290,28 @@ impl ConcurrencyState {
 }
 
 impl AgenticState {
+    fn activate_play(
+        &mut self,
+        play_index: usize,
+        start_ms: f64,
+        sessions: &mut [SessionRuntime],
+        ready_sessions: &mut BinaryHeap<ReadySession>,
+    ) {
+        let play = &self.plays[play_index];
+        let root_not_before_ms = self.authored_not_before_ms[play.root_node];
+        for &node_index in &play.nodes {
+            self.ready_after_ms[node_index] =
+                start_ms + (self.authored_not_before_ms[node_index] - root_not_before_ms).max(0.0);
+        }
+        Self::schedule_node(
+            play.root_node,
+            start_ms,
+            &mut self.node_states,
+            sessions,
+            ready_sessions,
+        );
+    }
+
     fn release_dispatch_dependents(
         &mut self,
         sessions: &mut [SessionRuntime],
@@ -477,14 +500,7 @@ impl AgenticState {
         let Some(&next_play_index) = lane.plays.get(lane.next_play) else {
             return;
         };
-        let root_node = self.plays[next_play_index].root_node;
-        Self::schedule_node(
-            root_node,
-            now_ms,
-            &mut self.node_states,
-            sessions,
-            ready_sessions,
-        );
+        self.activate_play(next_play_index, now_ms, sessions, ready_sessions);
     }
 
     fn trajectory_snapshot(&self) -> AgenticTrajectorySnapshot {
@@ -664,7 +680,7 @@ impl WorkloadDriver {
         let mut dispatch_dependents = vec![Vec::new(); trace.nodes.len()];
         let mut completion_dependents = vec![Vec::new(); trace.nodes.len()];
         let mut remaining_dependencies = Vec::with_capacity(trace.nodes.len());
-        let mut ready_after_ms = Vec::with_capacity(trace.nodes.len());
+        let mut authored_not_before_ms = Vec::with_capacity(trace.nodes.len());
         let mut sessions = Vec::with_capacity(trace.nodes.len());
         let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
 
@@ -687,7 +703,7 @@ impl WorkloadDriver {
                 }
             }
             remaining_dependencies.push(node.dependencies.len());
-            ready_after_ms.push(node.not_before_ms);
+            authored_not_before_ms.push(node.not_before_ms);
 
             let hash_ids = node
                 .hash_ids
@@ -779,44 +795,41 @@ impl WorkloadDriver {
             }
         }
 
-        let mut node_states = vec![AgenticNodeState::Blocked; sessions.len()];
+        let mut state = AgenticState {
+            node_states: vec![AgenticNodeState::Blocked; sessions.len()],
+            remaining_dependencies,
+            ready_after_ms: authored_not_before_ms.clone(),
+            authored_not_before_ms,
+            dispatch_dependents,
+            completion_dependents,
+            node_to_play,
+            plays,
+            lanes,
+        };
         let mut ready_sessions = BinaryHeap::new();
-        if lanes.is_empty() {
-            for play in &plays {
+        if state.lanes.is_empty() {
+            for play in &state.plays {
                 AgenticState::schedule_node(
                     play.root_node,
-                    ready_after_ms[play.root_node],
-                    &mut node_states,
+                    state.ready_after_ms[play.root_node],
+                    &mut state.node_states,
                     &mut sessions,
                     &mut ready_sessions,
                 );
             }
         } else {
-            for lane in &lanes {
-                let Some(&play_index) = lane.plays.first() else {
-                    continue;
-                };
-                AgenticState::schedule_node(
-                    plays[play_index].root_node,
-                    0.0,
-                    &mut node_states,
-                    &mut sessions,
-                    &mut ready_sessions,
-                );
+            let initial_plays = state
+                .lanes
+                .iter()
+                .filter_map(|lane| lane.plays.first().copied())
+                .collect::<Vec<_>>();
+            for play_index in initial_plays {
+                state.activate_play(play_index, 0.0, &mut sessions, &mut ready_sessions);
             }
         }
 
         Ok(Self {
-            policy: SchedulingPolicy::Agentic(AgenticState {
-                node_states,
-                remaining_dependencies,
-                ready_after_ms,
-                dispatch_dependents,
-                completion_dependents,
-                node_to_play,
-                plays,
-                lanes,
-            }),
+            policy: SchedulingPolicy::Agentic(state),
             prompt_mode: PromptMode::Full,
             emit_session_metadata: true,
             trace_block_size,
@@ -2308,6 +2321,46 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].authored_request_id.as_deref(), Some("b"));
         assert_eq!(second[0].dispatched_at_ms, 20.0);
+    }
+
+    #[test]
+    fn agentic_lane_rebases_descendant_timing_to_recycled_play_start() {
+        let trace = agentic_trace(vec![
+            agentic_node("first", "play-a", 0.0, Vec::new()),
+            agentic_node("second-root", "play-b", 1_000.0, Vec::new()),
+            agentic_node(
+                "second-child",
+                "play-b",
+                1_005.0,
+                vec![dependency(
+                    "second-root",
+                    AgenticDependencyTrigger::Dispatch,
+                    0.0,
+                    AgenticDependencyRelation::Spawn,
+                )],
+            ),
+        ]);
+        let mut driver = WorkloadDriver::new_agentic_trace_with_lanes(trace, 1, 1).unwrap();
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        driver
+            .on_causal_terminal(first[0].request_uuid, 10.0, ReplayTerminalStatus::Completed)
+            .unwrap();
+        driver.on_quiescent(first[0].request_uuid, 20.0).unwrap();
+
+        let second_root = driver.pop_ready(20.0, usize::MAX);
+        assert_eq!(second_root.len(), 1);
+        assert_eq!(
+            second_root[0].authored_request_id.as_deref(),
+            Some("second-root")
+        );
+        assert!(driver.pop_ready(24.9, usize::MAX).is_empty());
+        let second_child = driver.pop_ready(25.0, usize::MAX);
+        assert_eq!(second_child.len(), 1);
+        assert_eq!(
+            second_child[0].authored_request_id.as_deref(),
+            Some("second-child")
+        );
     }
 
     #[test]

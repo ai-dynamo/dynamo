@@ -2450,7 +2450,6 @@ def run_mocker_trace_replay(
     num_prefill_workers: int = 1,
     num_decode_workers: int = 1,
     replay_concurrency: Optional[int] = None,
-    agentic_lanes: Optional[int] = None,
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
@@ -2476,6 +2475,7 @@ def run_mocker_trace_replay(
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
+    agentic_lanes: Optional[int] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 

@@ -443,12 +443,14 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
         .map(|request| request.request.t)
         .fold(f64::INFINITY, f64::min);
     let mut row_by_source = HashMap::new();
+    let mut request_by_source = HashMap::new();
     for stream in &streams {
         for request in &stream.requests {
             row_by_source.insert(
                 request.source_id.clone(),
                 format!("{namespace}:request:{}", request.source_id),
             );
+            request_by_source.insert(request.source_id.clone(), request);
         }
     }
 
@@ -515,12 +517,16 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
 
     for (target_source, terminal_sources) in join_markers {
         for terminal_source in terminal_sources {
+            let target = request_by_source[&target_source];
+            let terminal = request_by_source[&terminal_source];
             push_dependency(
                 dependencies.entry(target_source.clone()).or_default(),
                 AgenticDependency {
                     request_id: row_by_source[&terminal_source].clone(),
                     trigger: AgenticDependencyTrigger::Completion,
-                    delay_ms: 0.0,
+                    delay_ms: seconds_to_milliseconds(
+                        target.request.t - request_end(&terminal.request),
+                    ),
                     relation: AgenticDependencyRelation::Join,
                 },
             );
@@ -1366,6 +1372,7 @@ mod tests {
             consumer.dependencies.iter().any(|edge| {
                 edge.request_id == child.request_id
                     && edge.relation == AgenticDependencyRelation::Join
+                    && (edge.delay_ms - 500.0).abs() < 1e-6
             }),
             "lowered rows: {rows:#?}"
         );
