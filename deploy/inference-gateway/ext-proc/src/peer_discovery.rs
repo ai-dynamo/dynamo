@@ -375,40 +375,40 @@ fn live_peer_ips(store: &Store, self_ip: &str) -> BTreeSet<String> {
     ips
 }
 
-/// Recovery prefers an already-serving sibling, but falls back to not-ready
-/// siblings so same-generation replicas can bootstrap during a full surge.
+/// Recovery targets only already-serving siblings (EndpointSlice `ready` or
+/// `serving`). Not-ready siblings cannot contribute a meaningful index: this
+/// replica starts worker KV listeners only *after* recovery completes, so a
+/// not-ready sibling's index is empty by construction. Treating those as
+/// recovery candidates turns a cold start (all replicas empty, none serving)
+/// into a mutual-recovery deadlock — each replica rejects the other's empty
+/// dump via `require_events(0)` and retries forever, so no replica ever
+/// becomes Ready. With only serving peers as candidates, an empty set means
+/// "no eligible peer" and bootstraps an empty index immediately.
 fn recovery_peer_urls(store: &Store, self_ip: &str, port: u16) -> Vec<String> {
     let want_ipv6 = is_ipv6(self_ip);
-    let mut preferred = BTreeSet::new();
-    let mut fallback = BTreeSet::new();
+    let mut peers = BTreeSet::new();
 
     for slice in store.state() {
         if !matches_address_family(&slice.address_type, want_ipv6) {
             continue;
         }
         for endpoint in &slice.endpoints {
-            let is_preferred = endpoint.conditions.as_ref().is_some_and(|conditions| {
+            let is_serving = endpoint.conditions.as_ref().is_some_and(|conditions| {
                 conditions.ready == Some(true) || conditions.serving == Some(true)
             });
+            if !is_serving {
+                continue;
+            }
             for address in &endpoint.addresses {
-                if address.is_empty() || address == self_ip {
-                    continue;
-                }
-                if is_preferred {
-                    preferred.insert(address.clone());
-                } else {
-                    fallback.insert(address.clone());
+                if !address.is_empty() && address != self_ip {
+                    peers.insert(address.clone());
                 }
             }
         }
     }
-    for address in &preferred {
-        fallback.remove(address);
-    }
 
-    preferred
+    peers
         .into_iter()
-        .chain(fallback)
         .map(|ip| format!("http://{}", authority(&ip, port)))
         .collect()
 }
@@ -1192,12 +1192,11 @@ mod tests {
             peer_ips([&slice].into_iter(), false),
             BTreeSet::from(["10.0.0.2".to_string(), "10.0.0.3".to_string()])
         );
+        // Recovery candidates exclude the not-ready sibling (10.0.0.2): a
+        // not-ready replica has no KV index yet, so it cannot bootstrap a peer.
         assert_eq!(
             recovery_peer_urls(&store, "10.0.0.9", 9093),
-            vec![
-                "http://10.0.0.3:9093".to_string(),
-                "http://10.0.0.2:9093".to_string(),
-            ]
+            vec!["http://10.0.0.3:9093".to_string()]
         );
     }
 
