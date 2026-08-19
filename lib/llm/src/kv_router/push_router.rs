@@ -609,10 +609,11 @@ where
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(&request, phase)?;
         let initial_worker = match explicit {
-            Some(target) => target.worker_id,
-            None => self.inner.select_next_worker().ok_or_else(|| {
-                anyhow::anyhow!("no eligible worker available for {policy:?} routing")
-            })?,
+            Some(target) => {
+                self.inner.ensure_routable(target.worker_id)?;
+                target.worker_id
+            }
+            None => self.inner.select_stateless_worker()?,
         };
         let mut guard: RequestGuard<Sel> =
             RequestGuard::new_stateless(self.request_metrics.clone(), initial_worker, &request);
@@ -642,21 +643,22 @@ where
             .and_then(|result| result)
             .map(|stream| (metadata, target, stream))
         } else {
+            let target = AffinityTarget::new(initial_worker, None);
+            request.routing_mut().dp_rank = None;
+            let metadata = match prepare(&mut request, target) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    guard.abort().await;
+                    return Err(error);
+                }
+            };
             cancel_on_stop(
                 request_context.as_ref(),
-                self.inner.dispatch_selected_untracked(
-                    initial_worker,
-                    request,
-                    |request, worker_id| {
-                        let target = AffinityTarget::new(worker_id, None);
-                        request.routing_mut().dp_rank = None;
-                        prepare(request, target).map(|metadata| (metadata, target))
-                    },
-                ),
+                self.inner.dispatch_exact(request, target.worker_id),
             )
             .await
             .and_then(|result| result)
-            .map(|((metadata, target), stream)| (metadata, target, stream))
+            .map(|stream| (metadata, target, stream))
         };
 
         let (metadata, target, response_stream) = match dispatch_result {
@@ -670,7 +672,6 @@ where
                 return Err(error);
             }
         };
-        guard.set_stateless_worker(target.worker_id);
         if let Some(tracker) = tracker {
             let worker_type = if tracker.phase() == RequestPhase::Prefill {
                 WORKER_TYPE_PREFILL
@@ -1300,6 +1301,16 @@ mod tests {
         completed_guard.finish().await;
         drop(completed_guard);
         assert_eq!(metrics.requests_started_total().get(), started_before + 3);
+        assert_eq!(metrics.requests_total.get(), completed_before + 1);
+
+        let mut stateless_guard = RequestGuard::<DefaultWorkerSelector>::new_stateless(
+            Arc::clone(&metrics),
+            7,
+            &request(),
+        );
+        assert_eq!(metrics.requests_started_total().get(), started_before + 4);
+        stateless_guard.abort().await;
+        drop(stateless_guard);
         assert_eq!(metrics.requests_total.get(), completed_before + 1);
 
         drop(router);

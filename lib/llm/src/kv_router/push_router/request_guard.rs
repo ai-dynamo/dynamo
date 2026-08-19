@@ -346,7 +346,7 @@ impl RequestObservability {
         }
     }
 
-    fn record_metrics(&mut self) {
+    fn record_metrics(&mut self, record_itl_at_completion: bool) {
         // A failed dispatch never reached the backend and must not count as a request.
         if self.metrics_recorded || !self.dispatched {
             return;
@@ -356,6 +356,11 @@ impl RequestObservability {
         if let Some(tracker) = &self.tracker {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
+            if record_itl_at_completion && let Some(avg_itl) = tracker.avg_itl_ms() {
+                self.request_metrics
+                    .inter_token_latency_seconds
+                    .observe(avg_itl / 1000.0);
+            }
             if let Some(latency) = tracker.kv_transfer_estimated_latency_secs() {
                 self.request_metrics
                     .kv_transfer_estimated_latency_seconds
@@ -519,6 +524,7 @@ where
     output_blocks: OutputBlockTracker,
     approximate_lru: Option<ApproximateLruLease>,
     output_hashes: Option<CanonicalOutputTracker>,
+    record_itl_at_completion: bool,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
 }
@@ -577,6 +583,7 @@ where
             ),
             approximate_lru,
             output_hashes,
+            record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
         }
@@ -587,21 +594,19 @@ where
         worker_id: u64,
         request: &PreprocessedRequest,
     ) -> Self {
+        request_metrics.requests_started_total().inc();
         Self {
             cleanup: RequestCleanup::Stateless { worker_id },
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
-            // Stateless policies have no scheduler blocks to update, but token-sized
-            // boundaries keep their ITL observation on the common response path.
-            output_blocks: OutputBlockTracker::new(true, request.token_ids.len(), 1, None),
+            // Stateless policies have no scheduler blocks to update. Emit one final ITL sample
+            // when the request completes rather than observing every streamed token.
+            output_blocks: OutputBlockTracker::new(false, request.token_ids.len(), 1, None),
             approximate_lru: None,
             output_hashes: None,
+            record_itl_at_completion: true,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
         }
-    }
-
-    pub(super) fn set_stateless_worker(&mut self, worker_id: u64) {
-        self.cleanup.set_stateless_worker(worker_id);
     }
 
     pub(super) fn record_migration_failure(&self, error: Option<DynamoError>) {
@@ -732,7 +737,8 @@ where
 
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
-        self.observability.record_metrics();
+        self.observability
+            .record_metrics(self.record_itl_at_completion);
         let lru_ack = self
             .approximate_lru
             .as_ref()
@@ -770,11 +776,12 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     fn drop(&mut self) {
-        self.observability.record_metrics();
+        self.observability
+            .record_metrics(self.record_itl_at_completion);
         if let Some(lease) = &self.approximate_lru {
             lease.release_now();
         }
-        // RequestCleanup drops immediately afterward and performs scheduler cleanup.
+        // RequestCleanup drops immediately afterward and performs resource cleanup.
     }
 }
 
