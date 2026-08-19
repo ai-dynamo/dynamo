@@ -17,7 +17,7 @@ use dynamo_runtime::{
 
 use super::{PrefillCompletion, PrefillError, PrefillRouter};
 use crate::{
-    kv_router::{BuiltinRoutingHost, RoutingHost},
+    kv_router::RoutingHost,
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
         llm_backend::{FinishReason, LLMEngineOutput, PreprocessedRequest},
@@ -30,9 +30,9 @@ pub(super) enum InnerPrefillRouter<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    Kv(Arc<RoutingHost<Sel>>),
-    Builtin(Arc<BuiltinRoutingHost>),
-    Simple(Arc<SessionAffinityPushRouter>),
+    KvRouter(Arc<RoutingHost<Sel>>),
+    Builtin(Arc<RoutingHost<Sel>>),
+    SimpleRouter(Arc<SessionAffinityPushRouter>),
 }
 
 impl<Sel> InnerPrefillRouter<Sel>
@@ -48,13 +48,13 @@ where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M>,
     {
         match self {
-            InnerPrefillRouter::Kv(router) => {
+            InnerPrefillRouter::KvRouter(router) => {
                 router.select_and_dispatch_prefill(request, prepare).await
             }
             InnerPrefillRouter::Builtin(router) => {
                 router.select_and_dispatch_prefill(request, prepare).await
             }
-            InnerPrefillRouter::Simple(router) => {
+            InnerPrefillRouter::SimpleRouter(router) => {
                 router.select_and_dispatch_prefill(request, prepare).await
             }
         }

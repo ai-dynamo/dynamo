@@ -217,6 +217,47 @@ impl CanonicalOutputTracker {
     }
 }
 
+/// Policy-specific state released by the host's common request lifecycle.
+enum RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    Kv(KvRequestCleanup<Sel>),
+    Stateless { worker_id: u64 },
+}
+
+impl<Sel> RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn worker_id(&self) -> u64 {
+        match self {
+            Self::Kv(cleanup) => cleanup.worker.worker_id,
+            Self::Stateless { worker_id } => *worker_id,
+        }
+    }
+
+    fn context_id(&self) -> Option<&str> {
+        match self {
+            Self::Kv(cleanup) => Some(&cleanup.context_id),
+            Self::Stateless { .. } => None,
+        }
+    }
+
+    fn set_stateless_worker(&mut self, worker_id: u64) {
+        match self {
+            Self::Kv(_) => debug_assert!(false, "KV cleanup target cannot be retargeted"),
+            Self::Stateless { worker_id: current } => *current = worker_id,
+        }
+    }
+
+    async fn finish(&mut self) {
+        if let Self::Kv(cleanup) = self {
+            cleanup.finish().await;
+        }
+    }
+}
+
 /// Owns request-scoped timing and metrics state.
 struct RequestObservability {
     tracker: Option<Arc<RequestTracker>>,
@@ -346,7 +387,7 @@ struct OutputBlockTracker {
 /// Owns the legacy scheduler cleanup after a worker is selected.
 ///
 /// Approximate-LRU references are deliberately owned separately by `RequestGuard`.
-struct RequestCleanup<Sel>
+struct KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -357,7 +398,7 @@ where
     freed: bool,
 }
 
-impl<Sel> RequestCleanup<Sel>
+impl<Sel> KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -397,7 +438,7 @@ where
     }
 }
 
-impl<Sel> Drop for RequestCleanup<Sel>
+impl<Sel> Drop for KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -486,7 +527,7 @@ impl<Sel> RequestGuard<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    pub(super) fn new(
+    pub(super) fn new_kv(
         chooser: Arc<KvRouter<Sel>>,
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
@@ -521,7 +562,12 @@ where
             .as_ref()
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
         Self {
-            cleanup: RequestCleanup::new(chooser, context_id, worker, scheduler_tracked),
+            cleanup: RequestCleanup::Kv(KvRequestCleanup::new(
+                chooser,
+                context_id,
+                worker,
+                scheduler_tracked,
+            )),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
@@ -536,9 +582,31 @@ where
         }
     }
 
+    pub(super) fn new_stateless(
+        request_metrics: Arc<RouterRequestMetrics>,
+        worker_id: u64,
+        request: &PreprocessedRequest,
+    ) -> Self {
+        Self {
+            cleanup: RequestCleanup::Stateless { worker_id },
+            observability: RequestObservability::new(request.tracker.clone(), request_metrics),
+            // Stateless policies have no scheduler blocks to update, but token-sized
+            // boundaries keep their ITL observation on the common response path.
+            output_blocks: OutputBlockTracker::new(true, request.token_ids.len(), 1, None),
+            approximate_lru: None,
+            output_hashes: None,
+            prefill_marked: false,
+            migration_state: request.migration_state.clone(),
+        }
+    }
+
+    pub(super) fn set_stateless_worker(&mut self, worker_id: u64) {
+        self.cleanup.set_stateless_worker(worker_id);
+    }
+
     pub(super) fn record_migration_failure(&self, error: Option<DynamoError>) {
         if let Some(state) = self.migration_state.as_ref() {
-            state.record_failure(self.cleanup.worker.worker_id, error);
+            state.record_failure(self.cleanup.worker_id(), error);
         }
     }
 
@@ -605,15 +673,15 @@ where
                 .as_ref()
                 .is_some_and(|data| !data.token_ids.is_empty());
             if has_tokens {
-                if self.cleanup.scheduler_tracked
-                    && let Err(error) = self
-                        .cleanup
+                if let RequestCleanup::Kv(cleanup) = &self.cleanup
+                    && cleanup.scheduler_tracked
+                    && let Err(error) = cleanup
                         .chooser
-                        .mark_prefill_completed(&self.cleanup.context_id)
+                        .mark_prefill_completed(&cleanup.context_id)
                         .await
                 {
                     tracing::warn!(
-                        request_id = %self.cleanup.context_id,
+                        request_id = %cleanup.context_id,
                         %error,
                         "Failed to mark prefill completed"
                     );
@@ -636,7 +704,7 @@ where
             )
         {
             tracing::warn!(
-                request_id = %self.cleanup.context_id,
+                request_id = self.cleanup.context_id().unwrap_or("stateless"),
                 %error,
                 "Failed to materialize approximate LRU output blocks"
             );
@@ -647,13 +715,13 @@ where
             return;
         };
 
-        if let Err(error) = self
-            .cleanup
-            .chooser
-            .add_output_block(&self.cleanup.context_id, update.decay_fraction)
+        if let RequestCleanup::Kv(cleanup) = &self.cleanup
+            && let Err(error) = cleanup
+                .chooser
+                .add_output_block(&cleanup.context_id, update.decay_fraction)
         {
             tracing::warn!(
-                request_id = %self.cleanup.context_id,
+                request_id = %cleanup.context_id,
                 %error,
                 "Failed to add output block"
             );
@@ -674,7 +742,7 @@ where
             Ok(Some(ack)) => {
                 if let Err(error) = ack.wait().await {
                     tracing::warn!(
-                        request_id = %self.cleanup.context_id,
+                        request_id = self.cleanup.context_id().unwrap_or("stateless"),
                         %error,
                         "Failed to release approximate LRU request lease"
                     );
@@ -682,7 +750,7 @@ where
             }
             Ok(None) => {}
             Err(error) => tracing::warn!(
-                request_id = %self.cleanup.context_id,
+                request_id = self.cleanup.context_id().unwrap_or("stateless"),
                 %error,
                 "Failed to enqueue approximate LRU request release"
             ),

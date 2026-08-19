@@ -72,7 +72,7 @@ pub use dynamo_kv_router::scheduling::{
 pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
-pub use push_router::{BuiltinRoutingHost, DirectRoutingRouter, KvPushRouter, RoutingHost};
+pub use push_router::{BuiltinRoutingPolicy, DirectRoutingRouter, KvPushRouter, RoutingHost};
 
 use crate::{
     discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
@@ -521,6 +521,7 @@ where
 {
     indexer: Indexer,
     scheduler: KvScheduler<Sel, TieredOverlapRefresher<Indexer>>,
+    required_worker_inputs: dynamo_kv_router::selector::WorkerInputs,
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
@@ -616,6 +617,7 @@ where
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
+        let required_worker_inputs = selector.required_worker_inputs();
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate().map_err(anyhow::Error::msg)?;
         let tracking_hash = TrackingHashContext::from_config(&kv_router_config)?;
@@ -766,6 +768,7 @@ where
         Ok(Self {
             indexer,
             scheduler,
+            required_worker_inputs,
             workers_with_configs,
             block_size,
             kv_router_config,
@@ -814,6 +817,10 @@ where
 
     pub fn kv_router_config(&self) -> &KvRouterConfig {
         &self.kv_router_config
+    }
+
+    pub fn required_worker_inputs(&self) -> dynamo_kv_router::selector::WorkerInputs {
+        self.required_worker_inputs
     }
 
     /// Cancel background work and wait for KV event ingestion to stop.
