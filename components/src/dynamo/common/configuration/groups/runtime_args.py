@@ -30,6 +30,7 @@ class DynamoRuntimeConfig(ConfigBase):
     kv_state_endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
+    response_plane: str = "tcp"
     event_plane: Optional[str] = None
     fpm_trace: bool = False
     connector: list[str]
@@ -99,6 +100,8 @@ class DynamoRuntimeConfig(ConfigBase):
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
             )
+
+        os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
 
         # Propagate TCP TLS CLI flags to env vars so the Rust runtime picks them up.
         if self.tcp_tls_cert_path:
@@ -192,6 +195,14 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default="tcp",
             help="Determines how requests are distributed from routers to workers. 'tcp' is fastest.",
             choices=["tcp", "nats"],
+        )
+        add_argument(
+            g,
+            flag_name="--response-plane",
+            env_var="DYN_RESPONSE_PLANE",
+            default="tcp",
+            help="Select the response transport. Frontend and workers must match.",
+            choices=["tcp", "quic"],
         )
         add_argument(
             g,

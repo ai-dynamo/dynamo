@@ -112,6 +112,7 @@ async def worker(argv: list[str] | None = None):
             discovery_backend=config.discovery_backend,
             request_plane=config.request_plane,
             event_plane=config.event_plane,
+            response_plane=config.response_plane,
         )
     else:
         _validate_supported_snapshot_config(config)

@@ -47,6 +47,7 @@ def create_runtime(
     request_plane: str,
     event_plane: Optional[str] = None,
     use_kv_events: Optional[bool] = None,
+    response_plane: str = "tcp",
 ) -> Tuple[DistributedRuntime, asyncio.AbstractEventLoop]:
     """Create a DistributedRuntime.
 
@@ -59,6 +60,8 @@ def create_runtime(
         use_kv_events: Deprecated. NATS enablement is now determined automatically
             from the event-plane configuration. This parameter is accepted for
             backwards compatibility but will be removed in a future release.
+        response_plane: Response transport (tcp or quic). Frontend and workers
+            must use the same value.
 
     Returns:
         Tuple of (runtime, event_loop).
@@ -71,6 +74,10 @@ def create_runtime(
             DeprecationWarning,
             stacklevel=2,
         )
+
+    if response_plane not in {"tcp", "quic"}:
+        raise ValueError("response_plane must be 'tcp' or 'quic'")
+    os.environ["DYN_RESPONSE_PLANE"] = response_plane
 
     loop = asyncio.get_running_loop()
 

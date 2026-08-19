@@ -82,6 +82,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
 
     discovery_backend: str
     request_plane: str
+    response_plane: str = "tcp"
     event_plane: Optional[str] = None
     chat_processor: str
     enable_anthropic_api: bool
@@ -469,6 +470,14 @@ class FrontendArgGroup(ArgGroup):
                 "'tcp' is fastest [nats|tcp]"
             ),
             choices=["nats", "tcp"],
+        )
+        add_argument(
+            g,
+            flag_name="--response-plane",
+            env_var="DYN_RESPONSE_PLANE",
+            default="tcp",
+            help="Select the response transport. Frontend and workers must match.",
+            choices=["tcp", "quic"],
         )
         add_argument(
             g,

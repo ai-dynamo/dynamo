@@ -539,7 +539,7 @@ mod push_handler_notify_tests {
 
     /// Helper: create ingress pipeline with given engine and notifier.
     fn create_ingress(
-        drt: &crate::DistributedRuntime,
+        _drt: &crate::DistributedRuntime,
         engine: Arc<MockStreamingEngine>,
         notifier: Arc<tokio::sync::Notify>,
     ) -> Arc<Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>> {
@@ -549,7 +549,9 @@ mod push_handler_notify_tests {
             .set_endpoint_health_check_notifier(notifier)
             .unwrap();
         ingress
-            .set_quic_response_client_pool(drt.quic_response_client_pool().unwrap())
+            .set_quic_response_client_pool(
+                crate::pipeline::network::quic_response::process_client_pool_from_env().unwrap(),
+            )
             .unwrap();
         ingress
     }

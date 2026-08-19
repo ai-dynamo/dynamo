@@ -603,6 +603,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|tcp]",
     )
     parser.add_argument(
+        "--response-plane",
+        type=str,
+        choices=["tcp", "quic"],
+        default=os.environ.get("DYN_RESPONSE_PLANE", "tcp"),
+        help="Select the response transport. Frontend and workers must match.",
+    )
+    parser.add_argument(
         "--event-plane",
         type=str,
         choices=["nats", "zmq"],

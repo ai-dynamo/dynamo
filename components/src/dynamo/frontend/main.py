@@ -352,6 +352,7 @@ async def async_main():
         )
 
     loop = asyncio.get_running_loop()
+    os.environ["DYN_RESPONSE_PLANE"] = config.response_plane
     runtime = DistributedRuntime(
         loop,
         config.discovery_backend,

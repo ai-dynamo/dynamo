@@ -7,6 +7,7 @@ use crate::component::{
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
+use crate::pipeline::network::ResponsePlaneMode;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
@@ -61,6 +62,7 @@ pub struct DistributedRuntime {
         Arc<OnceCell<Arc<crate::pipeline::network::quic_response::QuicResponseServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
+    response_plane: ResponsePlaneMode,
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
@@ -126,6 +128,7 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
+        let response_plane = ResponsePlaneMode::configured()?;
         let (discovery_backend, nats_config, request_plane, event_transport_kind) =
             config.dissolve();
 
@@ -224,15 +227,18 @@ impl DistributedRuntime {
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
+            response_plane,
             local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
             engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
             metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
         };
 
-        crate::metrics::quic_response::ensure_registered(
-            distributed_runtime.get_metrics_registry(),
-        );
+        if response_plane == ResponsePlaneMode::Quic {
+            crate::metrics::quic_response::ensure_registered(
+                distributed_runtime.get_metrics_registry(),
+            );
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -436,6 +442,11 @@ impl DistributedRuntime {
     pub async fn quic_response_server(
         &self,
     ) -> Result<Arc<crate::pipeline::network::quic_response::QuicResponseServer>> {
+        anyhow::ensure!(
+            self.response_plane == ResponsePlaneMode::Quic,
+            "QUIC response server requested while response plane is {}",
+            self.response_plane.name()
+        );
         Ok(self
             .quic_response_server
             .get_or_try_init(async {
@@ -460,8 +471,17 @@ impl DistributedRuntime {
     pub fn quic_response_client_pool(
         &self,
     ) -> Result<Arc<crate::pipeline::network::quic_response::QuicResponseClientPool>> {
+        anyhow::ensure!(
+            self.response_plane == ResponsePlaneMode::Quic,
+            "QUIC response client pool requested while response plane is {}",
+            self.response_plane.name()
+        );
         crate::pipeline::network::quic_response::process_client_pool_from_env()
             .map_err(anyhow::Error::from)
+    }
+
+    pub fn response_plane(&self) -> ResponsePlaneMode {
+        self.response_plane
     }
 
     /// Get the network manager

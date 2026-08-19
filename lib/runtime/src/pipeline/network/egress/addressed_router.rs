@@ -20,11 +20,15 @@ use crate::metrics::request_plane::{
 };
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
+use crate::pipeline::network::PendingConnections;
 use crate::pipeline::network::RegisteredStream;
 use crate::pipeline::network::RequestControlMessage;
 use crate::pipeline::network::RequestPlanePayloadCodec;
 use crate::pipeline::network::RequestType;
+use crate::pipeline::network::ResponsePlaneMode;
+use crate::pipeline::network::ResponseService;
 use crate::pipeline::network::ResponseType;
+use crate::pipeline::network::StreamOptions;
 use crate::pipeline::network::StreamProvider;
 use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
@@ -382,7 +386,12 @@ pub struct AddressedPushRouter {
     req_client: Arc<dyn RequestPlaneClient>,
 
     request_callbacks: Arc<tcp::server::TcpStreamServer>,
-    responses: Arc<quic_response::QuicResponseServer>,
+    responses: ResponseServer,
+}
+
+enum ResponseServer {
+    Tcp(Arc<tcp::server::TcpStreamServer>),
+    Quic(Arc<quic_response::QuicResponseServer>),
 }
 
 impl AddressedPushRouter {
@@ -392,14 +401,25 @@ impl AddressedPushRouter {
     /// The client is provided as a trait object, hiding the specific implementation.
     pub fn new(
         req_client: Arc<dyn RequestPlaneClient>,
-        request_callbacks: Arc<tcp::server::TcpStreamServer>,
-        responses: Arc<quic_response::QuicResponseServer>,
+        responses: Arc<tcp::server::TcpStreamServer>,
     ) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             req_client,
-            request_callbacks,
-            responses,
+            request_callbacks: responses.clone(),
+            responses: ResponseServer::Tcp(responses),
         }))
+    }
+
+    fn new_quic(
+        req_client: Arc<dyn RequestPlaneClient>,
+        request_callbacks: Arc<tcp::server::TcpStreamServer>,
+        responses: Arc<quic_response::QuicResponseServer>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            req_client,
+            request_callbacks,
+            responses: ResponseServer::Quic(responses),
+        })
     }
 
     pub async fn from_runtime_provider(
@@ -408,32 +428,49 @@ impl AddressedPushRouter {
         let manager = provider.drt().network_manager();
         let req_client = manager.create_client()?;
         let request_callbacks = provider.drt().tcp_server().await?;
-        let responses = provider.drt().quic_response_server().await?;
 
         tracing::debug!(
             transport = req_client.transport_name(),
             "Creating AddressedPushRouter with request plane client"
         );
 
-        Self::new(req_client, request_callbacks, responses)
+        match provider.drt().response_plane() {
+            ResponsePlaneMode::Tcp => Self::new(req_client, request_callbacks),
+            ResponsePlaneMode::Quic => {
+                let responses = provider.drt().quic_response_server().await?;
+                Ok(Self::new_quic(req_client, request_callbacks, responses))
+            }
+        }
     }
 
     /// Cancel all pending response-stream registrations for an instance.
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
-        let responses = self.responses.cancel_instance_streams(instance_id).await;
-        let requests = self
-            .request_callbacks
-            .cancel_instance_streams(instance_id)
-            .await;
-        responses + requests
+        match &self.responses {
+            ResponseServer::Tcp(responses) => responses.cancel_instance_streams(instance_id).await,
+            ResponseServer::Quic(responses) => {
+                let response_count = responses.cancel_instance_streams(instance_id).await;
+                response_count
+                    + self
+                        .request_callbacks
+                        .cancel_instance_streams(instance_id)
+                        .await
+            }
+        }
     }
 
     /// Clear the tombstone after an instance reappears in discovery.
     pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
-        self.responses.clear_instance_tombstone(instance_id).await;
-        self.request_callbacks
-            .clear_instance_tombstone(instance_id)
-            .await;
+        match &self.responses {
+            ResponseServer::Tcp(responses) => {
+                responses.clear_instance_tombstone(instance_id).await;
+            }
+            ResponseServer::Quic(responses) => {
+                responses.clear_instance_tombstone(instance_id).await;
+                self.request_callbacks
+                    .clear_instance_tombstone(instance_id)
+                    .await;
+            }
+        }
     }
 
     /// Bidirectional generation. Note that it doesn't implement the AsyncEngine trait directly
@@ -499,41 +536,53 @@ impl AddressedPushRouter {
         // disarmed by `into_parts()` on awaiting stream provider: past that point the
         // subject is reaped by the worker's dial-in (instance healthy) or the discovery
         // watcher (instance dropped), so no cleanup is owed.
-        let (send_registered, recv_registered) =
-            self.register_streams(engine_ctx.clone(), enable_request_stream);
+        let (send_registered, recv_registered) = self
+            .register_streams(engine_ctx.clone(), enable_request_stream)
+            .await?;
 
         // Tombstone check: if discovery already removed the worker, fail fast
         // with a migratable error rather than writing to the request plane.
         // Dropping the held registrations on this return runs their cleanup.
         let response_registration = recv_registered.registration_id();
+        let response_subject = tcp_subject_of(&recv_registered.connection_info);
         let send_subject = send_registered
             .as_ref()
             .and_then(|r| tcp_subject_of(&r.connection_info));
         if let Some(inst) = instance {
             let instance_id = inst.endpoint_instance_id();
-            let response_ok = match response_registration {
-                Some(registration_id) => {
-                    self.responses
-                        .associate_instance(registration_id, &instance_id)
-                        .await
+            let associated = match &self.responses {
+                ResponseServer::Tcp(responses) => match response_subject.as_deref() {
+                    Some(subject) => {
+                        responses
+                            .associate_instance(subject, send_subject.as_deref(), &instance_id)
+                            .await
+                    }
+                    None => false,
+                },
+                ResponseServer::Quic(responses) => {
+                    let response_ok = match response_registration {
+                        Some(registration_id) => {
+                            responses
+                                .associate_instance(registration_id, &instance_id)
+                                .await
+                        }
+                        None => false,
+                    };
+                    let request_ok = match send_subject.as_deref() {
+                        Some(subject) => {
+                            self.request_callbacks
+                                .associate_request_instance(subject, &instance_id)
+                                .await
+                        }
+                        None => true,
+                    };
+                    if !request_ok && let Some(registration_id) = response_registration {
+                        responses.cancel_response(registration_id).await;
+                    }
+                    response_ok && request_ok
                 }
-                None => false,
             };
-            let request_ok = match send_subject.as_deref() {
-                Some(subject) => {
-                    self.request_callbacks
-                        .associate_request_instance(subject, &instance_id)
-                        .await
-                }
-                None => true,
-            };
-            if !response_ok || !request_ok {
-                if let Some(registration_id) = response_registration {
-                    self.responses.cancel_response(registration_id).await;
-                }
-                if let Some(subject) = send_subject.as_deref() {
-                    self.request_callbacks.cancel_send_stream(subject).await;
-                }
+            if !associated {
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::Disconnected)
@@ -639,20 +688,44 @@ impl AddressedPushRouter {
         ))
     }
 
-    /// Register the optional TCP request callback and required QUIC response.
-    fn register_streams(
+    /// Register the optional TCP request callback and selected response stream.
+    async fn register_streams(
         &self,
         engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
         enable_request_stream: bool,
-    ) -> (
+    ) -> Result<(
         Option<RegisteredStream<StreamSender>>,
         RegisteredStream<StreamReceiver>,
-    ) {
-        let send_stream = enable_request_stream.then(|| {
-            self.request_callbacks
-                .register_request(engine_ctx.clone(), DEFAULT_SEND_BUFFER_COUNT)
-        });
-        let recv_stream = self.responses.register_response(engine_ctx);
+    )> {
+        let (send_stream, recv_stream) = match &self.responses {
+            ResponseServer::Tcp(responses) => {
+                let options = StreamOptions::builder()
+                    .context(engine_ctx)
+                    .enable_request_stream(enable_request_stream)
+                    .enable_response_stream(true)
+                    .build()?;
+                let pending: PendingConnections = responses.register(options).await;
+                pending.into_parts()
+            }
+            ResponseServer::Quic(responses) => {
+                let send_stream = if enable_request_stream {
+                    let options = StreamOptions::builder()
+                        .context(engine_ctx.clone())
+                        .enable_request_stream(true)
+                        .enable_response_stream(false)
+                        .build()?;
+                    let pending: PendingConnections =
+                        self.request_callbacks.register(options).await;
+                    pending.send_stream
+                } else {
+                    None
+                };
+                (send_stream, Some(responses.register_response(engine_ctx)))
+            }
+        };
+        let recv_stream = recv_stream.ok_or_else(|| {
+            anyhow::anyhow!("response stream registration missing despite response being enabled")
+        })?;
 
         // Transport-layer invariant: the data plane produces exactly the halves
         // we requested. A mismatch is a bug in the transport, not a runtime
@@ -662,7 +735,7 @@ impl AddressedPushRouter {
             enable_request_stream,
             "data-plane registration: request-stream presence does not match request"
         );
-        (send_stream, recv_stream)
+        Ok((send_stream, recv_stream))
     }
 
     /// Build standard request-plane headers (trace propagation, request-id,

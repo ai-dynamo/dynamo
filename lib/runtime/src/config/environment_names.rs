@@ -688,6 +688,13 @@ pub mod request_plane {
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 }
 
+/// Response plane transport configuration.
+pub mod response_plane {
+    /// Response transport used by every runtime in this process: "tcp" or "quic".
+    /// Defaults to "tcp".
+    pub const DYN_RESPONSE_PLANE: &str = "DYN_RESPONSE_PLANE";
+}
+
 /// TCP request callback listener environment variables. Names are retained for compatibility.
 pub mod tcp_response_stream {
     /// Port shared by the TCP request callback and QUIC response listeners.
@@ -987,6 +994,7 @@ mod tests {
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
             request_plane::DYN_REQUEST_PLANE_CODEC,
+            response_plane::DYN_RESPONSE_PLANE,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
