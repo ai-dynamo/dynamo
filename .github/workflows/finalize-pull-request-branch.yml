@@ -1,89 +1,34 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Finalize Pull Request Branch
+name: Finalize Pull Request Branches
 
-# This reusable workflow is called through an explicit @main reference. The
-# privileged deletion logic and environment credentials therefore come from the
-# default branch, not from the pull-request commit that invokes it.
+# Scheduled workflows always run from the latest commit on the default branch.
+# Keeping the trigger here prevents a pull request from disabling cleanup by
+# editing its own workflow files.
 on:
-  workflow_call:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
 
 permissions:
   actions: read
   contents: read
 
-env:
-  # Every workflow selected by a numeric pull-request branch must have a run
-  # before the temporary ref is removed. Keep this list aligned with push
-  # triggers; tests/ci/test_pull_request_branch_finalizer.py enforces the set.
-  EXPECTED_WORKFLOWS: |
-    .github/workflows/fern-docs.yml
-    .github/workflows/pr-xpu.yaml
-    .github/workflows/pr.yaml
-    .github/workflows/request-nvskills-ci.yml
+concurrency:
+  group: pull-request-branch-finalizer
+  cancel-in-progress: false
 
 jobs:
   finalize:
-    name: Delete trusted pull request branch
+    name: Delete ready pull request branches
     if: >-
       github.repository == 'ai-dynamo/dynamo' &&
-      github.event_name == 'push' &&
-      startsWith(github.ref, 'refs/heads/pull-request/')
+      github.ref == 'refs/heads/main'
     environment: pull-request-branch-cleanup
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Validate caller identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$GITHUB_REPOSITORY" != "ai-dynamo/dynamo" ]]; then
-            echo "::error title=Pull request branch finalizer::Unexpected repository: $GITHUB_REPOSITORY"
-            exit 1
-          fi
-          if [[ ! "$GITHUB_REF_NAME" =~ ^pull-request/[0-9]+$ ]]; then
-            echo "::error title=Pull request branch finalizer::Unexpected branch: $GITHUB_REF_NAME"
-            exit 1
-          fi
-          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error title=Pull request branch finalizer::Unexpected commit SHA"
-            exit 1
-          fi
-
-      - name: Wait for trusted workflows to materialize
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mapfile -t expected_workflows < <(printf '%s\n' "$EXPECTED_WORKFLOWS" | sed '/^[[:space:]]*$/d')
-
-          for attempt in 1 2 3 4 5; do
-            run_paths=$(gh api --method GET --paginate \
-              "repos/ai-dynamo/dynamo/actions/runs" \
-              --raw-field branch="$GITHUB_REF_NAME" \
-              --raw-field event=push \
-              --raw-field head_sha="$GITHUB_SHA" \
-              --raw-field per_page=100 \
-              --jq '.workflow_runs[].path')
-
-            missing=()
-            for workflow in "${expected_workflows[@]}"; do
-              if ! grep -Fqx -- "$workflow" <<< "$run_paths"; then
-                missing+=("$workflow")
-              fi
-            done
-
-            if (( ${#missing[@]} == 0 )); then
-              exit 0
-            fi
-            if (( attempt == 5 )); then
-              printf '::error title=Pull request branch finalizer::Missing workflow run: %s\n' "${missing[@]}"
-              exit 1
-            fi
-            sleep $((1 << (attempt - 1)))
-          done
-
       - name: Create a short-lived maintenance token
         id: maintenance-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
@@ -94,42 +39,159 @@ jobs:
           repositories: dynamo
           permission-contents: write
 
-      - name: Delete the unchanged branch
+      - name: Audit and delete ready branches
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           BRANCH_DELETE_TOKEN: ${{ steps.maintenance-token.outputs.token }}
           GIT_TERMINAL_PROMPT: "0"
+          RUN_MATERIALIZATION_GRACE_SECONDS: "900"
         run: |
           set -euo pipefail
-          delete_ref="refs/heads/${GITHUB_REF_NAME}"
-          repository_url="https://github.com/ai-dynamo/dynamo.git"
-          git_directory="${RUNNER_TEMP}/pull-request-branch-finalizer.git"
-          git -c init.templateDir= init --bare --quiet "$git_directory"
 
-          # Supply the token through the environment at authentication time. It
-          # never enters the remote URL, process arguments, or git configuration.
+          readonly repository="ai-dynamo/dynamo"
+          readonly repository_url="https://github.com/ai-dynamo/dynamo.git"
+          readonly refs_file="${RUNNER_TEMP}/pull-request-refs.tsv"
+          readonly git_directory="${RUNNER_TEMP}/pull-request-branch-finalizer.git"
+
+          if [[ "$GITHUB_REPOSITORY" != "$repository" || "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error title=Pull request branch finalizer::Unexpected workflow context"
+            exit 1
+          fi
+
+          if ! gh api --method GET --paginate \
+            "repos/${repository}/git/matching-refs/heads/pull-request/" \
+            --jq '.[] | [.ref, .object.sha] | @tsv' > "$refs_file"; then
+            echo "::warning title=Pull request branch finalizer::Could not list pull request branches"
+            exit 0
+          fi
+
+          if [[ ! -s "$refs_file" ]]; then
+            echo "::notice title=Pull request branch finalizer::No pull request branches found"
+            exit 0
+          fi
+
+          git -c init.templateDir= init --bare --quiet "$git_directory"
           git_auth=(
             -c credential.helper=
             -c 'credential.helper=!f() { printf "%s\n" "username=x-access-token" "password=$BRANCH_DELETE_TOKEN"; }; f'
             -c core.hooksPath=/dev/null
           )
 
-          if git -C "$git_directory" "${git_auth[@]}" push --porcelain \
-            --force-with-lease="${delete_ref}:${GITHUB_SHA}" \
-            "$repository_url" ":${delete_ref}"; then
-            exit 0
-          fi
+          while IFS=$'\t' read -r delete_ref branch_sha; do
+            if [[ ! "$delete_ref" =~ ^refs/heads/pull-request/[0-9]+$ ]]; then
+              echo "::warning title=Pull request branch finalizer::Ignoring unexpected ref: $delete_ref"
+              continue
+            fi
+            if [[ ! "$branch_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::warning title=Pull request branch finalizer::Ignoring invalid SHA for $delete_ref"
+              continue
+            fi
 
-          current_sha=$(git -C "$git_directory" "${git_auth[@]}" ls-remote \
-            --heads "$repository_url" "$delete_ref" | awk '{print $1}')
-          if [[ -z "$current_sha" ]]; then
-            echo "::notice title=Pull request branch finalizer::Branch is already absent"
-            exit 0
-          fi
-          if [[ "$current_sha" != "$GITHUB_SHA" ]]; then
-            echo "::notice title=Pull request branch finalizer::Branch moved; leaving the newer commit unchanged"
-            exit 0
-          fi
+            branch_name="${delete_ref#refs/heads/}"
+            branch_number="${branch_name#pull-request/}"
+            runs_file="${RUNNER_TEMP}/pull-request-${branch_number}-runs.tsv"
+            current_runs_file="${RUNNER_TEMP}/pull-request-${branch_number}-current-runs.tsv"
 
-          echo "::error title=Pull request branch finalizer::Branch still points to $GITHUB_SHA after deletion failed"
-          exit 1
+            if ! gh api --method GET --paginate \
+              "repos/${repository}/actions/runs" \
+              --raw-field branch="$branch_name" \
+              --raw-field event=push \
+              --raw-field per_page=100 \
+              --jq '.workflow_runs[] | [.id, .head_sha, .status, .created_at, .path] | @tsv' \
+              > "$runs_file"; then
+              echo "::warning title=Pull request branch finalizer::Could not inspect runs for $branch_name"
+              continue
+            fi
+
+            : > "$current_runs_file"
+            run_count=0
+            newest_run_epoch=0
+            invalid_run_time=false
+            while IFS=$'\t' read -r run_id run_sha run_status run_created_at run_path; do
+              [[ "$run_sha" == "$branch_sha" ]] || continue
+              printf '%s\t%s\t%s\t%s\n' \
+                "$run_id" "$run_status" "$run_created_at" "$run_path" >> "$current_runs_file"
+              run_count=$((run_count + 1))
+              if ! run_created_epoch=$(date -u -d "$run_created_at" +%s); then
+                invalid_run_time=true
+                break
+              fi
+              if (( run_created_epoch > newest_run_epoch )); then
+                newest_run_epoch=$run_created_epoch
+              fi
+            done < "$runs_file"
+
+            if [[ "$invalid_run_time" == true ]]; then
+              echo "::warning title=Pull request branch finalizer::Could not parse run time for $branch_name"
+              continue
+            fi
+            if (( run_count == 0 )); then
+              echo "::notice title=Pull request branch finalizer::No push runs exist for $branch_name at $branch_sha; leaving it for a later audit"
+              continue
+            fi
+
+            now_epoch=$(date -u +%s)
+            if (( now_epoch - newest_run_epoch < RUN_MATERIALIZATION_GRACE_SECONDS )); then
+              echo "::notice title=Pull request branch finalizer::Runs for $branch_name are still inside the materialization grace period"
+              continue
+            fi
+
+            ready=true
+            while IFS=$'\t' read -r run_id run_status run_created_at run_path; do
+              if [[ "$run_status" == "completed" ]]; then
+                continue
+              fi
+              if [[ "$run_status" != "in_progress" ]]; then
+                echo "::notice title=Pull request branch finalizer::$branch_name still has a $run_status run: $run_path"
+                ready=false
+                break
+              fi
+
+              jobs_file="${RUNNER_TEMP}/workflow-run-${run_id}-jobs.tsv"
+              if ! gh api --method GET --paginate \
+                "repos/${repository}/actions/runs/${run_id}/jobs" \
+                --raw-field filter=latest \
+                --raw-field per_page=100 \
+                --jq '.jobs[] | [.id, .status, .name] | @tsv' > "$jobs_file"; then
+                echo "::warning title=Pull request branch finalizer::Could not inspect jobs for workflow run $run_id"
+                ready=false
+                break
+              fi
+
+              job_count=0
+              while IFS=$'\t' read -r job_id job_status job_name; do
+                job_count=$((job_count + 1))
+                if [[ "$job_status" != "in_progress" && "$job_status" != "completed" ]]; then
+                  echo "::notice title=Pull request branch finalizer::$branch_name still has a $job_status job: $job_name"
+                  ready=false
+                  break
+                fi
+              done < "$jobs_file"
+
+              if (( job_count == 0 )); then
+                echo "::notice title=Pull request branch finalizer::Workflow run $run_id has not materialized any jobs"
+                ready=false
+              fi
+              [[ "$ready" == true ]] || break
+            done < "$current_runs_file"
+
+            [[ "$ready" == true ]] || continue
+
+            if git -C "$git_directory" "${git_auth[@]}" push --porcelain \
+              --force-with-lease="${delete_ref}:${branch_sha}" \
+              "$repository_url" ":${delete_ref}"; then
+              echo "::notice title=Pull request branch finalizer::Deleted $branch_name at $branch_sha"
+              continue
+            fi
+
+            current_sha=$(git -C "$git_directory" "${git_auth[@]}" ls-remote \
+              --heads "$repository_url" "$delete_ref" | awk '{print $1}')
+            if [[ -z "$current_sha" ]]; then
+              echo "::notice title=Pull request branch finalizer::$branch_name is already absent"
+            elif [[ "$current_sha" != "$branch_sha" ]]; then
+              echo "::notice title=Pull request branch finalizer::$branch_name moved; leaving the newer commit unchanged"
+            else
+              echo "::warning title=Pull request branch finalizer::Could not delete $branch_name at $branch_sha"
+            fi
+          done < "$refs_file"
