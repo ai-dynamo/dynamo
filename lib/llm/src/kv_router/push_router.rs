@@ -665,9 +665,10 @@ where
         } else if uses_load {
             cancel_on_stop(
                 request_context.as_ref(),
-                self.inner.dispatch_selected_untracked(
-                    initial_worker,
+                self.inner.direct_within_prepared(
                     request,
+                    initial_worker,
+                    None,
                     |request, worker_id| {
                         guard.retarget_worker(worker_id)?;
                         let target = AffinityTarget::new(worker_id, None);
