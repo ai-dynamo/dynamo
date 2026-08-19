@@ -30,6 +30,7 @@ pytestmark = [
 ]
 
 ROOT = Path(__file__).resolve().parents[2]
+AISIMULATE_REQUIREMENTS = ROOT / "container/deps/requirements.aisimulate.txt"
 LOCKFILES = (
     ROOT / "Cargo.lock",
     ROOT / "lib/bindings/python/Cargo.lock",
@@ -52,6 +53,19 @@ def _python_requirement(pyproject: dict) -> Requirement:
         if canonicalize_name(Requirement(requirement).name) == "aisimulate"
     ]
     assert len(matches) == 1, "ai-dynamo must declare one AISimulate dependency"
+    return matches[0]
+
+
+def _requirements_file_aisimulate_requirement(path: Path) -> Requirement:
+    matches: list[Requirement] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        requirement = line.split("#", 1)[0].strip()
+        if not requirement or requirement.startswith("--"):
+            continue
+        parsed = Requirement(requirement)
+        if canonicalize_name(parsed.name) == "aisimulate":
+            matches.append(parsed)
+    assert len(matches) == 1, f"{path} must declare one AISimulate dependency"
     return matches[0]
 
 
@@ -84,6 +98,9 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     pyproject, cargo = _root_configs()
     python_requirement = _python_requirement(pyproject)
     python_version = _exact_version(python_requirement)
+    container_requirement = _requirements_file_aisimulate_requirement(
+        AISIMULATE_REQUIREMENTS
+    )
 
     assert python_requirement.marker is not None
     environment = default_environment()
@@ -91,6 +108,8 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     assert python_requirement.marker.evaluate(environment)
     environment["python_version"] = "3.13"
     assert not python_requirement.marker.evaluate(environment)
+    assert container_requirement.marker is None
+    assert _exact_version(container_requirement) == python_version
 
     cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
     assert not {"path", "git", "rev", "branch", "tag"} & cargo_dependency.keys()
@@ -107,11 +126,20 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
 def test_container_stages_the_published_aisimulate_wheel() -> None:
     pyproject, _ = _root_configs()
     python_version = _exact_version(_python_requirement(pyproject))
+    container_version = _exact_version(
+        _requirements_file_aisimulate_requirement(AISIMULATE_REQUIREMENTS)
+    )
     wheel_builder = (ROOT / "container/templates/wheel_builder.Dockerfile").read_text(
         encoding="utf-8"
     )
 
-    assert f'"aisimulate=={python_version}"' in wheel_builder
+    assert container_version == python_version
+    assert "requirements.aisimulate.txt" in wheel_builder
+    assert (
+        "--requirement /opt/dynamo/container/deps/requirements.aisimulate.txt"
+        in wheel_builder
+    )
+    assert "--no-deps" in wheel_builder
     assert "COPY aisimulate" not in wheel_builder
     assert "/opt/dynamo/aisimulate" not in wheel_builder
     assert not (ROOT / "aisimulate").exists()

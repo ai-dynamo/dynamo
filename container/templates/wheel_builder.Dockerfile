@@ -235,8 +235,8 @@ ENV VIRTUAL_ENV=/workspace/.venv
 # imports yaml at module scope); the system python3 doesn't ship it.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade pip meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
+    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed && \
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
 
@@ -601,8 +601,12 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 
 {% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
+COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
+
 # AI Simulate is released separately as an abi3 wheel. Stage the exact published
 # wheel consumed by ai-dynamo instead of rebuilding it from vendored source.
+# Download only this distribution; runtime images own dependency installation
+# through their requirements files and local wheels.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
@@ -610,7 +614,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         --only-binary=:all: \
         --no-deps \
         --dest /opt/dynamo/dist \
-        "aisimulate==0.1.0.dev1"
+        --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 {% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
