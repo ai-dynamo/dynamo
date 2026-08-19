@@ -128,7 +128,7 @@ impl LoraFilteredRouter {
                 Some(candidates[idx % candidates.len()])
             }
             // Direct, KV, and advanced modes are never routed through LoraFilteredRouter
-            // (Direct uses DirectRoutingRouter; KV uses RoutingHost; advanced modes
+            // (Direct uses SessionAffinityPushRouter; KV uses RoutingHost; advanced modes
             // bypass LoRA filtering in common.rs). These arms exist only for match
             // exhaustiveness.
             RouterMode::Direct
