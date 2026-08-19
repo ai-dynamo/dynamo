@@ -1048,151 +1048,129 @@ func requireOwnershipConflict(t *testing.T, err error) {
 	assert.Equal(t, ownershipTestForeignUID, alreadyOwned.Owner.UID)
 }
 
-func TestSyncResource_ForeignControllerBlocksUpdate(t *testing.T) {
-	ctx := context.Background()
-	s := newOwnershipTestScheme(t)
+// TestSyncResource_ForeignControllerBlocksMutation covers the three paths that write or delete
+// once an object already exists. Each must refuse a foreign owner before touching anything: the
+// content-differs update, the delete, and the content-matches path that previously reported
+// success without ever attaching an owner reference.
+func TestSyncResource_ForeignControllerBlocksMutation(t *testing.T) {
+	tests := []struct {
+		name         string
+		existingPort int32
+		desiredPort  int32
+		toDelete     bool
+	}{
+		{name: "differing content is not overwritten", existingPort: 9090, desiredPort: 8080},
+		{name: "existing object is not deleted", existingPort: 9090, desiredPort: 9090, toDelete: true},
+		{name: "matching content does not rewrite owner references", existingPort: 8080, desiredPort: 8080},
+	}
 
-	existing := seedService(t, ownershipTestService(9090))
-	existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
-	r, c := newOwnershipTestReconciler(t, s, existing)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("seed an object held by a foreign controller that shares the parent's kind and name")
+			s := newOwnershipTestScheme(t)
+			existing := seedService(t, ownershipTestService(tt.existingPort))
+			existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
+			r, c := newOwnershipTestReconciler(t, s, existing)
 
-	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(ownershipTestService(8080), false))
+			t.Log("sync on behalf of a different parent")
+			modified, _, err := SyncResource(context.Background(), r, newOwnershipTestParent(),
+				serviceGenerator(ownershipTestService(tt.desiredPort), tt.toDelete))
 
-	requireOwnershipConflict(t, err)
-	assert.False(t, modified)
-
-	stored := storedService(t, c)
-	assert.Equal(t, int32(9090), stored.Spec.Ports[0].Port, "spec of a foreign-owned object must not be overwritten")
-	assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences)
-	assert.Equal(t, existing.Annotations, stored.Annotations, "bookkeeping annotations must not be written either")
+			t.Log("the sync is refused and the stored object is left exactly as it was")
+			requireOwnershipConflict(t, err)
+			assert.False(t, modified)
+			stored := storedService(t, c)
+			assert.Equal(t, tt.existingPort, stored.Spec.Ports[0].Port, "spec of a foreign-owned object must not be overwritten")
+			assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences)
+			assert.Equal(t, existing.Annotations, stored.Annotations, "bookkeeping annotations must not be written either")
+		})
+	}
 }
 
-func TestSyncResource_ForeignControllerBlocksDelete(t *testing.T) {
-	ctx := context.Background()
-	s := newOwnershipTestScheme(t)
+// TestSyncResource_SyncProceeds covers the cases the guard must let through: adoption of an
+// ownerless object, the controller that already owns the object, an opted-out nil parent, and the
+// shared-ownership opt-out. Every case also asserts that a second sync settles, since a write that
+// repeated on each pass would requeue the controller forever without ever converging.
+func TestSyncResource_SyncProceeds(t *testing.T) {
+	tests := []struct {
+		name          string
+		existingOwner []metav1.OwnerReference
+		existingPort  int32
+		desiredPort   int32
+		parent        client.Object
+		opts          []SyncOption
+		wantModified  bool
+		wantOwner     []metav1.OwnerReference
+		wantPort      int32
+		reason        string
+	}{
+		{
+			name:         "ownerless object with matching content is adopted",
+			existingPort: 8080, desiredPort: 8080,
+			parent: newOwnershipTestParent(), wantModified: true,
+			wantOwner: []metav1.OwnerReference{parentControllerRef()}, wantPort: 8080,
+			reason: "adoption must attach the owner reference without changing the content",
+		},
+		{
+			name:         "ownerless object with differing content is adopted and updated",
+			existingPort: 9090, desiredPort: 8080,
+			parent: newOwnershipTestParent(), wantModified: true,
+			wantOwner: []metav1.OwnerReference{parentControllerRef()}, wantPort: 8080,
+			reason: "adoption rides along with the content update in one write",
+		},
+		{
+			name:          "the controller that already owns the object reconciles normally",
+			existingOwner: []metav1.OwnerReference{parentControllerRef()},
+			existingPort:  9090, desiredPort: 8080,
+			parent: newOwnershipTestParent(), wantModified: true,
+			wantOwner: []metav1.OwnerReference{parentControllerRef()}, wantPort: 8080,
+			reason: "the guard must not disturb the ordinary same-owner path",
+		},
+		{
+			name:          "a nil parent asks for an independent lifecycle",
+			existingOwner: []metav1.OwnerReference{foreignControllerRef()},
+			existingPort:  9090, desiredPort: 8080,
+			parent: nil, wantModified: true,
+			wantOwner: []metav1.OwnerReference{foreignControllerRef()}, wantPort: 8080,
+			reason: "a nil parent means no ownership opinion, so behavior is unchanged from before the guard",
+		},
+		{
+			name:          "the shared-ownership opt-out tolerates a foreign controller",
+			existingOwner: []metav1.OwnerReference{foreignControllerRef()},
+			existingPort:  8080, desiredPort: 8080,
+			parent: newOwnershipTestParent(), opts: []SyncOption{WithSharedOwnership()},
+			wantModified: false,
+			wantOwner:    []metav1.OwnerReference{foreignControllerRef()}, wantPort: 8080,
+			reason: "an object legitimately shared between owners must neither fail nor be re-owned",
+		},
+	}
 
-	existing := seedService(t, ownershipTestService(9090))
-	existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
-	r, c := newOwnershipTestReconciler(t, s, existing)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("seed the existing object with the owner references under test")
+			ctx := context.Background()
+			s := newOwnershipTestScheme(t)
+			existing := seedService(t, ownershipTestService(tt.existingPort))
+			existing.OwnerReferences = tt.existingOwner
+			r, c := newOwnershipTestReconciler(t, s, existing)
 
-	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(ownershipTestService(9090), true))
+			t.Log("sync once")
+			modified, res, err := SyncResource(ctx, r, tt.parent,
+				serviceGenerator(ownershipTestService(tt.desiredPort), false), tt.opts...)
 
-	requireOwnershipConflict(t, err)
-	assert.False(t, modified)
+			t.Log("the sync is allowed and leaves the expected content and ownership")
+			require.NoError(t, err, tt.reason)
+			assert.Equal(t, tt.wantModified, modified, tt.reason)
+			require.NotNil(t, res)
+			stored := storedService(t, c)
+			assert.Equal(t, tt.wantPort, stored.Spec.Ports[0].Port)
+			assert.Equal(t, tt.wantOwner, stored.OwnerReferences)
 
-	stored := storedService(t, c)
-	assert.Equal(t, int32(9090), stored.Spec.Ports[0].Port)
-	assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences)
-}
-
-func TestSyncResource_ForeignControllerBlocksMatchingContentSuccess(t *testing.T) {
-	ctx := context.Background()
-	s := newOwnershipTestScheme(t)
-
-	desired := ownershipTestService(8080)
-	existing := seedService(t, desired)
-	existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
-	r, c := newOwnershipTestReconciler(t, s, existing)
-
-	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(desired, false))
-
-	requireOwnershipConflict(t, err)
-	assert.False(t, modified)
-
-	stored := storedService(t, c)
-	assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences,
-		"a matching-content sync must not rewrite the owner references of a foreign-owned object")
-}
-
-func TestSyncResource_AdoptsOwnerlessObjectWithMatchingContent(t *testing.T) {
-	ctx := context.Background()
-	s := newOwnershipTestScheme(t)
-
-	desired := ownershipTestService(8080)
-	existing := seedService(t, desired)
-	r, c := newOwnershipTestReconciler(t, s, existing)
-
-	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(desired, false))
-
-	require.NoError(t, err)
-	assert.True(t, modified)
-
-	stored := storedService(t, c)
-	require.Len(t, stored.OwnerReferences, 1)
-	assert.Equal(t, parentControllerRef(), stored.OwnerReferences[0])
-	assert.Equal(t, int32(8080), stored.Spec.Ports[0].Port, "adoption must not change the content")
-}
-
-func TestSyncResource_AdoptsOwnerlessObjectWithDifferingContent(t *testing.T) {
-	ctx := context.Background()
-	s := newOwnershipTestScheme(t)
-
-	existing := seedService(t, ownershipTestService(9090))
-	r, c := newOwnershipTestReconciler(t, s, existing)
-
-	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(ownershipTestService(8080), false))
-
-	require.NoError(t, err)
-	assert.True(t, modified)
-
-	stored := storedService(t, c)
-	require.Len(t, stored.OwnerReferences, 1)
-	assert.Equal(t, parentControllerRef(), stored.OwnerReferences[0])
-	assert.Equal(t, int32(8080), stored.Spec.Ports[0].Port)
-}
-
-func TestSyncResource_SameControllerReconcilesNormally(t *testing.T) {
-	ctx := context.Background()
-	s := newOwnershipTestScheme(t)
-
-	existing := seedService(t, ownershipTestService(9090))
-	existing.OwnerReferences = []metav1.OwnerReference{parentControllerRef()}
-	r, c := newOwnershipTestReconciler(t, s, existing)
-
-	modified, _, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(ownershipTestService(8080), false))
-
-	require.NoError(t, err)
-	assert.True(t, modified)
-
-	stored := storedService(t, c)
-	assert.Equal(t, int32(8080), stored.Spec.Ports[0].Port)
-	assert.Equal(t, []metav1.OwnerReference{parentControllerRef()}, stored.OwnerReferences)
-}
-
-func TestSyncResource_NilParentIgnoresOwnership(t *testing.T) {
-	ctx := context.Background()
-	s := newOwnershipTestScheme(t)
-
-	existing := seedService(t, ownershipTestService(9090))
-	existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
-	r, c := newOwnershipTestReconciler(t, s, existing)
-
-	modified, _, err := SyncResource(ctx, r, nil, serviceGenerator(ownershipTestService(8080), false))
-
-	require.NoError(t, err, "a nil parent asks for an independent lifecycle and must behave as before")
-	assert.True(t, modified)
-
-	stored := storedService(t, c)
-	assert.Equal(t, int32(8080), stored.Spec.Ports[0].Port)
-	assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences)
-}
-
-func TestSyncResource_SharedOwnershipToleratesForeignController(t *testing.T) {
-	ctx := context.Background()
-	s := newOwnershipTestScheme(t)
-
-	desired := ownershipTestService(8080)
-	existing := seedService(t, desired)
-	existing.OwnerReferences = []metav1.OwnerReference{foreignControllerRef()}
-	r, c := newOwnershipTestReconciler(t, s, existing)
-
-	modified, res, err := SyncResource(ctx, r, newOwnershipTestParent(), serviceGenerator(desired, false), WithSharedOwnership())
-
-	require.NoError(t, err, "the shared-ownership opt-out must keep a second owner from failing")
-	assert.False(t, modified)
-	require.NotNil(t, res)
-
-	stored := storedService(t, c)
-	assert.Equal(t, []metav1.OwnerReference{foreignControllerRef()}, stored.OwnerReferences,
-		"shared ownership must leave owner references alone")
+			t.Log("a second sync over the settled object writes nothing further")
+			modified, _, err = SyncResource(ctx, r, tt.parent,
+				serviceGenerator(ownershipTestService(tt.desiredPort), false), tt.opts...)
+			require.NoError(t, err)
+			assert.False(t, modified, "reconciliation must converge rather than write on every pass")
+		})
+	}
 }
