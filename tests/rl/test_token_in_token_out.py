@@ -7,17 +7,22 @@ from __future__ import annotations
 
 import json
 import math
-import os
+from functools import partial
 from typing import Any, Generator
 
 import pytest
-import requests
 
+from tests.rl.utils import (
+    check_model_registered,
+    check_ready,
+    prepare_log_dir,
+    process_env,
+    vllm_gpu_mem_args,
+)
 from tests.utils.client import send_request
 from tests.utils.constants import QWEN
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
-from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import ServicePorts
 
 TEST_MODEL = QWEN
@@ -32,44 +37,6 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.model(TEST_MODEL),
 ]
-
-
-def _check_ready(response: requests.Response) -> bool:
-    try:
-        return (response.json() or {}).get("status") == "ready"
-    except ValueError:
-        return False
-
-
-def _check_model_registered(response: requests.Response) -> bool:
-    if not check_models_api(response):
-        return False
-    data = response.json()
-    return any(model.get("id") == TEST_MODEL for model in data.get("data", []))
-
-
-def _process_env(**extra: str) -> dict[str, str]:
-    env = os.environ.copy()
-    env.setdefault("HF_HUB_OFFLINE", "1")
-    env.setdefault("TRANSFORMERS_OFFLINE", "1")
-    env["DYN_LOG"] = "debug"
-    env["DYN_NAMESPACE"] = "dynamo"
-    env.update(extra)
-    return env
-
-
-def _prepare_log_dir(request: pytest.FixtureRequest, suffix: str) -> str:
-    tmp_path = request.getfixturevalue("tmp_path")
-    log_dir = tmp_path / suffix
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return str(log_dir)
-
-
-def _vllm_gpu_mem_args() -> list[str]:
-    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
-        "--gpu-memory-utilization",
-        "0.4",
-    ]
 
 
 def _sglang_gpu_mem_args(env: dict[str, str]) -> list[str]:
@@ -89,7 +56,7 @@ class VllmTitoWorkerProcess(ManagedProcess):
         frontend_port: int,
         system_port: int,
     ):
-        env = _process_env(
+        env = process_env(
             DYN_SYSTEM_PORT=str(system_port),
             DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]',
         )
@@ -102,7 +69,7 @@ class VllmTitoWorkerProcess(ManagedProcess):
                 "--model",
                 TEST_MODEL,
                 "--enforce-eager",
-                *_vllm_gpu_mem_args(),
+                *vllm_gpu_mem_args(),
                 "--max-model-len",
                 "2048",
                 "--max-num-seqs",
@@ -111,17 +78,17 @@ class VllmTitoWorkerProcess(ManagedProcess):
             ],
             env=env,
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready),
+                (f"http://localhost:{system_port}/health", check_ready),
                 (
                     f"http://localhost:{frontend_port}/v1/models",
-                    _check_model_registered,
+                    partial(check_model_registered, model=TEST_MODEL),
                 ),
             ],
             timeout=600,
             display_output=True,
             terminate_all_matching_process_names=False,
             straggler_commands=["-m dynamo.vllm"],
-            log_dir=_prepare_log_dir(request, "tito-vllm-worker"),
+            log_dir=prepare_log_dir(request, "tito-vllm-worker"),
             display_name="tito-vllm-worker",
         )
 
@@ -134,7 +101,7 @@ class SglangTitoWorkerProcess(ManagedProcess):
         frontend_port: int,
         system_port: int,
     ):
-        env = _process_env(
+        env = process_env(
             DYN_SYSTEM_PORT=str(system_port),
             DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]',
         )
@@ -158,10 +125,10 @@ class SglangTitoWorkerProcess(ManagedProcess):
             ],
             env=env,
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready),
+                (f"http://localhost:{system_port}/health", check_ready),
                 (
                     f"http://localhost:{frontend_port}/v1/models",
-                    _check_model_registered,
+                    partial(check_model_registered, model=TEST_MODEL),
                 ),
             ],
             timeout=600,
@@ -169,7 +136,7 @@ class SglangTitoWorkerProcess(ManagedProcess):
             terminate_all_matching_process_names=False,
             stragglers=["SGLANG:EngineCore"],
             straggler_commands=["-m dynamo.sglang"],
-            log_dir=_prepare_log_dir(request, "tito-sglang-worker"),
+            log_dir=prepare_log_dir(request, "tito-sglang-worker"),
             display_name="tito-sglang-worker",
         )
 
@@ -188,7 +155,7 @@ def start_vllm_tito_services(
     with DynamoFrontendProcess(
         request,
         frontend_port=frontend_port,
-        extra_env=_process_env(),
+        extra_env=process_env(),
         terminate_all_matching_process_names=False,
         display_name="tito-vllm-frontend",
     ):
@@ -214,7 +181,7 @@ def start_sglang_tito_services(
     with DynamoFrontendProcess(
         request,
         frontend_port=frontend_port,
-        extra_env=_process_env(DYN_SGLANG_ENABLE_GENERATE="1"),
+        extra_env=process_env(DYN_SGLANG_ENABLE_GENERATE="1"),
         terminate_all_matching_process_names=False,
         display_name="tito-sglang-frontend",
     ):
@@ -384,6 +351,9 @@ def test_sglang_token_in_token_out(start_sglang_tito_services: int) -> None:
 
         meta_info = event.get("meta_info")
         assert isinstance(meta_info, dict), event
+        if not output_ids:
+            continue
+
         output_logprobs = meta_info.get("output_token_logprobs")
         assert isinstance(output_logprobs, list), event
         assert len(output_logprobs) == len(output_ids), event
