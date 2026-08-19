@@ -1,0 +1,4 @@
+interface:
+  display_name: "Synthesize User Workload"
+  short_description: "Capture workload and user-provided DGD"
+  default_prompt: "Use $synthesize-user-workload to capture my workload and provided DGD for this optimization run."
