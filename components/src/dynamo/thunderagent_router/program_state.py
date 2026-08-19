@@ -47,6 +47,11 @@ class Program:
     # monotonic seconds; used to compute resume-side decay
     acting_since: float = 0.0
 
+    # Bumped by every `begin_request`. Two concurrent requests for one session
+    # share this object, so object identity alone cannot tell a rollback whether
+    # the mutations it is about to undo are still its own.
+    admission_epoch: int = 0
+
 
 @dataclass(frozen=True)
 class RequestSnapshot:
@@ -54,7 +59,9 @@ class RequestSnapshot:
 
     ``program`` is captured so a rollback can tell "the program I mutated" from
     "a program with the same id that a later request created": the two are
-    different objects and only the first may be restored.
+    different objects and only the first may be restored. ``admission_epoch``
+    extends that to the case where the object is the same but a later request
+    has admitted its own turn on it since.
     """
 
     program: Program
@@ -68,6 +75,7 @@ class RequestSnapshot:
     waiting: Optional[asyncio.Event]
     acting_since: float
     was_paused: bool
+    admission_epoch: int
 
 
 @dataclass
@@ -85,6 +93,7 @@ class ProgramTable:
             program = Program(program_id=program_id)
             self.programs[program_id] = program
         program.step_count += 1
+        program.admission_epoch += 1
         if estimated_prompt_tokens > 0:
             program.token_total = estimated_prompt_tokens
         program.status = ProgramStatus.REASONING
@@ -113,6 +122,7 @@ class ProgramTable:
             waiting=program.waiting,
             acting_since=program.acting_since,
             was_paused=program_id in self.paused,
+            admission_epoch=program.admission_epoch,
         )
 
     def rollback_request(
@@ -128,6 +138,10 @@ class ProgramTable:
 
         Restoration is skipped when a different Program object now holds the id:
         the recorded one was released meanwhile and a newer request owns it.
+
+        The caller is responsible for the matching ``admission_epoch`` check --
+        the same object can be shared by a later request whose mutations must
+        not be undone. See ``ThunderAgentScheduler._rollback_admission``.
         """
         if snapshot is None:
             self.paused.pop(program_id, None)
@@ -146,10 +160,17 @@ class ProgramTable:
         program.marked_for_pause = snapshot.marked_for_pause
         program.soft_demoted_until = snapshot.soft_demoted_until
         program.acting_since = snapshot.acting_since
+        program.admission_epoch = snapshot.admission_epoch
         # A concurrent admission for the same program may have installed its own
         # Event; leave that one in place rather than stranding its waiter.
         if program.waiting is None or program.waiting is snapshot.waiting:
             program.waiting = snapshot.waiting
+        if program.lifecycle == ProgramLifecycle.PAUSED and program.waiting is not None:
+            # The Event may have been set by the resume this rollback is undoing.
+            # A paused program has to make its next waiter wait, and clearing
+            # cannot un-wake anyone: `set` completes every waiter already parked
+            # on the Event, and `clear` only affects `wait` calls made after it.
+            program.waiting.clear()
         if snapshot.was_paused:
             self.paused[program_id] = None
         else:

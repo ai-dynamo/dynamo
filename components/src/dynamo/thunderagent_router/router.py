@@ -111,6 +111,7 @@ class ThunderAgentScheduler:
             # between _admit_locked returning and the end of this block, so the
             # handle to what it mutated cannot be lost.
             admitted = self._table.programs.get(program_id)
+            admitted_epoch = admitted.admission_epoch if admitted is not None else None
 
         try:
             if wait_event is not None:
@@ -167,24 +168,56 @@ class ThunderAgentScheduler:
             # keeps consuming worker capacity, holds unrelated new programs
             # behind the fairness rule, and a later tick can resume and assign
             # a worker to a request nobody is waiting for.
-            await self._rollback_admission(program_id, snapshot, admitted)
+            await self._rollback_admission_shielded(
+                program_id, snapshot, admitted, admitted_epoch
+            )
             raise
+
+    async def _rollback_admission_shielded(
+        self,
+        program_id: str,
+        snapshot: Optional[RequestSnapshot],
+        admitted: Optional[Program],
+        admitted_epoch: Optional[int],
+    ) -> None:
+        """Run the rollback to completion even if cancellation is re-delivered.
+
+        The rollback has to take the lock, and a scheduler tick holds that lock
+        across awaits (``_pause_until_safe``, ``_greedy_resume``), so the
+        acquisition really can block. A second ``cancel()`` landing on it would
+        abandon the cleanup and leave behind exactly the state this path exists
+        to remove, so repeated cancellation is absorbed here; ``before_request``
+        re-raises ``CancelledError`` either way.
+
+        Post-cancellation state stays observable to whoever awaits the cancelled
+        task: this returns only once the rollback has finished.
+        """
+        rollback = asyncio.ensure_future(
+            self._rollback_admission(program_id, snapshot, admitted, admitted_epoch)
+        )
+        while not rollback.done():
+            try:
+                await asyncio.shield(rollback)
+            except asyncio.CancelledError:
+                if rollback.cancelled():
+                    break
+        if not rollback.cancelled():
+            # Surface a rollback failure the way a direct await would, instead
+            # of leaving it as an unretrieved task exception.
+            rollback.result()
 
     async def _rollback_admission(
         self,
         program_id: str,
         snapshot: Optional[RequestSnapshot],
         admitted: Optional[Program],
+        admitted_epoch: Optional[int],
     ) -> None:
         """Undo a cancelled admission attempt's mutations under the lock.
 
         A scheduler tick can run between cancellation being requested and this
         acquisition, so nothing here assumes the program is still paused: a
-        resumed program is rolled back just the same. Deliberately a plain
-        await rather than a shielded one — every critical section in this class
-        is synchronous, so the acquisition normally completes without yielding,
-        which keeps the post-cancellation state observable to the caller that
-        awaits the cancelled task.
+        resumed program is rolled back just the same.
         """
         if admitted is None:
             return
@@ -192,6 +225,14 @@ class ThunderAgentScheduler:
             if self._table.programs.get(program_id) is not admitted:
                 # Released meanwhile, and possibly recreated by a newer request.
                 # Neither case is ours to undo.
+                return
+            if admitted.admission_epoch != admitted_epoch:
+                # A later request for the same session has admitted its own turn
+                # on this same object. Its mutations are live and the snapshot
+                # predates them, so restoring would undo that request's work,
+                # and dropping a program it is parked on would strand it until
+                # the resume timeout. Leaving the program to its new owner costs
+                # only this attempt's step_count.
                 return
             self._table.rollback_request(program_id, snapshot)
             self._stat_admissions_cancelled += 1

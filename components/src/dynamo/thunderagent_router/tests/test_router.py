@@ -421,6 +421,7 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
     assert paused == 6
 
 
+@pytest.mark.fault_tolerance
 @pytest.mark.asyncio
 async def test_cancelled_admission_of_new_program_leaves_no_trace():
     """A cancelled first-turn admission must not outlive the request.
@@ -472,6 +473,7 @@ async def test_cancelled_admission_of_new_program_leaves_no_trace():
     assert router._stat_worker_assignments == assignments_before_tick
 
 
+@pytest.mark.fault_tolerance
 @pytest.mark.asyncio
 async def test_cancelled_admission_of_existing_program_restores_prior_turn():
     cfg = ThunderAgentConfig(
@@ -518,3 +520,140 @@ async def test_cancelled_admission_of_existing_program_restores_prior_turn():
     assert "p1" in router._table.paused
     assert program.waiting is waiting_before
     assert not program.waiting.is_set()
+
+
+@pytest.mark.fault_tolerance
+@pytest.mark.asyncio
+async def test_cancelled_admission_does_not_strand_a_concurrent_waiter():
+    """Two turns of one session share a program, so one cancelling must not
+    delete it out from under the other: the survivor is parked on the program's
+    Event and only a resume of that program can wake it."""
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=5.0,
+        pause_threshold=1.0,
+        pause_target=1.0,
+        resume_hysteresis=0.0,
+    )
+    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+
+    decision = await router.before_request("existing", estimated_prompt_tokens=850)
+    assert decision.assigned_worker_hint == 1
+
+    first = asyncio.create_task(
+        router.before_request("shared", estimated_prompt_tokens=50)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(first), timeout=0.05)
+    assert "shared" in router._table.paused
+
+    second = asyncio.create_task(
+        router.before_request("shared", estimated_prompt_tokens=50)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(second), timeout=0.05)
+    wait_event = router._table.programs["shared"].waiting
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert "shared" in router._table.programs
+    assert "shared" in router._table.paused
+    assert router._table.programs["shared"].waiting is wait_event
+
+    assert await router.end_program("existing") is True
+    await router._scheduler_tick()
+
+    decision = await asyncio.wait_for(second, timeout=1.5)
+    assert decision.was_paused is True
+    assert decision.assigned_worker_hint == 1
+
+
+@pytest.mark.fault_tolerance
+@pytest.mark.asyncio
+async def test_cancelled_admission_does_not_undo_a_later_turn():
+    """Both turns mutate the same Program object, so object identity alone
+    cannot tell the cancelled turn's mutations from the live turn's."""
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=5.0,
+    )
+    router, _ = make_router(config=cfg)
+
+    await router.before_request("p1")
+    await router.assign_worker("p1", 1)
+    await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
+    await router._pause_acting("p1")
+    program = router._table.programs["p1"]
+
+    cancelled = asyncio.create_task(
+        router.before_request("p1", estimated_prompt_tokens=500)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(cancelled), timeout=0.05)
+
+    later = asyncio.create_task(
+        router.before_request("p1", estimated_prompt_tokens=777)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(later), timeout=0.05)
+    assert program.token_total == 777
+    assert program.step_count == 3
+
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+
+    # The later turn's admission is still in force; restoring the cancelled
+    # turn's snapshot would have put token_total back to 110 and step_count to 1.
+    assert router._table.programs["p1"] is program
+    assert program.token_total == 777
+    assert program.step_count == 3
+    assert program.lifecycle == ProgramLifecycle.PAUSED
+
+    later.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await later
+
+
+@pytest.mark.fault_tolerance
+@pytest.mark.asyncio
+async def test_rollback_completes_when_cancellation_is_redelivered():
+    """A scheduler tick holds the lock across awaits, so the rollback's
+    acquisition can block long enough to be cancelled a second time."""
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=5.0,
+        pause_threshold=1.0,
+        pause_target=1.0,
+        resume_hysteresis=0.0,
+    )
+    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+
+    decision = await router.before_request("existing", estimated_prompt_tokens=850)
+    assert decision.assigned_worker_hint == 1
+
+    waiter = asyncio.create_task(
+        router.before_request("new", estimated_prompt_tokens=50)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+    assert "new" in router._table.paused
+
+    await router._lock.acquire()
+    try:
+        waiter.cancel()
+        await asyncio.sleep(0.01)
+        assert "new" in router._table.programs, "rollback should be parked on the lock"
+        waiter.cancel()
+        await asyncio.sleep(0.01)
+        assert "new" in router._table.programs
+    finally:
+        router._lock.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert "new" not in router._table.programs
+    assert "new" not in router._table.paused
