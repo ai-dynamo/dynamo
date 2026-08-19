@@ -713,6 +713,65 @@ fn token_native_compatibility_envelope_is_accepted_when_fields_are_projected() {
 }
 
 #[test]
+fn routed_expert_prompt_offset_is_forwarded() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {"routed_experts_prompt_start": 2},
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("valid routed-expert prompt offset");
+
+    assert_eq!(
+        wire.response
+            .expect("response options")
+            .routed_experts_prompt_start,
+        Some(2)
+    );
+}
+
+#[test]
+fn routed_expert_prompt_offset_rejects_invalid_values() {
+    for value in [
+        json!(-1),
+        json!(u64::from(u32::MAX) + 1),
+        json!(1.5),
+        json!("2"),
+    ] {
+        let mut request = request();
+        request.extra_args = Some(json!({
+            "vllm_tito": {
+                "request_id": "request-1",
+                "sampling_params": {"routed_experts_prompt_start": value},
+                "stream": false,
+                "priority": 0
+            }
+        }));
+
+        let error = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("invalid routed-expert prompt offset must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("routed_experts_prompt_start must be an unsigned 32-bit integer")
+        );
+    }
+}
+
+#[test]
 fn token_native_compatibility_envelope_rejects_disabled_token_ids() {
     let mut request = request();
     request.extra_args = Some(json!({
