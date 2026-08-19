@@ -288,20 +288,21 @@ impl SystemHealth {
     /// has no outstanding registrations left: while any remain, the notifier is still the
     /// one their handlers signal, and the health entry is still the subject's.
     ///
-    /// A release that re-exposes an earlier registration deliberately leaves that
-    /// subject's health status where the displacing registration put it, `NotReady`,
-    /// rather than trying to restore a verdict from before. Readiness here means "the
-    /// canary probed the target now installed and it answered", and nothing has probed
-    /// this target since it came back into view. The monitor task re-reads the target
-    /// every tick and the handler signals on any successful stream, so the entry is
-    /// re-decided within one canary interval, in the conservative direction.
+    /// A release that re-exposes an earlier registration resets that subject's health to
+    /// `NotReady`, the same as a registration that displaces one does. Readiness here
+    /// means "the canary probed the target now installed and it answered": the verdict
+    /// standing at that moment was earned by the registration that is leaving, and
+    /// nothing has probed the re-exposed target since it came back into view. Without the
+    /// reset the worker would report ready over an unprobed target for up to one canary
+    /// interval. The monitor re-reads the target every tick and the handler signals on
+    /// any successful stream, so the entry is re-decided from there.
     pub fn release_health_check_target(&self, registration: HealthCheckRegistration) {
         let HealthCheckRegistration {
             subject,
             registration,
         } = registration;
 
-        let subject_vacated = {
+        let (subject_vacated, re_exposed) = {
             let mut targets = self.health_check_targets.write().unwrap();
             let Some(outstanding) = targets.get_mut(&subject) else {
                 return;
@@ -312,16 +313,25 @@ impl SystemHealth {
             else {
                 return;
             };
+            // Only the last entry is the one the canary probes, so only removing that one
+            // puts a different target in front of the canary.
+            let was_current = position + 1 == outstanding.len();
             outstanding.remove(position);
             if outstanding.is_empty() {
                 targets.remove(&subject);
-                true
+                (true, false)
             } else {
-                false
+                (false, was_current)
             }
         };
 
         if !subject_vacated {
+            if re_exposed {
+                self.endpoint_health
+                    .write()
+                    .unwrap()
+                    .insert(subject.clone(), HealthStatus::NotReady);
+            }
             tracing::debug!(
                 "Released one health check registration for endpoint '{subject}'; other \
                  registrations still hold the subject."
@@ -671,6 +681,53 @@ mod tests {
         assert!(health.get_health_status().0);
     }
 
+    /// Releasing the registration the canary was probing puts a different target in front
+    /// of it. The readiness verdict standing at that moment was earned by the departing
+    /// registration, so it must not be inherited: the worker would otherwise report ready
+    /// over a target nothing has probed since it came back into view.
+    #[test]
+    fn releasing_the_probed_registration_withholds_ready_from_the_one_it_re_exposes() {
+        let mut health = system_health(true);
+        health.set_health_status(HealthStatus::Ready);
+        let earlier = health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "first"}),
+        );
+        let mut probed_instance = instance();
+        probed_instance.instance_id = 2;
+        let probed = health.register_health_check_target(
+            ENDPOINT,
+            probed_instance,
+            serde_json::json!({"generation": "second"}),
+        );
+        // The canary verified the second registration, and only the second.
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        assert!(health.get_health_status().0);
+
+        health.release_health_check_target(probed);
+
+        let target = health
+            .get_health_check_target(ENDPOINT)
+            .expect("the earlier registration is outstanding and takes the subject back");
+        assert_eq!(target.payload, serde_json::json!({"generation": "first"}));
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::NotReady),
+            "the departing registration's verdict says nothing about the re-exposed target"
+        );
+        assert!(
+            !health.get_health_status().0,
+            "the worker must not report ready over a target no canary has probed"
+        );
+
+        // And the re-exposed registration can still be verified and released normally.
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        assert!(health.get_health_status().0);
+        health.release_health_check_target(earlier);
+        assert!(health.get_health_check_target(ENDPOINT).is_none());
+    }
+
     /// The interleaving that a snapshot-and-restore release gets wrong: A registers, B
     /// displaces A, then A releases *before* B does. A's release is a no-op — but B's
     /// release must not then reinstate A, whose engine is long gone. A reinstated target
@@ -702,7 +759,11 @@ mod tests {
             health.get_health_check_target(ENDPOINT).is_none(),
             "both registrations are released, so nothing may hold the subject"
         );
-        assert!(health.get_endpoint_health_check_notifier(ENDPOINT).is_none());
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_none()
+        );
         assert!(health.get_endpoint_health_status(ENDPOINT).is_none());
         assert!(
             health.get_health_status().0,
@@ -715,7 +776,8 @@ mod tests {
     #[test]
     fn releasing_in_order_also_clears_the_subject() {
         let health = system_health(true);
-        let first = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let first =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
         let second =
             health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
 
@@ -727,7 +789,11 @@ mod tests {
 
         health.release_health_check_target(first);
         assert!(health.get_health_check_target(ENDPOINT).is_none());
-        assert!(health.get_endpoint_health_check_notifier(ENDPOINT).is_none());
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_none()
+        );
         assert!(health.get_endpoint_health_status(ENDPOINT).is_none());
     }
 

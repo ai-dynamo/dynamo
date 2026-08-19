@@ -176,10 +176,10 @@ impl EndpointScopedState {
     /// must stop being dispatchable and stop counting towards worker health.
     fn release(self) {
         if let Some(registration) = self.health_check_registration {
-            // Conditional on registration identity, and restoring what this start
-            // displaced: the target map is keyed by endpoint name alone, so an unrelated
-            // endpoint sharing that name must not lose its canary because this one went
-            // away.
+            // Conditional on registration identity: the target map is keyed by endpoint
+            // name alone, so this removes only the registration this start made, and
+            // whichever registration is still outstanding under that name takes the
+            // subject. An unrelated endpoint sharing the name keeps its canary.
             self.system_health
                 .lock()
                 .release_health_check_target(registration);
@@ -573,5 +573,476 @@ impl Endpoint {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! What a start installs process-wide, and what stops being installed once it releases.
+    //!
+    //! [`EndpointScopedState`] is deliberately built out of a bare
+    //! [`LocalEndpointRegistry`](crate::local_endpoint_registry::LocalEndpointRegistry) and a
+    //! bare [`SystemHealth`](crate::system_health::SystemHealth) rather than reaching through a
+    //! `DistributedRuntime`, so these assertions need no NATS, no discovery backend and no GPU.
+    //! They read the same public getters the canary and the `/health` handler read.
+
+    use super::*;
+    use crate::config::HealthStatus;
+    use crate::local_endpoint_registry::{
+        LocalAsyncEngine, LocalEndpointRegistry, test_support::stub_engine,
+    };
+    use crate::system_health::SystemHealth;
+
+    const ENDPOINT: &str = "generate";
+
+    fn system_health() -> Arc<parking_lot::Mutex<SystemHealth>> {
+        Arc::new(parking_lot::Mutex::new(SystemHealth::new(
+            HealthStatus::NotReady,
+            Vec::new(),
+            true,
+            "/health".to_string(),
+            "/live".to_string(),
+        )))
+    }
+
+    fn instance(instance_id: u64) -> Instance {
+        Instance {
+            component: "backend".to_string(),
+            endpoint: ENDPOINT.to_string(),
+            namespace: "dynamo".to_string(),
+            instance_id,
+            transport: TransportType::Tcp("127.0.0.1:0".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        }
+    }
+
+    /// Acquire one endpoint's scoped state, as `start_with_registration` does once it has
+    /// built the instance and knows the payload.
+    fn acquire(
+        registry: &LocalEndpointRegistry,
+        health: &Arc<parking_lot::Mutex<SystemHealth>>,
+        engine: &LocalAsyncEngine,
+        instance_id: u64,
+        payload: serde_json::Value,
+    ) -> (EndpointScopedState, Option<Arc<tokio::sync::Notify>>) {
+        EndpointScopedState::acquire(
+            ENDPOINT.to_string(),
+            registry.clone(),
+            health.clone(),
+            Some(engine.clone()),
+            Some((instance(instance_id), payload)),
+        )
+    }
+
+    /// The three things a start makes visible to the rest of the process: a dispatchable
+    /// engine, a canary target for it, and a notifier its handler signals through — with the
+    /// endpoint held `NotReady` until the canary says otherwise.
+    #[test]
+    fn acquire_publishes_the_engine_target_notifier_and_notready_status() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        let engine = stub_engine();
+
+        let (_scope, notifier) = acquire(
+            &registry,
+            &health,
+            &engine,
+            7,
+            serde_json::json!({"probe": "payload"}),
+        );
+
+        let registered = registry.get(ENDPOINT).expect(
+            "the canary dispatches through the local registry, so the engine must be there",
+        );
+        assert!(Arc::ptr_eq(&registered, &engine));
+
+        let guard = health.lock();
+        let target = guard
+            .get_health_check_target(ENDPOINT)
+            .expect("the canary needs a target to probe");
+        assert_eq!(target.instance.instance_id, 7);
+        assert_eq!(target.payload, serde_json::json!({"probe": "payload"}));
+        assert_eq!(
+            guard.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::NotReady),
+            "an endpoint the canary has not verified yet must not count as ready"
+        );
+        let published = guard
+            .get_endpoint_health_check_notifier(ENDPOINT)
+            .expect("the handler signals the canary through this notifier");
+        let handed_back = notifier.expect("acquire hands the notifier to the handler");
+        assert!(
+            Arc::ptr_eq(&published, &handed_back),
+            "the handler must signal the same notifier the canary waits on"
+        );
+        assert!(
+            !guard.get_health_status().0,
+            "an unverified endpoint holds the worker unhealthy"
+        );
+    }
+
+    /// The bug this work item exists for: a start that fails, or an endpoint that stops,
+    /// used to leave all of the above behind. The engine stayed callable for an endpoint
+    /// with no request-plane or discovery presence, and the abandoned target — which nothing
+    /// would ever verify — held the whole worker unhealthy.
+    #[test]
+    fn release_leaves_no_endpoint_scoped_state_behind() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        health.lock().set_health_status(HealthStatus::Ready);
+        let engine = stub_engine();
+
+        let (scope, _notifier) = acquire(&registry, &health, &engine, 7, serde_json::json!({}));
+        assert!(!health.lock().get_health_status().0);
+
+        scope.release();
+
+        assert!(
+            registry.get(ENDPOINT).is_none(),
+            "a stopped endpoint must not stay locally dispatchable"
+        );
+        let guard = health.lock();
+        assert!(guard.get_health_check_target(ENDPOINT).is_none());
+        assert!(guard.get_endpoint_health_check_notifier(ENDPOINT).is_none());
+        assert!(guard.get_endpoint_health_status(ENDPOINT).is_none());
+        assert!(
+            guard.get_health_status().0,
+            "an abandoned target would hold the worker unhealthy with no endpoint to blame"
+        );
+    }
+
+    /// An endpoint with no health check payload registers no canary target, but its engine
+    /// is still endpoint-scoped state that has to go when the endpoint stops.
+    #[test]
+    fn release_withdraws_the_engine_even_with_no_health_check_target() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        let engine = stub_engine();
+
+        let (scope, notifier) = EndpointScopedState::acquire(
+            ENDPOINT.to_string(),
+            registry.clone(),
+            health.clone(),
+            Some(engine.clone()),
+            None,
+        );
+        assert!(
+            notifier.is_none(),
+            "no target means nothing to notify about"
+        );
+        assert!(registry.get(ENDPOINT).is_some());
+        assert!(health.lock().get_health_check_target(ENDPOINT).is_none());
+
+        scope.release();
+
+        assert!(registry.get(ENDPOINT).is_none());
+    }
+
+    /// Restarting an endpoint under the same name must serve from the new engine and let the
+    /// canary probe the new instance with the new payload. Before this change the second
+    /// registration was refused outright, so the restart silently inherited the dead
+    /// incarnation's instance and payload.
+    #[test]
+    fn a_restart_under_the_same_name_installs_its_own_engine_and_target() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        let first_engine = stub_engine();
+        let second_engine = stub_engine();
+
+        let (first, _) = acquire(
+            &registry,
+            &health,
+            &first_engine,
+            1,
+            serde_json::json!({"generation": "first"}),
+        );
+        first.release();
+        let (_second, _) = acquire(
+            &registry,
+            &health,
+            &second_engine,
+            2,
+            serde_json::json!({"generation": "second"}),
+        );
+
+        let registered = registry.get(ENDPOINT).expect("the restart is dispatchable");
+        assert!(
+            Arc::ptr_eq(&registered, &second_engine),
+            "requests must reach the engine that is serving now"
+        );
+        let guard = health.lock();
+        let target = guard
+            .get_health_check_target(ENDPOINT)
+            .expect("the restart registered a target");
+        assert_eq!(
+            target.instance.instance_id, 2,
+            "the canary must report on the instance that exists"
+        );
+        assert_eq!(target.payload, serde_json::json!({"generation": "second"}));
+        assert!(
+            guard.get_endpoint_health_check_notifier(ENDPOINT).is_some(),
+            "the restart's handler needs a notifier to signal"
+        );
+    }
+
+    /// Both identity guards, together. Two endpoints can hold one name at once — a restart
+    /// that overlaps the outgoing incarnation's cleanup, or two components whose endpoints
+    /// share a name — and the registry and the target map are both keyed by that name alone.
+    /// Releasing the older scope must therefore evict neither the engine nor the canary
+    /// target the newer one installed; the whole receipt design exists for this case.
+    #[test]
+    fn releasing_an_overlapped_scope_leaves_the_newer_one_serving() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        let outgoing_engine = stub_engine();
+        let live_engine = stub_engine();
+
+        let (outgoing, _) = acquire(
+            &registry,
+            &health,
+            &outgoing_engine,
+            1,
+            serde_json::json!({"generation": "outgoing"}),
+        );
+        let (_live, _) = acquire(
+            &registry,
+            &health,
+            &live_engine,
+            2,
+            serde_json::json!({"generation": "live"}),
+        );
+
+        outgoing.release();
+
+        let registered = registry
+            .get(ENDPOINT)
+            .expect("the live endpoint must stay dispatchable");
+        assert!(
+            Arc::ptr_eq(&registered, &live_engine),
+            "the outgoing scope must not evict the engine that replaced its own"
+        );
+        let guard = health.lock();
+        let target = guard
+            .get_health_check_target(ENDPOINT)
+            .expect("the live endpoint must keep its canary target");
+        assert_eq!(target.instance.instance_id, 2);
+        assert_eq!(target.payload, serde_json::json!({"generation": "live"}));
+        assert!(
+            guard.get_endpoint_health_check_notifier(ENDPOINT).is_some(),
+            "the live endpoint's handler still signals through this notifier"
+        );
+        assert_eq!(
+            guard.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::NotReady),
+            "the live endpoint is still tracked, awaiting its own canary verdict"
+        );
+    }
+}
+
+// ===============================
+// Integration Tests (require DRT)
+// ===============================
+#[cfg(all(test, feature = "integration"))]
+mod integration_tests {
+    //! The same guarantees, driven through a real `start_with_registration`.
+    //!
+    //! These need a live NATS server, so they are gated behind the `integration` feature
+    //! like every other DRT-backed test in this crate.
+
+    use super::*;
+    use crate::distributed::distributed_test_utils::create_test_drt_async;
+    use crate::local_endpoint_registry::{LocalAsyncEngine, test_support::stub_engine};
+    use crate::pipeline::PipelineError;
+    use crate::pipeline::network::PushWorkHandler;
+    use crate::system_health::SystemHealth;
+    use async_trait::async_trait;
+    use bytes::Bytes;
+
+    const ENDPOINT: &str = "generate";
+
+    /// A handler that carries no pipeline. These tests assert on the process-wide state a
+    /// start installs, never on request handling, so the handler only has to exist — and a
+    /// bare one keeps a second start under the same endpoint name from tripping over
+    /// metrics that were registered by the first.
+    struct TestHandler {
+        /// Fails the notifier handshake, which is the first fallible step after the start
+        /// has installed its endpoint-scoped state.
+        refuse_notifier: bool,
+    }
+
+    #[async_trait]
+    impl PushWorkHandler for TestHandler {
+        async fn handle_payload(
+            &self,
+            _payload: Bytes,
+            _request_id: Option<String>,
+        ) -> Result<(), PipelineError> {
+            Ok(())
+        }
+
+        fn add_metrics(
+            &self,
+            _endpoint: &Endpoint,
+            _metrics_labels: Option<&[(&str, &str)]>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_endpoint_health_check_notifier(
+            &self,
+            _notifier: Arc<tokio::sync::Notify>,
+        ) -> Result<()> {
+            if self.refuse_notifier {
+                anyhow::bail!("handler rejected the health check notifier");
+            }
+            Ok(())
+        }
+    }
+
+    fn handler(refuse_notifier: bool) -> Arc<dyn PushWorkHandler> {
+        Arc::new(TestHandler { refuse_notifier })
+    }
+
+    /// Assert that the endpoint name holds no engine, target, notifier or health entry.
+    fn assert_no_endpoint_state(
+        registry: &crate::local_endpoint_registry::LocalEndpointRegistry,
+        system_health: &Arc<parking_lot::Mutex<SystemHealth>>,
+        context: &str,
+    ) {
+        assert!(
+            registry.get(ENDPOINT).is_none(),
+            "{context}: the engine must not stay locally dispatchable"
+        );
+        let guard = system_health.lock();
+        assert!(
+            guard.get_health_check_target(ENDPOINT).is_none(),
+            "{context}: an abandoned canary target holds the whole worker unhealthy"
+        );
+        assert!(
+            guard.get_endpoint_health_check_notifier(ENDPOINT).is_none(),
+            "{context}: nothing is left to signal this notifier"
+        );
+        assert!(
+            guard.get_endpoint_health_status(ENDPOINT).is_none(),
+            "{context}: a stale health entry keeps counting towards worker health"
+        );
+    }
+
+    async fn start(
+        drt: &crate::DistributedRuntime,
+        namespace: &str,
+        engine: &LocalAsyncEngine,
+        payload: serde_json::Value,
+        refuse_notifier: bool,
+    ) -> Result<StartedEndpoint> {
+        drt.namespace(namespace)?
+            .component("backend")?
+            .endpoint(ENDPOINT)
+            .endpoint_builder()
+            .handler(handler(refuse_notifier))
+            .health_check_payload(payload)
+            .register_local_engine(engine.clone())?
+            .start_with_registration()
+            .await
+    }
+
+    /// A start that fails partway leaves the process as it found it. Before this change the
+    /// engine and the canary target it had already installed outlived the failed start: the
+    /// engine stayed callable for an endpoint that never reached discovery, and the target —
+    /// which nothing would ever verify — held the whole worker unhealthy.
+    #[tokio::test]
+    async fn a_failed_start_leaves_no_endpoint_scoped_state_behind() {
+        let drt = create_test_drt_async().await;
+        let engine = stub_engine();
+
+        let outcome = start(
+            &drt,
+            "rollback_ns",
+            &engine,
+            serde_json::json!({"probe": "payload"}),
+            true,
+        )
+        .await;
+        let Err(error) = outcome else {
+            panic!("the handler refused the notifier, so the start cannot succeed");
+        };
+        assert!(error.to_string().contains("notifier"));
+
+        assert_no_endpoint_state(
+            drt.local_endpoint_registry(),
+            &drt.system_health(),
+            "after a failed start",
+        );
+    }
+
+    /// Stop an endpoint and start it again under the same name. The restart must serve from
+    /// its own engine and be probed with its own payload — and the shutdown in between must
+    /// leave nothing that could answer for the endpoint while it is down.
+    #[tokio::test]
+    async fn a_restart_after_shutdown_is_the_one_the_canary_reports_on() {
+        let drt = create_test_drt_async().await;
+        let first_engine = stub_engine();
+        let second_engine = stub_engine();
+
+        let started = start(
+            &drt,
+            "restart_ns",
+            &first_engine,
+            serde_json::json!({"generation": "first"}),
+            false,
+        )
+        .await
+        .expect("the first start succeeds");
+        assert!(Arc::ptr_eq(
+            &drt.local_endpoint_registry()
+                .get(ENDPOINT)
+                .expect("the first endpoint is dispatchable"),
+            &first_engine
+        ));
+
+        started.shutdown().await.expect("shutdown runs cleanly");
+        assert_no_endpoint_state(
+            drt.local_endpoint_registry(),
+            &drt.system_health(),
+            "after shutdown",
+        );
+
+        let _restarted = start(
+            &drt,
+            "restart_ns",
+            &second_engine,
+            serde_json::json!({"generation": "second"}),
+            false,
+        )
+        .await
+        .expect("the endpoint can be started again under the same name");
+
+        let registered = drt
+            .local_endpoint_registry()
+            .get(ENDPOINT)
+            .expect("the restart is dispatchable");
+        assert!(
+            Arc::ptr_eq(&registered, &second_engine),
+            "requests must reach the engine that is serving now"
+        );
+        let guard = drt.system_health();
+        let guard = guard.lock();
+        let target = guard
+            .get_health_check_target(ENDPOINT)
+            .expect("the restart registered a canary target");
+        assert_eq!(
+            target.payload,
+            serde_json::json!({"generation": "second"}),
+            "the canary must probe the incarnation that is serving, not the one that stopped"
+        );
+        // The canary is off in this configuration, so registering with the request plane
+        // marks the endpoint ready; what matters here is that the restart is tracked again
+        // under its own registration, after the shutdown removed the previous entry.
+        assert!(
+            guard.get_endpoint_health_status(ENDPOINT).is_some(),
+            "the restart counts towards worker health again"
+        );
+        assert!(guard.get_endpoint_health_check_notifier(ENDPOINT).is_some());
     }
 }
