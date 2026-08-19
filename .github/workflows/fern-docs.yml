@@ -123,11 +123,18 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Check generated API references
+      - name: Generate API references
+        # The Python/Rust reference pages are publish-time artifacts:
+        # gitignored in the source tree and generated here against the exact
+        # ref being published, so source PRs never carry (or review) the
+        # regenerated MDX. Generation must precede the pages-dev sync below,
+        # which rsyncs whatever sits under docs/fern/pages/. The Kubernetes
+        # reference regenerates from a docs-owned source file and stays
+        # committed, so it keeps the freshness check.
         run: |
           python3 -m pip install 'griffe==2.1.0'
-          python3 source-checkout/docs/fern/scripts/gen_python_api.py --check
-          python3 source-checkout/docs/fern/scripts/gen_rust_api.py --check
+          python3 source-checkout/docs/fern/scripts/gen_python_api.py
+          python3 source-checkout/docs/fern/scripts/gen_rust_api.py
           python3 source-checkout/docs/fern/scripts/gen_kubernetes_api.py --check
 
       - name: Checkout docs-website branch
@@ -723,6 +730,29 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Setup Python for API reference generation
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.13'
+
+      - name: Generate API references at the tag
+        # Tags cut after the Python/Rust references became publish-time
+        # artifacts carry no committed pages, so the snapshot below must
+        # generate them from the tagged source. Older tags predate the
+        # generators (or still commit their pages); their snapshots sync
+        # whatever the tag holds, so generation is skipped, never failed.
+        run: |
+          set -euo pipefail
+          gen_py="source-checkout/docs/fern/scripts/gen_python_api.py"
+          gen_rs="source-checkout/docs/fern/scripts/gen_rust_api.py"
+          if [ ! -f "$gen_py" ] || [ ! -f "$gen_rs" ]; then
+            echo "::notice::Tagged tree lacks the API reference generators; snapshotting committed pages as-is"
+            exit 0
+          fi
+          python3 -m pip install 'griffe==2.1.0'
+          python3 "$gen_py"
+          python3 "$gen_rs"
 
       - name: Build versioned pages from tagged commit
         run: |

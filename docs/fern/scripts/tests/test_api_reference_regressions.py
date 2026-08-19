@@ -548,8 +548,25 @@ def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     assert "docs/fern/scripts/tests/test_gen_rust_api.py" in workflow
     assert "docs/fern/scripts/tests/test_gen_kubernetes_api.py" in workflow
     assert "-c /dev/null" not in workflow
-    for generator in ("python", "rust", "kubernetes"):
-        assert f"gen_{generator}_api.py --check" in workflow
+    # Python/Rust references are publish-time artifacts: pre-merge must run
+    # both generators in WRITE mode (proving a source PR cannot break
+    # generation) and never as a freshness diff against committed pages,
+    # which no longer exist. Kubernetes output stays committed, so its
+    # freshness gate stays.
+    for generator in ("python", "rust"):
+        assert f"gen_{generator}_api.py\n" in workflow
+        assert f"gen_{generator}_api.py --check" not in workflow
+    assert "gen_kubernetes_api.py --check" in workflow
+    # The publish and preview paths must GENERATE the pages before syncing
+    # them to the docs-website branch (dev sync and version snapshots both).
+    for generator in ("python", "rust"):
+        assert f"gen_{generator}_api.py --check" not in publish
+    assert "gen_kubernetes_api.py --check" in publish
+    assert "Generate API references" in publish
+    assert "Generate API references at the tag" in publish
+    # fern check validates nav paths, so the fern-check job must materialize
+    # the generated pages first.
+    assert "Generate API reference pages" in workflow
     assert "griffe==2.1.0" in workflow
     assert "griffe==2.1.0" in publish
     assert '"griffe==2.1.0"' in project
