@@ -80,7 +80,7 @@ on:
         required: false
         type: boolean
         default: true
-      gpu_platforms:
+      gpu_test_platforms:
         description: 'Platforms whose matrix entries should run GPU tests, as a JSON array'
         required: false
         type: string
@@ -231,7 +231,7 @@ jobs:
           gpu_tests: 'false'
       - name: Run GPU tests (parallel)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-        if: ${{ inputs.run_gpu_tests && inputs.run_gpu_parallel_tests && contains(fromJSON(inputs.gpu_platforms), matrix.platform) }}
+        if: ${{ inputs.run_gpu_tests && inputs.run_gpu_parallel_tests && contains(fromJSON(inputs.gpu_test_platforms), matrix.platform) }}
         uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
@@ -252,7 +252,7 @@ jobs:
         # but require checkout to have succeeded so an infra/prereq failure (e.g. the
         # container/pod never coming online) skips this step cleanly instead of trying
         # to run the local pytest-local action against an un-checked-out workspace.
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_gpu_tests && contains(fromJSON(inputs.gpu_platforms), matrix.platform) }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_gpu_tests && contains(fromJSON(inputs.gpu_test_platforms), matrix.platform) }}
         uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
