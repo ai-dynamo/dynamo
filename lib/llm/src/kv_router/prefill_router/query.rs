@@ -41,9 +41,17 @@ where
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
 
         match &binding.router {
-            InnerPrefillRouter::KvRouter(router) => {
-                let outcome = router
-                    .kv_router()
+            InnerPrefillRouter::RoutingHost(router) => {
+                let Some(kv_router) = router.kv_router_if_enabled() else {
+                    let worker_id = router
+                        .peek_next_worker()
+                        .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+                    return Ok(PrefillQueryOutcome::Routed {
+                        worker_id,
+                        dp_rank: None,
+                    });
+                };
+                let outcome = kv_router
                     .find_best_match_details(
                         None,
                         token_ids,
@@ -82,23 +90,15 @@ where
                     dp_rank: None,
                 })
             }
-            InnerPrefillRouter::Builtin(router) => {
-                let worker_id = router
-                    .peek_next_worker()
-                    .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-                Ok(PrefillQueryOutcome::Routed {
-                    worker_id,
-                    dp_rank: None,
-                })
-            }
         }
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         if let Some(binding) = self.binding.load_full()
-            && let InnerPrefillRouter::KvRouter(router) = &binding.router
+            && let InnerPrefillRouter::RoutingHost(router) = &binding.router
+            && let Some(kv_router) = router.kv_router_if_enabled()
         {
-            router.kv_router().register_workers(worker_ids);
+            kv_router.register_workers(worker_ids);
         }
     }
 }

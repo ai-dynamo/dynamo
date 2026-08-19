@@ -305,9 +305,10 @@ where
         let threshold = self.conditional_disagg_prefill_busy_threshold?;
         let binding = self.binding.load_full()?;
         let router = match &binding.router {
-            InnerPrefillRouter::KvRouter(router) => router,
-            InnerPrefillRouter::Builtin(_) | InnerPrefillRouter::SimpleRouter(_) => return None,
+            InnerPrefillRouter::RoutingHost(router) => router,
+            InnerPrefillRouter::SimpleRouter(_) => return None,
         };
+        let kv_router = router.kv_router_if_enabled()?;
 
         let lora_name = req
             .routing
@@ -350,8 +351,7 @@ where
             .ok()
             .flatten();
 
-        let outcome = router
-            .kv_router()
+        let outcome = kv_router
             .find_best_match_details_without_admission(
                 None,
                 routing_token_ids,

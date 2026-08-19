@@ -243,9 +243,14 @@ where
 
     /// The active KV-aware data plane.
     pub fn kv_router(&self) -> &Arc<KvRouter<Sel>> {
+        self.kv_router_if_enabled()
+            .expect("routing host has no KV capability")
+    }
+
+    pub(crate) fn kv_router_if_enabled(&self) -> Option<&Arc<KvRouter<Sel>>> {
         match &self.plane {
-            RoutingPlane::Kv(chooser) => chooser,
-            RoutingPlane::Builtin(_) => panic!("builtin routing host has no KV router"),
+            RoutingPlane::Kv(chooser) => Some(chooser),
+            RoutingPlane::Builtin(_) => None,
         }
     }
 
