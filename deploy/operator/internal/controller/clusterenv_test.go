@@ -8,6 +8,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +17,9 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	dynamotesting "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/clusterenv"
@@ -25,8 +28,10 @@ import (
 	lwsmock "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/mocks/lws"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorchart"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,6 +41,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
 var clusterTestEnv *clusterenv.Env
@@ -147,6 +153,9 @@ func TestClusterDynamoGraphDeploymentManifests(t *testing.T) {
 
 			t.Log("Wait for the complete generated manifest contract")
 			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+
+			t.Log("Verify every rendered worker hash and namespace suffix binds to the live DGD hash")
+			assertClusterDGDWorkerHashBindings(t, t.Context(), env.Client(), getOnlyClusterDGD(t, t.Context(), env.Client(), env.Namespace()))
 		})
 	}
 }
@@ -287,6 +296,121 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 
 			t.Log("Wait for the generated DGD and its terminal workload manifests")
 			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+
+			t.Log("Verify every rendered worker hash and namespace suffix binds to the live DGD hash")
+			var liveDGD nvidiacomv1beta1.DynamoGraphDeployment
+			require.NoError(t, env.Client().Get(ctx, client.ObjectKeyFromObject(&dgd), &liveDGD))
+			assertClusterDGDWorkerHashBindings(t, ctx, env.Client(), &liveDGD)
 		})
 	}
+}
+
+func getOnlyClusterDGD(t *testing.T, ctx context.Context, c client.Client, namespace string) *nvidiacomv1beta1.DynamoGraphDeployment {
+	t.Helper()
+
+	var dgds nvidiacomv1beta1.DynamoGraphDeploymentList
+	require.NoError(t, c.List(ctx, &dgds, client.InNamespace(namespace)))
+	require.Len(t, dgds.Items, 1)
+	return &dgds.Items[0]
+}
+
+func assertClusterDGDWorkerHashBindings(
+	t *testing.T,
+	ctx context.Context,
+	c client.Client,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) {
+	t.Helper()
+
+	want, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+
+	var dcds nvidiacomv1beta1.DynamoComponentDeploymentList
+	require.NoError(t, c.List(ctx, &dcds, client.InNamespace(dgd.Namespace)))
+	for i := range dcds.Items {
+		dcd := &dcds.Items[i]
+		if dcd.GetParentGraphDeploymentName() != dgd.Name || !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+			continue
+		}
+		require.Equal(t, want, dcd.Labels[consts.KubeLabelDynamoWorkerHash], "worker DCD %q metadata hash", dcd.Name)
+		require.Equal(t, want, dynamo.GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)[consts.KubeLabelDynamoWorkerHash], "worker DCD %q pod-template hash", dcd.Name)
+	}
+
+	workerPodTemplates := 0
+	var deployments appsv1.DeploymentList
+	require.NoError(t, c.List(ctx, &deployments, client.InNamespace(dgd.Namespace)))
+	for i := range deployments.Items {
+		deployment := &deployments.Items[i]
+		if deployment.Spec.Template.Labels[consts.KubeLabelDynamoGraphDeploymentName] != dgd.Name {
+			continue
+		}
+		if assertClusterWorkerPodTemplateHashBinding(t, "Deployment "+deployment.Name, &deployment.Spec.Template, want) {
+			workerPodTemplates++
+		}
+	}
+
+	var leaderWorkerSets lwsv1.LeaderWorkerSetList
+	require.NoError(t, c.List(ctx, &leaderWorkerSets, client.InNamespace(dgd.Namespace)))
+	for i := range leaderWorkerSets.Items {
+		leaderWorkerSet := &leaderWorkerSets.Items[i]
+		leaderTemplate := leaderWorkerSet.Spec.LeaderWorkerTemplate.LeaderTemplate
+		if leaderTemplate != nil && leaderTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentName] == dgd.Name {
+			if assertClusterWorkerPodTemplateHashBinding(t, "LeaderWorkerSet "+leaderWorkerSet.Name+" leader template", leaderTemplate, want) {
+				workerPodTemplates++
+			}
+		}
+		workerTemplate := &leaderWorkerSet.Spec.LeaderWorkerTemplate.WorkerTemplate
+		if workerTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentName] == dgd.Name {
+			if assertClusterWorkerPodTemplateHashBinding(t, "LeaderWorkerSet "+leaderWorkerSet.Name+" worker template", workerTemplate, want) {
+				workerPodTemplates++
+			}
+		}
+	}
+
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	err = c.Get(ctx, types.NamespacedName{Name: dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components), Namespace: dgd.Namespace}, pcs)
+	if err != nil && !apierrors.IsNotFound(err) {
+		require.NoError(t, err)
+	}
+	if err == nil {
+		for _, clique := range pcs.Spec.Template.Cliques {
+			if clique == nil || clique.Labels[consts.KubeLabelDynamoGraphDeploymentName] != dgd.Name {
+				continue
+			}
+			podTemplate := &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: clique.Labels},
+				Spec:       clique.Spec.PodSpec,
+			}
+			if assertClusterWorkerPodTemplateHashBinding(t, "PodCliqueSet "+pcs.Name+" clique "+clique.Name, podTemplate, want) {
+				workerPodTemplates++
+			}
+		}
+	}
+
+	require.Positive(t, workerPodTemplates, "DGD %q has no rendered worker pod templates", dgd.Name)
+}
+
+func assertClusterWorkerPodTemplateHashBinding(t *testing.T, source string, podTemplate *corev1.PodTemplateSpec, want string) bool {
+	t.Helper()
+
+	if !dynamo.IsWorkerComponent(podTemplate.Labels[consts.KubeLabelDynamoComponentType]) {
+		return false
+	}
+	require.Equal(t, want, podTemplate.Labels[consts.KubeLabelDynamoWorkerHash], "%s worker hash", source)
+
+	for i := range podTemplate.Spec.Containers {
+		container := &podTemplate.Spec.Containers[i]
+		if container.Name != consts.MainContainerName {
+			continue
+		}
+		for _, env := range container.Env {
+			if env.Name == consts.DynamoNamespaceWorkerSuffixEnvVar {
+				require.Equal(t, want, env.Value, "%s worker namespace suffix", source)
+				return true
+			}
+		}
+		require.Failf(t, "%s main container has no worker namespace suffix", source, "%s is missing %s", source, consts.DynamoNamespaceWorkerSuffixEnvVar)
+	}
+	require.Failf(t, "%s has no main container", source, "%s is missing container %q", source, consts.MainContainerName)
+	return false
 }
