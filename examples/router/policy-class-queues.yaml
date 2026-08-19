@@ -22,6 +22,16 @@ policy_classes:
     queue_policy: fcfs
     quantum: 512
     prefill_busy_threshold_frac: 16.0
+    # Pool-level gate for large fleets: start queueing once 95% of the eligible
+    # workers are prefill-busy instead of waiting for literally all of them.
+    # Omit it to keep the default all-workers-busy rule.
+    #
+    # Note the different scales: prefill_busy_threshold_frac above is a
+    # multiplier on a single worker's max_num_batched_tokens, while
+    # busy_worker_ratio is a true fraction of the worker count in (0.0, 1.0].
+    # It requires prefill_busy_threshold or prefill_busy_threshold_frac to be
+    # set, since on its own it cannot define what "busy" means.
+    busy_worker_ratio: 0.95
     request_queue_limit_per_worker: 512
     raw_isl_token_queue_limit_per_worker: 1048576
   - name: latency_cached

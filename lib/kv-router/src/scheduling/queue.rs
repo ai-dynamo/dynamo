@@ -680,6 +680,33 @@ impl<
     }
 }
 
+/// Count `(busy, eligible)` prefill workers across the eligible set.
+///
+/// Split out of `all_workers_prefill_busy_with` so the counting can be tested
+/// without naming every generic parameter of `SchedulerQueueActor`. Unlike the
+/// default all-workers-busy path this cannot short-circuit, because the
+/// fractional rule needs the total as well as the busy count.
+fn count_busy_eligible_workers<C: WorkerConfigLike>(
+    active_tokens: &HashMap<crate::protocols::WorkerWithDpRank, usize>,
+    configs: &HashMap<WorkerId, C>,
+    class: &PolicyClassConfig,
+    eligibility: RoutingEligibility<'_>,
+) -> (usize, usize) {
+    let mut eligible_workers = 0usize;
+    let mut busy_workers = 0usize;
+    eligibility.for_each_eligible_worker_rank(configs, |worker, config| {
+        eligible_workers += 1;
+        let max_batched = config
+            .max_num_batched_tokens()
+            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+        let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+        if class.worker_is_busy(tokens, max_batched) {
+            busy_workers += 1;
+        }
+    });
+    (busy_workers, eligible_workers)
+}
+
 impl<
     P: SequencePublisher + 'static,
     C: WorkerConfigLike + Send + Sync + 'static,
@@ -1275,17 +1302,29 @@ impl<
             return class.worker_is_busy(tokens, max_batched);
         }
 
-        let mut checked_any = false;
-        let has_available = eligibility.any_eligible_worker_rank(configs, |worker, config| {
-            checked_any = true;
-            let max_batched = config
-                .max_num_batched_tokens()
-                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
-            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-            !class.worker_is_busy(tokens, max_batched)
-        });
+        // Default rule: stop at the first idle worker. Kept as a separate path
+        // so the common case still short-circuits instead of walking the pool.
+        if class.busy_worker_ratio.is_none() {
+            let mut checked_any = false;
+            let has_available = eligibility.any_eligible_worker_rank(configs, |worker, config| {
+                checked_any = true;
+                let max_batched = config
+                    .max_num_batched_tokens()
+                    .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+                let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+                !class.worker_is_busy(tokens, max_batched)
+            });
 
-        checked_any && !has_available
+            return checked_any && !has_available;
+        }
+
+        // Fractional rule needs both counts, so it cannot short-circuit.
+        let (busy_workers, eligible_workers) =
+            count_busy_eligible_workers(active_tokens, configs, class, eligibility);
+
+        // Returns false when no eligible workers were inspected, preserving the
+        // fall-through to `schedule` and its `NoEndpoints` error.
+        class.pool_is_busy(busy_workers, eligible_workers)
     }
 
     fn add_class_counters(&self, class_index: usize, snapshot: QueueSnapshot) {
@@ -1337,6 +1376,65 @@ mod tests {
 
     fn decay_now() -> Instant {
         Instant::now()
+    }
+
+    fn busy_counting_class(busy_worker_ratio: Option<f64>) -> PolicyClassConfig {
+        PolicyClassConfig {
+            name: "count-test".to_string(),
+            queue_policy: crate::config::RouterQueuePolicy::Fcfs,
+            admission: None,
+            quantum: 1,
+            // A worker is busy above 50 active prefill tokens.
+            prefill_busy_threshold: Some(50),
+            prefill_busy_threshold_frac: None,
+            busy_worker_ratio,
+            request_queue_limit_per_worker: None,
+            raw_isl_token_queue_limit_per_worker: None,
+            cached_token_queue_limit_per_worker: None,
+        }
+    }
+
+    #[test]
+    fn count_busy_eligible_workers_walks_the_whole_pool() {
+        let worker = |tokens: u64| SimpleWorkerConfig {
+            max_num_batched_tokens: Some(tokens),
+            ..Default::default()
+        };
+        let configs = HashMap::from([(1, worker(100)), (2, worker(100)), (3, worker(100))]);
+        let active_tokens = HashMap::from([
+            (WorkerWithDpRank::new(1, 0), 80),
+            (WorkerWithDpRank::new(2, 0), 80),
+            (WorkerWithDpRank::new(3, 0), 10),
+        ]);
+        let constraints = crate::protocols::RoutingConstraints::default();
+        let class = busy_counting_class(Some(0.6));
+
+        // The idle worker must not stop the walk: 2 busy out of 3 eligible.
+        let counts = count_busy_eligible_workers(
+            &active_tokens,
+            &configs,
+            &class,
+            RoutingEligibility::new(None, None, None, &constraints),
+        );
+        assert_eq!(counts, (2, 3));
+        assert!(class.pool_is_busy(counts.0, counts.1));
+
+        // Same pool under the default rule is not busy, since one worker is idle.
+        assert!(!busy_counting_class(None).pool_is_busy(counts.0, counts.1));
+    }
+
+    #[test]
+    fn count_busy_eligible_workers_reports_zero_for_an_empty_pool() {
+        let configs: HashMap<WorkerId, SimpleWorkerConfig> = HashMap::new();
+        let active_tokens = HashMap::new();
+        let constraints = crate::protocols::RoutingConstraints::default();
+        let counts = count_busy_eligible_workers(
+            &active_tokens,
+            &configs,
+            &busy_counting_class(Some(0.6)),
+            RoutingEligibility::new(None, None, None, &constraints),
+        );
+        assert_eq!(counts, (0, 0));
     }
 
     struct FixedPrefillLoadEstimator {

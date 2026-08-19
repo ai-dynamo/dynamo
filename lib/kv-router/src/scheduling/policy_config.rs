@@ -39,6 +39,16 @@ pub struct PolicyClassConfig {
     pub quantum: usize,
     pub prefill_busy_threshold: Option<usize>,
     pub prefill_busy_threshold_frac: Option<f64>,
+    /// Share of *eligible workers* that must be prefill-busy before the pool
+    /// counts as busy for queue admission, in `(0.0, 1.0]`.
+    ///
+    /// This is a pool-level ratio and is deliberately NOT named `*_frac`: the
+    /// sibling `prefill_busy_threshold_frac` is a multiplier on a single
+    /// worker's `max_num_batched_tokens` (values such as `16.0`), whereas this
+    /// knob is a true fraction of the worker count.
+    ///
+    /// `None` (the default) preserves the historical all-workers-busy rule.
+    pub busy_worker_ratio: Option<f64>,
     pub request_queue_limit_per_worker: Option<usize>,
     pub raw_isl_token_queue_limit_per_worker: Option<usize>,
     pub cached_token_queue_limit_per_worker: Option<usize>,
@@ -57,6 +67,28 @@ impl PolicyClassConfig {
             (active_tokens as f64) > threshold * (max_batched_tokens as f64)
         });
         absolute_busy || fractional_busy
+    }
+
+    /// Whether an eligible worker pool counts as busy for queue admission.
+    ///
+    /// Default (`busy_worker_ratio == None`) keeps the historical rule: the
+    /// pool is busy only when *every* eligible worker is busy.
+    ///
+    /// When set, the pool is busy once the busy share reaches the ratio. A high
+    /// ratio degrades to the historical rule on small pools, which is why no
+    /// separate minimum-pool-size knob is needed: with 2 eligible workers and a
+    /// ratio of `0.95`, `2 >= 1.9` still requires both workers to be busy.
+    ///
+    /// Returns `false` when no eligible workers were inspected so the request
+    /// falls through to `schedule`, which reports a proper `NoEndpoints` error.
+    pub fn pool_is_busy(&self, busy_workers: usize, eligible_workers: usize) -> bool {
+        if eligible_workers == 0 {
+            return false;
+        }
+        match self.busy_worker_ratio {
+            Some(ratio) => (busy_workers as f64) >= ratio * (eligible_workers as f64),
+            None => busy_workers == eligible_workers,
+        }
     }
 }
 
@@ -120,6 +152,7 @@ impl PolicyProfile {
             quantum: 1,
             prefill_busy_threshold: None,
             prefill_busy_threshold_frac: router_queue_threshold,
+            busy_worker_ratio: None,
             request_queue_limit_per_worker: None,
             raw_isl_token_queue_limit_per_worker: None,
             cached_token_queue_limit_per_worker: None,
@@ -322,6 +355,8 @@ struct RawPolicyClassConfig {
     #[serde(default)]
     prefill_busy_threshold_frac: Option<f64>,
     #[serde(default)]
+    busy_worker_ratio: Option<f64>,
+    #[serde(default)]
     request_queue_limit_per_worker: Option<usize>,
     #[serde(default)]
     raw_isl_token_queue_limit_per_worker: Option<usize>,
@@ -481,6 +516,32 @@ fn resolve_policy_class(
             raw.name
         )));
     }
+    // Range is deliberately stricter than `prefill_busy_threshold_frac`, which
+    // is a multiplier on `max_num_batched_tokens` and routinely exceeds 1.0.
+    // Rejecting out-of-range values here stops that scale being pasted into
+    // this knob, where it would silently never trigger.
+    if raw
+        .busy_worker_ratio
+        .is_some_and(|value| !value.is_finite() || value <= 0.0 || value > 1.0)
+    {
+        return Err(RouterPolicyConfigError::Validation(format!(
+            "{location} policy class {:?} busy_worker_ratio must be a finite fraction in (0.0, 1.0]",
+            raw.name
+        )));
+    }
+    // `busy_worker_ratio` only rescales how many busy workers are needed; it
+    // cannot define what "busy" means. Without a per-worker threshold every
+    // worker reports idle, so the ratio would never fire and queueing would
+    // stay disabled. Fail loudly instead of silently doing nothing.
+    if raw.busy_worker_ratio.is_some()
+        && raw.prefill_busy_threshold.is_none()
+        && raw.prefill_busy_threshold_frac.is_none()
+    {
+        return Err(RouterPolicyConfigError::Validation(format!(
+            "{location} policy class {:?} sets busy_worker_ratio but no prefill_busy_threshold or prefill_busy_threshold_frac, so no worker can ever be considered busy",
+            raw.name
+        )));
+    }
 
     let binding = match (raw.policy_family.as_deref(), raw.cache_bucket.as_deref()) {
         (None, None) => ClassBinding::Explicit,
@@ -512,6 +573,7 @@ fn resolve_policy_class(
             quantum: raw.quantum,
             prefill_busy_threshold: raw.prefill_busy_threshold,
             prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
+            busy_worker_ratio: raw.busy_worker_ratio,
             request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
             raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
             cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
@@ -783,6 +845,102 @@ models:
         assert_eq!(unmatched.default_class().name, "root-default");
         assert_eq!(unmatched.default_class().prefill_busy_threshold, Some(100));
         assert_eq!(unmatched.default_class().prefill_busy_threshold_frac, None);
+    }
+
+    fn class_with_busy_worker_ratio(ratio: Option<f64>) -> PolicyClassConfig {
+        PolicyClassConfig {
+            name: "test".to_string(),
+            queue_policy: RouterQueuePolicy::Fcfs,
+            admission: None,
+            quantum: 1,
+            prefill_busy_threshold: Some(0),
+            prefill_busy_threshold_frac: None,
+            busy_worker_ratio: ratio,
+            request_queue_limit_per_worker: None,
+            raw_isl_token_queue_limit_per_worker: None,
+            cached_token_queue_limit_per_worker: None,
+        }
+    }
+
+    #[test]
+    fn pool_is_busy_defaults_to_every_worker_busy() {
+        let class = class_with_busy_worker_ratio(None);
+        assert!(!class.pool_is_busy(127, 128));
+        assert!(class.pool_is_busy(128, 128));
+    }
+
+    #[test]
+    fn pool_is_busy_triggers_once_the_ratio_is_reached() {
+        let class = class_with_busy_worker_ratio(Some(0.95));
+        // 0.95 * 128 = 121.6, so 122 busy workers trip the gate while 121 do not.
+        assert!(!class.pool_is_busy(121, 128));
+        assert!(class.pool_is_busy(122, 128));
+    }
+
+    #[test]
+    fn pool_is_busy_high_ratio_keeps_small_pools_on_the_all_busy_rule() {
+        // Why no separate minimum-pool-size knob is needed: on a 2-worker pool
+        // a 0.95 ratio still requires 2 >= 1.9, i.e. every worker busy.
+        let class = class_with_busy_worker_ratio(Some(0.95));
+        assert!(!class.pool_is_busy(1, 2));
+        assert!(class.pool_is_busy(2, 2));
+    }
+
+    #[test]
+    fn pool_is_busy_is_false_without_eligible_workers() {
+        // Must stay false so the request falls through to `schedule` and gets a
+        // proper NoEndpoints error instead of being queued forever.
+        assert!(!class_with_busy_worker_ratio(None).pool_is_busy(0, 0));
+        assert!(!class_with_busy_worker_ratio(Some(0.5)).pool_is_busy(0, 0));
+    }
+
+    fn busy_ratio_yaml(class_fields: &str) -> String {
+        format!(
+            "default_policy_family: standard\nuncached_isl_buckets:\n  - min_tokens: 0\n    bucket: all\npolicy_classes:\n  - name: ratioed\n    policy_family: standard\n    cache_bucket: all\n    quantum: 4\n{class_fields}"
+        )
+    }
+
+    #[test]
+    fn busy_worker_ratio_rejects_the_prefill_threshold_frac_scale() {
+        // `prefill_busy_threshold_frac` is a multiplier and is routinely 16.0.
+        // Pasting that scale here must fail loudly rather than never trigger.
+        let err = RouterPolicyConfig::from_yaml(&busy_ratio_yaml(
+            "    prefill_busy_threshold: 10\n    busy_worker_ratio: 16.0\n",
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("busy_worker_ratio"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn busy_worker_ratio_requires_a_per_worker_busy_threshold() {
+        // Without a per-worker threshold no worker is ever busy, so the ratio
+        // would silently never fire.
+        let err = RouterPolicyConfig::from_yaml(&busy_ratio_yaml("    busy_worker_ratio: 0.9\n"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no prefill_busy_threshold"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn busy_worker_ratio_parses_and_defaults_to_none() {
+        let config = RouterPolicyConfig::from_yaml(&busy_ratio_yaml(
+            "    prefill_busy_threshold: 10\n    busy_worker_ratio: 0.9\n",
+        ))
+        .unwrap();
+        let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
+        assert_eq!(profile.default_class().busy_worker_ratio, Some(0.9));
+
+        assert_eq!(
+            PolicyProfile::synthetic(Some(16.0), RouterQueuePolicy::Fcfs)
+                .default_class()
+                .busy_worker_ratio,
+            None
+        );
     }
 
     #[test]
