@@ -1986,15 +1986,25 @@ impl ModelManager {
         let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
         let kv_event_source_requirement =
             KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
-        let kv_source_membership =
-            if kv_event_source_requirement.should_subscribe(&effective_kv_router_config) {
-                Some(
-                    self.get_or_create_kv_source_membership_watch(endpoint)
-                        .await?,
-                )
-            } else {
-                None
-            };
+        let cache_required = selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::CACHE)
+            || effective_kv_router_config.serve_indexer
+            || matches!(
+                kv_event_source_requirement,
+                KvEventSourceRequirement::ConditionalDisaggDecodeCache
+                    | KvEventSourceRequirement::Unknown
+            );
+        let kv_source_membership = if cache_required
+            && kv_event_source_requirement.should_subscribe(&effective_kv_router_config)
+        {
+            Some(
+                self.get_or_create_kv_source_membership_watch(endpoint)
+                    .await?,
+            )
+        } else {
+            None
+        };
 
         let mut chooser = KvRouter::new_with_worker_role(
             endpoint.clone(),
