@@ -13,7 +13,7 @@ patches:
       group: nvidia.com
       version: v1alpha1
       kind: DynamoGraphDeployment
-    path: resources.yaml
+    path: dgd-worker-efa-resources-patch.yaml
   - target:
       group: nvidia.com
       version: v1alpha1
