@@ -404,8 +404,10 @@ class OmniHandler(BaseOmniHandler):
 
             # Scoped to the pipelines whose decoder re-emits the full waveform
             # each yield; every other audio model keeps its per-payload path.
+            # Aggregated deployments only: the disaggregated stage router reads
+            # one final-stage payload per request (see stage_router
+            # ._format_output), so there is no snapshot stream to buffer.
             buffer_audio = self.audio.emits_cumulative_waveforms()
-            saw_audio_output = False
 
             async for stage_output in self.engine_client.generate(**per_request_kwargs):
                 # Chunk-streaming decoders emit the waveform repeatedly as the
@@ -413,7 +415,6 @@ class OmniHandler(BaseOmniHandler):
                 # them empty. Encode once at the end from the complete snapshot,
                 # or the response can carry a partial or silent waveform.
                 if buffer_audio and self.output_formatter.is_audio_output(stage_output):
-                    saw_audio_output = True
                     self.output_formatter.audio.observe_chunk(stage_output, request_id)
                     continue
 
@@ -426,10 +427,11 @@ class OmniHandler(BaseOmniHandler):
                 previous_text = update_previous_text(stage_output, previous_text)
                 yield {"stage_output": stage_output, "formatted_chunk": chunk}
 
-            if saw_audio_output:
-                # Emit even when nothing was buffered: format_audio reports a
-                # zero-length waveform as a failure, which is more useful to the
-                # client than an empty stream.
+            if buffer_audio:
+                # Always emit, even when no audio payload arrived or none was
+                # usable: format_audio reports a zero-length waveform as a
+                # failure, which is more useful to the client than the empty
+                # stream a buffered request would otherwise end on.
                 audio_np, sample_rate = self.output_formatter.audio.take_pending(
                     request_id
                 )

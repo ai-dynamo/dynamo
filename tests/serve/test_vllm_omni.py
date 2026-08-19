@@ -208,12 +208,21 @@ vllm_omni_configs = {
             pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
-            # Profiled with tests/utils/profile_pytest.py on 1x H200 (140 GiB).
-            # No requested_vllm_kv_cache_bytes marker: the Audex stage config
-            # pins gpu_memory_utilization per stage, so the engine ignores
-            # --kv-cache-memory-bytes/--gpu-memory-utilization from the CLI and
-            # the peak was 117.6 GiB at every probed cap (9-75 GiB).
-            pytest.mark.profiled_vram_gib(117.6),  # actual profiled peak
+            # Profiled with tests/utils/profile_pytest.py on 1x H200: peak
+            # 117.6 GiB, unchanged at every probed KV cap (9-75 GiB). vLLM-Omni's
+            # audex_tts.yaml sizes each stage as a fraction of *total* device
+            # memory (0.4 for the thinker, 0.25 for code2wav) and the aggregated
+            # worker forwards no engine memory args to AsyncOmni, so neither
+            # --kv-cache-memory-bytes nor --gpu-memory-utilization can cap the
+            # footprint from the CLI. Both VRAM markers are therefore omitted:
+            # the H200 number is card-relative, not a portable requirement.
+            # Re-enable once per-stage memory overrides are plumbed through
+            # omni's _build_omni_kwargs, then re-profile on a 24 GiB card.
+            pytest.mark.skip(
+                reason="Audex peaked at 117.6 GiB on 1x H200; the shipped stage "
+                "config sizes stages as a fraction of total device memory and "
+                "the worker cannot cap it, so it exceeds CI capacity (24GB)"
+            ),
         ],
         model="nvidia/Nemotron-Labs-Audex-2B",
         request_payloads=[

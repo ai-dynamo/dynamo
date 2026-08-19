@@ -287,6 +287,20 @@ class TestStreamedAudioIsResolved:
         assert chunks[0]["status"] == "failed"
 
     @pytest.mark.asyncio
+    async def test_missing_audio_stage_output_reports_failure(self):
+        """A buffered request must not end on an empty stream.
+
+        A thinker-only stream yields no audio-typed output at all, so nothing
+        is ever buffered and there is no payload to report per chunk.
+        """
+        handler = _make_handler()
+        chunks = await self._run(
+            handler, [SimpleNamespace(final_output_type="unknown")]
+        )
+
+        assert [c["status"] for c in chunks] == ["failed"]
+
+    @pytest.mark.asyncio
     async def test_buffer_is_released_after_the_request(self):
         """The formatter is shared, so a finished request must leave no state."""
         handler = _make_handler()

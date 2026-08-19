@@ -214,6 +214,18 @@ def test_tts_prompt_len_falls_back_when_builder_is_unavailable(monkeypatch):
     assert _make_audio_handler()._estimate_tts_prompt_len({}) == 2048
 
 
+def test_audex_request_fails_cleanly_without_audex_support(monkeypatch):
+    """A build without the Audex modules must report a request error.
+
+    RuntimeError is one of the types the handler turns into an error response,
+    so the request fails instead of the exception escaping the generator.
+    """
+    monkeypatch.setattr(audio_handler_module, "audex_prompt", None)
+
+    with pytest.raises(RuntimeError, match="no Audex support"):
+        audio_handler_module.AudioGenerationHandler._audex_prompt_builders("audex_tts")
+
+
 def test_tts_prompt_len_propagates_estimator_errors(monkeypatch):
     estimator = MagicMock(side_effect=RuntimeError("estimator failed"))
     monkeypatch.setattr(

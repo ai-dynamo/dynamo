@@ -23,6 +23,20 @@ try:
 except ImportError:
     Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
+try:
+    # Imported as modules, not symbols: the Audex helpers are looked up as
+    # attributes at call time so a test can substitute one.
+    from vllm_omni.model_executor.models.audex import checkpoint as audex_checkpoint
+    from vllm_omni.model_executor.models.audex import prompt as audex_prompt
+    from vllm_omni.model_executor.models.audex import tta as audex_tta
+except ImportError:
+    # vllm_omni only ships these in Audex-capable builds. Missing support fails
+    # the Audex request path (see _require_audex) rather than the import, so
+    # every other audio model still serves on such a build.
+    audex_checkpoint = None  # type: ignore[assignment]
+    audex_prompt = None  # type: ignore[assignment]
+    audex_tta = None  # type: ignore[assignment]
+
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.utils.output_modalities import RequestType
 
@@ -73,6 +87,20 @@ _TTS_LANGUAGES_FALLBACK = {
     "Spanish",
     "Italian",
 }
+
+
+def _require_audex(module: Any, name: str) -> Any:
+    """Return an Audex submodule, or fail the request if the build lacks it.
+
+    RuntimeError (not ImportError) so the handler reports it as a request
+    error instead of letting it escape as an unhandled exception.
+    """
+    if module is None:
+        raise RuntimeError(
+            "This vLLM-Omni build has no Audex support: "
+            f"vllm_omni.model_executor.models.audex.{name} is unavailable"
+        )
+    return module
 
 
 class AudioGenerationHandler:
@@ -289,10 +317,9 @@ class AudioGenerationHandler:
         """Return the (conditional, null) ChatML prompt builders for a task.
 
         TTS and TTA prime different codec spaces, so each has its own pair of
-        model-owned builders. Imported lazily: vllm_omni only ships them in
-        Audex-capable builds.
+        model-owned builders.
         """
-        from vllm_omni.model_executor.models.audex import prompt
+        prompt = _require_audex(audex_prompt, "prompt")
 
         if model_type == "audex_tta":
             return prompt.build_tta_cond_prompt, prompt.build_tta_null_prompt
@@ -469,12 +496,11 @@ class AudioGenerationHandler:
         adapter shares one cached dict the same way.
         """
         if self._audex_tta_rvq is None:
-            from vllm_omni.model_executor.models.audex.tta import (
-                build_tta_phase_token_ids,
-            )
-
+            tta = _require_audex(audex_tta, "tta")
             tokenizer = self._get_audex_tokenizer("audex_tta")
-            phase_token_ids, start_tid, end_tid = build_tta_phase_token_ids(tokenizer)
+            phase_token_ids, start_tid, end_tid = tta.build_tta_phase_token_ids(
+                tokenizer
+            )
             self._audex_tta_rvq = {
                 "phase_token_ids": phase_token_ids,
                 "start_tid": start_tid,
@@ -501,9 +527,7 @@ class AudioGenerationHandler:
         is shared.
         """
         if self._audex_tokenizer is None:
-            from vllm_omni.model_executor.models.audex.checkpoint import (
-                ensure_audex_snapshot,
-            )
+            checkpoint = _require_audex(audex_checkpoint, "checkpoint")
 
             # The snapshot profile decides which subset is fetched: "tts" also
             # pulls the speech decoder, so it is not interchangeable with "tta".
@@ -517,7 +541,7 @@ class AudioGenerationHandler:
             if os.path.basename(model_path).startswith("checkpoint_folder"):
                 root = os.path.dirname(model_path)
             else:
-                root = ensure_audex_snapshot(model_path, profile=profile)
+                root = checkpoint.ensure_audex_snapshot(model_path, profile=profile)
             # The checkpoint ships custom code; without trust_remote_code
             # transformers prompts on stdin, which would hang the worker.
             self._audex_tokenizer = AutoTokenizer.from_pretrained(
