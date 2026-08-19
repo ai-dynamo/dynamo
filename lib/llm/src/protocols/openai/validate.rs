@@ -22,8 +22,6 @@ pub const TEMPERATURE_RANGE: (f32, f32) = (MIN_TEMPERATURE, MAX_TEMPERATURE);
 pub const MIN_TOP_P: f32 = 0.0;
 /// Maximum allowed value for OpenAI's `top_p` sampling option
 pub const MAX_TOP_P: f32 = 1.0;
-/// Allowed range of values for OpenAI's `top_p` sampling option
-pub const TOP_P_RANGE: (f32, f32) = (MIN_TOP_P, MAX_TOP_P);
 
 /// Minimum allowed value for `min_p`
 pub const MIN_MIN_P: f32 = 0.0;
@@ -203,6 +201,21 @@ pub fn validate_response_format(
                     "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
                 );
             }
+
+            // Schema must be a JSON object — numbers, strings, arrays, and
+            // booleans are not valid JSON Schema documents.
+            if !json_schema.schema.is_object() {
+                anyhow::bail!(
+                    "`response_format.json_schema.schema` must be a JSON object, got {}",
+                    match &json_schema.schema {
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Bool(_) => "boolean",
+                        _ => "non-object",
+                    }
+                );
+            }
             Ok(())
         }
     }
@@ -226,7 +239,7 @@ pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Erro
 /// Validates the top_p parameter
 pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
     if let Some(p) = top_p
-        && !(MIN_TOP_P..=MAX_TOP_P).contains(&p)
+        && !(p.is_finite() && p > MIN_TOP_P && p <= MAX_TOP_P)
     {
         anyhow::bail!(
             "Top_p must be between {} and {}, got {}",
@@ -933,5 +946,42 @@ mod tests {
         let err =
             validate_no_unsupported_fields_with_ignore(&unsupported_fields, true).unwrap_err();
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn validate_top_p_rejects_zero() {
+        let err = validate_top_p(Some(0.0)).unwrap_err();
+        assert!(err.to_string().contains("Top_p"));
+    }
+
+    #[test]
+    fn validate_top_p_accepts_valid_values() {
+        validate_top_p(Some(0.1)).unwrap();
+        validate_top_p(Some(1.0)).unwrap();
+        validate_top_p(None).unwrap();
+    }
+
+    #[test]
+    fn validate_response_format_rejects_non_object_schema() {
+        let fmt = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": { "name": "test", "schema": 42 }
+        }))
+        .unwrap();
+        let err = validate_response_format(&Some(fmt)).unwrap_err();
+        assert!(err.to_string().contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn validate_response_format_accepts_valid_object_schema() {
+        let fmt = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "test",
+                "schema": { "type": "object", "properties": {} }
+            }
+        }))
+        .unwrap();
+        validate_response_format(&Some(fmt)).unwrap();
     }
 }
