@@ -56,7 +56,7 @@ fn bs_event(
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
-        source_kind: None,
+        ownership: None,
     }
 }
 
@@ -68,7 +68,7 @@ fn br_event(hashes: Vec<u64>) -> RawKvEvent {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
-        source_kind: None,
+        ownership: None,
     }
 }
 
@@ -348,7 +348,7 @@ async fn clear_all_propagates() {
         // Send ClearAll.
         let clear = TestBatch(
             2.0,
-            vec![RawKvEvent::AllBlocksCleared { source_kind: None }],
+            vec![RawKvEvent::AllBlocksCleared { ownership: None }],
             None,
         );
         pub_handle.send_batch(&clear).await.expect("send clear");
