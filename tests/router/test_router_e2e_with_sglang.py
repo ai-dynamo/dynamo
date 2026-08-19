@@ -372,11 +372,12 @@ def test_router_decisions_sglang_dp(
     )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603")
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.gpu_2
 @pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
 @pytest.mark.timeout(600)
 def test_router_decisions_sglang_disagg(
