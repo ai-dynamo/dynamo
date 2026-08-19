@@ -488,3 +488,28 @@ def test_accept_rates_without_nextn_is_a_usage_error(monkeypatch) -> None:
                 "1,1",
             ]
         )
+
+
+@pytest.mark.parametrize("nextn", ["0", "6"])
+def test_out_of_range_nextn_is_a_usage_error(monkeypatch, nextn) -> None:
+    # normalize_conditional_accept_rates already rejects anything outside
+    # 1..=5, but defaulting the flag into the engine args moves that error
+    # ahead of the handling that turns it into a usage message.
+    seen: dict = {}
+    _stub_cli_dependencies(monkeypatch, seen)
+
+    with pytest.raises(SystemExit):
+        replay_main.main(
+            [
+                "--input-tokens",
+                "8",
+                "--output-tokens",
+                "4",
+                "--request-count",
+                "1",
+                "--replay-concurrency",
+                "1",
+                "--aic-nextn",
+                nextn,
+            ]
+        )

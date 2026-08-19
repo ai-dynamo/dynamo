@@ -657,11 +657,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(
                 "--max-sim-time-seconds is not supported with --planner-config"
             )
+    # These two checks exist because defaulting the flags into the engine args
+    # moves their validation earlier. Both conditions are already rejected, by
+    # normalize_conditional_accept_rates, but that now raises from
+    # MockEngineArgs.from_json below, which is outside the error handling that
+    # turns a bad value into a usage message.
     if args.aic_nextn_accept_rates is not None and args.aic_nextn is None:
-        # The engine args validator rejects this pair, but it raises from
-        # MockEngineArgs.from_json below, which is outside the error handling
-        # that turns a bad value into a usage message.
         parser.error("--aic-nextn-accept-rates requires --aic-nextn")
+    if args.aic_nextn is not None and not 1 <= args.aic_nextn <= 5:
+        parser.error(f"--aic-nextn must be in 1..=5, got {args.aic_nextn}")
 
     # Speculation is a decode-side concept, so the flags are defaulted into the
     # aggregated or the decode engine args, never prefill: prefill does not
