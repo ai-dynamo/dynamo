@@ -12,10 +12,14 @@ on:
   workflow_dispatch:
 
 permissions:
+  # The default token only inventories refs, workflow runs, and jobs. Branch
+  # deletion uses the separately scoped GitHub App token created below.
   actions: read
   contents: read
 
 concurrency:
+  # A single audit can inspect and delete many refs. Do not overlap audits or
+  # cancel one halfway through when the next scheduled run starts.
   group: pull-request-branch-finalizer
   cancel-in-progress: false
 
@@ -25,10 +29,14 @@ jobs:
     if: >-
       github.repository == 'ai-dynamo/dynamo' &&
       github.ref == 'refs/heads/main'
+    # The environment stores the App credentials and only admits main, keeping
+    # the privileged deletion boundary outside pull-request-controlled refs.
     environment: pull-request-branch-cleanup
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Mint one short-lived, dynamo-only token for this audit. It is used only
+      # for the exact-SHA deletion operations near the end of the script.
       - name: Create a short-lived maintenance token
         id: maintenance-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
@@ -54,11 +62,15 @@ jobs:
           readonly refs_file="${RUNNER_TEMP}/pull-request-refs.tsv"
           readonly git_directory="${RUNNER_TEMP}/pull-request-branch-finalizer.git"
 
+          # Fail closed if a future trigger or repository copy reaches this
+          # privileged job outside the expected main-branch context.
           if [[ "$GITHUB_REPOSITORY" != "$repository" || "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "::error title=Pull request branch finalizer::Unexpected workflow context"
             exit 1
           fi
 
+          # Build the audit inventory directly from current repository refs.
+          # Only exact numeric pull-request branches are considered below.
           if ! gh api --method GET --paginate \
             "repos/${repository}/git/matching-refs/heads/pull-request/" \
             --jq '.[] | [.ref, .object.sha] | @tsv' > "$refs_file"; then
@@ -71,6 +83,8 @@ jobs:
             exit 0
           fi
 
+          # Reuse one empty bare repository for authenticated deletions. No
+          # pull-request-controlled files are ever checked out or executed.
           git -c init.templateDir= init --bare --quiet "$git_directory"
           git_auth=(
             -c credential.helper=
@@ -78,6 +92,8 @@ jobs:
             -c core.hooksPath=/dev/null
           )
 
+          # Evaluate each ref independently so an API error or an unready branch
+          # does not prevent the rest of the inventory from being cleaned up.
           while IFS=$'\t' read -r delete_ref branch_sha; do
             if [[ ! "$delete_ref" =~ ^refs/heads/pull-request/[0-9]+$ ]]; then
               echo "::warning title=Pull request branch finalizer::Ignoring unexpected ref: $delete_ref"
@@ -88,6 +104,9 @@ jobs:
               continue
             fi
 
+            # Query the push runs that GitHub actually created for this branch.
+            # The later SHA filter excludes runs from older versions of the ref
+            # without relying on a hard-coded list of workflow files.
             branch_name="${delete_ref#refs/heads/}"
             branch_number="${branch_name#pull-request/}"
             runs_file="${RUNNER_TEMP}/pull-request-${branch_number}-runs.tsv"
@@ -104,6 +123,8 @@ jobs:
               continue
             fi
 
+            # Reduce the API response to runs for the ref's current SHA and find
+            # the newest creation time used by the materialization grace period.
             : > "$current_runs_file"
             run_count=0
             newest_run_epoch=0
@@ -131,12 +152,16 @@ jobs:
               continue
             fi
 
+            # GitHub does not expose an "all workflows dispatched" signal. Give
+            # new runs time to appear before evaluating their job states.
             now_epoch=$(date -u +%s)
             if (( now_epoch - newest_run_epoch < RUN_MATERIALIZATION_GRACE_SECONDS )); then
               echo "::notice title=Pull request branch finalizer::Runs for $branch_name are still inside the materialization grace period"
               continue
             fi
 
+            # Completed runs are safe. For an active run, require every visible
+            # job to have left queued/waiting state before deleting the ref.
             ready=true
             while IFS=$'\t' read -r run_id run_status run_created_at run_path; do
               if [[ "$run_status" == "completed" ]]; then
@@ -178,6 +203,8 @@ jobs:
 
             [[ "$ready" == true ]] || continue
 
+            # Delete only if the ref still points to the SHA that was audited.
+            # A concurrent branch update makes the lease fail without deletion.
             if git -C "$git_directory" "${git_auth[@]}" push --porcelain \
               --force-with-lease="${delete_ref}:${branch_sha}" \
               "$repository_url" ":${delete_ref}"; then
@@ -185,6 +212,8 @@ jobs:
               continue
             fi
 
+            # Classify a failed deletion without failing the whole scheduled
+            # audit: another run may have deleted or advanced the ref first.
             current_sha=$(git -C "$git_directory" "${git_auth[@]}" ls-remote \
               --heads "$repository_url" "$delete_ref" | awk '{print $1}')
             if [[ -z "$current_sha" ]]; then
