@@ -76,7 +76,7 @@ spec:
         - name: nvcr-secret
         containers:
         - name: main
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
           imagePullPolicy: IfNotPresent
           workingDir: "/workspace"
           command:
@@ -142,7 +142,7 @@ spec:
           effect: NoSchedule
         containers:
         - name: main
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
           imagePullPolicy: IfNotPresent
           workingDir: "/workspace"
           command:
@@ -161,7 +161,7 @@ spec:
               --trust-remote-code \
               --kv-cache-dtype fp8 \
               --max-model-len 262144 \
-              --max-num-seqs 64 \
+              --max-num-seqs 256 \
               --max-num-batched-tokens 32768 \
               --gpu-memory-utilization 0.9 \
               --no-enable-flashinfer-autotune \

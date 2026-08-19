@@ -8,7 +8,7 @@ metadata:
   annotations:
     nemotron-ultra-refresh.nvidia.com/mtp: disabled
     nemotron-ultra-refresh.nvidia.com/prefix-caching: enabled
-    nemotron-ultra-refresh.nvidia.com/transport: ucx-tcp
+    nemotron-ultra-refresh.nvidia.com/transport: ucx-rdma-gke-extended-resources
     nemotron-ultra-refresh.nvidia.com/async-scheduling: enabled
   labels:
     app.kubernetes.io/name: ultra-disagg-gb200-1m-1p1d
@@ -87,7 +87,7 @@ spec:
             - name: nvcr-secret
           containers:
             - name: main
-              image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
               imagePullPolicy: IfNotPresent
               command: ["/bin/bash", "-lc"]
               args:
@@ -97,6 +97,8 @@ spec:
                     --router-mode kv \
                     --router-kv-events \
                     --kv-cache-block-size 64 \
+                    --router-track-prefill-tokens \
+                    --router-kv-overlap-score-credit-decay 0.1 \
                     --http-host 0.0.0.0 \
                     --http-port 8000
               ports:
@@ -130,6 +132,9 @@ spec:
           labels:
             nemotron-ultra-refresh.nvidia.com/role: prefill
             nemotron-ultra-refresh.nvidia.com/topology: 1p1d-tp4-tp4
+          annotations:
+            networking.gke.io/default-interface: eth0
+            networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
         spec:
           imagePullSecrets:
             - name: nvcr-secret
@@ -147,7 +152,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command: ["/bin/bash", "-lc"]
@@ -171,9 +176,21 @@ spec:
                     echo "PRESTART_GPU_GUARD_FAIL class=gpu_memory_dirty role=prefill dirty_count=${dirty_count}"
                     exit 97
                   fi
+                  rdma_ifaces=""
+                  for iface in rdma0 rdma1 rdma2 rdma3; do
+                    test -e "/sys/class/net/${iface}" || { echo "RDMA_PREFLIGHT_FAIL class=missing_gke_rdma_interface role=prefill interface=${iface}"; exit 98; }
+                    rdma_ifaces="${rdma_ifaces}${iface} "
+                  done
+                  for ibdev in mlx5_0 mlx5_1 mlx5_2 mlx5_3; do
+                    test -e "/sys/class/infiniband/${ibdev}" || { echo "RDMA_PREFLIGHT_FAIL class=missing_infiniband_device role=prefill device=${ibdev}"; exit 99; }
+                  done
+                  test -c /dev/infiniband/rdma_cm || { echo "RDMA_PREFLIGHT_FAIL class=missing_rdma_cm role=prefill"; exit 100; }
+                  for uverbs in uverbs0 uverbs1 uverbs2 uverbs3; do
+                    test -c "/dev/infiniband/${uverbs}" || { echo "RDMA_PREFLIGHT_FAIL class=missing_uverbs_device role=prefill device=${uverbs}"; exit 101; }
+                  done
                   python3 -c 'import nixl; a=nixl.nixl_agent("ucx_preflight_prefill"); assert "UCX" in a.get_plugin_list()'
                   unset UCX_NET_DEVICES
-                  echo "TRANSPORT_PREFLIGHT_PASS role=prefill backend=UCX path=tcp"
+                  echo "TRANSPORT_PREFLIGHT_PASS role=prefill backend=UCX path=rdma platform=gcp attachment=extended-resource interfaces=${rdma_ifaces}"
                   echo "PRESTART_GPU_GUARD_PASS role=prefill"
                   ulimit -l unlimited
                   exec python3 -m dynamo.vllm \
@@ -183,7 +200,7 @@ spec:
                     --trust-remote-code \
                     --kv-cache-dtype fp8 \
                     --max-model-len 1048576 \
-                    --max-num-seqs 32 \
+                    --max-num-seqs 256 \
                     --max-num-batched-tokens 49152 \
                     --gpu-memory-utilization 0.9 \
                     --no-enable-flashinfer-autotune \
@@ -204,9 +221,19 @@ spec:
                     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}'
               env:
                 - name: UCX_TLS
-                  value: tcp,cuda_copy,cuda_ipc
+                  value: rc_x,rc,cuda_copy,cuda_ipc
+                - name: UCX_IB_ADDR_TYPE
+                  value: eth
+                - name: UCX_RNDV_SCHEME
+                  value: get_zcopy
+                - name: UCX_RNDV_THRESH
+                  value: "0"
+                - name: UCX_RC_TIMEOUT
+                  value: 600s
+                - name: UCX_KEEPALIVE_INTERVAL
+                  value: 300s
                 - name: NCCL_IB_DISABLE
-                  value: "0"                 # explicitly ENABLED (the agg B200 file sets "1")
+                  value: "0"
                 - name: NCCL_SOCKET_IFNAME
                   value: eth0
                 - name: GLOO_SOCKET_IFNAME
@@ -220,8 +247,24 @@ spec:
                   nvidia.com/gpu: "4"
                   memory: 750Gi
                   ephemeral-storage: 20Gi
+                  networking.gke.io.networks/rdma-0: "1"
+                  networking.gke.io.networks/rdma-0.IP: "1"
+                  networking.gke.io.networks/rdma-1: "1"
+                  networking.gke.io.networks/rdma-1.IP: "1"
+                  networking.gke.io.networks/rdma-2: "1"
+                  networking.gke.io.networks/rdma-2.IP: "1"
+                  networking.gke.io.networks/rdma-3: "1"
+                  networking.gke.io.networks/rdma-3.IP: "1"
                 limits:
                   nvidia.com/gpu: "4"
+                  networking.gke.io.networks/rdma-0: "1"
+                  networking.gke.io.networks/rdma-0.IP: "1"
+                  networking.gke.io.networks/rdma-1: "1"
+                  networking.gke.io.networks/rdma-1.IP: "1"
+                  networking.gke.io.networks/rdma-2: "1"
+                  networking.gke.io.networks/rdma-2.IP: "1"
+                  networking.gke.io.networks/rdma-3: "1"
+                  networking.gke.io.networks/rdma-3.IP: "1"
               securityContext:
                 runAsUser: 0
                 runAsGroup: 0
@@ -253,6 +296,9 @@ spec:
           labels:
             nemotron-ultra-refresh.nvidia.com/role: decode
             nemotron-ultra-refresh.nvidia.com/topology: 1p1d-tp4-tp4
+          annotations:
+            networking.gke.io/default-interface: eth0
+            networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
         spec:
           imagePullSecrets:
             - name: nvcr-secret
@@ -270,7 +316,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command: ["/bin/bash", "-lc"]
@@ -294,9 +340,21 @@ spec:
                     echo "PRESTART_GPU_GUARD_FAIL class=gpu_memory_dirty role=decode dirty_count=${dirty_count}"
                     exit 97
                   fi
+                  rdma_ifaces=""
+                  for iface in rdma0 rdma1 rdma2 rdma3; do
+                    test -e "/sys/class/net/${iface}" || { echo "RDMA_PREFLIGHT_FAIL class=missing_gke_rdma_interface role=decode interface=${iface}"; exit 98; }
+                    rdma_ifaces="${rdma_ifaces}${iface} "
+                  done
+                  for ibdev in mlx5_0 mlx5_1 mlx5_2 mlx5_3; do
+                    test -e "/sys/class/infiniband/${ibdev}" || { echo "RDMA_PREFLIGHT_FAIL class=missing_infiniband_device role=decode device=${ibdev}"; exit 99; }
+                  done
+                  test -c /dev/infiniband/rdma_cm || { echo "RDMA_PREFLIGHT_FAIL class=missing_rdma_cm role=decode"; exit 100; }
+                  for uverbs in uverbs0 uverbs1 uverbs2 uverbs3; do
+                    test -c "/dev/infiniband/${uverbs}" || { echo "RDMA_PREFLIGHT_FAIL class=missing_uverbs_device role=decode device=${uverbs}"; exit 101; }
+                  done
                   python3 -c 'import nixl; a=nixl.nixl_agent("ucx_preflight_decode"); assert "UCX" in a.get_plugin_list()'
                   unset UCX_NET_DEVICES
-                  echo "TRANSPORT_PREFLIGHT_PASS role=decode backend=UCX path=tcp"
+                  echo "TRANSPORT_PREFLIGHT_PASS role=decode backend=UCX path=rdma platform=gcp attachment=extended-resource interfaces=${rdma_ifaces}"
                   echo "PRESTART_GPU_GUARD_PASS role=decode"
                   ulimit -l unlimited
                   exec python3 -m dynamo.vllm \
@@ -306,7 +364,7 @@ spec:
                     --trust-remote-code \
                     --kv-cache-dtype fp8 \
                     --max-model-len 1048576 \
-                    --max-num-seqs 32 \
+                    --max-num-seqs 256 \
                     --max-num-batched-tokens 49152 \
                     --gpu-memory-utilization 0.9 \
                     --no-enable-flashinfer-autotune \
@@ -326,7 +384,17 @@ spec:
                     --disaggregation-mode decode
               env:
                 - name: UCX_TLS
-                  value: tcp,cuda_copy,cuda_ipc
+                  value: rc_x,rc,cuda_copy,cuda_ipc
+                - name: UCX_IB_ADDR_TYPE
+                  value: eth
+                - name: UCX_RNDV_SCHEME
+                  value: get_zcopy
+                - name: UCX_RNDV_THRESH
+                  value: "0"
+                - name: UCX_RC_TIMEOUT
+                  value: 600s
+                - name: UCX_KEEPALIVE_INTERVAL
+                  value: 300s
                 - name: NCCL_IB_DISABLE
                   value: "0"
                 - name: NCCL_SOCKET_IFNAME
@@ -342,8 +410,24 @@ spec:
                   nvidia.com/gpu: "4"
                   memory: 750Gi
                   ephemeral-storage: 20Gi
+                  networking.gke.io.networks/rdma-0: "1"
+                  networking.gke.io.networks/rdma-0.IP: "1"
+                  networking.gke.io.networks/rdma-1: "1"
+                  networking.gke.io.networks/rdma-1.IP: "1"
+                  networking.gke.io.networks/rdma-2: "1"
+                  networking.gke.io.networks/rdma-2.IP: "1"
+                  networking.gke.io.networks/rdma-3: "1"
+                  networking.gke.io.networks/rdma-3.IP: "1"
                 limits:
                   nvidia.com/gpu: "4"
+                  networking.gke.io.networks/rdma-0: "1"
+                  networking.gke.io.networks/rdma-0.IP: "1"
+                  networking.gke.io.networks/rdma-1: "1"
+                  networking.gke.io.networks/rdma-1.IP: "1"
+                  networking.gke.io.networks/rdma-2: "1"
+                  networking.gke.io.networks/rdma-2.IP: "1"
+                  networking.gke.io.networks/rdma-3: "1"
+                  networking.gke.io.networks/rdma-3.IP: "1"
               securityContext:
                 runAsUser: 0
                 runAsGroup: 0

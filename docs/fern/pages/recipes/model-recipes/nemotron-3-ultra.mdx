@@ -63,10 +63,10 @@ The target picker covers the original Day-0 vLLM deployments of Nemotron-3-Ultra
 
 ## Refresh Profiles
 
-Refresh profiles include two-worker aggregated and 1P1D disaggregated agentic deployments with KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, decoupled weights, and Expert Parallelism disabled. Aggregated 256K profiles use five-token MTP; aggregated 1M and all 1P1D profiles run without MTP.
+Refresh profiles include two-worker aggregated and selected 1P1D or 1P2D disaggregated agentic deployments with KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, decoupled weights, and Expert Parallelism disabled. Aggregated 256K profiles use five-token MTP; aggregated 1M and all disaggregated profiles run without MTP.
 
 <Info>
-The Refresh manifests use the pinned `vllm-runtime:1.4.0-rc.4` image digest shown in the source recipe. Review the image and cluster-specific placement before deployment.
+The Refresh manifests use the released `vllm-runtime:1.4.0` image pinned by digest in the source recipe. Review the image and cluster-specific placement before deployment.
 </Info>
 
 | GPU | Context | Topology | Worker shape | Reference concurrency | Manifest |
@@ -77,16 +77,16 @@ The Refresh manifests use the pinned `vllm-runtime:1.4.0-rc.4` image digest show
 | GB200 | 1M | Aggregated | 2 × TP4 | 48 | `vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml` |
 | H200 | 256K | Aggregated | 2 × TP8 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
 | H200 | 1M | Aggregated | 2 × TP8 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
-| B200 | 256K | Disaggregated | 1P TP4 + 1D TP4 | 72 | `vllm/disagg-b200-agentic-256k-1p1d/deploy.yaml` |
-| B200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 32 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
-| GB200 | 256K | Disaggregated | 1P TP4 + 1D TP4 | 64 | `vllm/disagg-gb200-agentic-256k-1p1d/deploy.yaml` |
-| GB200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 28 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
-| H200 | 256K | Disaggregated | 1P TP8 + 1D TP8 | 36 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
-| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | 32 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
+| B200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 144 | `vllm/disagg-b200-agentic-256k-1p2d/deploy.yaml` |
+| B200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 38 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
+| GB200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 140 | `vllm/disagg-gb200-agentic-256k-1p2d/deploy.yaml` |
+| GB200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 48 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
+| H200 | 256K | Disaggregated | 1P TP8 + 1D TP8 | 42 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
+| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | pending | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
 
-The 256K 1P1D rows and the H200/B200 1M 1P1D rows are closed concurrency boundaries. GB200 1M concurrency 28 is the current complete SLA-passing anchor; the next boundary point remains to be rerun after an infrastructure interruption.
+The numeric disaggregated rows passed the complete exact-count trace and all three SLA gates. H200 1M is still qualifying a lower-concurrency 1P1D point after CC32 missed the TTFT gate.
 
-The B200 and GB200 256K 1P1D profiles use FlashInfer attention; the H200 256K profile uses FlashAttention.
+The B200 and GB200 256K 1P2D profiles use FlashInfer attention; the H200 256K 1P1D profile uses FlashAttention. GB200 disaggregated profiles use GKE multi-network MRDMA.
 
 Deploy a Refresh profile by selecting the GPU and context length:
 
@@ -101,10 +101,14 @@ kubectl apply \
   -n ${NAMESPACE}
 ```
 
-For a disaggregated profile, select the same GPU and context length:
+For a disaggregated profile, select the GPU, context length, and qualified topology:
 
 ```bash
-PROFILE=disagg-${GPU}-agentic-${CONTEXT}-1p1d
+case "${GPU}-${CONTEXT}" in
+  b200-256k|gb200-256k) SHAPE=1p2d ;;
+  *) SHAPE=1p1d ;;
+esac
+PROFILE=disagg-${GPU}-agentic-${CONTEXT}-${SHAPE}
 
 kubectl apply \
   -f recipes/nemotron-3-ultra/vllm/${PROFILE}/deploy.yaml \
@@ -439,7 +443,7 @@ All targets serve `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` on the dedica
 - H200 chat + MTP: [vllm/agg-h200-chat-256k-mtp/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm)
 - H200 agentic + MTP: [vllm/agg-h200-agentic-256k-mtp/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm)
 - B200 disaggregated agentic: [vllm/disagg-b200-agentic-256k/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm)
-- Refresh profiles: [vllm/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm) (`agg-<sku>-agentic-<context>-2w-kv/deploy.yaml` and `disagg-<sku>-agentic-<context>-1p1d/deploy.yaml`)
+- Refresh profiles: [vllm/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm) (`agg-<sku>-agentic-<context>-2w-kv/deploy.yaml` and the selected `disagg-<sku>-agentic-<context>-1p1d|1p2d/deploy.yaml`)
 - Refresh benchmark: [refresh-perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/perf) and [refresh-runner.configmap.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/perf)
 - No-MTP fallbacks: [vllm/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm) (`agg-*-nomtp/deploy.yaml`)
 - Model cache setup: [model-cache/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/model-cache) (`model-cache.yaml`, `model-download.yaml`, `model-validate.yaml`)

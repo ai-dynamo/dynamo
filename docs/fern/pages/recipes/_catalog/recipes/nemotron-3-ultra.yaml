@@ -154,7 +154,8 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 50.89 tok/s/user, 637.41 tok/s/GPU, 526.23 ms TTFT, 19.649 ms ITL @ c94
 - id: refresh-b200-1m
   recommended: true
   hardware:
@@ -177,7 +178,8 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 52.00 tok/s/user, 255.95 tok/s/GPU, 179.64 ms TTFT, 19.230 ms ITL @ c46
 - id: refresh-gb200-256k
   recommended: true
   hardware:
@@ -201,7 +203,8 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 51.15 tok/s/user, 665.95 tok/s/GPU, 612.20 ms TTFT, 19.549 ms ITL @ c96
 - id: refresh-gb200-1m
   recommended: true
   hardware:
@@ -224,7 +227,8 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 51.21 tok/s/user, 269.55 tok/s/GPU, 274.05 ms TTFT, 19.527 ms ITL @ c48
 - id: refresh-h200-256k
   recommended: true
   hardware:
@@ -248,7 +252,8 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 51.94 tok/s/user, 203.58 tok/s/GPU, 564.70 ms TTFT, 19.253 ms ITL @ c64
 - id: refresh-h200-1m
   recommended: true
   hardware:
@@ -271,17 +276,18 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 53.02 tok/s/user, 81.50 tok/s/GPU, 215.34 ms TTFT, 18.862 ms ITL @ c32
 - id: refresh-disagg-b200-256k
   recommended: true
   hardware:
     gpu: B200
-    count: 8
+    count: 12
   runtime:
     framework: vLLM
   topology: disaggregated
   techniques:
-  - 1p1d
+  - 1p2d
   - tp4-per-role
   - kv-aware-routing
   - pd-kv-transfer
@@ -289,15 +295,15 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 72
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 144
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-256k-1p1d/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-256k-1p2d/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
     available: true
-    summary: 54.57 tok/s/user, 418.37 tok/s/GPU @ c72 (full 3,541-row trace; SLA pass)
+    summary: 52.08 tok/s/user, 510.82 tok/s/GPU, 3680.71 ms TTFT, 19.200 ms ITL @ c144
 - id: refresh-disagg-b200-1m
   recommended: true
   hardware:
@@ -315,7 +321,7 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 32
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 38
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml
   benchmark:
@@ -323,17 +329,17 @@ targets:
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
     available: true
-    summary: 60.52 tok/s/user, 213.66 tok/s/GPU @ c32 (full 3,541-row trace; closed SLA boundary)
+    summary: 53.57 tok/s/user, 223.49 tok/s/GPU, 1293.55 ms TTFT, 18.668 ms ITL @ c38
 - id: refresh-disagg-gb200-256k
   recommended: true
   hardware:
     gpu: GB200
-    count: 8
+    count: 12
   runtime:
     framework: vLLM
   topology: disaggregated
   techniques:
-  - 1p1d
+  - 1p2d
   - tp4-per-role
   - kv-aware-routing
   - pd-kv-transfer
@@ -341,15 +347,15 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 64
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 140
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-256k-1p1d/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-256k-1p2d/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
     available: true
-    summary: 51.00 tok/s/user, 351.59 tok/s/GPU @ c64 (full 3,541-row trace; SLA pass)
+    summary: 55.47 tok/s/user, 534.82 tok/s/GPU, 3342.87 ms TTFT, 18.026 ms ITL @ c140
 - id: refresh-disagg-gb200-1m
   recommended: true
   hardware:
@@ -367,7 +373,7 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 28
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 48
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml
   benchmark:
@@ -375,7 +381,7 @@ targets:
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
     available: true
-    summary: 65.45 tok/s/user, 187.86 tok/s/GPU @ c28 (full 3,541-row trace; SLA-passing anchor)
+    summary: 50.55 tok/s/user, 270.93 tok/s/GPU, 1696.20 ms TTFT, 19.783 ms ITL @ c48
 - id: refresh-disagg-h200-256k
   recommended: true
   hardware:
@@ -393,7 +399,7 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 36
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 42
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml
   benchmark:
@@ -401,7 +407,7 @@ targets:
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
     available: true
-    summary: 61.04 tok/s/user, 118.35 tok/s/GPU @ c36 (full 3,541-row trace; SLA pass)
+    summary: 50.75 tok/s/user, 124.94 tok/s/GPU, 422.92 ms TTFT, 19.703 ms ITL @ c42
 - id: refresh-disagg-h200-1m
   recommended: true
   hardware:
@@ -419,15 +425,14 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 32
+    traffic: 64K/400 agentic Moontrace replay, 1M context; reference concurrency qualification pending
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 59.59 tok/s/user, 91.42 tok/s/GPU @ c32 (full 3,541-row trace; closed SLA boundary)
+    available: false
 related_benchmarks: []
 maintainer: null
 gaps:

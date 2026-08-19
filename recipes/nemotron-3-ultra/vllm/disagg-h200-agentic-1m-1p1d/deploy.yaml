@@ -85,7 +85,7 @@ spec:
         - name: nvcr-secret
         containers:
         - name: main
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
           imagePullPolicy: IfNotPresent
           command:
           - "/bin/bash"
@@ -93,7 +93,7 @@ spec:
           args:
           - |
             set -Eeuo pipefail
-            exec python3 -m dynamo.frontend   --router-mode kv   --router-kv-events   --kv-cache-block-size 64   --http-host 0.0.0.0   --http-port 8000
+            exec python3 -m dynamo.frontend   --router-mode kv   --router-kv-events   --kv-cache-block-size 64   --router-track-prefill-tokens   --router-kv-overlap-score-credit-decay 0.1   --http-host 0.0.0.0   --http-port 8000
           ports:
           - name: http
             containerPort: 8000
@@ -154,7 +154,7 @@ spec:
           effect: NoSchedule
         containers:
         - name: main
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
           imagePullPolicy: IfNotPresent
           workingDir: "/workspace"
           command:
@@ -191,7 +191,7 @@ spec:
               --trust-remote-code \
               --kv-cache-dtype fp8 \
               --max-model-len 1048576 \
-              --max-num-seqs 32 \
+              --max-num-seqs 256 \
               --max-num-batched-tokens 24576 \
               --gpu-memory-utilization 0.95 \
               --block-size 64 \
@@ -301,7 +301,7 @@ spec:
           effect: NoSchedule
         containers:
         - name: main
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
           imagePullPolicy: IfNotPresent
           workingDir: "/workspace"
           command:
@@ -338,7 +338,7 @@ spec:
               --trust-remote-code \
               --kv-cache-dtype fp8 \
               --max-model-len 1048576 \
-              --max-num-seqs 32 \
+              --max-num-seqs 256 \
               --max-num-batched-tokens 24576 \
               --gpu-memory-utilization 0.95 \
               --block-size 64 \

@@ -49,16 +49,16 @@ The shared Refresh Job replays all 3541 rows of the 15% agentic Mooncake trace t
 | GB200 1M | `ultra-agg-gb200-1m-2w-kv` | `1m` | 48 | 8 | 3600 | 2 | 3528 | 13 |
 | H200 256K | `ultra-agg-h200-256k-2w-kv` | `256k` | 64 | 16 | 1200 | 2 | 3411 | 130 |
 | H200 1M | `ultra-agg-h200-1m-2w-kv` | `1m` | 32 | 16 | 3600 | 2 | 3528 | 13 |
-| B200 256K 1P1D | `ultra-disagg-b200-256k-1p1d` | `256k` | 72 | 8 | 3600 | 2 | 3411 | 130 |
-| B200 1M 1P1D | `ultra-disagg-b200-1m-1p1d` | `1m` | 32 | 8 | 3600 | 2 | 3528 | 13 |
-| GB200 256K 1P1D | `ultra-disagg-gb200-256k-1p1d` | `256k` | 64 | 8 | 1200 | 1 | 3411 | 130 |
-| GB200 1M 1P1D | `ultra-disagg-gb200-1m-1p1d` | `1m` | 28 | 8 | 3600 | 2 | 3528 | 13 |
-| H200 256K 1P1D | `ultra-disagg-h200-256k-1p1d` | `256k` | 36 | 16 | 1200 | 2 | 3411 | 130 |
-| H200 1M 1P1D | `ultra-disagg-h200-1m-1p1d` | `1m` | 32 | 16 | 3600 | 2 | 3528 | 13 |
+| B200 256K 1P2D | `ultra-disagg-b200-256k-1p2d` | `256k` | 144 | 12 | 3600 | 2 | 3411 | 130 |
+| B200 1M 1P1D | `ultra-disagg-b200-1m-1p1d` | `1m` | 38 | 8 | 3600 | 2 | 3528 | 13 |
+| GB200 256K 1P2D | `ultra-disagg-gb200-256k-1p2d` | `256k` | 140 | 12 | 1200 | 1 | 3411 | 130 |
+| GB200 1M 1P1D | `ultra-disagg-gb200-1m-1p1d` | `1m` | 48 | 8 | 3600 | 2 | 3528 | 13 |
+| H200 256K 1P1D | `ultra-disagg-h200-256k-1p1d` | `256k` | 42 | 16 | 1200 | 2 | 3411 | 130 |
+| H200 1M 1P1D | `ultra-disagg-h200-1m-1p1d` | `1m` | pending | 16 | 3600 | 2 | 3528 | 13 |
 
 Set `ENDPOINT` to `<DGD_NAME>-frontend:8000`, `EXPECTED_REQUEST_COUNT` and `EXPECTED_ERROR_COUNT` to the final two columns, and leave `JOB_NAME=perf-nemotron-ultra-refresh`. Then run:
 
-The GB200 1M 1P1D value is the latest complete SLA-passing anchor. H200 and B200 1M are closed boundaries; GB200 1M still requires its next clean boundary run.
+All numeric rows are selected released-1.4.0 reference points. Do not launch the H200 1M row until its lower-concurrency qualification replaces `pending` with an SLA-passing value.
 
 ```bash
 kubectl apply -f refresh-runner.configmap.yaml -n ${NAMESPACE}
