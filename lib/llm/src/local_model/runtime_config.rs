@@ -29,6 +29,14 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
+/// Runtime-data key indicating that a backend expects tool structural tags to
+/// exclude reasoning and manages grammar activation around reasoning itself.
+///
+/// Absence means `false` for compatibility with workers that expect the
+/// frontend's structural tag to model an already-opened reasoning block.
+pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_excludes_reasoning";
+
 /// Describes which request-token overflows the frontend may reject early.
 ///
 /// The combined limit already accounts for engine-reserved tokens. A false
@@ -240,6 +248,14 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_publishing_enabled: Option<bool>,
 
+    /// Immutable KV event source mode for this worker lifecycle.
+    ///
+    /// Accepted values are `framework_v1` and `state_agent_v2`. Missing means the
+    /// legacy Worker-only source. Unknown explicit values must disable KV-aware
+    /// routing rather than falling back within the same worker lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_event_source_mode: Option<String>,
+
     /// Endpoint whose event sources describe this worker's KV state.
     ///
     /// When unset, consumers use the worker's serving endpoint. This keeps existing
@@ -348,6 +364,7 @@ impl Default for ModelRuntimeConfig {
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
             kv_event_publishing_enabled: None,
+            kv_event_source_mode: None,
             kv_state_endpoint: None,
             runtime_data: HashMap::new(),
             disaggregated_endpoint: None,

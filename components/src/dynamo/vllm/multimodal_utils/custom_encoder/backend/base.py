@@ -54,6 +54,39 @@ Attributes read **once at setup** (never per-request):
 Batching is **one-dimensional**: Dynamo packs by scalar ``cost`` up to
 ``max_batch_cost`` and never inspects item shape — the author owns any
 shape/padding concerns inside ``forward_batch``.
+
+Raising errors
+--------------
+
+An exception raised anywhere in this contract reaches the HTTP client, and its
+**type** — not its message — decides how:
+
+- ``ValueError`` / ``TypeError`` ⇒ the caller's input is at fault. Dynamo maps
+  these to ``Backend(InvalidArgument)``, answering **HTTP 400 with the message
+  forwarded to the client verbatim**.
+- **any other type** (``RuntimeError``, ``TimeoutError``, ``torch`` errors, …)
+  ⇒ the engine is at fault. The caller gets a sanitized 5xx and the message
+  survives in the server log only.
+
+Pick the type deliberately. Reporting an out-of-memory or a driver fault as
+``ValueError`` tells the caller its request was malformed and suppresses the
+retry that would have succeeded; reporting a genuinely bad image as
+``RuntimeError`` costs the caller the one message that would let them fix it.
+
+.. warning::
+   **A ``ValueError``/``TypeError`` message is published to the client.** Do not
+   interpolate file paths, tracebacks, tensor dumps, model or weight
+   identifiers, or any other server-internal state into one. Describe the fault
+   in terms of the request ("image 2 is 1-D; expected a 2-D embedding"), and
+   keep the diagnosis in a log line. Non-validation exception types are
+   sanitized before they leave the process, so they may say anything.
+
+Note the blast radius differs by method. A ``preprocess`` failure is scoped to
+the one image that caused it, but ``forward_batch`` runs a batch coalesced
+across *concurrent, unrelated requests*, and an exception there is delivered to
+**every request in that batch**. A per-item fault therefore belongs in
+``preprocess`` — raised from ``forward_batch`` it would tell unrelated callers
+their requests were invalid.
 """
 
 from __future__ import annotations
@@ -140,6 +173,12 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT, ArtifactT]):
         Raise to reject a bad input — it fails only that image, before submit.
         With ``preprocess_concurrency == 0`` this method is **never called**;
         overriding it without raising the concurrency fails fast at startup.
+
+        This is the right place to reject a malformed image: the failure is
+        scoped to the one raw that caused it, so a ``ValueError``/``TypeError``
+        here reaches exactly the caller who sent it, as an HTTP 400 carrying the
+        message. Keep that message free of server-internal detail (see
+        *Raising errors* in the module docstring).
         """
         return Preprocessed(item=raw)  # type: ignore[arg-type]  # ItemT == RawT
 
@@ -157,6 +196,18 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT, ArtifactT]):
         so results are safe to consume from another thread. ``target_bucket`` is
         reserved for CUDA-graph batching, once supported (the ladder rung to pad
         to), and is ``None`` until then.
+
+        Raises:
+            Exception: fails **every request in the batch**, not just the item
+                that caused it — ``items`` is coalesced across concurrent,
+                unrelated requests, and the exception is delivered to all of
+                them. So prefer a non-validation type here (the engine, not any
+                one caller, is what failed), and push per-item rejection up into
+                ``preprocess`` where it is scoped to a single image. A
+                ``ValueError``/``TypeError`` raised here answers HTTP 400 with
+                its message forwarded verbatim to callers who may have sent
+                perfectly valid input. See *Raising errors* in the module
+                docstring.
         """
         ...
 

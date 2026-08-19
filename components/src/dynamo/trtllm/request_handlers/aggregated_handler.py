@@ -19,6 +19,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
 )
+from dynamo.trtllm.request_handlers.push_egress import push_egress_capable
 
 
 class AggregatedHandler(HandlerBase):
@@ -37,6 +38,8 @@ class AggregatedHandler(HandlerBase):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:

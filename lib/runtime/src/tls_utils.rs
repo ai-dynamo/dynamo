@@ -32,7 +32,7 @@ pub fn handshake_timeout() -> std::time::Duration {
 
 /// Build a rustls `ServerConfig` from PEM certificate and key files.
 ///
-/// The certificate is served through a [`ReloadingCertifiedKey`], so a rotated
+/// The certificate is served through a `ReloadingCertifiedKey`, so a rotated
 /// cert/key on disk (in-place rewrite or an atomic symlink swap) is picked up
 /// automatically on the next handshake without restarting the process. The
 /// initial load is validated eagerly: an invalid cert/key path
