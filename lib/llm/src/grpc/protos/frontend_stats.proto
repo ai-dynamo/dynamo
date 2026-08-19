@@ -1,0 +1,207 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package dynamo.frontend.stats.v1;
+
+service FrontendStats
+{
+  rpc WatchStats(WatchStatsRequest) returns (stream StatsUpdate);
+  rpc WatchKvPlacements(WatchKvPlacementsRequest) returns (stream KvPlacementUpdate);
+}
+
+message WatchStatsRequest {}
+
+message StatsUpdate
+{
+  oneof update
+  {
+    RequestStats request_stats = 1;
+    KvStatsSnapshot kv_stats = 2;
+  }
+}
+
+message RequestStats
+{
+  string request_id = 1;
+  string model = 2;
+  optional uint64 tokens_processed = 3;
+  optional uint64 tokens_generated = 4;
+  bool finished = 5;
+}
+
+message KvStatsSnapshot
+{
+  uint64 snapshot_id = 1;
+  uint64 observed_at_unix_ms = 2;
+  repeated ModelKvStats models = 3;
+}
+
+message ModelKvStats
+{
+  string model = 1;
+  repeated string aliases = 2;
+  optional RoutingCacheStats routing_cache = 3;
+  repeated KvPoolStats pools = 4;
+}
+
+enum WorkerRole {
+  WORKER_ROLE_UNSPECIFIED = 0;
+  WORKER_ROLE_AGGREGATED = 1;
+  WORKER_ROLE_PREFILL = 2;
+  WORKER_ROLE_DECODE = 3;
+  WORKER_ROLE_ENCODE = 4;
+}
+
+message RoutingCacheStats
+{
+  WorkerRole role = 1;
+  uint64 capacity_tokens = 2;
+  uint64 used_tokens = 3;
+  uint64 free_tokens = 4;
+}
+
+message KvPoolStats
+{
+  string namespace = 1;
+  string component = 2;
+  string endpoint = 3;
+  WorkerRole role = 4;
+  StorageTier storage_tier = 5;
+  uint32 block_size_tokens = 6;
+  uint64 expected_ranks = 7;
+  uint64 observed_ranks = 8;
+  optional uint64 capacity_blocks = 9;
+  optional uint64 used_blocks = 10;
+  optional uint64 free_blocks = 11;
+  optional uint64 active_decode_blocks = 12;
+  optional uint64 active_prefill_tokens = 13;
+  bool complete = 14;
+}
+
+message WatchKvPlacementsRequest {}
+
+message KvPlacementUpdate
+{
+  oneof update
+  {
+    KvPlacementSnapshotBoundary snapshot_begin = 1;
+    KvPlacementEvents snapshot_events = 2;
+    KvPlacementSnapshotBoundary snapshot_end = 3;
+    KvPlacementEvents events = 4;
+    KvPlacementSourceError source_error = 5;
+  }
+}
+
+message KvPlacementSnapshotBoundary
+{
+  uint64 snapshot_id = 1;
+  bool complete = 2;
+  repeated KvPlacementCursor cursors = 3;
+}
+
+message KvPlacementCursor
+{
+  string model = 1;
+  string namespace = 2;
+  string component = 3;
+  string endpoint = 4;
+  uint64 cursor = 5;
+}
+
+message KvPlacementSource
+{
+  string model = 1;
+  string namespace = 2;
+  string component = 3;
+  string endpoint = 4;
+  uint32 block_size_tokens = 5;
+}
+
+message KvPlacementEvents
+{
+  optional uint64 snapshot_id = 1;
+  KvPlacementSource source = 2;
+  uint64 cursor = 3;
+  uint32 batch_index = 4;
+  uint32 batch_count = 5;
+  repeated RouterEvent events = 6;
+}
+
+message KvPlacementSourceError
+{
+  KvPlacementSource source = 1;
+  string reason = 2;
+}
+
+enum StorageTier {
+  STORAGE_TIER_UNSPECIFIED = 0;
+  STORAGE_TIER_DEVICE = 1;
+  STORAGE_TIER_HOST_PINNED = 2;
+  STORAGE_TIER_DISK = 3;
+  STORAGE_TIER_EXTERNAL = 4;
+}
+
+message ResidencyDomain
+{
+  enum Kind {
+    KIND_MISSING = 0;
+    KIND_WORKER = 1;
+    KIND_CACHE_OWNER = 2;
+    KIND_UNKNOWN = 3;
+    KIND_INVALID = 4;
+  }
+
+  Kind kind = 1;
+  string unknown_value = 2;
+}
+
+message RouterEvent
+{
+  uint64 worker_id = 1;
+  StorageTier storage_tier = 2;
+  ResidencyDomain residency_domain = 3;
+  optional string state_source = 4;
+  uint64 event_id = 5;
+  uint32 dp_rank = 6;
+  oneof data
+  {
+    KvCacheStore stored = 7;
+    KvCacheRemove removed = 8;
+    KvCacheClear cleared = 9;
+  }
+}
+
+message KvCacheStore
+{
+  optional uint64 parent_hash = 1;
+  optional uint32 start_position = 2;
+  repeated KvCacheBlock blocks = 3;
+}
+
+message KvCacheBlock
+{
+  uint64 block_hash = 1;
+  uint64 tokens_hash = 2;
+  repeated MultimodalObject multimodal_objects = 3;
+}
+
+message MultimodalObject
+{
+  uint64 hash = 1;
+  repeated TokenRange offsets = 2;
+}
+
+message TokenRange
+{
+  uint64 start = 1;
+  uint64 end = 2;
+}
+
+message KvCacheRemove
+{
+  repeated uint64 block_hashes = 1;
+}
+
+message KvCacheClear {}

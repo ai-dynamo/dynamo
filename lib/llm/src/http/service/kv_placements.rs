@@ -25,7 +25,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::ModelManager;
-use crate::kv_router::indexer::{PlacementFeed, PlacementStream, PlacementUpdate};
+use crate::kv_router::indexer::{
+    PlacementFeed, PlacementStream as PlacementFeedStream, PlacementUpdate,
+};
 
 use super::{RouteDoc, service_v2};
 
@@ -35,7 +37,7 @@ const PLACEMENT_BUFFER_LINES: usize = 4;
 const SLOW_CONSUMER_TIMEOUT: Duration = Duration::from_secs(5);
 static NEXT_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
 
-type PlacementByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, Infallible>> + Send>>;
+pub(crate) type PlacementUpdateStream = Pin<Box<dyn Stream<Item = PlacementStreamEvent> + Send>>;
 
 #[derive(Clone)]
 struct PlacementSource {
@@ -47,8 +49,43 @@ struct PlacementSource {
 
 struct PlacementSession {
     source: PlacementSource,
-    stream: PlacementStream,
+    stream: PlacementFeedStream,
     cursor: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PlacementSourceInfo {
+    pub(crate) model: String,
+    pub(crate) block_size_tokens: u32,
+    pub(crate) endpoint: EndpointId,
+}
+
+#[derive(Debug)]
+pub(crate) struct PlacementEventBatch {
+    pub(crate) snapshot_id: Option<u64>,
+    pub(crate) source: PlacementSourceInfo,
+    pub(crate) cursor: u64,
+    pub(crate) batch_index: usize,
+    pub(crate) batch_count: usize,
+    pub(crate) events: Vec<RouterEvent>,
+}
+
+#[derive(Debug)]
+pub(crate) enum PlacementStreamEvent {
+    SnapshotBegin {
+        snapshot_id: u64,
+    },
+    SnapshotEvents(PlacementEventBatch),
+    SnapshotEnd {
+        snapshot_id: u64,
+        complete: bool,
+        cursors: Vec<PlacementCursor>,
+    },
+    Events(PlacementEventBatch),
+    SourceError {
+        source: PlacementSourceInfo,
+        reason: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -62,13 +99,13 @@ struct SnapshotBoundary<'a> {
     cursor: Option<&'a [PlacementCursor]>,
 }
 
-#[derive(Serialize)]
-struct PlacementCursor {
-    model: String,
-    namespace: String,
-    component: String,
-    endpoint: String,
-    cursor: u64,
+#[derive(Debug, Serialize)]
+pub(crate) struct PlacementCursor {
+    pub(crate) model: String,
+    pub(crate) namespace: String,
+    pub(crate) component: String,
+    pub(crate) endpoint: String,
+    pub(crate) cursor: u64,
 }
 
 #[derive(Serialize)]
@@ -124,16 +161,48 @@ fn kv_placements_stream_response(
     manager: Arc<ModelManager>,
     shutdown: CancellationToken,
 ) -> Response {
+    let source = placement_stream(manager, shutdown);
+    let stream = async_stream::stream! {
+        futures::pin_mut!(source);
+        while let Some(event) = source.next().await {
+            yield Ok::<Bytes, Infallible>(placement_json_line(&event));
+        }
+    };
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-ndjson"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
+}
+
+pub(crate) fn placement_stream(
+    manager: Arc<ModelManager>,
+    shutdown: CancellationToken,
+) -> PlacementUpdateStream {
+    let source = raw_placement_stream(manager, shutdown.clone());
+    let (stream, _producer) = bounded_placement_stream(
+        source,
+        shutdown,
+        PLACEMENT_BUFFER_LINES,
+        SLOW_CONSUMER_TIMEOUT,
+    );
+    Box::pin(stream)
+}
+
+fn raw_placement_stream(
+    manager: Arc<ModelManager>,
+    shutdown: CancellationToken,
+) -> PlacementUpdateStream {
     let source_shutdown = shutdown.clone();
-    let stream: PlacementByteStream = Box::pin(async_stream::stream! {
+    Box::pin(async_stream::stream! {
         let snapshot_id = NEXT_SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed);
-        yield json_line(&SnapshotBoundary {
-            v: 1,
-            event_type: "placement_snapshot_begin",
+        yield PlacementStreamEvent::SnapshotBegin {
             snapshot_id,
-            complete: false,
-            cursor: None,
-        });
+        };
 
         let mut complete = true;
         let mut sessions = Vec::new();
@@ -144,7 +213,7 @@ fn kv_placements_stream_response(
                 Err(error) => {
                     tracing::warn!(model = source.model, endpoint = %source.endpoint, %error, "failed to open KV placement feed");
                     complete = false;
-                    yield placement_error_line(&source, "feed_unavailable");
+                    yield placement_error(&source, "feed_unavailable");
                     continue;
                 }
             };
@@ -152,18 +221,18 @@ fn kv_placements_stream_response(
                 Some(Ok(PlacementUpdate::Snapshot { cursor, events })) => (cursor, events),
                 Some(Ok(PlacementUpdate::Events { .. })) => {
                     complete = false;
-                    yield placement_error_line(&source, "snapshot_missing");
+                    yield placement_error(&source, "snapshot_missing");
                     continue;
                 }
                 Some(Err(error)) => {
                     tracing::warn!(model = source.model, endpoint = %source.endpoint, %error, "failed to read KV placement snapshot");
                     complete = false;
-                    yield placement_error_line(&source, "snapshot_failed");
+                    yield placement_error(&source, "snapshot_failed");
                     continue;
                 }
                 None => {
                     complete = false;
-                    yield placement_error_line(&source, "stream_closed");
+                    yield placement_error(&source, "stream_closed");
                     continue;
                 }
             };
@@ -175,14 +244,13 @@ fn kv_placements_stream_response(
                 endpoint: source.endpoint.name.clone(),
                 cursor,
             });
-            for line in placement_event_lines(
+            for event in placement_event_batches(
                 &source,
-                "placement_snapshot_events",
                 Some(snapshot_id),
                 cursor,
-                &events,
+                events,
             ) {
-                yield line;
+                yield PlacementStreamEvent::SnapshotEvents(event);
             }
             sessions.push(PlacementSession {
                 source,
@@ -205,13 +273,11 @@ fn kv_placements_stream_response(
                     right.endpoint.as_str(),
                 ))
         });
-        yield json_line(&SnapshotBoundary {
-            v: 1,
-            event_type: "placement_snapshot_end",
+        yield PlacementStreamEvent::SnapshotEnd {
             snapshot_id,
             complete,
-            cursor: Some(&snapshot_cursor),
-        });
+            cursors: snapshot_cursor,
+        };
 
         if !complete {
             return;
@@ -246,37 +312,21 @@ fn kv_placements_stream_response(
                 } => {
                     let Some(batch) = batch else { break };
                     if let Some(reason) = batch.error.as_deref() {
-                        yield placement_error_line(&batch.source, reason);
+                        yield placement_error(&batch.source, reason);
                         break;
                     }
-                    for line in placement_event_lines(
+                    for event in placement_event_batches(
                         &batch.source,
-                        "placement_events",
                         None,
                         batch.cursor,
-                        &batch.events,
+                        batch.events,
                     ) {
-                        yield line;
+                        yield PlacementStreamEvent::Events(event);
                     }
                 }
             }
         }
-    });
-    let (stream, _producer) = bounded_placement_stream(
-        stream,
-        shutdown,
-        PLACEMENT_BUFFER_LINES,
-        SLOW_CONSUMER_TIMEOUT,
-    );
-    let mut response = Response::new(Body::from_stream(stream));
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/x-ndjson"),
-    );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    response
+    })
 }
 
 fn live_source_stream(
@@ -383,84 +433,131 @@ fn source_key(source: &PlacementSource) -> (String, EndpointId) {
     (source.model.clone(), source.endpoint.clone())
 }
 
-fn placement_event_lines<'a>(
-    source: &'a PlacementSource,
-    event_type: &'a str,
+fn placement_event_batches(
+    source: &PlacementSource,
     snapshot_id: Option<u64>,
     cursor: u64,
-    events: &'a [RouterEvent],
-) -> impl Iterator<Item = Result<Bytes, Infallible>> + 'a {
+    events: Vec<RouterEvent>,
+) -> Vec<PlacementEventBatch> {
     let batch_count = events.len().div_ceil(MAX_EVENTS_PER_LINE).max(1);
-    let chunks: Box<dyn Iterator<Item = (usize, &[RouterEvent])> + Send> = if events.is_empty() {
-        Box::new(std::iter::once((0, events)))
-    } else {
-        Box::new(event_chunks(events).enumerate())
-    };
-    chunks.map(move |(batch_index, events)| {
-        json_line(&PlacementEvents {
-            v: 1,
-            event_type,
+    let source = placement_source_info(source);
+    let mut events = events.into_iter();
+    (0..batch_count)
+        .map(|batch_index| PlacementEventBatch {
             snapshot_id,
-            model: &source.model,
-            namespace: &source.endpoint.namespace,
-            component: &source.endpoint.component,
-            endpoint: &source.endpoint.name,
-            block_size_tokens: source.block_size_tokens,
+            source: source.clone(),
             cursor,
             batch_index,
             batch_count,
-            events,
+            events: events.by_ref().take(MAX_EVENTS_PER_LINE).collect(),
         })
-    })
+        .collect()
 }
 
+#[cfg(test)]
 fn event_chunks(events: &[RouterEvent]) -> impl Iterator<Item = &[RouterEvent]> {
     events.chunks(MAX_EVENTS_PER_LINE)
 }
 
-fn placement_error_line(source: &PlacementSource, reason: &str) -> Result<Bytes, Infallible> {
-    json_line(&PlacementError {
+fn placement_source_info(source: &PlacementSource) -> PlacementSourceInfo {
+    PlacementSourceInfo {
+        model: source.model.clone(),
+        block_size_tokens: source.block_size_tokens,
+        endpoint: source.endpoint.clone(),
+    }
+}
+
+fn placement_error(source: &PlacementSource, reason: &str) -> PlacementStreamEvent {
+    PlacementStreamEvent::SourceError {
+        source: placement_source_info(source),
+        reason: reason.to_owned(),
+    }
+}
+
+fn placement_json_line(event: &PlacementStreamEvent) -> Bytes {
+    match event {
+        PlacementStreamEvent::SnapshotBegin { snapshot_id } => json_line(&SnapshotBoundary {
+            v: 1,
+            event_type: "placement_snapshot_begin",
+            snapshot_id: *snapshot_id,
+            complete: false,
+            cursor: None,
+        }),
+        PlacementStreamEvent::SnapshotEvents(batch) => {
+            placement_batch_json_line("placement_snapshot_events", batch)
+        }
+        PlacementStreamEvent::SnapshotEnd {
+            snapshot_id,
+            complete,
+            cursors,
+        } => json_line(&SnapshotBoundary {
+            v: 1,
+            event_type: "placement_snapshot_end",
+            snapshot_id: *snapshot_id,
+            complete: *complete,
+            cursor: Some(cursors),
+        }),
+        PlacementStreamEvent::Events(batch) => placement_batch_json_line("placement_events", batch),
+        PlacementStreamEvent::SourceError { source, reason } => json_line(&PlacementError {
+            v: 1,
+            event_type: "placement_source_error",
+            model: &source.model,
+            namespace: &source.endpoint.namespace,
+            component: &source.endpoint.component,
+            endpoint: &source.endpoint.name,
+            reason,
+        }),
+    }
+}
+
+fn placement_batch_json_line(event_type: &str, batch: &PlacementEventBatch) -> Bytes {
+    json_line(&PlacementEvents {
         v: 1,
-        event_type: "placement_source_error",
-        model: &source.model,
-        namespace: &source.endpoint.namespace,
-        component: &source.endpoint.component,
-        endpoint: &source.endpoint.name,
-        reason,
+        event_type,
+        snapshot_id: batch.snapshot_id,
+        model: &batch.source.model,
+        namespace: &batch.source.endpoint.namespace,
+        component: &batch.source.endpoint.component,
+        endpoint: &batch.source.endpoint.name,
+        block_size_tokens: batch.source.block_size_tokens,
+        cursor: batch.cursor,
+        batch_index: batch.batch_index,
+        batch_count: batch.batch_count,
+        events: &batch.events,
     })
 }
 
-fn json_line(value: &impl Serialize) -> Result<Bytes, Infallible> {
+fn json_line(value: &impl Serialize) -> Bytes {
     let mut line = serde_json::to_vec(value).expect("placement stream DTO must serialize");
     line.push(b'\n');
-    Ok(Bytes::from(line))
+    Bytes::from(line)
 }
 
-struct CancelOnDropStream {
-    inner: ReceiverStream<Result<Bytes, Infallible>>,
+struct CancelOnDropStream<T> {
+    inner: ReceiverStream<T>,
     cancel: CancellationToken,
 }
 
-impl Stream for CancelOnDropStream {
-    type Item = Result<Bytes, Infallible>;
+impl<T> Stream for CancelOnDropStream<T> {
+    type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.inner).poll_next(cx)
     }
 }
 
-impl Drop for CancelOnDropStream {
+impl<T> Drop for CancelOnDropStream<T> {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
 }
 
-fn bounded_placement_stream(
-    mut source: PlacementByteStream,
+fn bounded_placement_stream<T: Send + 'static>(
+    mut source: Pin<Box<dyn Stream<Item = T> + Send>>,
     shutdown: CancellationToken,
     capacity: usize,
     send_timeout: Duration,
-) -> (CancelOnDropStream, tokio::task::JoinHandle<()>) {
+) -> (CancelOnDropStream<T>, tokio::task::JoinHandle<()>) {
     let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
     let client_cancel = CancellationToken::new();
     let producer_cancel = client_cancel.clone();
@@ -542,7 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn slow_placement_consumer_is_disconnected() {
-        let source: PlacementByteStream =
+        let source: Pin<Box<dyn Stream<Item = Result<Bytes, Infallible>> + Send>> =
             Box::pin(futures::stream::repeat(Ok(Bytes::from_static(b"line\n"))));
         let (stream, producer) = bounded_placement_stream(
             source,
@@ -560,7 +657,8 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_placement_body_cancels_producer() {
-        let source: PlacementByteStream = Box::pin(futures::stream::pending());
+        let source: Pin<Box<dyn Stream<Item = Result<Bytes, Infallible>> + Send>> =
+            Box::pin(futures::stream::pending());
         let (stream, producer) =
             bounded_placement_stream(source, CancellationToken::new(), 1, Duration::from_secs(1));
 

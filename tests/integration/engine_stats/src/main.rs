@@ -48,7 +48,8 @@ const KV_WITHDRAW_TIMEOUT: Duration = Duration::from_secs(15);
 const WHOLE_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const CHUNK_DELAY: Duration = Duration::from_millis(100);
 const METRIC_CONNECTED_REQUIRED: &str = r#"pylon_engine_stats_stream_connected{mode="required"}"#;
-const METRIC_EVENT_PING: &str = r#"pylon_engine_stats_stream_events_total{type="ping"}"#;
+const METRIC_EVENT_KV_STATS: &str =
+    r#"pylon_engine_stats_stream_events_total{type="kv_stats_snapshot"}"#;
 const METRIC_EVENT_STATS: &str = r#"pylon_engine_stats_stream_events_total{type="stats"}"#;
 const METRIC_RECONNECTS: &str = "pylon_engine_stats_stream_reconnects_total";
 const METRIC_RECONNECT_CONNECT_ERROR: &str =
@@ -327,18 +328,18 @@ impl MockDynamoProcess {
         Ok(())
     }
 
-    async fn pause_kv_stats(&self) -> Result<()> {
+    async fn stop_stats_stream(&self) -> Result<()> {
         reqwest::Client::new()
             .put(format!(
-                "http://127.0.0.1:{}/test-control/kv-stats",
+                "http://127.0.0.1:{}/test-control/stats-stream",
                 self.port
             ))
             .json(&json!({ "enabled": false }))
             .send()
             .await
-            .context("failed to pause mock KV stats stream")?
+            .context("failed to stop mock stats stream")?
             .error_for_status()
-            .context("mock KV stats pause request failed")?;
+            .context("mock stats stream stop request failed")?;
         Ok(())
     }
 
@@ -664,7 +665,7 @@ impl StatsConsumerProcess {
             ordinal,
             upstream_port,
             stargate_grpc_addr,
-            "off",
+            "required",
             (inference_server_id, KV_CLUSTER_ID),
         )
         .await
@@ -704,8 +705,6 @@ impl StatsConsumerProcess {
             "1".to_string(),
             "--engine-stats-stream".to_string(),
             engine_stats_mode.to_string(),
-            "--engine-stats-stream-path".to_string(),
-            "/v1/stats/stream".to_string(),
             "--min-update-interval-ms".to_string(),
             "100".to_string(),
             "--pylon-queue-mismatch-retry-enabled".to_string(),
@@ -869,7 +868,7 @@ struct StatsEvent {
 }
 
 enum DiagnosticMessage {
-    Ping,
+    KvStats,
     Stats(StatsEvent),
     Eof,
     Error(String),
@@ -907,11 +906,11 @@ impl DiagnosticStream {
         let mut stream = Self { receiver, task };
         let first = timeout(READY_TIMEOUT, stream.receiver.recv())
             .await
-            .context("timed out waiting for immediate Dynamo ping")?
-            .context("Dynamo diagnostic stream closed before its ping")?;
+            .context("timed out waiting for immediate Dynamo KV snapshot")?
+            .context("Dynamo diagnostic stream closed before its KV snapshot")?;
         ensure!(
-            matches!(first, DiagnosticMessage::Ping),
-            "first Dynamo diagnostic event was not a ping"
+            matches!(first, DiagnosticMessage::KvStats),
+            "first Dynamo diagnostic event was not a KV snapshot"
         );
         Ok(stream)
     }
@@ -935,7 +934,7 @@ impl DiagnosticStream {
                     .await
                     .context("Dynamo diagnostic stream closed during batch")?
                 {
-                    DiagnosticMessage::Ping => {}
+                    DiagnosticMessage::KvStats => {}
                     DiagnosticMessage::Stats(event) => {
                         ensure!(
                             gateway_request_ids.contains(event.request_id.as_str()),
@@ -979,7 +978,7 @@ impl DiagnosticStream {
 
         while let Ok(message) = self.receiver.try_recv() {
             match message {
-                DiagnosticMessage::Ping => {}
+                DiagnosticMessage::KvStats => {}
                 DiagnosticMessage::Stats(event) => {
                     bail!("event arrived after batch terminal: {event:?}")
                 }
@@ -1053,8 +1052,8 @@ async fn read_diagnostic_stream(
                 raw_file.flush().await?;
                 let value: Value = serde_json::from_slice(&line)?;
                 match value.get("type").and_then(Value::as_str) {
-                    Some("ping") => {
-                        let _ = sender.send(DiagnosticMessage::Ping);
+                    Some("kv_stats_snapshot") => {
+                        let _ = sender.send(DiagnosticMessage::KvStats);
                     }
                     Some("stats") => {
                         ensure!(
@@ -1405,12 +1404,12 @@ async fn run(args: &Args) -> Result<TestReport> {
         })
         .await?;
 
-    let ping_before = metric_counter(&consumer.scrape().await?, METRIC_EVENT_PING)?;
+    let kv_stats_before = metric_counter(&consumer.scrape().await?, METRIC_EVENT_KV_STATS)?;
     let dynamo = report
         .phase("late-dynamo-start", DynamoFixture::start(reservation))
         .await?;
     let mut diagnostic = DiagnosticStream::connect(dynamo.port, &raw_path).await?;
-    wait_for_stats_stream(&mut consumer, ping_before).await?;
+    wait_for_stats_stream(&mut consumer, kv_stats_before).await?;
     wait_for_registration_and_route(&mut consumer, &stargate).await?;
 
     let mut previous_timestamp = 0;
@@ -1488,7 +1487,7 @@ async fn run(args: &Args) -> Result<TestReport> {
         let metrics_before_restart = consumer.scrape().await?;
         let reconnect_before =
             metric_counter(&metrics_before_restart, METRIC_RECONNECT_CONNECT_ERROR)?;
-        let ping_before = metric_counter(&metrics_before_restart, METRIC_EVENT_PING)?;
+        let kv_stats_before = metric_counter(&metrics_before_restart, METRIC_EVENT_KV_STATS)?;
         reservation = report
             .phase(&format!("dynamo-stop-{cycle}"), dynamo.stop_and_reserve())
             .await?;
@@ -1509,7 +1508,7 @@ async fn run(args: &Args) -> Result<TestReport> {
                 DynamoFixture::start(reservation),
             )
             .await?;
-        wait_for_stats_stream(&mut consumer, ping_before).await?;
+        wait_for_stats_stream(&mut consumer, kv_stats_before).await?;
         diagnostic = DiagnosticStream::connect(dynamo.port, &raw_path).await?;
         let requests = (0..2)
             .map(|index| RequestSpec {
@@ -1723,7 +1722,7 @@ async fn run_kv_cache_e2e(args: &Args, stargate: &StargateFixture) -> Result<KvC
     )
     .await?;
 
-    mock.pause_kv_stats().await?;
+    mock.stop_stats_stream().await?;
     wait_consumer_metrics(
         &mut consumer_a,
         KV_WITHDRAW_TIMEOUT,
@@ -1887,17 +1886,17 @@ async fn send_request(
 
 async fn wait_for_stats_stream(
     consumer: &mut StatsConsumerProcess,
-    ping_before: u64,
+    kv_stats_before: u64,
 ) -> Result<()> {
     wait_consumer_metrics(
         consumer,
         READY_TIMEOUT,
         |metrics| {
             let connected = metrics.value(METRIC_CONNECTED_REQUIRED)?;
-            let ping = metric_counter(metrics, METRIC_EVENT_PING)?;
-            Ok((connected == 1.0 && ping > ping_before).then_some(metrics.clone()))
+            let kv_stats = metric_counter(metrics, METRIC_EVENT_KV_STATS)?;
+            Ok((connected == 1.0 && kv_stats > kv_stats_before).then_some(metrics.clone()))
         },
-        "stats consumer stats stream connection and immediate ping",
+        "stats consumer gRPC connection and immediate KV snapshot",
     )
     .await?;
     Ok(())

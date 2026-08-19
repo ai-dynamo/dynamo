@@ -497,7 +497,7 @@ impl State {
         self.metrics.clone()
     }
 
-    pub(super) fn engine_stats(&self) -> &super::engine_stats::EngineStats {
+    pub(crate) fn engine_stats(&self) -> &super::engine_stats::EngineStats {
         &self.engine_stats
     }
 
@@ -1260,7 +1260,6 @@ impl HttpServiceConfigBuilder {
                 config.drt_metrics,
             ),
             super::engine_stats::router(state.clone()),
-            super::kv_stats::router(state.clone()),
             super::kv_placements::router(state.clone()),
             if anthropic_endpoints_enabled {
                 super::anthropic::anthropic_models_router(
@@ -1293,6 +1292,8 @@ impl HttpServiceConfigBuilder {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             system_router = system_router.merge(route);
         }
+        system_router =
+            system_router.merge(crate::grpc::service::frontend_stats::router(state.clone()));
         // Inference routes (completions, chat, embeddings, etc.) — info-level spans
         let endpoint_routes = HttpServiceConfigBuilder::get_endpoints_router(
             state.clone(),
