@@ -362,6 +362,30 @@ class TestAudexEngineInputs:
         assert stage0.temperature == 0.1
 
     @pytest.mark.asyncio
+    async def test_guided_request_fails_without_engine_sampling_defaults(self):
+        """The defaults are the only channel for the CFG contract.
+
+        Attaching nothing would answer with unguided audio — a different-sounding
+        result rather than a reported failure.
+        """
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        handler.engine_client.default_sampling_params_list = []
+        req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=1.5)
+
+        with pytest.raises(RuntimeError, match="no default_sampling_params_list"):
+            await handler.build_engine_inputs(req, request_id="r1")
+
+    @pytest.mark.asyncio
+    async def test_unguided_request_needs_no_engine_sampling_defaults(self):
+        """Nothing to override, so the engine keeps its own defaults."""
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        handler.engine_client.default_sampling_params_list = []
+        req = NvCreateAudioSpeechRequest(input="hello")
+
+        inputs = await handler.build_engine_inputs(req, request_id="r1")
+        assert inputs.sampling_params_list is None
+
+    @pytest.mark.asyncio
     async def test_tts_cfg_scale_one_stays_unguided(self):
         """cfg_scale=1.0 is a no-op scale, so it must not start a CFG pair."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")

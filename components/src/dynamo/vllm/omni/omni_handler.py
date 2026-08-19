@@ -407,7 +407,13 @@ class OmniHandler(BaseOmniHandler):
             # Aggregated deployments only: the disaggregated stage router reads
             # one final-stage payload per request (see stage_router
             # ._format_output), so there is no snapshot stream to buffer.
-            buffer_audio = self.audio.emits_cumulative_waveforms()
+            # Gated on the request type as well as the stage set: only an audio
+            # request may answer with an NvAudioSpeechResponse, so the same
+            # engine serving a chat request keeps the per-payload path.
+            buffer_audio = (
+                inputs.request_type == RequestType.AUDIO_GENERATION
+                and self.audio.emits_cumulative_waveforms()
+            )
 
             async for stage_output in self.engine_client.generate(**per_request_kwargs):
                 # Chunk-streaming decoders emit the waveform repeatedly as the

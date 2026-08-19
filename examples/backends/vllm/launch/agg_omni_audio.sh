@@ -52,7 +52,9 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 print_launch_banner --no-curl "Launching vLLM-Omni Audio/TTS (1 GPU)" "$MODEL" "$HTTP_PORT"
 # Audex rejects 'voice', so print the request body it actually accepts: the
 # Qwen3-TTS footer would hand the user a request that fails with HTTP 400.
-if [[ "$MODEL" == *[Aa]udex* ]]; then
+# Matched case-insensitively: --model may be a local checkpoint path in any
+# casing, not just the Hugging Face id.
+if [[ "${MODEL,,}" == *audex* ]]; then
 print_curl_footer <<CURL
   curl -X POST http://localhost:${HTTP_PORT}/v1/audio/speech \\
     -H 'Content-Type: application/json' \\

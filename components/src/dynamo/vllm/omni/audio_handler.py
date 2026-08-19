@@ -414,16 +414,23 @@ class AudioGenerationHandler:
         requests, so per-request CFG pair state is written onto deep copies —
         mutating the shared defaults would leak one request's pair id into the
         next. Returns ``None`` when there is nothing to override, which leaves
-        the engine on its own defaults.
+        the engine on its own defaults; a request that does need an override
+        fails instead, since the defaults are the only channel for it.
         """
-        defaults = list(
-            getattr(self.engine_client, "default_sampling_params_list", None) or []
-        )
+        defaults = list(self.engine_client.default_sampling_params_list or [])
         if not defaults:
-            logger.warning(
-                "Audex: engine exposed no default_sampling_params_list; "
-                "per-request CFG/RVQ overrides are unavailable"
-            )
+            if (
+                model_type == "audex_tta"
+                or req.max_new_tokens is not None
+                or (req.cfg_scale is not None and req.cfg_scale > _AUDEX_CFG_SCALE_MIN)
+            ):
+                # Dropping the contract here would answer with different-sounding
+                # audio (unguided, or for TTA a phase-invalid codec stream that
+                # decode rejects) instead of reporting the broken engine contract.
+                raise RuntimeError(
+                    "Audex: engine exposed no default_sampling_params_list, so "
+                    "the per-request CFG/RVQ contract cannot be attached"
+                )
             return None
 
         params_list = copy.deepcopy(defaults)
