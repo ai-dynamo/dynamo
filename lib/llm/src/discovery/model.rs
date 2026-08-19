@@ -15,9 +15,7 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
-use crate::local_model::runtime_config::{
-    VLLM_EXACT_MM_ROUTING_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-};
+use crate::local_model::runtime_config::VLLM_EXACT_MM_ROUTING_CAPABILITY;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -88,6 +86,7 @@ pub struct GenerateEngineSelection {
     pub lora_name: Option<String>,
     pub supports_exact_mm_routing: bool,
 }
+
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
 /// Shared by the serving gate and the `/ready` endpoint so they can't diverge.
 struct NamespaceReadinessEval {
@@ -729,6 +728,17 @@ impl Model {
         .ok_or_else(|| self.engine_error(self.has_completions_engine()))
     }
 
+    pub fn get_generate_engine_with_parsing(
+        &self,
+    ) -> Result<(GenerateStreamingEngine, ParsingOptions), ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.generate_engine
+                .clone()
+                .map(|e| (e, ws.parsing_options()))
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    }
+
     // -- Worker monitoring (aggregated across WorkerSets) --
 
     /// Get load threshold config from the first WorkerSet that has a monitor.
@@ -862,6 +872,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::protocols::common::preprocessor::PreprocessedRequest;
     use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
@@ -1088,9 +1099,7 @@ mod tests {
         model.add_worker_set("ns-b".to_string(), worker_set_b);
 
         let selection_a = model
-            .get_generate_engine_for_capability_with_routing(
-                VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-            )
+            .get_generate_engine_for_capability_with_routing(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
             .expect("select live worker set A");
         assert!(Arc::ptr_eq(&selection_a.engine, &engine_a));
         assert_eq!(selection_a.kv_cache_block_size, 16);
@@ -1101,9 +1110,7 @@ mod tests {
         worker_tx_b.send(vec![2]).expect("enable worker set B");
 
         let selection_b = model
-            .get_generate_engine_for_capability_with_routing(
-                VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-            )
+            .get_generate_engine_for_capability_with_routing(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
             .expect("select live worker set B");
         assert!(Arc::ptr_eq(&selection_b.engine, &engine_b));
         assert_eq!(selection_b.kv_cache_block_size, 32);

@@ -1412,6 +1412,7 @@ impl ModelManager {
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine_with_parsing()
     }
+
     // -- Convenience methods for in-process models (http.rs, grpc.rs) --
     // These create a WorkerSet with a default namespace for local models.
     // Synthetic in-process worker sets are always `Aggregated` (they own
