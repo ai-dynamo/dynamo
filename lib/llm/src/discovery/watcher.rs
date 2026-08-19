@@ -726,11 +726,14 @@ where
                             self.metrics.clone(),
                         )
                         .context("PreprocessedRouting::build_preprocessed_pipeline")?;
-                    Some(
+                    // This pipeline links no OpenAIPreprocessor, so the request
+                    // payload record is emitted around the engine the factory
+                    // returns. No-op unless request_payload records are selected.
+                    Some(crate::request_trace::wrap_chat_request_payload_engine(
                         factory(mcid.clone(), card.clone(), routed_engine)
                             .await
                             .context("python chat_engine_factory")?,
-                    )
+                    ))
                 } else if let Some(tk) = tokenizer.clone() {
                     let PromptFormatter::OAI(formatter) =
                         prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
