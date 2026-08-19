@@ -146,6 +146,7 @@ Most existing clusters run the device plugin, so this situation is easy to hit
 when trying GMS out. Since Shadow Engine Failover is still experimental, a
 temporary workaround is enough to verify the feature: reserve the occupied GPUs
 with a blocker ResourceClaim before deploying the GMS workload, so the
+generated claims land on free devices. Apply
 [gms-dra-blocker.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/gms-dra-blocker.yaml)
 with the CEL expression and the request `count` adjusted to the occupied device
 UUIDs on your node (list them with `nvidia-smi -L`, or map DRA device names to
