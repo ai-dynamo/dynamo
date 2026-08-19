@@ -272,6 +272,19 @@ def test_scale_success(stub_ray):
     assert engine.calls == [3]
 
 
+def test_validation_error_does_not_restart_the_worker(stub_ray):
+    # Fail-fast is scoped to real scale failures: a request rejected up front
+    # (dp=1 at TP=1 collapses the EP world) returns an error and must NOT restart
+    # the worker or touch the engine.
+    engine = _FakeVllmEngine(prev_dp=2, tensor_parallel_size=1)
+
+    result, shutdown = _run(engine, {"new_data_parallel_size": 1})
+
+    assert shutdown == []  # no restart on a rejected request
+    assert result["status"] == "error"
+    assert engine.calls == []  # never reached the engine
+
+
 def test_failed_grow_restarts_the_worker(stub_ray):
     # vLLM does not roll back a failed scale, so a failed grow must fail fast:
     # restart the worker rather than report a recovery that no caller acts on.
