@@ -72,7 +72,7 @@ permissions:
 jobs:
   # Detect changed files for conditional job execution
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/') && 'prod-default-small-v2' || 'ubuntu-latest' }}
     # Skip for tag pushes - version release doesn't need changed-files check
     if: github.ref_type != 'tag'
     outputs:
@@ -101,7 +101,7 @@ jobs:
       github.ref_type != 'tag' &&
       (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/') && 'prod-default-small-v2' || 'ubuntu-latest' }}
     steps:
       - name: Determine context
         id: ctx
