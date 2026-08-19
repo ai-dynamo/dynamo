@@ -591,6 +591,7 @@ jobs:
           diff_base_artifact_id: ${{ steps.resolve-diff-base.outputs.base_artifact_id }}
           diff_base_run_id: ${{ steps.resolve-diff-base.outputs.base_run_id }}
           gh_token: ${{ secrets.GITHUB_TOKEN }}
+          vulnerability_scan_mode: ${{ inputs.diff_event_context == 'pr' && 'pr' || 'none' }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
           platform: ${{ inputs.platform }}

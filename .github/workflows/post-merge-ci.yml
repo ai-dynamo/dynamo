@@ -627,10 +627,61 @@ jobs:
   # full-image rebuild on a separate fresh builder. archive_sources is currently
   # false (source archival temporarily disabled), so release branches do not emit
   # the /sources.zip OSRB artifact; EFA images are covered (make_efa flows to the
-  # extract). A compliance failure fails the build.
+  # extract). A compliance failure fails the build. The independent audits retain
+  # architecture-qualified native Syft JSON, CycloneDX, and the comparison
+  # report for 30 days on both main and release/*.*.* pushes.
   #
   # planner stays on the legacy shared-compliance scan until it migrates to
   # the inline system.
+
+  vllm-compliance-audit:
+    name: vllm-runtime
+    needs: [vllm-build]
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '13.0'
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.vllm-build.outputs.baseline_sbom_file }}
+      artifact_retention_days: 30
+
+  sglang-compliance-audit:
+    name: sglang-runtime
+    needs: [sglang-build]
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '13.0'
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.sglang-build.outputs.baseline_sbom_file }}
+      artifact_retention_days: 30
+
+  trtllm-compliance-audit:
+    name: trtllm-runtime
+    needs: [trtllm-build]
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: trtllm
+      target: runtime
+      cuda_version: '13.1'
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.trtllm-build.outputs.baseline_sbom_file }}
+      artifact_retention_days: 30
+
+  frontend-compliance-audit:
+    name: frontend
+    needs: [frontend-build]
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: ''
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.frontend-build.outputs.baseline_sbom_file }}
+      artifact_retention_days: 30
+
   planner-compliance:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [planner-build]
@@ -642,6 +693,75 @@ jobs:
       cuda_version: '[""]'
       platform: '["amd64", "arm64"]'
     secrets: inherit
+
+  grype-reconcile:
+    name: Container vulnerability policy
+    needs:
+      - operator
+      - snapshot-agent
+      - vllm-build
+      - vllm-efa-build
+      - sglang-build
+      - sglang-efa-build
+      - trtllm-build
+      - trtllm-efa-build
+      - planner-build
+      - frontend-build
+    # Rollout safety: this repository variable defaults to false/absent. Set
+    # GRYPE_POST_MERGE_ENFORCEMENT_ENABLED=true only after the LINEAR_API_KEY
+    # Actions secret exists and can write to the configured private project.
+    # This gate applies only to post-merge reconciliation; PR scanning remains
+    # enforced independently in the compliance producer actions.
+    if: ${{ always() && github.event_name == 'push' && vars.GRYPE_POST_MERGE_ENFORCEMENT_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: 0.11.15
+          enable-cache: false
+
+      - name: Set up Grype
+        uses: ./.github/actions/setup-grype
+
+      - name: Download current compliance inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          pattern: compliance-${{ github.sha }}*
+          path: ${{ runner.temp }}/compliance-current
+          merge-multiple: false
+
+      # TODO: Upload full Grype JSON to a private Artifactory repository after
+      # the repository path and secret convention are approved. Never upload
+      # these reports through GitHub artifacts, SARIF, annotations, or summaries.
+      # TODO: Add the generic Slack notification from the governance tracking
+      # issue after the private channel and secret convention are approved; do
+      # not expose finding data.
+      - name: Reconcile private vulnerability issues
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          PYTHONPATH: container
+        shell: bash
+        run: |
+          # Eight uniquely named multiarch image artifacts contribute 16
+          # pairs; operator and snapshot each contribute one amd64 pair.
+          uv run --no-project python -m compliance.vulnerability_scan post-merge \
+            --root "${RUNNER_TEMP}/compliance-current" \
+            --branch-line "${GITHUB_REF_NAME}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --complete-scan "${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}" \
+            --expected-pairs 18 \
+            --linear-team "Operations" \
+            --linear-project "Governance Project" \
+            --honor-wont-fix "${{ vars.GRYPE_LINEAR_WONT_FIX_EXCEPTIONS == 'true' }}"
 
   # ============================================================================
   # IMAGE COPY JOBS

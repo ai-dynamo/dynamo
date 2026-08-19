@@ -1019,8 +1019,8 @@ jobs:
     with:
       framework: dynamo
       target: frontend
-      # frontend ships amd64+arm64; the audit scans the amd64 image only,
-      # matching the single-arch framework audits above. Report-only.
+      # The reusable audit scans both shipped architecture manifests and keeps
+      # architecture-qualified native Syft evidence. Report-only.
       cuda_version: ''
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
       baseline_sbom_file: ${{ needs.frontend-build.outputs.baseline_sbom_file }}

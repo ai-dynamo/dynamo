@@ -447,6 +447,12 @@ runs:
           done
         fi
 
+    - name: Scan PR dependency additions
+      if: ${{ always() && steps.settings.outputs.run_compliance == 'true' && inputs.diff_event_context == 'pr' }}
+      uses: ./.github/actions/grype-pr-scan
+      with:
+        compliance_root: /tmp/compliance
+
     # /sources/ extraction: opt-in via archive_sources. PR / on-demand leave it
     # false; post-merge-ci.yml sets it true for push to main + release branches.
     - name: Extract /sources/ (opt-in via archive_sources)
