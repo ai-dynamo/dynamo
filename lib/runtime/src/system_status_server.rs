@@ -167,7 +167,7 @@ pub async fn spawn_system_status_server(
             &live_path,
             get({
                 let state = Arc::clone(&server_state);
-                move || health_handler(state)
+                move || live_handler(state)
             }),
         )
         .route(
@@ -294,6 +294,24 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     tracing::trace!("Response {}", response.to_string());
 
     (status_code, response.to_string())
+}
+
+/// Shallow process liveness handler.
+///
+/// Reaching this handler proves that the runtime and its status server are
+/// responsive. Engine readiness is deliberately excluded and remains the
+/// responsibility of the health endpoint, so an overloaded or busy engine
+/// does not turn a liveness probe into a restart loop.
+#[tracing::instrument(skip_all, level = "trace")]
+async fn live_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+    let uptime = state.drt().system_health().lock().uptime();
+    let response = json!({
+        "status": "live",
+        "uptime": uptime,
+    });
+
+    tracing::trace!("Response {}", response.to_string());
+    (StatusCode::OK, response.to_string())
 }
 
 /// Metrics handler with DistributedRuntime uptime
@@ -927,13 +945,15 @@ mod integration_tests {
                 }
                 match custom_live_path {
                     None => {
-                        // When using default paths, test the default paths
-                        test_cases.push(("/live", expected_status, expected_body));
+                        // When using default paths, test the default paths.
+                        // /live is a shallow liveness probe: it always returns
+                        // 200/"live" regardless of engine readiness.
+                        test_cases.push(("/live", 200, "live"));
                     }
                     Some(clp) => {
                         // When using custom paths, default paths should not exist
                         test_cases.push(("/live", 404, "Route not found"));
-                        test_cases.push((clp, expected_status, expected_body));
+                        test_cases.push((clp, 200, "live"));
                     }
                 }
                 test_cases.push(("/someRandomPathNotFoundHere", 404, "Route not found"));
