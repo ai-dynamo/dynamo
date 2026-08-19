@@ -1831,6 +1831,7 @@ dependencies = [
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
+ "dynamo-truthy",
  "futures",
  "ndarray",
  "ndarray-interp",
