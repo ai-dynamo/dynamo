@@ -35,6 +35,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        return_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -97,6 +98,8 @@ async fn apply_jail_transformation(
     let out = output_stream.next().await.unwrap();
     NvCreateChatCompletionStreamResponse {
         inner: out.data.unwrap(),
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     }

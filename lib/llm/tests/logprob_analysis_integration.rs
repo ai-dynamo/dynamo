@@ -406,6 +406,8 @@ fn create_response_with_linear_probs(
             object: "chat.completion.chunk".to_string(),
             usage: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     }
@@ -490,6 +492,8 @@ fn create_multi_choice_response(
             object: "chat.completion.chunk".to_string(),
             usage: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     }

@@ -185,6 +185,8 @@ fn make_stream_delta(
             object: "chat.completion.chunk".to_string(),
             usage: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext,
         llm_metrics: None,
     })
@@ -952,6 +954,8 @@ fn make_stream_delta_with_reasoning(
             object: "chat.completion.chunk".to_string(),
             usage: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     })

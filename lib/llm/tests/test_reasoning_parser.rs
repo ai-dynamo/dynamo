@@ -48,6 +48,8 @@ fn create_mock_response_chunk(
             usage: None,
             service_tier: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     };

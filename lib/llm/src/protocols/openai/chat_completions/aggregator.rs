@@ -153,6 +153,10 @@ pub struct DeltaAggregator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Aggregated nvext field from stream responses
     nvext: Option<serde_json::Value>,
+    /// Top-level `prompt_token_ids` captured from the final chunk.
+    prompt_token_ids: Option<Vec<crate::types::TokenIdType>>,
+    /// Top-level `kv_transfer_params` captured from the final chunk.
+    kv_transfer_params: Option<serde_json::Value>,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
@@ -316,6 +320,8 @@ impl DeltaAggregator {
             choices: HashMap::new(),
             service_tier: None,
             nvext: None,
+            prompt_token_ids: None,
+            kv_transfer_params: None,
         }
     }
 
@@ -350,6 +356,13 @@ impl DeltaAggregator {
                     }
 
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
+
+                    if delta.prompt_token_ids.is_some() {
+                        aggregator.prompt_token_ids = delta.prompt_token_ids;
+                    }
+                    if delta.kv_transfer_params.is_some() {
+                        aggregator.kv_transfer_params = delta.kv_transfer_params;
+                    }
 
                     // Aggregate choices incrementally.
                     for choice in delta.inner.choices {
@@ -839,6 +852,8 @@ impl DeltaAggregator {
                 choices,
                 service_tier: aggregator.service_tier,
             },
+            prompt_token_ids: aggregator.prompt_token_ids,
+            kv_transfer_params: aggregator.kv_transfer_params,
             nvext: aggregator.nvext,
         };
 
@@ -1017,6 +1032,8 @@ mod tests {
                 choices: vec![choice],
                 object: "chat.completion".to_string(),
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         };
@@ -1065,6 +1082,8 @@ mod tests {
                 choices: vec![choice],
                 object: "chat.completion".to_string(),
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         };
@@ -1186,6 +1205,8 @@ mod tests {
                 choices: vec![choice],
                 object: "chat.completion".to_string(),
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         };
@@ -1244,6 +1265,8 @@ mod tests {
                 choices: vec![choice],
                 object: "chat.completion".to_string(),
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         };
@@ -1838,6 +1861,8 @@ mod tests {
                 ],
                 object: "chat.completion".to_string(),
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         };

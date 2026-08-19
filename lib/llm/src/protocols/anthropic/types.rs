@@ -173,6 +173,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         })
     }
@@ -1096,6 +1097,8 @@ mod tests {
                     completion_tokens_details: None,
                 }),
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         };
 
@@ -1157,6 +1160,8 @@ mod tests {
                     completion_tokens_details: None,
                 }),
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         };
 
@@ -1221,6 +1226,8 @@ mod tests {
                 object: "chat.completion".to_string(),
                 usage: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         };
 
@@ -1260,6 +1267,8 @@ mod tests {
                 object: "chat.completion".to_string(),
                 usage: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: Some(serde_json::json!({
                 "worker_id": {"decode_worker_id": 1}
             })),

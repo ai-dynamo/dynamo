@@ -509,6 +509,13 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
+def _wants_engine_data_accumulation(request: Dict[str, Any]) -> bool:
+    """Whether ``_accumulate_engine_data`` should run for this request."""
+    return _nvext_extra_field_requested(
+        request, "engine_data"
+    ) or _nvext_extra_field_requested(request, "completion_token_ids")
+
+
 # Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
 _DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
 
@@ -3100,6 +3107,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                         if routed_experts is not None:
                             _attach_routed_experts_engine_data(out, routed_experts)
+                        # Aggregated / decode-only path emit; prefill worker
+                        # already surfaces this via disaggregated_params.
+                        if res.kv_transfer_params is not None:
+                            engine_data = out.setdefault("engine_data", {})
+                            if isinstance(engine_data, dict):
+                                engine_data[
+                                    "kv_transfer_params"
+                                ] = res.kv_transfer_params
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -3433,14 +3448,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             async with self._abort_monitor(
                 context, request_id, abort_guard=abort_guard
             ):
-                # nvext.engine_data opt-in: if the client requested
-                # `nvext.extra_fields=["engine_data"]`, we accumulate
-                # per-chunk token_ids and logprobs and attach them to the
-                # FINAL chunk (the one carrying `finish_reason`). The Rust
-                # frontend's response builder (delta.rs) gates emission via
-                # `NvExtResponseFieldSelection.engine_data` so this payload
-                # only reaches clients that asked for it.
-                want_engine_data = _nvext_extra_field_requested(request, "engine_data")
+                # engine_data accumulator opt-in (nvext.extra_fields).
+                want_engine_data = _wants_engine_data_accumulation(request)
                 # Prompt token IDs the engine actually saw. Either the
                 # pre-tokenized `nvext.token_data` (TITO) or whatever the
                 # preprocessor produced from messages (MITO). We echo them

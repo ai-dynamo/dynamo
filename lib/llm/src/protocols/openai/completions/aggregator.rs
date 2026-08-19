@@ -24,6 +24,8 @@ pub struct DeltaAggregator {
     system_fingerprint: Option<String>,
     choices: HashMap<u32, DeltaChoice>,
     nvext: Option<serde_json::Value>,
+    prompt_token_ids: Option<Vec<crate::types::TokenIdType>>,
+    kv_transfer_params: Option<serde_json::Value>,
 }
 
 struct DeltaChoice {
@@ -49,6 +51,8 @@ impl DeltaAggregator {
             system_fingerprint: None,
             choices: HashMap::new(),
             nvext: None,
+            prompt_token_ids: None,
+            kv_transfer_params: None,
         }
     }
 
@@ -75,6 +79,12 @@ impl DeltaAggregator {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
+                    if delta.prompt_token_ids.is_some() {
+                        aggregator.prompt_token_ids = delta.prompt_token_ids;
+                    }
+                    if delta.kv_transfer_params.is_some() {
+                        aggregator.kv_transfer_params = delta.kv_transfer_params;
+                    }
 
                     // handle the choices
                     for choice in delta.inner.choices {
@@ -151,6 +161,8 @@ impl DeltaAggregator {
 
         let response = NvCreateCompletionResponse {
             inner,
+            prompt_token_ids: aggregator.prompt_token_ids,
+            kv_transfer_params: aggregator.kv_transfer_params,
             nvext: aggregator.nvext,
         };
 
@@ -239,7 +251,12 @@ mod tests {
             object: "text_completion".to_string(),
         };
 
-        let response = NvCreateCompletionResponse { inner, nvext: None };
+        let response = NvCreateCompletionResponse {
+            inner,
+            prompt_token_ids: None,
+            kv_transfer_params: None,
+            nvext: None,
+        };
 
         Annotated {
             data: Some(response),
@@ -398,7 +415,12 @@ mod tests {
             object: "text_completion".to_string(),
         };
 
-        let response = NvCreateCompletionResponse { inner, nvext: None };
+        let response = NvCreateCompletionResponse {
+            inner,
+            prompt_token_ids: None,
+            kv_transfer_params: None,
+            nvext: None,
+        };
 
         let annotated_delta = Annotated {
             data: Some(response),

@@ -389,6 +389,99 @@ class TestReasoningParserForwarding:
         np.testing.assert_array_equal(decoded, routed_experts.reshape(-1))
 
     @pytest.mark.asyncio
+    async def test_generate_tokens_emits_kv_transfer_params_on_final_chunk(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        kv_payload = {"hidden_states_path": "hidden_states/req-kv-1.safetensors"}
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11],
+                        routed_experts=None,
+                        finish_reason=None,
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+                kv_transfer_params=None,
+            )
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=None,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+                kv_transfer_params=kv_payload,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=2),
+            "req-kv-1",
+        ):
+            chunks.append(chunk)
+
+        assert "engine_data" not in chunks[0] or (
+            "kv_transfer_params" not in (chunks[0].get("engine_data") or {})
+        )
+        engine_data = chunks[-1].get("engine_data") or {}
+        assert engine_data.get("kv_transfer_params") == kv_payload
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_omits_kv_transfer_params_when_engine_none(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=None,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+                kv_transfer_params=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=1),
+            "req-kv-none",
+        ):
+            chunks.append(chunk)
+
+        engine_data = chunks[-1].get("engine_data") or {}
+        assert "kv_transfer_params" not in engine_data
+
+    @pytest.mark.asyncio
     async def test_generate_tokens_routed_experts_start_echoes_prompt_start(self):
         """routed_experts.start echoes SamplingParams.routed_experts_prompt_start
         (the offset vLLM trimmed) so the RL consumer can align the completion."""

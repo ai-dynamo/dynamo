@@ -2492,6 +2492,8 @@ mod tests {
                 usage: None,
                 service_tier: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: Some(LLMMetricAnnotation {
                 input_tokens: 10,
@@ -3845,6 +3847,8 @@ mod tests {
                         usage: None,
                         service_tier: None,
                     },
+                    prompt_token_ids: None,
+                    kv_transfer_params: None,
                     nvext: None,
                     llm_metrics: None,
                 },

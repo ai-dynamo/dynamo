@@ -908,6 +908,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         })
     }
@@ -2756,6 +2757,8 @@ mod tests {
                 object: "chat.completion".to_string(),
                 usage: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         };
 
@@ -2816,6 +2819,8 @@ mod tests {
                 object: "chat.completion".to_string(),
                 usage: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         };
 
@@ -2865,6 +2870,8 @@ mod tests {
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         };
         let params = ResponseParams {
@@ -3078,6 +3085,8 @@ thinking
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         };
 
@@ -3114,6 +3123,8 @@ thinking
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         };
 
@@ -3142,6 +3153,8 @@ thinking
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         };
 
@@ -3167,6 +3180,8 @@ thinking
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         };
 
@@ -3333,6 +3348,8 @@ thinking
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
         }
     }

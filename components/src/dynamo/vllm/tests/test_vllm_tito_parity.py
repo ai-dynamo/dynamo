@@ -431,3 +431,46 @@ class TestSkipSpecialTokens:
         # build_sampling_params forces detokenize=False even when the request
         # asks for True.
         assert sp.detokenize is False
+
+
+class TestWantsEngineDataAccumulation:
+    @staticmethod
+    def _import():
+        from dynamo.vllm.handlers import _wants_engine_data_accumulation
+
+        return _wants_engine_data_accumulation
+
+    def test_opts_in_on_engine_data(self):
+        fn = self._import()
+        assert fn({"nvext": {"extra_fields": ["engine_data"]}}) is True
+
+    def test_opts_in_on_completion_token_ids(self):
+        fn = self._import()
+        assert fn({"nvext": {"extra_fields": ["completion_token_ids"]}}) is True
+
+    def test_opts_in_when_both_present(self):
+        fn = self._import()
+        assert (
+            fn({"nvext": {"extra_fields": ["engine_data", "completion_token_ids"]}})
+            is True
+        )
+
+    def test_off_by_default(self):
+        fn = self._import()
+        assert fn({}) is False
+        assert fn({"nvext": {}}) is False
+        assert fn({"nvext": {"extra_fields": []}}) is False
+
+    def test_off_for_unrelated_extra_fields(self):
+        fn = self._import()
+        assert (
+            fn({"nvext": {"extra_fields": ["worker_id", "timing", "routed_experts"]}})
+            is False
+        )
+
+    def test_reads_nested_extra_args_nvext(self):
+        fn = self._import()
+        assert (
+            fn({"extra_args": {"nvext": {"extra_fields": ["completion_token_ids"]}}})
+            is True
+        )

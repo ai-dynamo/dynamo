@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use dynamo_llm::preprocessor::{ANNOTATION_PAYLOAD_USAGE, OpenAIPreprocessor};
+use dynamo_llm::protocols::common::extensions::NvExt;
 use dynamo_llm::protocols::common::llm_backend::{BackendOutput, FinishReason};
 use dynamo_llm::protocols::openai::ParsingOptions;
 use dynamo_llm::protocols::openai::chat_completions::{
@@ -207,6 +208,7 @@ fn create_chat_request(
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        return_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -770,6 +772,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
         nvext: None,
         metadata: None,
         return_tokens_as_token_ids: None,
+        return_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -799,6 +802,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        return_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -1134,5 +1138,219 @@ async fn test_multimodal_counts_on_every_metrics_frame() {
             (2, 1, 0),
             "frame {i} must carry the request counts (every frame, not just the first)"
         );
+    }
+}
+
+fn build_backend_outputs_with_return_token_ids_trio() -> Vec<BackendOutput> {
+    let mut outputs = build_backend_outputs_with_cached_tokens(None);
+    let final_idx = outputs.len() - 1;
+    outputs[final_idx].engine_data =
+        Some(serde_json::json!({ "prompt_token_ids": [10u32, 20, 30] }));
+    outputs[final_idx].disaggregated_params =
+        Some(serde_json::json!({ "hidden_states_path": "/tmp/hs_0.safetensors" }));
+    outputs
+}
+
+fn create_chat_request_asking_for_trio() -> NvCreateChatCompletionRequest {
+    let mut request = create_chat_request(None, None);
+    request.nvext = Some(NvExt {
+        extra_fields: Some(vec!["completion_token_ids".to_string()]),
+        ..NvExt::default()
+    });
+    request
+}
+
+fn create_cmpl_request_asking_for_trio() -> NvCreateCompletionRequest {
+    let mut request = create_cmpl_request(None, true);
+    request.nvext = Some(NvExt {
+        extra_fields: Some(vec!["completion_token_ids".to_string()]),
+        ..NvExt::default()
+    });
+    request
+}
+
+#[tokio::test]
+async fn test_chat_return_token_ids_trio_emitted_on_final_chunk_only() {
+    let request = create_chat_request_asking_for_trio();
+    let request_id = "chat-trio-1".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    let ctx = Arc::new(MockContext::new());
+    let outputs = build_backend_outputs_with_return_token_ids_trio();
+    let stream = stream::iter(outputs.into_iter().map(Annotated::from_data));
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(Box::pin(stream), ctx.clone());
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
+    );
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    // Filter out metrics-annotation events (event=llm_metrics, data=None) so
+    // we look at content chunks only, same as `test_streaming_without_usage`.
+    let content_chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|chunk| {
+            !(chunk
+                .event
+                .as_ref()
+                .map(|e| e == "llm_metrics")
+                .unwrap_or(false)
+                && chunk.data.is_none())
+        })
+        .collect();
+    assert_eq!(
+        content_chunks.len(),
+        3,
+        "should have exactly 3 content chunks matching the mock backend stream"
+    );
+
+    for (i, chunk) in content_chunks.iter().take(2).enumerate() {
+        let resp = chunk.data.as_ref().expect("content chunk must have data");
+        assert!(
+            resp.prompt_token_ids.is_none(),
+            "chunk {i}: prompt_token_ids must not appear mid-stream (before finish_reason)"
+        );
+        assert!(
+            resp.kv_transfer_params.is_none(),
+            "chunk {i}: kv_transfer_params must not appear mid-stream (before finish_reason)"
+        );
+    }
+
+    let final_resp = content_chunks[2]
+        .data
+        .as_ref()
+        .expect("final chunk must have data");
+    assert_eq!(
+        final_resp.prompt_token_ids,
+        Some(vec![10u32, 20, 30]),
+        "prompt_token_ids must round-trip at top level on final chunk"
+    );
+    assert_eq!(
+        final_resp.kv_transfer_params,
+        Some(serde_json::json!({"hidden_states_path": "/tmp/hs_0.safetensors"})),
+        "kv_transfer_params must round-trip at top level on final chunk"
+    );
+    let nvext = final_resp
+        .nvext
+        .as_ref()
+        .expect("final chunk must carry nvext with completion_token_ids");
+    assert!(
+        nvext.get("completion_token_ids").is_some(),
+        "completion_token_ids must be present under nvext on final chunk (existing #9649 behavior)"
+    );
+}
+
+#[tokio::test]
+async fn test_cmpl_return_token_ids_trio_emitted_on_final_chunk_only() {
+    let request = create_cmpl_request_asking_for_trio();
+    let request_id = "cmpl-trio-1".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    let ctx = Arc::new(MockContext::new());
+    let outputs = build_backend_outputs_with_return_token_ids_trio();
+    let stream = stream::iter(outputs.into_iter().map(Annotated::from_data));
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(Box::pin(stream), ctx.clone());
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
+    );
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    // No stream_options.include_usage, so no trailing usage-only chunk.
+    let content_chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|chunk| {
+            !(chunk
+                .event
+                .as_ref()
+                .map(|e| e == "llm_metrics")
+                .unwrap_or(false)
+                && chunk.data.is_none())
+        })
+        .collect();
+    assert_eq!(
+        content_chunks.len(),
+        3,
+        "should have exactly 3 content chunks matching the mock backend stream"
+    );
+
+    for (i, chunk) in content_chunks.iter().take(2).enumerate() {
+        let resp = chunk.data.as_ref().expect("content chunk must have data");
+        assert!(
+            resp.prompt_token_ids.is_none(),
+            "cmpl chunk {i}: prompt_token_ids must not appear mid-stream"
+        );
+        assert!(
+            resp.kv_transfer_params.is_none(),
+            "cmpl chunk {i}: kv_transfer_params must not appear mid-stream"
+        );
+    }
+
+    let final_resp = content_chunks[2]
+        .data
+        .as_ref()
+        .expect("cmpl final chunk must have data");
+    assert_eq!(
+        final_resp.prompt_token_ids,
+        Some(vec![10u32, 20, 30]),
+        "cmpl: prompt_token_ids must round-trip at top level"
+    );
+    assert_eq!(
+        final_resp.kv_transfer_params,
+        Some(serde_json::json!({"hidden_states_path": "/tmp/hs_0.safetensors"})),
+        "cmpl: kv_transfer_params must round-trip at top level"
+    );
+    let nvext = final_resp
+        .nvext
+        .as_ref()
+        .expect("cmpl final chunk must carry nvext with completion_token_ids");
+    assert!(
+        nvext.get("completion_token_ids").is_some(),
+        "cmpl: completion_token_ids must be present under nvext on final chunk"
+    );
+}
+
+#[tokio::test]
+async fn test_chat_return_token_ids_absent_without_alias_or_extra_fields() {
+    let request = create_chat_request(None, None);
+    let request_id = "chat-no-trio-baseline".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    let ctx = Arc::new(MockContext::new());
+    let outputs = build_backend_outputs_with_return_token_ids_trio();
+    let stream = stream::iter(outputs.into_iter().map(Annotated::from_data));
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(Box::pin(stream), ctx.clone());
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
+    );
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    for chunk in chunks {
+        if let Some(resp) = chunk.data.as_ref() {
+            assert!(resp.prompt_token_ids.is_none());
+            assert!(resp.kv_transfer_params.is_none());
+            if let Some(nvext) = resp.nvext.as_ref() {
+                assert!(nvext.get("completion_token_ids").is_none());
+            }
+        }
     }
 }
