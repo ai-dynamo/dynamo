@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Hello World Workflow Comparison
 
 This comparison accepts an OpenAI chat-completions request, ignores its content,
-and returns `Hello, World!`. Both implementations reuse the same stage behavior:
+and returns `Hello, World!`. All implementations reuse the same stage behavior:
 
 - `HelloStage` produces `Hello, `.
 - `WorldStage` produces `World!`.
@@ -50,9 +50,27 @@ Run the frontend and three workers:
 examples/custom_backend/workflow_hello_world/dynamo/launch.sh
 ```
 
+## Dynamo with Bespoke Worker Orchestration
+
+This implementation keeps Dynamo's existing frontend, model discovery, and
+routing, but registers one aggregated worker at `dyn://my.endpoint.generate`.
+The worker owns the application control flow: it runs Hello and World
+concurrently, then runs Merge locally. It does not construct a `WorkflowIR`.
+
+```text
+OpenAI client -> Dynamo frontend -> aggregated worker --+--> Hello --+
+                                                       +--> World --+--> Merge
+```
+
+Run the frontend and aggregated worker:
+
+```bash
+examples/custom_backend/workflow_hello_world/dynamo_bespoke/launch.sh
+```
+
 ## Send a Request
 
-Both launchers listen on port 8000 by default. Send the same request to either
+All launchers listen on port 8000 by default. Send the same request to any
 implementation:
 
 ```bash
@@ -63,11 +81,11 @@ Override `--base-url` when the selected launcher uses another port.
 
 ## Responsibility Comparison
 
-| Concern | Bespoke | Dynamo workflow |
-| --- | --- | --- |
-| OpenAI request and response handling | Gateway code | Existing frontend |
-| Worker location | Configured URLs | Discovery endpoint IDs |
-| Fan-out and join | Gateway tasks | Graph scheduler |
-| Merge placement | Inline code | Remote binding |
-| Cancellation and stage failure | Gateway code | Workflow attempt |
-| Stage input and output checks | HTTP adapter code | Stage contracts |
+| Concern | Bespoke HTTP | Dynamo workflow | Dynamo bespoke |
+| --- | --- | --- | --- |
+| OpenAI request and response handling | Gateway code | Existing frontend | Existing frontend |
+| Worker location | Configured URLs | Three discovery endpoint IDs | One discovery endpoint ID |
+| Fan-out and join | Gateway tasks | Graph scheduler | Aggregated worker code |
+| Merge placement | Inline gateway code | Remote binding | Inline worker code |
+| Cancellation and stage failure | Gateway code | Workflow attempt | Aggregated worker code |
+| Stage input and output checks | HTTP adapter code | Stage contracts | User code |
