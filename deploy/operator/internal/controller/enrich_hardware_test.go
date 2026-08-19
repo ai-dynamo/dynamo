@@ -190,9 +190,9 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 			wantGPUSKU:    "v100_sxm", wantVRAM: 16384, wantGPUsNode: 8, wantTotalGPUs: 8, wantChanged: true,
 		},
 		{
-			name:          "nothing set, unknown GPU falls back to model name",
+			name:          "nothing set, unknown GPU returns actionable error instead of raw model name",
 			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 4, Model: "FutureGPU-X1000", VRAMPerGPU: 65536},
-			wantGPUSKU:    "FutureGPU-X1000", wantVRAM: 65536, wantGPUsNode: 4, wantTotalGPUs: 4, wantChanged: true,
+			wantErr:       `could not infer spec.hardware.gpuSku from discovered GPU model "FutureGPU-X1000"`,
 		},
 		{
 			name: "only totalGpus missing, discovery fills it",
@@ -549,9 +549,10 @@ func TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM(t *testing.T) {
 	}
 }
 
-// TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU verifies that for GPUs
-// not in the AIC support matrix, the raw GFD product name is used as a fallback.
-func TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU(t *testing.T) {
+// TestEnrichHardwareFromDiscovery_PreservesUserSuppliedGPUSKUEvenIfInvalid verifies that
+// discovery never overwrites a user-supplied gpuSku, even a value that wouldn't itself pass
+// enum validation (e.g. an already-broken DGDR being re-reconciled).
+func TestEnrichHardwareFromDiscovery_PreservesUserSuppliedGPUSKUEvenIfInvalid(t *testing.T) {
 	r := newFakeReconciler(gpuNode("gpu-node-1", "Tesla-V100-SXM2-16GB", 8, 16384))
 
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
@@ -567,7 +568,21 @@ func TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU(t *testing.T)
 
 	_, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 	require.NoError(t, err)
-	require.NotNil(t, dgdr.Spec.Hardware)
-	assert.Equal(t, "Tesla-V100-SXM2-16GB", string(dgdr.Spec.Hardware.GPUSKU),
-		"Unknown GPU should fall back to raw model name")
+	assert.Equal(t, "Tesla-V100-SXM2-16GB", string(dgdr.Spec.Hardware.GPUSKU))
+}
+
+// TestEnrichHardwareFromDiscovery_UnknownGPUReturnsActionableError is the regression test for
+// https://github.com/ai-dynamo/dynamo/issues/13239: an unrecognized GPU must not have its raw
+// product string written into hw.GPUSKU (which the CRD enum would then reject).
+func TestEnrichHardwareFromDiscovery_UnknownGPUReturnsActionableError(t *testing.T) {
+	const unknownProduct = "NVIDIA-RTX-PRO-6000-Blackwell-Server-Edition"
+	r := newFakeReconciler(gpuNode("gpu-node-1", unknownProduct, 8, 98304))
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{},
+	}
+
+	_, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.ErrorContains(t, err, unknownProduct)
+	assert.Empty(t, dgdr.Spec.Hardware.GPUSKU)
 }

@@ -1772,7 +1772,16 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		case inferred != "":
 			hw.GPUSKU = inferred
 		default:
-			hw.GPUSKU = nvidiacomv1beta1.GPUSKUType(gpuInfo.Model)
+			// Neither the discovery backend nor InferHardwareSystem could classify this
+			// GPU. Writing gpuInfo.Model here would violate the GPUSKUType CRD enum and
+			// fail the Update below with a confusing "Unsupported value" error that looks
+			// like the user supplied it, when the operator did. Fail fast with a message
+			// that names the actual problem instead.
+			return changed, fmt.Errorf(
+				"could not infer spec.hardware.gpuSku from discovered GPU model %q on node %q: "+
+					"no known hardware matches this product; set spec.hardware.gpuSku explicitly "+
+					"to one of the supported values %v",
+				gpuInfo.Model, gpuInfo.NodeName, gpu.SupportedGPUSKUs())
 		}
 		changed = true
 	}
