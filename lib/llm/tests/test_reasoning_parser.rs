@@ -740,6 +740,138 @@ mod tests {
         );
     }
 
+    async fn assert_kimi_k3_tool_call(case_name: &str, input_chunks: &[&str]) {
+        let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            stream::iter(input_chunks.iter().map(|content| chunk(content)).collect::<Vec<_>>()),
+            "kimi_k3".to_string(),
+            false,
+        );
+        let output_chunks: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("kimi_k3".to_string()),
+            None,
+            None,
+            false,
+            reasoning_parsed_stream,
+        )
+        .collect()
+        .await;
+
+        let mut tool_name = None;
+        let mut arguments = None;
+        for output in output_chunks {
+            if let Some(data) = output.data {
+                for choice in data.inner.choices {
+                    for tool_call in choice.delta.tool_calls.unwrap_or_default() {
+                        if let Some(function) = tool_call.function {
+                            tool_name = function.name.or(tool_name);
+                            arguments = function.arguments.or(arguments);
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            tool_name.as_deref(),
+            Some("get_current_weather"),
+            "{case_name}"
+        );
+        assert_eq!(
+            arguments.as_deref(),
+            Some(r#"{"location":"Boston, MA"}"#),
+            "{case_name}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_tool_call_with_split_xtml_tags() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "split tools opener",
+                &[
+                    "The user is asking about the weather in Boston.",
+                    "<|close|>think<|sep|><|open|>response<|sep|>I'll check the weather.",
+                    "<|close|>response<|sep|><|open|>",
+                    "tools<|sep|><|open|>call tool=\"get_current_weather\" index=\"1\"<|sep|>",
+                    "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
+                    "Boston, MA<|close|>argument<|sep|><|close|>call<|sep|>",
+                    "<|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>",
+                ],
+            ),
+            (
+                "tools opener attached to response content",
+                &[
+                    "The user is asking about the weather in Boston.",
+                    "<|close|>think<|sep|><|open|>response<|sep|>I'll check the weather.<|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool=\"get_current_weather\" index=\"1\"<|sep|>",
+                    "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
+                    "Boston, MA<|close|>argument<|sep|><|close|>call<|sep|>",
+                    "<|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>",
+                ],
+            ),
+            (
+                "split response close",
+                &[
+                    "The user is asking about the weather in Boston.",
+                    "<|close|>think<|sep|><|open|>response<|sep|>",
+                    "<|close|>",
+                    "response<|sep|><|open|>tools<|sep|><|open|>call tool=\"get_current_weather\" index=\"1\"<|sep|>",
+                    "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
+                    "Boston, MA<|close|>argument<|sep|><|close|>call<|sep|>",
+                    "<|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>",
+                ],
+            ),
+            (
+                "split response opener",
+                &[
+                    "The user is asking about the weather in Boston.<|close|>think<|sep|><|open|>",
+                    "response<|sep|><|close|>",
+                    "response<|sep|><|open|>tools<|sep|><|open|>call tool=\"get_current_weather\" index=\"1\"<|sep|>",
+                    "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
+                    "Boston, MA<|close|>argument<|sep|><|close|>call<|sep|>",
+                    "<|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>",
+                ],
+            ),
+            (
+                "split think close",
+                &[
+                    "The user is asking about the weather in Boston.<|close|>think",
+                    "<|sep|><|open|>response<|sep|>I'll check the weather.",
+                    "<|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool=\"get_current_weather\" index=\"1\"<|sep|>",
+                    "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
+                    "Boston, MA<|close|>argument<|sep|><|close|>call<|sep|>",
+                    "<|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>",
+                ],
+            ),
+        ];
+
+        for (case_name, input_chunks) in cases {
+            assert_kimi_k3_tool_call(case_name, input_chunks).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_tool_call_with_every_xtml_byte_boundary() {
+        let raw = concat!(
+            "The user is asking about the weather in Boston.",
+            "<|close|>think<|sep|>",
+            "<|open|>response<|sep|>I'll check the weather.",
+            "<|close|>response<|sep|>",
+            "<|open|>tools<|sep|>",
+            "<|open|>call tool=\"get_current_weather\" index=\"1\"<|sep|>",
+            "<|open|>argument key=\"location\" type=\"string\"<|sep|>",
+            "Boston, MA",
+            "<|close|>argument<|sep|>",
+            "<|close|>call<|sep|>",
+            "<|close|>tools<|sep|>",
+            "<|close|>message<|sep|>",
+            "<|end_of_msg|>"
+        );
+        let chunks: Vec<String> = raw.chars().map(|character| character.to_string()).collect();
+        let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+
+        assert_kimi_k3_tool_call("every byte boundary", &chunk_refs).await;
+    }
+
     #[tokio::test]
     #[ignore]
     // (TODO: Ayush) Fix this test
