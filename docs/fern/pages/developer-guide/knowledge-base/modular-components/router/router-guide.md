@@ -207,6 +207,7 @@ Advertised configuration applies to the worker sets the frontend routes to direc
 - **[Router Operations](router-operations.md)**: Replicas, remote indexers, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[Router Testing](router-testing.md)**: Recommended test layers for non-trivial router changes
+- **[Multi-DC KV Routing](multi-dc-kv-routing.md)**: Cross-datacenter KV routing and the DC Relay
 - **[Standalone Indexer](standalone-indexer.md)**: Run the KV indexer as a separate service
 - **[Standalone Selection Service](standalone-selection.md)**: Select workers and account for reservations without forwarding requests
 - **[Standalone Slot Tracker](standalone-slot-tracker.md)**: Run active-request accounting as a separate service

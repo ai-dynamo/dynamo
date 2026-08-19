@@ -114,7 +114,13 @@ Added by an individual metric family. Each label appears only on the metrics not
 <ParamField path="status" type="string">
   `[Shared]` On `dynamo_component_kv_cache_events_applied` — the outcome of applying a KV cache event to the router's radix-tree index.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ok</Badge> <Badge intent="note" minimal>parent_block_not_found</Badge> <Badge intent="note" minimal>block_not_found</Badge> <Badge intent="note" minimal>invalid_block</Badge> <Badge intent="note" minimal>capacity_exhausted</Badge> <Badge intent="note" minimal>indexer_invariant_violation</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ok</Badge> <Badge intent="note" minimal>parent_block_not_found</Badge> <Badge intent="note" minimal>block_not_found</Badge> <Badge intent="note" minimal>invalid_block</Badge> <Badge intent="note" minimal>capacity_exhausted</Badge> <Badge intent="note" minimal>allocation_failed</Badge> <Badge intent="note" minimal>ownership_degree_overflow</Badge> <Badge intent="note" minimal>indexer_invariant_violation</Badge></span>
+</ParamField>
+
+<ParamField path="outcome" type="string">
+  `[Shared]` On `dynamo_component_ckf_mutation_total`, and on `dynamo_kvrouter_ckf_mutation_total` from the standalone indexer — the block-level CKF mutation outcome. Both counters are registered but never incremented today, so no series carries this label in practice.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>unknown_remove</Badge> <Badge intent="note" minimal>capacity_exhausted</Badge></span>
 </ParamField>
 
 <ParamField path="event_type" type="string">
