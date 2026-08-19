@@ -317,9 +317,9 @@ pub mod llm {
     pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
 
     /// Idle heartbeat interval, in milliseconds, for the forward-pass-metrics
-    /// relay. Unset, `0`, invalid, or unrepresentable values keep the 1 s
-    /// default that matches the Python publisher. The value is read once when
-    /// the relay starts.
+    /// relay. Accepted range is `1` through `300000` (five minutes); unset,
+    /// `0`, invalid, or above the maximum keeps the 1 s default that matches
+    /// the Python publisher. The value is read once when the relay starts.
     pub const DYN_FPM_HEARTBEAT_INTERVAL_MS: &str = "DYN_FPM_HEARTBEAT_INTERVAL_MS";
 
     /// Enable LoRA adapter support (set to "true" to enable)

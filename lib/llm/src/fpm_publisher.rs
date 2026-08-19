@@ -35,13 +35,26 @@ const FPM_VERSION: i32 = 1;
 /// `DYN_FPM_HEARTBEAT_INTERVAL_MS` override below is Rust-side only, so the two
 /// publishers agree unless an operator sets it.
 const IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+/// Largest accepted idle heartbeat interval.
+///
+/// The heartbeat is a liveness signal, so an interval far beyond the default is
+/// indistinguishable from a publisher that has stopped: a consumer waiting on it
+/// gives up long before it fires. Five minutes is three orders of magnitude
+/// above the 1 s default, which leaves ample room for the ablation this override
+/// exists for while still rejecting a value that would silence the publisher.
+///
+/// A representability check is not a substitute for this bound.
+/// `Instant::checked_add` accepts `Duration::from_millis(u64::MAX)` — roughly
+/// 584 million years — on Linux, so `u64::MAX` would pass an arithmetic guard
+/// and produce exactly the never-heartbeats-again outcome the guard is for.
+const MAX_IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Resolve the idle heartbeat interval from `DYN_FPM_HEARTBEAT_INTERVAL_MS`.
 ///
-/// Anything that is not a usable interval — unset, unparseable, zero, or too
-/// large for the platform's monotonic clock to add — keeps
-/// [`IDLE_HEARTBEAT_INTERVAL`], because a publisher that silently stops
-/// heartbeating is worse than one that ignores a bad override.
+/// Anything that is not a usable interval — unset, unparseable, zero, or above
+/// [`MAX_IDLE_HEARTBEAT_INTERVAL`] — keeps [`IDLE_HEARTBEAT_INTERVAL`], because
+/// a publisher that silently stops heartbeating is worse than one that ignores a
+/// bad override.
 fn parse_idle_heartbeat_interval(value: Result<String, std::env::VarError>) -> Duration {
     let value = match value {
         Ok(value) => value,
@@ -66,13 +79,14 @@ fn parse_idle_heartbeat_interval(value: Result<String, std::env::VarError>) -> D
         }
         Ok(milliseconds) => {
             let interval = Duration::from_millis(milliseconds);
-            if std::time::Instant::now().checked_add(interval).is_some() {
+            if interval <= MAX_IDLE_HEARTBEAT_INTERVAL {
                 interval
             } else {
                 tracing::warn!(
                     env = env_llm::DYN_FPM_HEARTBEAT_INTERVAL_MS,
                     value,
-                    "ignoring FPM idle heartbeat interval outside the platform range"
+                    max_ms = MAX_IDLE_HEARTBEAT_INTERVAL.as_millis() as u64,
+                    "ignoring FPM idle heartbeat interval above the maximum"
                 );
                 IDLE_HEARTBEAT_INTERVAL
             }
@@ -744,17 +758,27 @@ mod tests {
             parse_idle_heartbeat_interval(Ok("-1".to_string())),
             IDLE_HEARTBEAT_INTERVAL
         );
-        // Whether a huge interval is representable is platform-dependent, so
-        // derive the expectation the same way the parser decides: honored if
-        // the monotonic clock can hold it, default if it cannot. Either way it
-        // must not panic. (Mirrors `test_sse_keep_alive_env_var`.)
-        let huge = Duration::from_millis(u64::MAX);
-        let expected = std::time::Instant::now()
-            .checked_add(huge)
-            .map_or(IDLE_HEARTBEAT_INTERVAL, |_| huge);
+        // The ceiling, asserted against literals on both sides of it. Deriving
+        // the expectation from `Instant::checked_add` the way the parser used
+        // to decide would mirror the implementation and could not detect the
+        // gap this bound closes.
+        assert_eq!(
+            parse_idle_heartbeat_interval(Ok("300000".to_string())),
+            Duration::from_millis(300_000),
+            "five minutes is the largest accepted interval"
+        );
+        assert_eq!(
+            parse_idle_heartbeat_interval(Ok("300001".to_string())),
+            IDLE_HEARTBEAT_INTERVAL,
+            "one millisecond past the ceiling falls back"
+        );
+        // The value that motivates the ceiling: on Linux `Instant::checked_add`
+        // accepts `Duration::from_millis(u64::MAX)`, so a representability guard
+        // would honor it and the publisher would never heartbeat again. The
+        // ceiling rejects it on every platform, which is what this asserts.
         assert_eq!(
             parse_idle_heartbeat_interval(Ok(u64::MAX.to_string())),
-            expected
+            IDLE_HEARTBEAT_INTERVAL
         );
     }
 

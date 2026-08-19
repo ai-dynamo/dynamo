@@ -392,19 +392,62 @@ mod tests {
 
     /// The default cadence must not move: on Linux `auto` still means timerfd,
     /// and the drift accounting stays off unless it is asked for.
+    ///
+    /// The expectation is a `#[cfg]`-gated literal, not a `cfg!(...)`
+    /// expression. An expression here would be a transcription of `resolve()`'s
+    /// own branch table and would keep agreeing with it after someone edited
+    /// it, which is precisely the assertion this test must not make. See
+    /// `test_default_backend_actually_sleeps_on_timerfd` for the same claim
+    /// driven through the production sleep body.
     #[test]
     fn test_auto_backend_keeps_platform_default() {
         assert_eq!(configured_sleep_backend(), SleepBackend::Auto);
         assert!(!sleep_drift_enabled());
 
-        let expected = if cfg!(target_os = "linux") {
-            SleepBackend::Timerfd
-        } else {
-            SleepBackend::TimeDriver
-        };
+        #[cfg(target_os = "linux")]
+        let expected = SleepBackend::Timerfd;
+        #[cfg(not(target_os = "linux"))]
+        let expected = SleepBackend::TimeDriver;
+
         assert_eq!(SleepBackend::Auto.resolve(), expected);
         assert_eq!(SleepBackend::Timerfd.resolve(), expected);
         assert_eq!(SleepBackend::TimeDriver.resolve(), SleepBackend::TimeDriver);
+    }
+
+    /// The default path, exercised rather than restated: a process with no
+    /// environment set asks for `Auto`, and on Linux the wake must be served by
+    /// the timerfd on the IO driver — the same primitive `main` reaches today.
+    ///
+    /// This goes through `sleep_until_precise_measured`, which is the body
+    /// `sleep_until_precise` runs, so it observes which primitive actually
+    /// served the sleep instead of asking `resolve()` what it would have
+    /// picked. An edit that left the branch table alone but changed which
+    /// backend the default path reaches — a differently-consulted
+    /// `configured_sleep_backend()`, a moved `resolve()` call — fails here and
+    /// nowhere else.
+    ///
+    /// A `TimeDriver` result would mean the timerfd could not be created (fd
+    /// exhaustion, a restricted sandbox) and the documented fallback fired.
+    /// That is a real difference in what the default path does on this host,
+    /// so it is asserted rather than tolerated.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_default_backend_actually_sleeps_on_timerfd() {
+        assert_eq!(configured_sleep_backend(), SleepBackend::Auto);
+
+        let record = sleep_until_precise_measured(
+            Instant::now() + Duration::from_millis(2),
+            SleepBackend::Auto,
+        )
+        .await
+        .expect("a 2ms deadline is not expired, so a timer is armed");
+
+        assert_eq!(
+            record.backend,
+            SleepBackend::Timerfd,
+            "the default path was served by {} on Linux, not timerfd",
+            record.backend.label()
+        );
     }
 
     #[test]
@@ -430,11 +473,36 @@ mod tests {
     /// mode under investigation, so it separates the two regimes without
     /// flaking. `TimeDriver` is forced because it is the backend macOS always
     /// takes and Linux otherwise never compiles.
+    ///
+    /// The heartbeat is polled once and reports back before the 2 ms deadline is
+    /// armed. Registration on the time driver happens on that first poll, and
+    /// spawning alone does not order it against this task on a two-worker
+    /// runtime — without the handshake the 1 s entry might not be in the wheel
+    /// at all when the short sleep is armed, and the interference the test is
+    /// named for would not be established.
+    ///
+    /// Which assertion has failure power, stated plainly so a later reader does
+    /// not over-trust this fixture: the backend-identity assertion is what fails
+    /// against pre-change behavior, where `#[cfg]` decided and a requested
+    /// `TimeDriver` was silently unanswerable on Linux. The 200 ms drift bound
+    /// is the discriminator for the ~1000 ms mode itself; it has never been
+    /// observed to fire on Linux, and it is not evidence about macOS.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_short_sleep_does_not_ride_the_one_second_timer() {
-        let heartbeat = tokio::spawn(async {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+        let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+        let heartbeat = tokio::spawn(async move {
+            let sleep = tokio::time::sleep(Duration::from_secs(1));
+            tokio::pin!(sleep);
+            assert!(
+                matches!(futures::poll!(sleep.as_mut()), Poll::Pending),
+                "a 1s timer must not be ready on its first poll"
+            );
+            let _ = registered_tx.send(());
+            sleep.await;
         });
+        registered_rx
+            .await
+            .expect("heartbeat task registered its 1s deadline on the time driver");
 
         let record = sleep_until_precise_measured(
             Instant::now() + Duration::from_millis(2),
