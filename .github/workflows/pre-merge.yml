@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   changed-files:
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
+    runs-on: &internal_pr_runner ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
       examples: ${{ steps.changes.outputs.examples }}
@@ -49,7 +49,7 @@ jobs:
           gh_token: ${{ github.token }}
 
   pre-merge-status-check:
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
+    runs-on: *internal_pr_runner
     needs: [changed-files, pre-commit, recipe-check, api-docs, fern-check, fern-broken-links, operator, rust-tests, rust-clippy, docs-website-composition]
     if: always()
     steps:
@@ -58,7 +58,7 @@ jobs:
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   pre-commit:
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
+    runs-on: *internal_pr_runner
     permissions:
       contents: read
     steps:
@@ -71,7 +71,7 @@ jobs:
     name: Recipe Check
     needs: changed-files
     if: needs.changed-files.outputs.examples == 'true'
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
+    runs-on: *internal_pr_runner
     timeout-minutes: 5
     permissions:
       contents: read
@@ -100,7 +100,7 @@ jobs:
     name: Generated API References
     needs: changed-files
     if: needs.changed-files.outputs.api_docs == 'true'
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
+    runs-on: *internal_pr_runner
     permissions:
       contents: read
     steps:
@@ -172,7 +172,7 @@ jobs:
     name: Fern Configuration Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
+    runs-on: *internal_pr_runner
     permissions:
       contents: read
     steps:
@@ -245,7 +245,7 @@ jobs:
     name: Docs Website Composition Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
+    runs-on: *internal_pr_runner
     permissions:
       contents: read
     steps:
@@ -281,7 +281,7 @@ jobs:
     name: Fern Broken Links Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
+    runs-on: *internal_pr_runner
     permissions:
       contents: read
     steps:
@@ -298,7 +298,7 @@ jobs:
   operator:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
+    runs-on: *internal_pr_runner
     permissions:
       contents: read
     steps:
