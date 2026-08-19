@@ -181,14 +181,16 @@ impl VllmClient {
 
     pub(crate) async fn load_lora(
         &self,
-        adapter: pb::LoraAdapter,
+        lora_name: String,
+        source_path: String,
     ) -> Result<pb::LoadLoraResponse, DynamoError> {
         let mut client = pb::control_client::ControlClient::new(self.pool.next_channel())
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
         client
             .load_lora(pb::LoadLoraRequest {
-                adapter: Some(adapter),
+                lora_name,
+                source_path,
             })
             .await
             .map(tonic::Response::into_inner)

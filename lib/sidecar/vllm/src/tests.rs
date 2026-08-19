@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
@@ -39,6 +39,7 @@ struct FakeVllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
     loras: Arc<Mutex<Vec<pb::LoraAdapter>>>,
+    next_lora_id: Arc<AtomicI64>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
     reject: Arc<AtomicBool>,
@@ -233,32 +234,28 @@ impl pb::control_server::Control for FakeVllm {
         &self,
         request: Request<pb::LoadLoraRequest>,
     ) -> Result<Response<pb::LoadLoraResponse>, Status> {
-        let adapter = request
-            .into_inner()
-            .adapter
-            .ok_or_else(|| Status::invalid_argument("adapter required"))?;
+        let request = request.into_inner();
         let mut loras = self.loras.lock().await;
         if let Some(existing) = loras
             .iter()
-            .find(|loaded| loaded.lora_name == adapter.lora_name)
+            .find(|loaded| loaded.lora_name == request.lora_name)
         {
-            if existing != &adapter {
-                return Err(Status::already_exists(
-                    "adapter name has different identity",
-                ));
-            }
-            return Ok(Response::new(pb::LoadLoraResponse {
-                adapter: Some(existing.clone()),
-                already_loaded: true,
-            }));
+            return Err(Status::already_exists(format!(
+                "adapter `{}` is already loaded with id {}",
+                existing.lora_name, existing.lora_id
+            )));
         }
+        let adapter = pb::LoraAdapter {
+            lora_id: self.next_lora_id.fetch_add(1, Ordering::SeqCst) + 1,
+            lora_name: request.lora_name,
+            source_path: request.source_path,
+        };
         loras.push(adapter.clone());
         if self.load_commit_error.swap(false, Ordering::SeqCst) {
             return Err(Status::unavailable("injected error after load commit"));
         }
         Ok(Response::new(pb::LoadLoraResponse {
             adapter: Some(adapter),
-            already_loaded: false,
         }))
     }
 
@@ -883,6 +880,7 @@ async fn native_lora_lifecycle_reconciles_committed_rpc_errors() {
         .await
         .unwrap();
     assert_eq!(load["status"], "success");
+    assert_eq!(load["lora_id"], 1);
     assert_eq!(server.service.loras.lock().await.len(), 1);
     let models = endpoint
         .drt()

@@ -184,13 +184,19 @@ impl VllmSidecarEngine {
         endpoint: &Endpoint,
         adapter: &crate::proto::LoraAdapter,
     ) -> Result<(), DynamoError> {
-        let response = client.load_lora(adapter.clone()).await?;
+        let response = client
+            .load_lora(adapter.lora_name.clone(), adapter.source_path.clone())
+            .await?;
         match response.adapter {
-            Some(restored) if restored == *adapter => {
-                publish_lora_model(endpoint, adapter, self.model.max_loras()).await
+            Some(restored)
+                if restored.lora_id > 0
+                    && restored.lora_name == adapter.lora_name
+                    && restored.source_path == adapter.source_path =>
+            {
+                publish_lora_model(endpoint, &restored, self.model.max_loras()).await
             }
             observed => Err(client::protocol_error(format!(
-                "native unload rollback returned a different adapter identity: expected {adapter:?}, observed {observed:?}"
+                "native unload rollback returned an invalid adapter identity: expected name/path from {adapter:?}, observed {observed:?}"
             ))),
         }
     }
@@ -199,7 +205,10 @@ impl VllmSidecarEngine {
         adapters: &[crate::proto::LoraAdapter],
     ) -> Result<(), DynamoError> {
         for (index, adapter) in adapters.iter().enumerate() {
-            if adapter.lora_name.trim().is_empty() || adapter.lora_id <= 0 {
+            if adapter.lora_name.trim().is_empty()
+                || adapter.source_path.trim().is_empty()
+                || adapter.lora_id <= 0
+            {
                 return Err(client::protocol_error(format!(
                     "ListLoras returned an invalid adapter identity: {adapter:?}"
                 )));
@@ -272,22 +281,18 @@ impl VllmSidecarEngine {
         let source_path = resolve_source_path(downloader, &request.uri).await?;
         let source_path = source_path
             .to_str()
-            .ok_or_else(|| client::invalid_argument("the resolved LoRA path is not valid UTF-8"))?;
-        let lora_id = i64::from(dynamo_llm::utils::lora_name_to_id(&request.name));
-        let requested = crate::proto::LoraAdapter {
-            lora_id,
-            lora_name: request.name.clone(),
-            source_path: source_path.to_string(),
-        };
+            .ok_or_else(|| client::invalid_argument("the resolved LoRA path is not valid UTF-8"))?
+            .to_string();
 
         let loaded = client.list_loras().await?;
+        Self::validate_adapter_inventory(&loaded)?;
         if let Some(existing) = loaded
             .iter()
             .find(|adapter| adapter.lora_name == request.name)
         {
-            if existing != &requested {
+            if existing.source_path != source_path {
                 return Err(client::invalid_argument(format!(
-                    "LoRA adapter `{}` is already loaded with different identity",
+                    "LoRA adapter `{}` is already loaded from a different source path",
                     request.name
                 )));
             }
@@ -300,38 +305,32 @@ impl VllmSidecarEngine {
                 "already_loaded": true,
             }));
         }
-        if let Some(existing) = loaded
-            .iter()
-            .find(|adapter| adapter.lora_id == requested.lora_id)
-        {
-            return Err(client::invalid_argument(format!(
-                "LoRA adapter ID {} for `{}` conflicts with loaded adapter `{}`",
-                requested.lora_id, requested.lora_name, existing.lora_name
-            )));
-        }
 
-        let response = match client.load_lora(requested.clone()).await {
+        let response = match client
+            .load_lora(request.name.clone(), source_path.clone())
+            .await
+        {
             Ok(response) => response,
             Err(load_error) => match client.list_loras().await {
                 Ok(adapters) => {
                     Self::validate_adapter_inventory(&adapters)?;
-                    if adapters.iter().any(|adapter| adapter == &requested) {
+                    if let Some(adapter) = adapters
+                        .iter()
+                        .find(|adapter| adapter.lora_name == request.name)
+                    {
+                        if adapter.source_path != source_path {
+                            return Err(client::protocol_error(format!(
+                                "LoadLora failed ({load_error}) and reconciliation found the same name with a different source path: {adapter:?}"
+                            )));
+                        }
                         tracing::warn!(
-                            lora_name = %requested.lora_name,
+                            lora_name = %request.name,
                             %load_error,
                             "LoadLora failed after the adapter committed; reconciled with ListLoras"
                         );
                         crate::proto::LoadLoraResponse {
-                            adapter: Some(requested.clone()),
-                            already_loaded: false,
+                            adapter: Some(adapter.clone()),
                         }
-                    } else if let Some(conflict) = adapters.iter().find(|adapter| {
-                        adapter.lora_name == requested.lora_name
-                            || adapter.lora_id == requested.lora_id
-                    }) {
-                        return Err(client::protocol_error(format!(
-                            "LoadLora failed ({load_error}) and reconciliation found a conflicting adapter: requested {requested:?}, observed {conflict:?}"
-                        )));
                     } else {
                         return Err(load_error);
                     }
@@ -344,15 +343,38 @@ impl VllmSidecarEngine {
             },
         };
         let adapter = match response.adapter {
-            Some(adapter) if adapter == requested => adapter,
+            Some(adapter)
+                if adapter.lora_id > 0
+                    && adapter.lora_name == request.name
+                    && adapter.source_path == source_path =>
+            {
+                adapter
+            }
             observed => {
                 let identity_error = client::protocol_error(format!(
-                    "LoadLora returned a different adapter identity: expected {requested:?}, observed {observed:?}"
+                    "LoadLora returned an invalid adapter identity for name `{}` and path `{source_path}`: observed {observed:?}",
+                    request.name
                 ));
-                return match Self::rollback_loaded_adapter(client, &requested).await {
-                    Ok(()) => Err(identity_error),
-                    Err(rollback_error) => Err(client::protocol_error(format!(
-                        "{identity_error}; native rollback also failed: {rollback_error}"
+                return match client.list_loras().await {
+                    Ok(adapters) => {
+                        Self::validate_adapter_inventory(&adapters)?;
+                        match adapters
+                            .iter()
+                            .find(|adapter| adapter.lora_name == request.name)
+                        {
+                            Some(committed) => {
+                                match Self::rollback_loaded_adapter(client, committed).await {
+                                    Ok(()) => Err(identity_error),
+                                    Err(rollback_error) => Err(client::protocol_error(format!(
+                                        "{identity_error}; native rollback also failed: {rollback_error}"
+                                    ))),
+                                }
+                            }
+                            None => Err(identity_error),
+                        }
+                    }
+                    Err(list_error) => Err(client::protocol_error(format!(
+                        "{identity_error}; ListLoras could not identify a committed adapter for rollback: {list_error}"
                     ))),
                 };
             }
@@ -373,7 +395,7 @@ impl VllmSidecarEngine {
             "message": format!("LoRA adapter '{}' loaded successfully", adapter.lora_name),
             "lora_name": adapter.lora_name,
             "lora_id": adapter.lora_id,
-            "already_loaded": response.already_loaded,
+            "already_loaded": false,
         }))
     }
 
