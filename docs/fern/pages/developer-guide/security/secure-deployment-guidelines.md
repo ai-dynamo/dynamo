@@ -44,27 +44,7 @@ The security posture rests on two assumptions:
 If both hold, the externally reachable surface is limited to the frontend's
 inference API. The sections below explain how to satisfy each assumption.
 
-```mermaid
-flowchart LR
-    client["Untrusted clients"]
-    gateway["Gateway / ingress<br/>authentication · TLS · rate limiting"]
-
-    subgraph cluster["Trusted cluster — isolate all internal traffic from untrusted networks"]
-        direction TB
-        fe["Frontends<br/>(external-facing inference API)"]
-        subgraph planes["Internal communication planes"]
-            disc["Discovery<br/>K8s RBAC / authenticated etcd"]
-            evt["Event<br/>NATS auth+TLS / isolated ZMQ"]
-            req["Request<br/>mTLS · NIXL/RDMA"]
-        end
-        workers["Backend workers"]
-        fe --> planes
-        planes --> workers
-    end
-
-    client -->|HTTPS| gateway
-    gateway -->|only entry point| fe
-```
+![Dynamo trust boundary — untrusted clients reach the frontends only through an authenticating gateway; the internal communication planes and backend workers run on the trusted network and must be isolated from untrusted peers.](../../../assets/img/secure-deployment-trust-boundary.svg)
 
 The gateway is the only entry point into the cluster; it forwards to the
 frontends (the external-facing inference API). Everything inside — the frontends,
