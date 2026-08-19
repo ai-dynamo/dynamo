@@ -57,7 +57,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-38fe980b-arm64
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-38fe980b-arm64@sha256:607264966673675f344b0676f9f09c9f91acd303d08c6c6abdc8265403f200bf
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
               args:
@@ -138,7 +138,7 @@ spec:
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-38fe980b-arm64
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-38fe980b-arm64@sha256:607264966673675f344b0676f9f09c9f91acd303d08c6c6abdc8265403f200bf
               imagePullPolicy: Always
               command: [python3, -m, dynamo.sglang]
               args:
@@ -163,12 +163,14 @@ spec:
                 - kimi_k3
                 - --dyn-tool-call-parser
                 - kimi_k3
+                - --dyn-enable-structural-tag
                 - --speculative-algorithm
                 - DSPARK
                 - --speculative-draft-model-path
                 - /draft
                 - --speculative-dspark-block-size
                 - "7"
+                - --enable-linear-replayssm-spec
                 - --enable-nccl-nvls
                 - --kv-cache-dtype
                 - fp8_e4m3
@@ -182,27 +184,19 @@ spec:
               env:
                 - name: DYN_FORWARDPASS_METRIC_PORT
                   value: ""
-                - name: HF_HUB_OFFLINE
-                  value: "1"
-                - name: TRANSFORMERS_OFFLINE
-                  value: "1"
-                - name: PYTHONUNBUFFERED
-                  value: "1"
                 - name: NCCL_MNNVL_ENABLE
                   value: "1"
                 - name: NCCL_NVLS_ENABLE
                   value: "1"
                 - name: NCCL_CUMEM_ENABLE
                   value: "1"
-                - name: NCCL_SOCKET_IFNAME
-                  value: eth0
-                - name: GLOO_SOCKET_IFNAME
-                  value: eth0
                 - name: SGLANG_OPT_USE_CUSTOM_ALL_REDUCE_V2
                   value: "1"
                 - name: SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE
                   value: "1"
                 # For perf benchmarking only
+                # - name: SGLANG_RAGGED_VERIFY_MODE
+                #   value: static
                 # - name: SGLANG_SIMULATE_ACC_LEN
                 #   value: "4.05"
                 # - name: SGLANG_SIMULATE_ACC_METHOD
