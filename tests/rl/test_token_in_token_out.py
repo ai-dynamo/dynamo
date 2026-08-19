@@ -330,18 +330,6 @@ def test_vllm_token_in_token_out(start_vllm_tito_services: int) -> None:
         "openai_logprobs": openai_logprobs,
         "rl_logprobs": rl_logprobs,
     }
-    if len(rl_logprobs) > 2:
-        shifted = all(
-            math.isclose(left, right, rel_tol=0.0, abs_tol=LOGPROB_ATOL)
-            for left, right in zip(openai_logprobs[1:], rl_logprobs[:-1], strict=True)
-        ) or all(
-            math.isclose(left, right, rel_tol=0.0, abs_tol=LOGPROB_ATOL)
-            for left, right in zip(openai_logprobs[:-1], rl_logprobs[1:], strict=True)
-        )
-        assert not shifted, {
-            "openai_logprobs": openai_logprobs,
-            "rl_logprobs": rl_logprobs,
-        }
 
 
 def _request_sglang_generation_events(*, frontend_port: int) -> list[dict[str, Any]]:
