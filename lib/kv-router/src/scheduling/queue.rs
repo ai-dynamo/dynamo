@@ -1333,7 +1333,7 @@ mod tests {
     use crate::scheduling::{RefreshedOverlap, RouterPolicyConfig};
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-    use crate::{DefaultWorkerSelector, WorkerSelector};
+    use crate::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
 
     fn decay_now() -> Instant {
         Instant::now()
@@ -1402,6 +1402,10 @@ mod tests {
     }
 
     impl WorkerSelector<SimpleWorkerConfig> for MinDecodeSelector {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::CACHE | WorkerInputs::LOAD
+        }
+
         fn select_worker(
             &self,
             workers: &HashMap<WorkerId, SimpleWorkerConfig>,
