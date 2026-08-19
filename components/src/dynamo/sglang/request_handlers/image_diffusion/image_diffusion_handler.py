@@ -124,8 +124,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             num_images = req.n
             if not 1 <= num_images <= MAX_IMAGES_PER_REQUEST:
                 raise ValueError(
-                    f"n must be in [1, {MAX_IMAGES_PER_REQUEST}], "
-                    f"got {num_images}"
+                    f"n must be in [1, {MAX_IMAGES_PER_REQUEST}], " f"got {num_images}"
                 )
 
             # The engine produces one image per call, so serve OpenAI `n`

@@ -476,9 +476,7 @@ class TestNParameter:
         assert handler.generator.generate.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_n_seeds_are_deterministic_and_distinct(
-        self, handler, mock_context
-    ):
+    async def test_n_seeds_are_deterministic_and_distinct(self, handler, mock_context):
         """With an explicit seed, generation i uses seed+i."""
         self._mock_one_image(handler)
 
