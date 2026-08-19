@@ -667,6 +667,13 @@ func registerControllers(
 	}); err != nil {
 		return err
 	}
+	// A disabled gate omits the external watch while retaining finalizer cleanup reconciliation.
+	if !runtimeConfig.Gate.Enabled(features.Checkpoint) {
+		setupLog.Info(
+			"Registering DynamoCheckpoint controller without PodSnapshot watch",
+			"reason", "checkpoint feature gate is disabled",
+		)
+	}
 	if err := controller.SetupDynamoCheckpoint(mgr, setupOptions); err != nil {
 		return err
 	}
