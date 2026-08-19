@@ -3,19 +3,14 @@
 
 """Unit tests for BaseWorkerHandler.scale_elastic_ep.
 
-Covers two independent concerns of the same method:
+Two concerns: input validation (the TP-derived EP-size floor) and fail-fast
+handling of a failed grow. vLLM does no rollback on a failed scale, so the
+handler restarts the worker instead of recovering in process; the fail-fast
+tests assert the restart is actually triggered (via ``_WorkerShutdown``), not
+just that a value was returned.
 
-* input validation and the TP-derived EP-size floor, and
-* fail-fast handling of a failed grow.
-
-vLLM performs no rollback or cleanup on a failed elastic-EP scale, so the handler
-does not try to recover in process: on any failed grow it restarts the worker
-(``_shutdown_worker`` / ``_shutdown_on_engine_dead``) so it comes back clean. The
-fail-fast tests verify that shutdown is actually triggered (not just that a
-boolean was returned) via the ``_WorkerShutdown`` stand-in.
-
-``ray`` is imported lazily inside the scale path and is absent in CI, so it is
-stubbed in ``sys.modules`` via the ``stub_ray`` fixture.
+``ray`` is stubbed via the ``stub_ray`` fixture (the scale path imports it
+lazily and CI lacks it).
 """
 
 import asyncio
@@ -189,11 +184,10 @@ async def test_prefill_context_parallelism_is_rejected(size):
 
 
 class _WorkerShutdown(BaseException):
-    """Stand-in for the real _shutdown_worker / _shutdown_on_engine_dead, which
-    never return (they call runtime.shutdown() + os._exit). Subclassing
-    BaseException (not Exception) means the handler's broad ``except Exception``
-    cannot swallow it, so a test observes the restart exactly as production does:
-    control leaves scale_elastic_ep and it never reports success.
+    """Stand-in for the NoReturn _shutdown_worker / _shutdown_on_engine_dead.
+    BaseException (not Exception) so the handler's broad ``except Exception``
+    can't swallow it -- the test sees the restart as production does: control
+    leaves scale_elastic_ep without reporting success.
     """
 
 
@@ -201,10 +195,10 @@ _RESTARTED = object()  # sentinel: handler restarted the worker instead of retur
 
 
 class _FakeVllmEngine:
-    """Stand-in engine client. Scaling to a size in ``fail_sizes`` raises
-    ``RuntimeError`` and to a size in ``dead_sizes`` raises ``EngineDeadError``;
-    ``tensor_parallel_size`` is exposed so the handler's TP-derived floor check
-    passes and the grow is actually attempted.
+    """Stand-in engine client: scaling to a ``fail_sizes`` size raises
+    ``RuntimeError`` and to a ``dead_sizes`` size raises ``EngineDeadError``.
+    ``tensor_parallel_size`` is set so the TP floor check passes and the grow is
+    actually attempted.
     """
 
     def __init__(self, prev_dp, fail_sizes=(), dead_sizes=(), tensor_parallel_size=1):

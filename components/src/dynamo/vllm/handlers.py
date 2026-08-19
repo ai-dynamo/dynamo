@@ -1532,10 +1532,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             try:
                 await _scale_engine(new_dp_size)
             except EngineDeadError as dead_err:
-                # A failed grow can leave the engine core dead. Restart the worker
-                # the same way every other engine path in this handler does, so it
-                # comes back clean and re-registers (the fail-fast rationale is in
-                # the broad handler below).
+                # Engine died mid-grow. Restart it the same way every other engine
+                # path here does, so it comes back clean and re-registers.
                 logger.error(
                     "[ElasticEP] Engine died during scale to dp=%s: %s",
                     new_dp_size,
@@ -1543,20 +1541,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
                 self._shutdown_on_engine_dead(dead_err)  # NoReturn: restarts worker
             except Exception as grow_err:
-                # Fail fast on a failed scale. vLLM performs NO rollback or cleanup
-                # of its own -- _scale_up_elastic_ep has no try/except and vLLM's
-                # own /scale_elastic_ep endpoint simply returns 500 -- so a failed
-                # grow leaves the engine in a partial state: the existing ranks were
-                # already told to reconfigure toward a peer that never joined, so
-                # they wedge on a collective that never completes. Because vLLM
-                # gives us no rollback protection, there is no safe way to recover
-                # in process: an in-handler rollback would race vLLM's still-running
-                # grow tasks (its asyncio.gather does not cancel the siblings of the
-                # failed task) and could not repair a wedged engine anyway. The only
-                # safe response is to fail fast -- shut the worker down so it
-                # restarts clean at the previous size and re-registers, instead of
-                # returning a "recovered" status that nothing consumes while a
-                # broken worker keeps taking traffic.
+                # Fail fast: vLLM does no rollback or cleanup on a failed scale (its
+                # _scale_up_elastic_ep has no except and its /scale_elastic_ep
+                # endpoint just returns 500), so a failed grow leaves the engine
+                # partial/wedged with no safe way to recover in process. Restart the
+                # worker so it comes back clean, rather than fake a recovery that
+                # nothing acts on.
                 logger.error(
                     "[ElasticEP] Scaling to dp=%s failed: %s. vLLM does not roll "
                     "back a failed scale; restarting the worker to recover a clean "
