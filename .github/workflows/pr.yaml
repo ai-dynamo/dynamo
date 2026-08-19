@@ -186,6 +186,12 @@ jobs:
       - deploy-test-checkpoint-vllm
       - deploy-test-checkpoint-sglang
       - deploy-test-checkpoint-trtllm
+      - gb200-gate
+      - deploy-operator-gb200
+      - deploy-test-gb200-vllm
+      - deploy-test-gb200-sglang
+      - deploy-test-gb200-trtllm
+      - deploy-cleanup-gb200
       - deploy-cleanup
       - deploy-cleanup-checkpoint-vllm
       - deploy-cleanup-checkpoint-sglang
@@ -1204,8 +1210,9 @@ jobs:
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      # No override_arch: copy the full manifest list so the arm64 GB200 deploy
+      # tests can pull it, matching vllm-copy-to-acr and sglang-copy-to-acr.
+      copy_timeout_minutes: 20
     secrets: inherit
 
   snapshot-placeholder-trtllm:
@@ -1341,6 +1348,206 @@ jobs:
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
+
+  # ============================================================================
+  # GB200 DEPLOY TESTS
+  #
+  # Opt-in via the "gb200-ci" PR label while we validate the path. These are
+  # destined for nightly-ci.yml; they live here for now so they can reuse the
+  # per-PR build and ACR copy jobs above.
+  # ============================================================================
+
+  gb200-gate:
+    name: GB200 Gate
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.pr-info.outputs.enabled }}
+      # Single source of truth for the context, since reusable-workflow `with:`
+      # inputs cannot read the workflow-level `env` context.
+      kube_context: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-01
+    steps:
+      # pr.yaml runs on push to pull-request/N, so github.event.pull_request is
+      # unavailable and the label has to be read back from the API. Same pattern
+      # as the "xpu" gate in pr-xpu.yaml.
+      - name: Check for gb200-ci label
+        id: pr-info
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUMBER="${GITHUB_REF_NAME##*/}"
+          ENABLED=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            --jq '[.labels[].name] | any(. == "gb200-ci")')
+          echo "enabled=${ENABLED}" >> "$GITHUB_OUTPUT"
+          if [[ "${ENABLED}" == "true" ]]; then
+            echo "PR #${PR_NUMBER} has the 'gb200-ci' label - running GB200 deploy tests"
+          else
+            echo "PR #${PR_NUMBER} has no 'gb200-ci' label - skipping GB200 deploy tests"
+          fi
+
+  deploy-operator-gb200:
+    name: GB200 Operator Setup
+    if: |
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      !cancelled() && !failure() &&
+      needs.gb200-gate.outputs.enabled == 'true' &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true') &&
+      needs.operator.result == 'success'
+    needs: [changed-files, operator, gb200-gate]
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: ${{ needs.gb200-gate.outputs.kube_context }}
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set kubectl context
+        run: |
+          set -euo pipefail
+          KUBECONFIG_PATH="${RUNNER_TEMP}/kubeconfig.yaml"
+          cp /teleport/kubeconfig.yaml "${KUBECONFIG_PATH}"
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" config use-context "${KUBE_CONTEXT}"
+          echo "KUBECONFIG=${KUBECONFIG_PATH}" >> "$GITHUB_ENV"
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          # aws-dev-01 is a shared cluster, so the vCluster name (not the
+          # namespace) is what keeps concurrent runs apart. An empty
+          # vcluster_namespace lets the action resolve the required
+          # dynamo-deploy-test namespace and ci-nightly-high-priority class
+          # from KUBE_CONTEXT.
+          vcluster_name: ci-${{ github.run_id }}-gb200
+          # Pull the operator from ECR, not ACR. setup-dynamo-operator never
+          # creates an imagePullSecret, so the kubelet pulls with whatever
+          # identity the cluster itself has. On the AKS deploy-tester that is
+          # AcrPull via managed identity; aws-dev-01 has no Azure credentials,
+          # so the ACR pull went out anonymous and 401'd. The operator job
+          # pushes the same <sha>-operator tag to both registries, so only the
+          # registry host and repository path change here.
+          registry: ${{ vars.ECR_REGISTRY }}
+          repository: ${{ vars.ECR_REPOSITORY }}
+          operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          # No model cache: the shared cache endpoint is not known to be
+          # reachable from aws-dev-01, and a stuck PV mount hangs the workers
+          # rather than failing fast. Qwen3-0.6B downloads from HF instead.
+
+  deploy-test-gb200-vllm:
+    name: vllm GB200 Deploy Test
+    needs: [changed-files, gb200-gate, deploy-operator-gb200, vllm-copy-to-acr]
+    if: |
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      !cancelled() && !failure() &&
+      needs.gb200-gate.outputs.enabled == 'true' &&
+      (needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true')
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: vllm
+      profiles: '["agg", "disagg"]'
+      image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
+      namespace: ${{ needs.deploy-operator-gb200.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator-gb200.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator-gb200.outputs.operator_tag }}
+      kube_context: ${{ needs.gb200-gate.outputs.kube_context }}
+      platform_arch: arm64
+      mount_model_cache: false
+    secrets: inherit
+
+  deploy-test-gb200-sglang:
+    name: sglang GB200 Deploy Test
+    needs: [changed-files, gb200-gate, deploy-operator-gb200, sglang-copy-to-acr]
+    if: |
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      !cancelled() && !failure() &&
+      needs.gb200-gate.outputs.enabled == 'true' &&
+      (needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true')
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: sglang
+      profiles: '["agg", "disagg"]'
+      image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      namespace: ${{ needs.deploy-operator-gb200.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator-gb200.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator-gb200.outputs.operator_tag }}
+      kube_context: ${{ needs.gb200-gate.outputs.kube_context }}
+      platform_arch: arm64
+      mount_model_cache: false
+    secrets: inherit
+
+  deploy-test-gb200-trtllm:
+    name: trtllm GB200 Deploy Test
+    needs: [changed-files, gb200-gate, deploy-operator-gb200, trtllm-copy-to-acr]
+    if: |
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      !cancelled() && !failure() &&
+      needs.gb200-gate.outputs.enabled == 'true' &&
+      (needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true')
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: trtllm
+      profiles: '["agg", "disagg"]'
+      image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
+      namespace: ${{ needs.deploy-operator-gb200.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator-gb200.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator-gb200.outputs.operator_tag }}
+      kube_context: ${{ needs.gb200-gate.outputs.kube_context }}
+      platform_arch: arm64
+      mount_model_cache: false
+    secrets: inherit
+
+  deploy-cleanup-gb200:
+    name: GB200 Deploy Cleanup
+    # Gated on the label so unlabelled PRs don't take a deploy-tester runner
+    # just to no-op. The teardown action preserves the shared
+    # dynamo-deploy-test namespace and only removes this run's vCluster.
+    if: |
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      always() && needs.gb200-gate.outputs.enabled == 'true'
+    needs:
+      - changed-files
+      - gb200-gate
+      - deploy-operator-gb200
+      - deploy-test-gb200-vllm
+      - deploy-test-gb200-sglang
+      - deploy-test-gb200-trtllm
+    runs-on: prod-deploy-tester-v1
+    env:
+      KUBE_CONTEXT: ${{ needs.gb200-gate.outputs.kube_context }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set kubectl context
+        run: |
+          set -euo pipefail
+          KUBECONFIG_PATH="${RUNNER_TEMP}/kubeconfig.yaml"
+          cp /teleport/kubeconfig.yaml "${KUBECONFIG_PATH}"
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" config use-context "${KUBE_CONTEXT}"
+          echo "KUBECONFIG=${KUBECONFIG_PATH}" >> "$GITHUB_ENV"
+      - name: Teardown vCluster
+        if: needs.deploy-operator-gb200.outputs.namespace != '' && needs.deploy-operator-gb200.outputs.vcluster_name != ''
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-gb200.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-gb200.outputs.namespace }}
 
   deploy-test-dgdr:
     name: DGDR Deploy Test

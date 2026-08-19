@@ -30,6 +30,27 @@ on:
         description: 'Operator image tag'
         type: string
         required: true
+      kube_context:
+        description: >-
+          Teleport kube context to target (e.g.
+          nv-prd-dgxc.teleport.sh-dynamo-aws-dev-01 for GB200). Empty keeps the
+          runner default context.
+        type: string
+        required: false
+        default: ''
+      platform_arch:
+        description: 'Architecture of the cluster under test (amd64, arm64)'
+        type: string
+        required: false
+        default: 'amd64'
+      mount_model_cache:
+        description: >-
+          Mount the shared model-cache PVC on worker pods. Disable on clusters
+          that cannot reach the cache endpoint; workers then download from
+          HuggingFace.
+        type: boolean
+        required: false
+        default: true
 
 jobs:
   deploy-test:
@@ -37,6 +58,10 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
+    env:
+      # setup-dynamo-operator reads KUBE_CONTEXT to pick the deploy-test
+      # namespace and host PriorityClass for the shared AWS clusters.
+      KUBE_CONTEXT: ${{ inputs.kube_context }}
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -46,6 +71,18 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      # Point every subsequent kubectl/vcluster call at the requested shared GPU
+      # cluster. Later steps only override KUBECONFIG when handed an explicit
+      # kubeconfig (the vCluster one), so this stays in effect for the host.
+      - name: Set kubectl context
+        if: inputs.kube_context != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          KUBECONFIG_PATH="${RUNNER_TEMP}/kubeconfig.yaml"
+          cp /teleport/kubeconfig.yaml "${KUBECONFIG_PATH}"
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" config use-context "${KUBE_CONTEXT}"
+          echo "KUBECONFIG=${KUBECONFIG_PATH}" >> "$GITHUB_ENV"
       - name: Check if vCluster exists
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
@@ -64,8 +101,8 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
-          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
+          model_cache_server: ${{ inputs.mount_model_cache && vars.AZURE_MODEL_CACHE_SERVER || '' }}
+          model_cache_path: ${{ inputs.mount_model_cache && vars.AZURE_MODEL_CACHE_PATH || '' }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -84,8 +121,9 @@ jobs:
           framework: ${{ inputs.framework }}
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.image_tag }}
-          platform_arch: amd64
+          platform_arch: ${{ inputs.platform_arch }}
           extra_pytest_args: -m framework_only
-          # Mount the shared model cache only when both endpoint vars are set
-          # (matches the PV/PVC creation gate); otherwise workers download from HF.
-          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
+          # Mount the shared model cache only when the caller asked for it and
+          # both endpoint vars are set (matches the PV/PVC creation gate);
+          # otherwise workers download from HF.
+          model_cache_pvc: ${{ inputs.mount_model_cache && vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
