@@ -85,10 +85,18 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 		ResourceClaimTemplateName: &claimTemplateName,
 	}
 	for i := range podSpec.ResourceClaims {
-		if podSpec.ResourceClaims[i].Name == ClaimName {
-			podSpec.ResourceClaims[i] = claim
+		if podSpec.ResourceClaims[i].Name != ClaimName {
+			continue
+		}
+		existing := &podSpec.ResourceClaims[i]
+		// Dest restore pods (and other user-provided bindings) already name a
+		// ResourceClaim. Replacing that with a template allocates new GPUs and
+		// rolls live dest workers off their reserved devices.
+		if existing.ResourceClaimName != nil && *existing.ResourceClaimName != "" {
 			return nil
 		}
+		*existing = claim
+		return nil
 	}
 	podSpec.ResourceClaims = append(podSpec.ResourceClaims, claim)
 	return nil

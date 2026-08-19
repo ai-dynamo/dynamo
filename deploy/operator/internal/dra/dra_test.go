@@ -119,6 +119,24 @@ func TestApplyClaimOverridesOperatorOwnedClaim(t *testing.T) {
 	assert.Equal(t, "new-template", *ps.ResourceClaims[0].ResourceClaimTemplateName)
 }
 
+func TestApplyClaimPreservesNamedResourceClaim(t *testing.T) {
+	claimName := "dest-gpus"
+	ps := basePodSpec()
+	ps.ResourceClaims = []corev1.PodResourceClaim{{
+		Name:              ClaimName,
+		ResourceClaimName: &claimName,
+	}}
+
+	require.NoError(t, ApplyClaim(&ps, "should-not-replace-named-claim"))
+
+	require.Len(t, ps.ResourceClaims, 1)
+	require.NotNil(t, ps.ResourceClaims[0].ResourceClaimName)
+	assert.Equal(t, claimName, *ps.ResourceClaims[0].ResourceClaimName)
+	assert.Nil(t, ps.ResourceClaims[0].ResourceClaimTemplateName)
+	require.Len(t, ps.Containers[0].Resources.Claims, 1)
+	assert.Equal(t, ClaimName, ps.Containers[0].Resources.Claims[0].Name)
+}
+
 func TestApplyClaim_AlwaysTargetsFirstContainer(t *testing.T) {
 	ps := basePodSpec()
 	ps.Containers = append(ps.Containers, corev1.Container{Name: "sidecar", Image: "sidecar:latest"})
