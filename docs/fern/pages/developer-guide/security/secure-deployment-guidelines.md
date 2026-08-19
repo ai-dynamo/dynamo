@@ -51,30 +51,25 @@ flowchart LR
 
     subgraph cluster["Trusted cluster — isolate all internal traffic from untrusted networks"]
         direction TB
-        subgraph fesvc["Frontend Service (Kubernetes) — external-facing inference API"]
-            fe1["Frontend"]
-            fe2["Frontend"]
-            fe3["Frontend"]
-        end
+        fe["Frontends<br/>(external-facing inference API)"]
         subgraph planes["Internal communication planes"]
             disc["Discovery<br/>K8s RBAC / authenticated etcd"]
             evt["Event<br/>NATS auth+TLS / isolated ZMQ"]
             req["Request<br/>mTLS · NIXL/RDMA"]
         end
         workers["Backend workers"]
-        fesvc --> planes
+        fe --> planes
         planes --> workers
     end
 
     client -->|HTTPS| gateway
-    gateway -->|only entry point| fesvc
+    gateway -->|only entry point| fe
 ```
 
 The gateway is the only entry point into the cluster; it forwards to the
-frontend Kubernetes Service, which load-balances across the frontend replicas.
-Everything inside — the frontends, the internal communication planes, and the
-workers — runs on the trusted network and must be protected from any untrusted
-peer.
+frontends (the external-facing inference API). Everything inside — the frontends,
+the internal communication planes, and the workers — runs on the trusted network
+and must be protected from any untrusted peer.
 
 ## Securing the External-Facing Inference API
 
