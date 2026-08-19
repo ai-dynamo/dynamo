@@ -317,9 +317,13 @@ pub mod llm {
     pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
 
     /// Idle heartbeat interval, in milliseconds, for the forward-pass-metrics
-    /// relay. Accepted range is `1` through `300000` (five minutes); unset,
-    /// `0`, invalid, or above the maximum keeps the 1 s default that matches
-    /// the Python publisher. The value is read once when the relay starts.
+    /// *direct publisher* — the Rust publisher the mocker and the TensorRT-LLM
+    /// adapter start. It does not reach `FpmEventRelay`, which has no periodic
+    /// timer, nor the Python `_FpmPublisherThread` that carries the vLLM path's
+    /// own 1 s heartbeat. Accepted range is `1` through `300000` (five minutes);
+    /// unset, `0`, invalid, or above the maximum keeps the 1 s default that
+    /// matches the Python publisher. The value is read once, when the publisher
+    /// starts.
     pub const DYN_FPM_HEARTBEAT_INTERVAL_MS: &str = "DYN_FPM_HEARTBEAT_INTERVAL_MS";
 
     /// Enable LoRA adapter support (set to "true" to enable)
