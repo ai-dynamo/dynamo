@@ -14,7 +14,8 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{
-        EncoderRouter, KvRouter, PrefillRouter, RoutingHost, metrics::RouterRequestMetrics,
+        BuiltinRoutingPolicy, EncoderRouter, KvRouter, PrefillRouter, RoutingHost,
+        metrics::RouterRequestMetrics, push_router::RoutingLoadState,
     },
     lora::LoraFilteredRouter,
     migration::Migration,
@@ -36,8 +37,8 @@ use crate::{
 };
 
 use dynamo_kv_router::{
-    config::min_initial_workers_from_env,
-    selector::{DefaultWorkerSelector, WorkerSelector},
+    config::{KvRouterConfig, min_initial_workers_from_env},
+    selector::{DefaultWorkerSelector, WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
     DistributedRuntime,
@@ -51,6 +52,7 @@ use dynamo_runtime::{
 use std::sync::Arc;
 
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
+const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 
 #[derive(Clone)]
 pub struct PreprocessedRouting<Sel = DefaultWorkerSelector>
@@ -167,6 +169,7 @@ fn preprocessed_backend_engine<Sel>(
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
+    load_state: Option<Arc<RoutingLoadState>>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -192,12 +195,17 @@ where
                     model_manager.lora_load_estimator_for(endpoint_id),
                     router_mode,
                 )),
-                None if affinity.is_none() => Arc::new(RoutingHost::<Sel>::new_builtin(router)?),
+                None if affinity.is_none() => Arc::new(RoutingHost::<Sel>::new_builtin_with_load(
+                    router, load_state,
+                )?),
                 None => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
                     router, affinity, false,
                 )),
             }
         }
+        RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded if affinity.is_none() => Arc::new(
+            RoutingHost::<Sel>::new_builtin_with_load(router, load_state)?,
+        ),
         RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
         | RouterMode::DeviceAwareWeighted => {
@@ -230,6 +238,14 @@ pub async fn build_preprocessed_routing(
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
+    let kv_cache_block_size = chooser
+        .as_ref()
+        .map_or(DEFAULT_KV_CACHE_BLOCK_SIZE, |chooser| chooser.block_size());
+    let kv_router_config = chooser
+        .as_ref()
+        .map_or_else(KvRouterConfig::default, |chooser| {
+            chooser.kv_router_config().clone()
+        });
     build_preprocessed_routing_with_selector(
         client,
         model_manager,
@@ -238,6 +254,8 @@ pub async fn build_preprocessed_routing(
         chooser,
         prefill_chooser,
         encoder_chooser,
+        kv_cache_block_size,
+        kv_router_config,
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
     )
@@ -253,6 +271,8 @@ pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     chooser: Option<Arc<KvRouter<Sel>>>,
     prefill_chooser: Option<Arc<PrefillRouter<Sel>>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
+    kv_cache_block_size: u32,
+    kv_router_config: KvRouterConfig,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting<Sel>>
@@ -278,6 +298,27 @@ where
         router_client.clone(),
     )
     .await?;
+
+    let load_state = if affinity.is_none()
+        && BuiltinRoutingPolicy::from_router_mode(router_mode)
+            .is_some_and(|policy| policy.required_worker_inputs().contains(WorkerInputs::LOAD))
+    {
+        let workers = model_manager
+            .get_or_create_runtime_config_watcher(&router_client.endpoint)
+            .await?;
+        Some(
+            RoutingLoadState::start(
+                router_client.endpoint.clone(),
+                kv_cache_block_size,
+                workers,
+                kv_router_config,
+                crate::protocols::common::timing::WORKER_TYPE_DECODE,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
         && matches!(router_mode, RouterMode::DeviceAwareWeighted)
@@ -328,6 +369,7 @@ where
         &model_manager,
         &endpoint_id,
         affinity,
+        load_state,
     )?;
     Ok(PreprocessedRouting {
         backend_engine,

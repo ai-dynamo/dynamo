@@ -37,10 +37,12 @@ use crate::{
 };
 
 mod cancellation;
+mod load;
 mod request_guard;
 mod selection;
 
 use cancellation::cancel_on_stop;
+pub(crate) use load::RoutingLoadState;
 use request_guard::RequestGuard;
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
@@ -131,11 +133,13 @@ where
     ResponseStream::new(wrapped_stream, stream_context)
 }
 
-/// First-party policies that need no KV-cache index.
+/// First-party policies selected without a KV-cache index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuiltinRoutingPolicy {
     RoundRobin,
     Random,
+    PowerOfTwoChoices,
+    LeastLoaded,
 }
 
 impl BuiltinRoutingPolicy {
@@ -143,12 +147,17 @@ impl BuiltinRoutingPolicy {
         match mode {
             RouterMode::RoundRobin => Some(Self::RoundRobin),
             RouterMode::Random => Some(Self::Random),
+            RouterMode::PowerOfTwoChoices => Some(Self::PowerOfTwoChoices),
+            RouterMode::LeastLoaded => Some(Self::LeastLoaded),
             _ => None,
         }
     }
 
     pub const fn required_worker_inputs(self) -> WorkerInputs {
-        WorkerInputs::NONE
+        match self {
+            Self::RoundRobin | Self::Random => WorkerInputs::NONE,
+            Self::PowerOfTwoChoices | Self::LeastLoaded => WorkerInputs::LOAD,
+        }
     }
 }
 
@@ -173,6 +182,7 @@ where
     plane: RoutingPlane<Sel>,
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
+    load_state: Option<Arc<RoutingLoadState>>,
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
@@ -210,20 +220,26 @@ where
             plane: RoutingPlane::Kv(kv_router),
             request_metrics,
             affinity,
+            load_state: None,
         }
     }
 
-    pub(crate) fn new_builtin(
+    pub(crate) fn new_builtin_with_load(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        load_state: Option<Arc<RoutingLoadState>>,
     ) -> Result<Self, Error> {
         let policy =
             BuiltinRoutingPolicy::from_router_mode(inner.router_mode()).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "{:?} routing is not a stateless builtin policy",
+                    "{:?} routing is not a first-party builtin policy",
                     inner.router_mode()
                 )
             })?;
-        debug_assert_eq!(policy.required_worker_inputs(), WorkerInputs::NONE);
+        let needs_load = policy.required_worker_inputs().contains(WorkerInputs::LOAD);
+        anyhow::ensure!(
+            needs_load == load_state.is_some(),
+            "{policy:?} routing requires LOAD capability: {needs_load}"
+        );
         let request_metrics =
             RouterRequestMetrics::from_component(inner.client.endpoint.component());
         Ok(Self {
@@ -231,6 +247,7 @@ where
             plane: RoutingPlane::Builtin(policy),
             request_metrics,
             affinity: None,
+            load_state,
         })
     }
 
@@ -586,19 +603,38 @@ where
             unreachable!("builtin dispatch called for KV routing")
         };
         let policy = *policy;
-        debug_assert_eq!(policy.required_worker_inputs(), WorkerInputs::NONE);
+        let required_inputs = policy.required_worker_inputs();
 
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(&request, phase)?;
-        let initial_worker = match explicit {
-            Some(target) => target.worker_id,
-            None => self.inner.select_next_worker().ok_or_else(|| {
-                anyhow::anyhow!("no eligible worker available for {policy:?} routing")
-            })?,
+        let (initial_worker, load_reservation) = if required_inputs.contains(WorkerInputs::LOAD) {
+            let load_state = self
+                .load_state
+                .as_ref()
+                .expect("LOAD policy must have routing load state");
+            let reservation = load_state.select_and_reserve(
+                &self.inner,
+                request.context().id(),
+                request.content(),
+                explicit.map(|target| (target.worker_id, target.dp_rank)),
+            )?;
+            (reservation.worker().worker_id, Some(reservation))
+        } else {
+            let worker_id = match explicit {
+                Some(target) => target.worker_id,
+                None => self.inner.select_next_worker().ok_or_else(|| {
+                    anyhow::anyhow!("no eligible worker available for {policy:?} routing")
+                })?,
+            };
+            (worker_id, None)
         };
-        let mut guard: RequestGuard<Sel> =
-            RequestGuard::new_stateless(self.request_metrics.clone(), initial_worker, &request);
+        let mut guard: RequestGuard<Sel> = RequestGuard::new_builtin(
+            self.request_metrics.clone(),
+            initial_worker,
+            load_reservation,
+            &request,
+        );
         let tracker = request.tracker.clone();
         let request_context = request.context().clone();
         self.request_metrics
@@ -631,6 +667,7 @@ where
                     initial_worker,
                     request,
                     |request, worker_id| {
+                        guard.retarget_worker(worker_id)?;
                         let target = AffinityTarget::new(worker_id, None);
                         request.routing_mut().dp_rank = None;
                         prepare(request, target).map(|metadata| (metadata, target))
@@ -653,7 +690,7 @@ where
                 return Err(error);
             }
         };
-        guard.set_stateless_worker(target.worker_id);
+        guard.retarget_worker(target.worker_id)?;
         if let Some(tracker) = tracker {
             let worker_type = if tracker.phase() == RequestPhase::Prefill {
                 WORKER_TYPE_PREFILL
@@ -992,10 +1029,18 @@ mod tests {
     }
 
     #[test]
-    fn stateless_builtin_policies_request_no_optional_capabilities() {
+    fn builtin_policies_declare_capabilities() {
         assert_eq!(
             BuiltinRoutingPolicy::RoundRobin.required_worker_inputs(),
             WorkerInputs::NONE
+        );
+        assert_eq!(
+            BuiltinRoutingPolicy::PowerOfTwoChoices.required_worker_inputs(),
+            WorkerInputs::LOAD
+        );
+        assert_eq!(
+            BuiltinRoutingPolicy::LeastLoaded.required_worker_inputs(),
+            WorkerInputs::LOAD
         );
         assert_eq!(
             BuiltinRoutingPolicy::Random.required_worker_inputs(),
@@ -1004,7 +1049,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_host_does_not_construct_kv_capabilities() {
+    async fn builtin_host_constructs_only_declared_capabilities() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -1017,12 +1062,62 @@ mod tests {
             .unwrap()
             .endpoint("generate".to_string());
         let client = endpoint.client().await.unwrap();
-        let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+        let inner = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
             .await
             .unwrap();
-        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner).unwrap();
+        let host =
+            RoutingHost::<DefaultWorkerSelector>::new_builtin_with_load(inner, None).unwrap();
 
         assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
+
+        drop(host);
+
+        client.override_instance_avail(vec![1, 2]);
+        let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
+            .await
+            .unwrap();
+        let (_workers_tx, workers) = watch::channel(HashMap::from([
+            (1, ModelRuntimeConfig::default()),
+            (2, ModelRuntimeConfig::default()),
+        ]));
+        let load_state = RoutingLoadState::start(
+            endpoint,
+            16,
+            workers,
+            KvRouterConfig::default(),
+            WORKER_TYPE_DECODE,
+        )
+        .await
+        .unwrap();
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_load(
+            inner,
+            Some(load_state.clone()),
+        )
+        .unwrap();
+        assert_eq!(host.required_worker_inputs(), WorkerInputs::LOAD);
+        let request = PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids((0..32).collect())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        let reservation = load_state
+            .select_and_reserve(&host.inner, "request-1", &request, None)
+            .unwrap();
+        let worker = reservation.worker();
+        assert_eq!(load_state.active_request_count_for_test(worker), 1);
+        assert_eq!(load_state.active_blocks_for_test(worker), 2);
+        assert_eq!(load_state.active_tokens_for_test(worker), 32);
+        let mut guard: RequestGuard<DefaultWorkerSelector> = RequestGuard::new_builtin(
+            Arc::clone(&host.request_metrics),
+            worker.worker_id,
+            Some(reservation),
+            &request,
+        );
+        guard.abort().await;
+        assert_eq!(load_state.active_request_count_for_test(worker), 0);
 
         drop(host);
         runtime.shutdown();
