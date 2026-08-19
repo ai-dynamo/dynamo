@@ -60,6 +60,21 @@ exactly. All of this is enforced by `scripts/validate_skills.py` (pre-commit hoo
 `validate-skills`). Changes under `.agents/skills/` are also validated by NVSkills CI —
 a maintainer comments `/nvskills-ci` on the PR.
 
+## Workflows
+
+Multi-agent orchestration scripts for Claude Code's workflow runner live
+canonically in `.agents/workflows/`; `.claude/workflows/` is a symlink to it —
+edit only the canonical copy. Each is a self-contained JavaScript file that
+begins with a pure-literal `export const meta` block. See
+[`.agents/workflows/README.md`](.agents/workflows/README.md).
+
+- `code-review` — runs an adversarial framing pass, then fans out pluggable
+  expert reviewers (built-ins: correctness, concurrency, distributed, simplicity,
+  perf, comment-hygiene, tests/API; add more by dropping a file in
+  `.agents/workflows/reviewers/`), reviews the diff, and adversarially verifies
+  every finding before returning a ranked report. Reuses the `graham-code-review`
+  skill as the review engine. Optional args: `{ base, reviewers, votes, exhaustive }`.
+
 ## Ecosystem
 
 Sibling repositories this repo integrates with:
