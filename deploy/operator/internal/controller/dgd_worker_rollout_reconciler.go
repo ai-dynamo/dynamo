@@ -375,7 +375,8 @@ func activeWorkerHashCandidates(
 	}
 
 	candidates = append(candidates, generated)
-	if current.v1 == desired.v1 && (current.v2 == "" || current.v2 == desired.v2) && desired.v1 != generated {
+	if desired.v1 != "" && current.v1 == desired.v1 &&
+		(current.v2 == "" || current.v2 == desired.v2) && desired.v1 != generated {
 		candidates = append(candidates, desired.v1)
 	}
 	if current.contains(desired.v2) && desired.v2 != generated && desired.v2 != desired.v1 {

@@ -463,6 +463,17 @@ func TestActiveV1OnlyRolloutRerollsUnderV2(t *testing.T) {
 	}
 }
 
+func TestActiveWorkerHashCandidatesV2Only(t *testing.T) {
+	t.Log("Build a normal v2-only generation")
+	dgd := createTestDGD("test-dgd", nil)
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHashV2: "v2",
+	}
+
+	t.Log("Verify candidate lookup cannot fall back to an empty legacy hash")
+	assert.Equal(t, []string{"v2"}, activeWorkerHashCandidates(dgd, workerGenerationHashes{v2: "v2"}))
+}
+
 func TestInitializeWorkerHashIfNeeded_PreservesLegacyAlphaHash(t *testing.T) {
 	alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
