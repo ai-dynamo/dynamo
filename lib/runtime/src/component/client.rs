@@ -12,99 +12,99 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use futures::StreamExt;
-use rand::Rng;
 
 use crate::component::{Endpoint, Instance};
 use crate::config::environment_names::runtime as env_runtime;
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
+use crate::routing_policy::{
+    AdmissionKind, CandidateView, RouteContext, RouteDecision, RoutePicker, RoutePolicy,
+};
 use crate::traits::DistributedRuntimeProvider;
 
 /// Shared occupancy state for routing modes that track per-worker in-flight requests.
 #[derive(Debug, Default)]
 pub(crate) struct RoutingOccupancyState {
-    counts: DashMap<u64, AtomicU64>,
-    exact_selection_lock: tokio::sync::Mutex<()>,
+    counts: DashMap<u64, Arc<AtomicU64>>,
+    exact_selection_lock: parking_lot::Mutex<()>,
 }
 
 impl RoutingOccupancyState {
-    pub(crate) fn increment(&self, instance_id: u64) {
-        self.counts
+    pub(crate) fn increment(&self, instance_id: u64) -> Arc<AtomicU64> {
+        let count = self
+            .counts
             .entry(instance_id)
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed);
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone();
+        count.fetch_add(1, Ordering::Relaxed);
+        count
     }
 
     pub(crate) async fn select_exact_min(&self, instance_ids: &[u64]) -> Option<u64> {
-        instance_ids
-            .iter()
-            .min_by_key(|&&id| self.load(id))
-            .copied()
+        RoutePicker::new(RoutePolicy::LeastLoaded)
+            .peek(
+                CandidateView::Workers(instance_ids),
+                RouteContext::default(),
+                |id| self.load(id),
+            )
+            .map(|decision| decision.target.worker_id)
     }
 
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
-        let _guard = self.exact_selection_lock.lock().await;
-
-        let mut min_load = u64::MAX;
-        let mut selected = None;
-        let mut tie_count = 0usize;
-        let mut rng = rand::rng();
-        for &id in instance_ids {
-            let load = self.load(id);
-            if load < min_load {
-                min_load = load;
-                selected = Some(id);
-                tie_count = 1;
-                continue;
-            }
-
-            if load == min_load {
-                tie_count += 1;
-                // Reservoir sampling keeps tied minima uniform without allocating in this locked hot path.
-                if rng.random_range(0..tie_count) == 0 {
-                    selected = Some(id);
-                }
-            }
-        }
-
-        let id = selected?;
-        self.increment(id);
-        Some(id)
+        let picker = RoutePicker::new(RoutePolicy::LeastLoaded);
+        self.select_and_admit(
+            &picker,
+            CandidateView::Workers(instance_ids),
+            RouteContext::default(),
+        )
+        .map(|(decision, _)| decision.target.worker_id)
     }
 
     /// Least-loaded selection without the increment. Same tie-break policy as
     /// [`Self::select_exact_min_and_increment`] so peek and select share a
     /// distribution.
     pub(crate) fn peek_min(&self, instance_ids: &[u64]) -> Option<u64> {
-        let mut min_load = u64::MAX;
-        let mut selected = None;
-        let mut tie_count = 0usize;
-        let mut rng = rand::rng();
-        for &id in instance_ids {
-            let load = self.load(id);
-            if load < min_load {
-                min_load = load;
-                selected = Some(id);
-                tie_count = 1;
-                continue;
-            }
+        RoutePicker::new(RoutePolicy::LeastLoaded)
+            .peek(
+                CandidateView::Workers(instance_ids),
+                RouteContext::default(),
+                |id| self.load(id),
+            )
+            .map(|decision| decision.target.worker_id)
+    }
 
-            if load == min_load {
-                tie_count += 1;
-                // Reservoir sampling keeps tied minima uniform; matches select_exact_min_and_increment.
-                if rng.random_range(0..tie_count) == 0 {
-                    selected = Some(id);
-                }
-            }
-        }
+    pub(crate) fn peek(
+        &self,
+        picker: &RoutePicker,
+        candidates: CandidateView<'_>,
+        context: RouteContext,
+    ) -> Option<RouteDecision> {
+        picker.peek(candidates, context, |id| self.load(id))
+    }
 
-        selected
+    pub(crate) fn select_and_admit(
+        &self,
+        picker: &RoutePicker,
+        candidates: CandidateView<'_>,
+        context: RouteContext,
+    ) -> Option<(RouteDecision, Option<Arc<AtomicU64>>)> {
+        let _guard = self.exact_selection_lock.lock();
+        let decision = picker.select(candidates, context, |id| self.load(id))?;
+        let counter = match decision.admission {
+            AdmissionKind::None => None,
+            AdmissionKind::Occupancy => Some(self.increment(decision.target.worker_id)),
+        };
+        Some((decision, counter))
+    }
+
+    pub(crate) fn decrement_counter(counter: &AtomicU64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_sub(1))
+        });
     }
 
     pub(crate) fn decrement(&self, instance_id: u64) {
         if let Some(count) = self.counts.get(&instance_id) {
-            let _ = count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(1))
-            });
+            Self::decrement_counter(count.as_ref());
         }
     }
 
@@ -182,6 +182,25 @@ pub(crate) struct EndpointDiscoverySource {
     event_subscribers: StdMutex<Vec<tokio::sync::mpsc::UnboundedSender<DiscoveryEvent>>>,
 }
 
+pub(crate) struct DiscoveryEventReceiver {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent>,
+    _source: Arc<EndpointDiscoverySource>,
+}
+
+impl std::ops::Deref for DiscoveryEventReceiver {
+    type Target = tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.receiver
+    }
+}
+
+impl std::ops::DerefMut for DiscoveryEventReceiver {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.receiver
+    }
+}
+
 impl EndpointDiscoverySource {
     fn new(instance_source: tokio::sync::watch::Receiver<Vec<Instance>>) -> Self {
         Self {
@@ -240,11 +259,15 @@ impl RoutingInstances {
     }
 
     fn from_parts(
-        discovered_ids: Vec<u64>,
-        routable_ids: Vec<u64>,
+        mut discovered_ids: Vec<u64>,
+        mut routable_ids: Vec<u64>,
         overloaded_ids: HashSet<u64>,
         availability_initialized: bool,
     ) -> Self {
+        discovered_ids.sort_unstable();
+        discovered_ids.dedup();
+        routable_ids.sort_unstable();
+        routable_ids.dedup();
         let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids);
         let routable_id_set = Arc::new(routable_ids.iter().copied().collect());
         Self {
@@ -392,21 +415,22 @@ struct RoutingInstancesState {
     update_lock: StdMutex<()>,
     overload_reconciliation_needed: AtomicBool,
     instance_avail_tx: tokio::sync::watch::Sender<Vec<u64>>,
-    instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
 }
 
 impl RoutingInstancesState {
-    fn new(discovered_ids: Vec<u64>) -> Self {
+    fn new(discovered_ids: Vec<u64>) -> (Self, tokio::sync::watch::Receiver<Vec<u64>>) {
         let snapshot = RoutingInstances::new(discovered_ids);
         let (instance_avail_tx, instance_avail_rx) =
             tokio::sync::watch::channel(snapshot.routable_ids().to_vec());
-        Self {
-            snapshot: ArcSwap::from_pointee(snapshot),
-            update_lock: StdMutex::new(()),
-            overload_reconciliation_needed: AtomicBool::new(false),
-            instance_avail_tx,
+        (
+            Self {
+                snapshot: ArcSwap::from_pointee(snapshot),
+                update_lock: StdMutex::new(()),
+                overload_reconciliation_needed: AtomicBool::new(false),
+                instance_avail_tx,
+            },
             instance_avail_rx,
-        }
+        )
     }
 
     fn snapshot(&self) -> arc_swap::Guard<Arc<RoutingInstances>> {
@@ -452,10 +476,6 @@ impl RoutingInstancesState {
 
     fn overloaded_ids(&self) -> Option<HashSet<u64>> {
         self.snapshot().overloaded_ids()
-    }
-
-    fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
-        self.instance_avail_rx.clone()
     }
 
     fn report_instance_down(&self, instance_id: u64) {
@@ -528,6 +548,8 @@ pub struct Client {
     pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
     // Immutable routing snapshot. Free IDs are derived from discovered IDs and overloaded IDs.
     routing_instances: Arc<RoutingInstancesState>,
+    // Client clones and standalone watchers jointly own the reconciliation task.
+    instance_avail_owner: Arc<tokio::sync::watch::Receiver<Vec<u64>>>,
     /// Interval for periodic reconciliation of instance_avail with instance_source.
     /// This ensures instances removed via `report_instance_down` are eventually restored.
     /// A zero value disables local worker inhibition.
@@ -540,12 +562,46 @@ impl Client {
         Self::with_reconcile_interval(endpoint, *INHIBITED_DURATION).await
     }
 
+    /// Like [`Self::new`], but the `monitor_instance_source` background task
+    /// is bound to `cancel_token` instead of the process-wide primary token.
+    /// See [`Self::with_reconcile_interval_and_cancellation`] for why a
+    /// caller whose own scope is narrower than the process needs this.
+    pub(crate) async fn with_cancellation(
+        endpoint: Endpoint,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<Self> {
+        Self::with_reconcile_interval_and_cancellation(endpoint, *INHIBITED_DURATION, cancel_token)
+            .await
+    }
+
     /// Create a client with a custom reconcile interval.
     /// The reconcile interval controls how often `instance_avail` is reset to match
     /// `instance_source`, restoring any instances removed via `report_instance_down`.
     pub(crate) async fn with_reconcile_interval(
         endpoint: Endpoint,
         reconcile_interval: Duration,
+    ) -> Result<Self> {
+        let cancel_token = endpoint.drt().primary_token();
+        Self::with_reconcile_interval_and_cancellation(endpoint, reconcile_interval, cancel_token)
+            .await
+    }
+
+    /// Like [`Self::with_reconcile_interval`], but the `monitor_instance_source`
+    /// background task is bound to `cancel_token` rather than the process-wide
+    /// primary token.
+    ///
+    /// A caller that builds a `Client` scoped to something narrower than the
+    /// process — a monitor bound to one `WorkerSet`'s lifecycle, say — must use
+    /// this constructor. `Client` is `Clone`, and `monitor_instance_source`
+    /// captures its own clone before returning, so dropping every `Client`
+    /// handle the caller holds does not stop that task; only cancelling its
+    /// token does. Built through [`Self::new`] or [`Self::with_reconcile_interval`]
+    /// instead, that task runs until process shutdown regardless of how long
+    /// the caller actually keeps the `Client` around.
+    pub(crate) async fn with_reconcile_interval_and_cancellation(
+        endpoint: Endpoint,
+        reconcile_interval: Duration,
+        cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<Self> {
         tracing::trace!(
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
@@ -564,14 +620,16 @@ impl Client {
             .iter()
             .map(|instance| instance.id())
             .collect();
+        let (routing_instances, instance_avail_owner) = RoutingInstancesState::new(initial_ids);
         let client = Client {
             endpoint: endpoint.clone(),
             endpoint_discovery_source,
             instance_source: instance_source.clone(),
-            routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
+            routing_instances: Arc::new(routing_instances),
+            instance_avail_owner: Arc::new(instance_avail_owner),
             reconcile_interval,
         };
-        client.monitor_instance_source();
+        client.monitor_instance_source_with_cancellation(cancel_token, true);
         Ok(client)
     }
 
@@ -604,7 +662,7 @@ impl Client {
 
     /// Get a watcher for available instance IDs
     pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
-        self.routing_instances.instance_avail_watcher()
+        self.instance_avail_owner.as_ref().clone()
     }
 
     /// Create a client view whose routable instances are restricted by a caller-owned
@@ -669,11 +727,13 @@ impl Client {
             }
         });
 
+        let (routing_instances, instance_avail_owner) = RoutingInstancesState::new(initial_ids);
         let client = Self {
             endpoint: self.endpoint.clone(),
             endpoint_discovery_source: self.endpoint_discovery_source.clone(),
             instance_source: Arc::new(instance_rx),
-            routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
+            routing_instances: Arc::new(routing_instances),
+            instance_avail_owner: Arc::new(instance_avail_owner),
             reconcile_interval: self.reconcile_interval,
         };
         client.monitor_instance_source_with_cancellation(cancel_token, false);
@@ -697,10 +757,11 @@ impl Client {
     ///
     /// Unlike `instance_source`, this feed does not coalesce remove→add pairs,
     /// so consumers can react to every removal event exactly once.
-    pub(crate) fn subscribe_discovery_events(
-        &self,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent> {
-        self.endpoint_discovery_source.subscribe_events()
+    pub(crate) fn subscribe_discovery_events(&self) -> DiscoveryEventReceiver {
+        DiscoveryEventReceiver {
+            receiver: self.endpoint_discovery_source.subscribe_events(),
+            _source: self.endpoint_discovery_source.clone(),
+        }
     }
 
     /// Wait for at least one Instance to be available for this Endpoint
@@ -794,21 +855,23 @@ impl Client {
     /// changed for `reconcile_interval`, we reset `instance_avail` to match
     /// `instance_source`. This ensures instances removed via `report_instance_down`
     /// are eventually restored even if the discovery source doesn't emit updates.
-    fn monitor_instance_source(&self) {
-        let cancel_token = self.endpoint.drt().primary_token();
-        self.monitor_instance_source_with_cancellation(cancel_token, true);
-    }
-
+    ///
+    /// The spawned task runs until `cancel_token` cancels. A caller that wants
+    /// this task to outlive nothing shorter than the process should pass
+    /// `self.endpoint.drt().primary_token()`, as [`Self::new`] does.
     fn monitor_instance_source_with_cancellation(
         &self,
         cancel_token: tokio_util::sync::CancellationToken,
         prune_shared_occupancy: bool,
     ) {
         let reconcile_interval = self.reconcile_interval;
-        let client = self.clone();
+        let endpoint = self.endpoint.clone();
+        let endpoint_discovery_source = self.endpoint_discovery_source.clone();
+        let routing_instances = self.routing_instances.clone();
+        let instance_source = self.instance_source.clone();
         let endpoint_id = self.endpoint.id();
         tokio::task::spawn(async move {
-            let mut rx = client.instance_source.as_ref().clone();
+            let mut rx = instance_source.as_ref().clone();
             while !cancel_token.is_cancelled() {
                 let instance_ids: Vec<u64> = rx
                     .borrow_and_update()
@@ -816,21 +879,22 @@ impl Client {
                     .map(|instance| instance.id())
                     .collect();
 
-                let routing_instances = client.reconcile_discovered_instances(instance_ids);
+                let snapshot = routing_instances.reconcile_discovered(instance_ids);
 
                 // Clean up stale occupancy counters for instances that no longer exist.
                 if prune_shared_occupancy {
-                    let registry = client.endpoint.drt().routing_occupancy_states();
+                    let registry = endpoint.drt().routing_occupancy_states();
                     if let Ok(registry) = registry.try_lock()
-                        && let Some(weak) = registry.get(&client.endpoint)
+                        && let Some(weak) = registry.get(&endpoint)
                         && let Some(state) = weak.upgrade()
                     {
-                        state.retain(routing_instances.discovered_ids());
+                        state.retain(snapshot.discovered_ids());
                     }
                 }
 
                 tokio::select! {
                     _ = cancel_token.cancelled() => break,
+                    _ = routing_instances.instance_avail_tx.closed() => break,
                     result = rx.changed() => {
                         if let Err(err) = result {
                             tracing::error!(
@@ -846,6 +910,7 @@ impl Client {
                     }
                 }
             }
+            drop(endpoint_discovery_source);
         });
     }
 
@@ -894,7 +959,7 @@ impl Client {
         let discovery_source = Arc::new(EndpointDiscoverySource::new(watch_rx));
 
         let secondary = endpoint.component.drt.runtime().secondary().clone();
-        let discovery_source_task = discovery_source.clone();
+        let discovery_source_task = Arc::downgrade(&discovery_source);
 
         secondary.spawn(async move {
             tracing::trace!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
@@ -921,13 +986,16 @@ impl Client {
                     }
                 };
 
-                discovery_source_task.broadcast_event(&discovery_event);
+                if let Some(discovery_source) = discovery_source_task.upgrade() {
+                    discovery_source.broadcast_event(&discovery_event);
+                }
 
                 match discovery_event {
                     DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => {
                         map.insert(instance.instance_id, instance);
                     }
                     DiscoveryEvent::Added(_) => {}
+                    DiscoveryEvent::ModelTaintsUpdated(_) => {}
                     DiscoveryEvent::Removed(id) => {
                         if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
                             map.remove(&endpoint_id.instance_id);
@@ -953,6 +1021,41 @@ mod tests {
     use super::*;
     use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
+    async fn wait_for_discovery_event(
+        receiver: &mut DiscoveryEventReceiver,
+        predicate: impl Fn(&DiscoveryEvent) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let event = receiver.recv().await.expect("discovery event feed closed");
+                if predicate(&event) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("expected discovery event was not received");
+    }
+
+    async fn wait_for_watch_state<T>(
+        receiver: &mut tokio::sync::watch::Receiver<Vec<T>>,
+        predicate: impl Fn(&[T]) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if predicate(receiver.borrow_and_update().as_slice()) {
+                    return;
+                }
+                receiver
+                    .changed()
+                    .await
+                    .expect("instance availability feed closed");
+            }
+        })
+        .await
+        .expect("expected instance availability state was not observed");
+    }
+
     #[test]
     fn test_inhibited_duration_from_env() {
         assert_eq!(
@@ -971,6 +1074,82 @@ mod tests {
             inhibited_duration_from_env(|_| Some("invalid".to_string())),
             Duration::from_secs(DEFAULT_INHIBITED_DURATION_SECS)
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_last_client_releases_routing_state() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_client_lifecycle".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string());
+        let client = endpoint.client().await.unwrap();
+        let routing_instances = Arc::downgrade(&client.routing_instances);
+        let discovery_source = Arc::downgrade(&client.endpoint_discovery_source);
+        let mut raw_watcher = client.instance_source.as_ref().clone();
+        let mut watcher = client.instance_avail_watcher();
+        let mut event_watcher = client.subscribe_discovery_events();
+        raw_watcher.borrow_and_update();
+        watcher.borrow_and_update();
+
+        drop(client);
+        assert!(routing_instances.upgrade().is_some());
+        assert!(discovery_source.upgrade().is_some());
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        wait_for_watch_state(&mut watcher, |instances| instances.len() == 1).await;
+        wait_for_discovery_event(&mut event_watcher, |event| {
+            matches!(event, DiscoveryEvent::Added(DiscoveryInstance::Endpoint(_)))
+        })
+        .await;
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        wait_for_watch_state(&mut watcher, |instances| instances.is_empty()).await;
+        assert!(raw_watcher.borrow_and_update().is_empty());
+        wait_for_discovery_event(&mut event_watcher, |event| {
+            matches!(event, DiscoveryEvent::Removed(_))
+        })
+        .await;
+
+        drop(watcher);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while routing_instances.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("client monitor retained state after its last observer was dropped");
+        assert!(discovery_source.upgrade().is_some());
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        wait_for_watch_state(&mut raw_watcher, |instances| instances.len() == 1).await;
+        wait_for_discovery_event(&mut event_watcher, |event| {
+            matches!(event, DiscoveryEvent::Added(DiscoveryInstance::Endpoint(_)))
+        })
+        .await;
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        wait_for_watch_state(&mut raw_watcher, |instances| instances.is_empty()).await;
+        wait_for_discovery_event(&mut event_watcher, |event| {
+            matches!(event, DiscoveryEvent::Removed(_))
+        })
+        .await;
+
+        drop(event_watcher);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while discovery_source.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("discovery event receiver retained its source after being dropped");
+
+        rt.shutdown();
     }
 
     /// Test that instances removed via report_instance_down are restored after
@@ -1358,6 +1537,56 @@ mod tests {
         // Note: We need to check if changed() was signaled
         let current = watcher.borrow().clone();
         assert_eq!(current, vec![1, 3]);
+
+        rt.shutdown();
+    }
+
+    /// Regression test: `monitor_instance_source_with_cancellation`'s task must
+    /// exit on its own `cancel_token`, not only at process shutdown.
+    ///
+    /// `Client::new` bound this task to the process-wide primary token
+    /// unconditionally. A caller building a `Client` scoped to something
+    /// narrower — a monitor bound to one `WorkerSet`'s lifecycle, say — had no
+    /// way to stop the task before then: dropping every `Client` handle does
+    /// not stop it, since it holds its own clone. Every WorkerSet rebuild
+    /// leaked one.
+    ///
+    /// The observable is the strong count of `routing_instances`: the spawned
+    /// task captures a clone of it, so the count returning to 1 proves the
+    /// task actually exited and dropped that capture.
+    #[tokio::test]
+    async fn monitor_instance_source_exits_on_its_own_cancellation_token() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_monitor_instance_source_cancellation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let client = Client::with_cancellation(endpoint.clone(), cancel_token.clone())
+            .await
+            .unwrap();
+
+        // Negative control, first: the task must still be alive, and still
+        // holding its capture, before cancellation.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            Arc::strong_count(&client.routing_instances) > 1,
+            "monitor task must be running (and holding its capture) before cancellation"
+        );
+
+        cancel_token.cancel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&client.routing_instances) > 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("monitor_instance_source task must exit when its cancel_token cancels");
 
         rt.shutdown();
     }

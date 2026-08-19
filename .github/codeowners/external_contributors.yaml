@@ -42,15 +42,3 @@
 #       - router
 
 contributors:
-  - name: Jason Zhou
-    github: jasonqinzhou
-    level: maintainer
-    affiliation: NVIDIA
-    areas:
-      - planner
-  - name: Yongming Ding
-    github: dreamtalen
-    level: maintainer
-    affiliation: NVIDIA
-    areas:
-      - planner

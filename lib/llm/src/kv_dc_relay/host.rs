@@ -172,6 +172,7 @@ pub struct KvDcRelayAggregationStats {
     pub contribution_count: usize,
     pub unique_block_count: usize,
     pub unknown_removals: u64,
+    pub parent_not_found: u64,
     pub capacity_failures: u64,
     pub occupied_bucket_count: usize,
     pub occupied_slot_count: usize,
@@ -213,8 +214,8 @@ pub struct KvDcRelayRecoveryStats {
 pub struct KvDcRelayMemoryStats {
     pub filter_bytes: usize,
     pub dirty_tracking_bytes: usize,
-    pub member_set_capacity: usize,
-    pub refcount_capacity: usize,
+    pub source_lineage_capacity: usize,
+    pub canonical_owner_capacity: usize,
     pub insertion_scratch_capacity: usize,
 }
 
@@ -1484,6 +1485,7 @@ async fn endpoint_stats(
                 contribution_count: aggregation.contribution_count(),
                 unique_block_count: aggregation.unique_block_count(),
                 unknown_removals: aggregation.unknown_removals(),
+                parent_not_found: aggregation.parent_not_found(),
                 capacity_failures: aggregation.capacity_failures(),
                 occupied_bucket_count: aggregation.occupied_bucket_count(),
                 occupied_slot_count: aggregation.occupied_slot_count(),
@@ -1512,8 +1514,8 @@ async fn endpoint_stats(
             Some(KvDcRelayMemoryStats {
                 filter_bytes: memory.filter_bytes(),
                 dirty_tracking_bytes: memory.dirty_tracking_bytes(),
-                member_set_capacity: memory.member_set_capacity(),
-                refcount_capacity: memory.refcount_capacity(),
+                source_lineage_capacity: memory.source_lineage_capacity(),
+                canonical_owner_capacity: memory.canonical_owner_capacity(),
                 insertion_scratch_capacity: memory.insertion_scratch_capacity(),
             }),
         )

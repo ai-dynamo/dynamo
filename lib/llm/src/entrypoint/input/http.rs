@@ -22,7 +22,7 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy,
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::DistributedRuntime;
@@ -51,12 +51,14 @@ impl HttpFrontend {
     /// Replace the default worker selector with a statically linked native policy.
     ///
     /// The factory is called when each decode or prefill worker set is constructed, not per
-    /// request. Dynamo continues to own discovery, scheduling, validation, and accounting.
+    /// request. Workers must advertise an explicit typed role; legacy untyped cards are rejected
+    /// because decode and aggregated workers cannot be distinguished. Dynamo continues to own
+    /// discovery, scheduling, validation, and accounting.
     pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
     where
         F: for<'a> Fn(
                 &KvRouterConfig,
-                &'static str,
+                WorkerType,
                 RoutingPartitionRef<'a>,
             ) -> WorkerSelectionPolicy
             + Send
@@ -73,6 +75,12 @@ impl HttpFrontend {
         distributed_runtime: DistributedRuntime,
         engine_config: EngineConfig,
     ) -> anyhow::Result<()> {
+        if self.worker_selection_policy_factory.is_some()
+            && !matches!(&engine_config, EngineConfig::Dynamic { .. })
+        {
+            anyhow::bail!("custom worker-selection policies require a dynamic engine");
+        }
+
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
         match self.worker_selection_policy_factory {
@@ -81,6 +89,7 @@ impl HttpFrontend {
                     distributed_runtime,
                     engine_config,
                     self.frontend_route_extensions,
+                    true,
                     factory,
                 )
                 .await
@@ -90,8 +99,12 @@ impl HttpFrontend {
                     distributed_runtime,
                     engine_config,
                     self.frontend_route_extensions,
+                    false,
                     Arc::new(|config, worker_type, _partition| {
-                        DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+                        DefaultWorkerSelector::new(
+                            Some(config.clone()),
+                            worker_type.default_selector_label(),
+                        )
                     }),
                 )
                 .await
@@ -126,6 +139,7 @@ async fn run_with_worker_selector_factory<Sel>(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
+    require_typed_worker_role: bool,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
 ) -> anyhow::Result<()>
 where
@@ -215,7 +229,9 @@ where
                 prefill_load_estimator.clone(),
                 local_model_path,
                 model.runtime_config().tokenizer_backend,
+                model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
+                require_typed_worker_role,
                 worker_selector_factory.clone(),
             )
             .await?;
@@ -229,10 +245,7 @@ where
             manager.add_completions_model(model.display_name(), checksum, engine.clone())?;
             manager.add_chat_completions_model(model.display_name(), checksum, engine)?;
 
-            // Enable all endpoints
-            for endpoint_type in EndpointType::all() {
-                http_service.enable_model_endpoint(endpoint_type, true);
-            }
+            enable_in_process_model_endpoints(&http_service)?;
             http_service
         }
         EngineConfig::InProcessTokens {
@@ -258,10 +271,7 @@ where
             >(model.card(), inner_engine, tokenizer)
             .await?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
-            // Enable all endpoints
-            for endpoint_type in EndpointType::all() {
-                http_service.enable_model_endpoint(endpoint_type, true);
-            }
+            enable_in_process_model_endpoints(&http_service)?;
             http_service
         }
     };
@@ -282,6 +292,15 @@ where
     Ok(())
 }
 
+fn enable_in_process_model_endpoints(http_service: &HttpService) -> anyhow::Result<()> {
+    for endpoint_type in EndpointType::all() {
+        if endpoint_type != EndpointType::Batch {
+            http_service.enable_model_endpoint(endpoint_type, true)?;
+        }
+    }
+    Ok(())
+}
+
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 #[allow(clippy::too_many_arguments)]
@@ -298,7 +317,9 @@ async fn run_watcher<Sel>(
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
+    tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
+    require_typed_worker_role: bool,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
 ) -> anyhow::Result<()>
 where
@@ -321,10 +342,12 @@ where
         chat_engine_factory,
         prefill_load_estimator,
         metrics.clone(),
+        require_typed_worker_role,
         worker_selector_factory,
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
+    watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
     watch_obj.set_generate_engine_capabilities(generate_engine_capabilities);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
@@ -343,7 +366,9 @@ where
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {
         while let Some(model_update) = rx.recv().await {
-            update_http_endpoints(http_service.clone(), model_update.clone());
+            if let Err(error) = update_http_endpoints(http_service.clone(), model_update.clone()) {
+                tracing::error!(%error, "failed to update HTTP endpoints");
+            }
             update_model_metrics(model_update, metrics.clone());
         }
     });
@@ -357,7 +382,7 @@ where
 }
 
 /// Updates HTTP service endpoints based on available model types
-fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
+fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> anyhow::Result<()> {
     tracing::debug!(
         "Updating HTTP service endpoints for model type: {:?}",
         model_type
@@ -369,7 +394,7 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
                 .model_type
                 .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
             {
-                service.enable_model_endpoint(endpoint_type, true);
+                service.enable_model_endpoint(endpoint_type, true)?;
             }
         }
         ModelUpdate::Removed(card) => {
@@ -378,10 +403,11 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
                 .model_type
                 .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
             {
-                service.enable_model_endpoint(endpoint_type, false);
+                service.enable_model_endpoint(endpoint_type, false)?;
             }
         }
     }
+    Ok(())
 }
 
 /// Updates metrics for model type changes

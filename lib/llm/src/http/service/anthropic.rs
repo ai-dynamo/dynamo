@@ -16,7 +16,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::State,
-    http::{HeaderMap, Request, StatusCode},
+    http::{HeaderMap, Method, Request, StatusCode, Uri},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -30,7 +30,9 @@ use tracing::Instrument;
 
 use super::{
     RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
+    disconnect::{
+        ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_activity,
+    },
     metrics::{
         CancellationLabels, Endpoint, ErrorType, InflightGuard,
         process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
@@ -48,6 +50,7 @@ use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
     apply_header_routing_overrides, session_affinity_from_headers,
 };
+use crate::protocols::common::input_trigger::classify_anthropic_request;
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
@@ -65,13 +68,16 @@ use super::openai::{get_body_limit, get_or_create_request_id};
 // Router
 // ---------------------------------------------------------------------------
 
+/// Default route for the Anthropic Messages API when no override is configured.
+pub(crate) const DEFAULT_MESSAGES_PATH: &str = "/v1/messages";
+
 /// Creates the router for the `/v1/messages` and `/v1/messages/count_tokens` endpoints.
 pub fn anthropic_messages_router(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/v1/messages".to_string());
+    let path = path.unwrap_or_else(|| DEFAULT_MESSAGES_PATH.to_string());
     let count_tokens_path = format!("{}/count_tokens", &path);
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let count_doc = RouteDoc::new(axum::http::Method::POST, &count_tokens_path);
@@ -301,7 +307,8 @@ async fn handler_anthropic_messages(
     })?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, &headers);
-    if let Some(agent_context) = agent_context_from_headers(&headers) {
+    if let Some(mut agent_context) = agent_context_from_headers(&headers) {
+        agent_context.input_trigger = Some(classify_anthropic_request(request.content()));
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
     if let Some(session_affinity) = session_affinity_from_headers(&headers) {
@@ -508,6 +515,23 @@ async fn anthropic_messages(
         ),
     );
 
+    // Same backstop as the chat handler, so the two aggregation entry points
+    // cannot drift. See `wants_reasoning_as_content_when_empty`.
+    let move_reasoning_to_content_when_empty =
+        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
+            request.chat_template_args.as_ref(),
+        );
+    let parsing_options = parsing_options
+        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
+    // Computed before `request` moves into `generate`. Only a stream that can
+    // withhold every data frame needs forced keep-alive frames.
+    let stream_can_defer_all_output =
+        crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
+            parsing_options.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
+        );
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     tracing::trace!("Issuing generate call for Anthropic messages");
@@ -591,6 +615,7 @@ async fn anthropic_messages(
         // to `monitor_for_disconnects` below.
         let cancel_ctx = ctx.clone();
 
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
         let full_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
@@ -615,6 +640,7 @@ async fn anthropic_messages(
                         let Some(annotated_chunk) = maybe_chunk else {
                             break; // backend stream ended normally
                         };
+                        let _ = activity_tx.send(());
                         process_response_and_observe_metrics(
                             &annotated_chunk,
                             &mut response_collector,
@@ -662,13 +688,19 @@ async fn anthropic_messages(
             }
         };
 
-        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+        let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
+        let stream = monitor_for_disconnects_with_activity(
+            full_stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            activity_rx,
+        );
 
         let mut sse_stream = Sse::new(stream);
-        if let Some(keep_alive) = state.sse_keep_alive() {
+        if let Some(keep_alive) = keep_alive {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
-
         Ok(sse_stream.into_response())
     } else {
         // Non-streaming path: aggregate stream into single response
@@ -1101,6 +1133,16 @@ fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Respo
         }),
     )
         .into_response()
+}
+
+/// Returns an Anthropic-compatible JSON `404` error response for an unmatched route.
+/// Anthropic clients expect the nested `{"type": "error", "error": {...}}`
+pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> Response {
+    anthropic_error(
+        StatusCode::NOT_FOUND,
+        "not_found_error",
+        &format!("Route not found: {} {}", method, uri.path()),
+    )
 }
 
 #[cfg(test)]

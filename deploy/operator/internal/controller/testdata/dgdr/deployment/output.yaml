@@ -12,7 +12,12 @@ spec:
       podTemplate:
         spec:
           containers:
-            - image: $ignore
+            - args:
+                - -m
+                - dynamo.frontend
+              command:
+                - python3
+              image: $ignore
               name: main
       replicas: 1
       runtimeVersionOverride: 1.4.0
@@ -33,6 +38,8 @@ spec:
                 - --aic-perf-model
                 - --aic-backend
                 - vllm
+                - --aic-backend-version
+                - 0.14.0
                 - --aic-system
                 - h100_sxm
                 - --aic-tp-size
@@ -74,6 +81,8 @@ spec:
                 - --aic-perf-model
                 - --aic-backend
                 - vllm
+                - --aic-backend-version
+                - 0.14.0
                 - --aic-system
                 - h100_sxm
                 - --aic-tp-size
@@ -129,6 +138,8 @@ spec:
             - --aic-perf-model
             - --aic-backend
             - vllm
+            - --aic-backend-version
+            - 0.14.0
             - --aic-system
             - h100_sxm
             - --aic-tp-size
@@ -201,6 +212,8 @@ spec:
             - --aic-perf-model
             - --aic-backend
             - vllm
+            - --aic-backend-version
+            - 0.14.0
             - --aic-system
             - h100_sxm
             - --aic-tp-size
@@ -484,6 +497,8 @@ spec:
             - --aic-perf-model
             - --aic-backend
             - vllm
+            - --aic-backend-version
+            - 0.14.0
             - --aic-system
             - h100_sxm
             - --aic-tp-size
@@ -620,7 +635,12 @@ spec:
         nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
     spec:
       containers:
-        - image: $ignore
+        - args:
+            - -m
+            - dynamo.frontend
+          command:
+            - python3
+          image: $ignore
           name: main
   replicas: 1
   runtimeVersionOverride: 1.4.0
@@ -655,6 +675,8 @@ spec:
             - --aic-perf-model
             - --aic-backend
             - vllm
+            - --aic-backend-version
+            - 0.14.0
             - --aic-system
             - h100_sxm
             - --aic-tp-size

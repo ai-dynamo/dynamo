@@ -29,17 +29,17 @@ dynamo:
   planner_build_image: python
   planner_build_image_tag: 3.12-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.12-v4.0.3
+  planner_runtime_image_tag: 3.12-v4.0.9
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@043085f9
+  planner_baseline_sbom: python@ec133be9
   python_version: "3.12"
   # Every stage must use the same uv: stages share one BuildKit uv cache mount,
   # and uv rejects cache entries written by a newer version.
   uv_version: "0.12.0"
 
-  nats_version: v2.10.28
-  etcd_version: v3.5.30
+  nats_version: v2.12.14
+  etcd_version: v3.5.33
 
   nixl_ref: v1.0.1
   nixl_ucx_ref: v1.21.0
@@ -66,7 +66,7 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.26.0-ubuntu2404
+    runtime_image_tag: v0.27.1-ubuntu2404
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -78,18 +78,21 @@ vllm:
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
-    base_image_tag: v0.26.0
-    runtime_image_tag: v0.26.0
-    baseline_sbom: vllm-openai-xpu@e2ab5095
+    base_image_tag: v0.27.1
+    runtime_image_tag: v0.27.1
+    baseline_sbom: vllm-openai-xpu@3309c2e1
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.26.0
+    runtime_image_tag: v0.27.1
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
-  flashinf_ref: v0.6.14
-  vllm_omni_ref: "v0.26.0rc1"
-  nixl_ref: v1.3.1
+  vllm_omni_ref: "v0.27.0rc1"
+  # vLLM 0.27.1 lacks the Transformers 5.15 heterogeneous Gemma 4 config
+  # support that landed upstream after the release. Remove this pin when the
+  # vLLM base images include https://github.com/vllm-project/vllm/pull/49797.
+  transformers_version: "5.14.1"
+  nixl_ref: v1.3.2
   max_jobs: "10"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"

@@ -29,28 +29,30 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -58,6 +60,10 @@ import (
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
+
+func noContainerGPUs() dynamo.ContainerGPUCount {
+	return func() (int64, error) { return 0, nil }
+}
 
 const (
 	testDottedDCDName     = "service.1"
@@ -90,7 +96,7 @@ func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilit
 		Build()
 	reconciler := &DynamoComponentDeploymentReconciler{
 		Client:        kubeClient,
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
@@ -145,7 +151,7 @@ func TestDynamoComponentDeploymentReconcileFinalizesDeletingStoredCheckpointInco
 		Build()
 	reconciler := &DynamoComponentDeploymentReconciler{
 		Client:   kubeClient,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
@@ -885,6 +891,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		context.Background(),
 		dcd,
 		dynamo.RoleMain,
+		noContainerGPUs(),
 	)
 	require.NoError(t, err)
 	require.Equal(t, commonconsts.ComponentTypeWorker, podTemplate.Labels[commonconsts.KubeLabelDynamoComponentType])
@@ -1060,6 +1067,7 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 		context.Background(),
 		dcd,
 		dynamo.RoleMain,
+		noContainerGPUs(),
 	)
 	require.NoError(t, err)
 	require.Equal(t, commonconsts.ComponentTypePrefill, podTemplate.Labels[commonconsts.KubeLabelDynamoComponentType])
@@ -1142,7 +1150,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 	limit.SetMilli(ptr.To(resource.MustParse("1Gi")).MilliValue() / 2)
 	type fields struct {
 		Client                client.Client
-		Recorder              record.EventRecorder
+		Recorder              events.EventRecorder
 		Config                *configv1alpha1.OperatorConfiguration
 		RuntimeConfig         *controller_common.RuntimeConfig
 		DockerSecretRetriever *mockDockerSecretRetriever
@@ -1165,7 +1173,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		{
 			name: "generateLeaderWorkerSet - nominal case",
 			fields: fields{
-				Recorder:      record.NewFakeRecorder(100),
+				Recorder:      events.NewFakeRecorder(100),
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
@@ -1541,7 +1549,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		{
 			name: "error from generateLeaderPodTemplateSpec", // This case involves an error from generatePodTemplateSpec
 			fields: fields{
-				Recorder:      record.NewFakeRecorder(100),
+				Recorder:      events.NewFakeRecorder(100),
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
@@ -1691,7 +1699,7 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 		Build()
 
 	// Set up reconciler
-	recorder := record.NewFakeRecorder(100)
+	recorder := events.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
 		Client:        fakeKubeClient,
 		Recorder:      recorder,
@@ -1875,6 +1883,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -1935,6 +1944,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -2014,6 +2024,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
+			noContainerGPUs(),
 		)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "gpuMemoryService restore requires resolved checkpoint")
@@ -2056,6 +2067,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -2101,6 +2113,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -2162,6 +2175,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -2205,6 +2219,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
+			noContainerGPUs(),
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
@@ -2420,7 +2435,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 		WithObjects(dcd).
 		Build()
 
-	recorder := record.NewFakeRecorder(100)
+	recorder := events.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
 		Client:        fakeKubeClient,
 		Recorder:      recorder,
@@ -2674,7 +2689,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				Build()
 
 			// Set up reconciler
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
@@ -2770,7 +2785,7 @@ func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *
 				WithObjects(objs...).
 				WithStatusSubresource(objs...).
 				Build(),
-			Recorder:      record.NewFakeRecorder(100),
+			Recorder:      events.NewFakeRecorder(100),
 			Config:        &configv1alpha1.OperatorConfiguration{},
 			RuntimeConfig: &controller_common.RuntimeConfig{},
 			DockerSecretRetriever: &mockDockerSecretRetriever{
@@ -2984,7 +2999,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				Build()
 
 			// Set up reconciler
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
@@ -3073,7 +3088,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 
 	reconciler := &DynamoComponentDeploymentReconciler{
 		Client:        fakeKubeClient,
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
@@ -3294,7 +3309,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				Build()
 
 			// Set up reconciler
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
 				Client:   fakeKubeClient,
 				Recorder: recorder,
@@ -3493,7 +3508,7 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 				WithObjects(dcd).
 				Build()
 
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
@@ -3579,9 +3594,117 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 		context.Background(),
 		dcd,
 		map[string]string{"app": "demo"},
+		noContainerGPUs(),
 	)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, "worker", got.Labels["role"])
 	require.Equal(t, commonconsts.MainContainerName, got.Spec.Containers[0].Name)
+}
+
+type draReadCounter struct {
+	client.Reader
+	claimTemplateGets int
+	deviceClassGets   int
+}
+
+func (r *draReadCounter) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	switch obj.(type) {
+	case *resourcev1.ResourceClaimTemplate:
+		r.claimTemplateGets++
+	case *resourcev1.DeviceClass:
+		r.deviceClassGets++
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+func TestRenderMultinodePodTemplateSpecs_VLLMMultinodeDRA(t *testing.T) {
+	t.Log("Create a one-GPU ResourceClaimTemplate")
+	s := scheme.Scheme
+	require.NoError(t, resourcev1.AddToScheme(s))
+	claimTemplate := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "one-gpu", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{
+			Spec: resourcev1.ResourceClaimSpec{
+				Devices: resourcev1.DeviceClaim{
+					Requests: []resourcev1.DeviceRequest{{
+						Name: "gpu",
+						Exactly: &resourcev1.ExactDeviceRequest{
+							DeviceClassName: "gpu.nvidia.com",
+							AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+							Count:           1,
+						},
+					}},
+				},
+			},
+		},
+	}
+	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}}
+
+	t.Log("Create an LWS-backed two-node TP=2 vLLM component using only DRA")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "dra-test-agg", Namespace: "default"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "agg",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+						},
+					},
+					Spec: corev1.PodSpec{
+						ResourceClaims: []corev1.PodResourceClaim{{
+							Name:                      "gpu",
+							ResourceClaimTemplateName: ptr.To("one-gpu"),
+						}},
+						Containers: []corev1.Container{{
+							Name:    commonconsts.MainContainerName,
+							Image:   "vllm-test",
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.vllm", "--tensor-parallel-size", "2"},
+							Resources: corev1.ResourceRequirements{
+								Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dcd, claimTemplate, deviceClass).
+			Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return nil, nil
+			},
+		},
+	}
+	t.Log("Resolve DRA once and render both LWS roles")
+	reader := &draReadCounter{Reader: reconciler.Client}
+	renderer := reconciler.workloadRenderer()
+	renderer.reader = reader
+	leaderTemplate, workerTemplate, err := renderer.renderMultinodePodTemplateSpecs(t.Context(), dcd)
+	require.NoError(t, err)
+	assert.Equal(t, 1, reader.claimTemplateGets)
+	assert.Equal(t, 1, reader.deviceClassGets)
+
+	t.Log("Verify role-specific MP launch flags and preserved DRA claims")
+	leader := leaderTemplate.Spec.Containers[0]
+	worker := workerTemplate.Spec.Containers[0]
+	assert.Contains(t, leader.Args, "--nnodes")
+	assert.Contains(t, leader.Args, "--node-rank")
+	assert.Contains(t, leader.Args, "0")
+	assert.Contains(t, worker.Args, "--headless")
+	assert.Contains(t, worker.Args, "$(LWS_WORKER_INDEX)")
+	assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, leader.Resources.Claims)
+	assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, worker.Resources.Claims)
 }

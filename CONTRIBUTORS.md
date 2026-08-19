@@ -9,7 +9,4 @@ Generated from `.github/codeowners/external_contributors.yaml`. Do not
 hand-edit — update that file and regenerate (see
 `.github/codeowners/README.md`).
 
-| Contributor | Level | GitHub | Affiliation | Areas |
-| --- | --- | --- | --- | --- |
-| Jason Zhou | Maintainer | [@jasonqinzhou](https://github.com/jasonqinzhou) | NVIDIA | `planner` |
-| Yongming Ding | Maintainer | [@dreamtalen](https://github.com/dreamtalen) | NVIDIA | `planner` |
+_No external contributors yet._

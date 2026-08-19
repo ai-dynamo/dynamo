@@ -138,7 +138,7 @@ runs:
         RUN_COMPLIANCE=""
         case "${{ inputs.component }}" in
           operator)
-            BASELINE_STEM="go@e86c88d0"
+            BASELINE_STEM="go@66dcc593"
             [[ -z "${{ inputs.target }}" ]] && RUN_COMPLIANCE="true" ;;
           snapshot)
             BASELINE_STEM="cuda-dl-base@8315e245"
@@ -210,19 +210,12 @@ runs:
           fi
         done <<< "${{ inputs.extra_build_args }}"
 
-        # operator and snapshot both consume the named `snapshot` build context
-        # (deploy/operator/Dockerfile COPYs --from=snapshot; the snapshot image
-        # IS that tree), and the named `operator` build context (deploy/snapshot/
-        # Dockerfile COPYs --from=operator for the `replace => ../operator` module).
-        # power-agent is self-contained, so omit both there.
-        # operator + snapshot additionally consume the `compliance` context for
-        # their inline license/SBOM stages (COPY --from=compliance).
+        # operator consumes the `compliance` context for its inline
+        # license/SBOM stage (COPY --from=compliance). power-agent has no
+        # baseline, so run_compliance is false there and this stays empty.
         BUILD_CONTEXT_FLAG=""
-        if [[ "${{ inputs.component }}" != "power-agent" ]]; then
-          BUILD_CONTEXT_FLAG="--build-context snapshot=../snapshot --build-context operator=../operator"
-        fi
         if [[ "${{ steps.settings.outputs.run_compliance }}" == "true" ]]; then
-          BUILD_CONTEXT_FLAG="${BUILD_CONTEXT_FLAG} --build-context compliance=../../container/compliance"
+          BUILD_CONTEXT_FLAG="--build-context compliance=../../container/compliance"
         fi
 
         docker buildx build --push \
@@ -266,8 +259,6 @@ runs:
         docker buildx build \
             --platform ${{ steps.settings.outputs.compliance_platform }} \
             "${BUILD_ARGS[@]}" \
-            --build-context snapshot=../snapshot \
-            --build-context operator=../operator \
             --build-context compliance=../../container/compliance \
             --target compliance_artifact \
             --output type=local,dest=/tmp/compliance \
@@ -477,8 +468,6 @@ runs:
         docker buildx build \
             --platform ${{ steps.settings.outputs.compliance_platform }} \
             "${BUILD_ARGS[@]}" \
-            --build-context snapshot=../snapshot \
-            --build-context operator=../operator \
             --build-context compliance=../../container/compliance \
             --target sources_archive \
             --output type=local,dest=/tmp/sources \
