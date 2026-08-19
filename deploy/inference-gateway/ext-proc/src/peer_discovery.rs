@@ -25,9 +25,6 @@ pub const REPLICA_AGG_PORT_NAME: &str = "replica-agg";
 
 type Store = kube::runtime::reflector::Store<EndpointSlice>;
 
-/// Resolve the required aggregated replica-sync port from the peer Service's
-/// EndpointSlices. Every slice must expose the same named `replica-agg` port;
-/// missing or inconsistent ports fail EPP startup before replica sync is built.
 /// How many times to retry the EndpointSlice LIST when the observed slice is
 /// transiently incomplete (e.g. every pod restarting at once). The window is
 /// short (hundreds of ms), so a few bounded retries smooth it out without
@@ -36,6 +33,10 @@ type Store = kube::runtime::reflector::Store<EndpointSlice>;
 const PORT_RESOLUTION_RETRIES: usize = 5;
 const PORT_RESOLUTION_INITIAL_BACKOFF_MS: u64 = 100;
 
+/// Resolve the required aggregated replica-sync port from the peer Service's
+/// EndpointSlices. Every slice must expose the same named `replica-agg` port;
+/// missing or inconsistent ports fail EPP startup before replica sync is
+/// built. Retries across transient mid-update slices before giving up.
 pub async fn resolve_replica_sync_port(namespace: &str, service_name: &str) -> Result<u16> {
     use kube::{Api, Client, api::ListParams};
 
@@ -77,6 +78,8 @@ pub async fn resolve_replica_sync_port(namespace: &str, service_name: &str) -> R
     unreachable!("retry loop always returns or exhausts")
 }
 
+/// Resolve a single consistent `replica-agg` TCP port from the given
+/// EndpointSlices, skipping slices that transiently omit the named port.
 fn replica_sync_port<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Result<u16> {
     let mut resolved = BTreeSet::new();
     let mut slice_count = 0usize;
@@ -278,6 +281,8 @@ async fn reconcile_loop(
     }
 }
 
+/// One peer-set reconcile: register newly added and deregister removed replica
+/// peers on the selection service.
 async fn reconcile_once(
     service: &SelectionService,
     store: &Store,
@@ -326,6 +331,7 @@ fn authority(ip: &str, port: u16) -> String {
     }
 }
 
+/// True when `ip` is an IPv6 literal (contains `:`).
 fn is_ipv6(ip: &str) -> bool {
     ip.contains(':')
 }
