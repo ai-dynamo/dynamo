@@ -2220,7 +2220,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													TimeoutSeconds:   4,
 													PeriodSeconds:    5,
 													SuccessThreshold: 0,
-													FailureThreshold: 1,
+													FailureThreshold: 3,
 												},
 												ReadinessProbe: &corev1.Probe{
 													ProbeHandler: corev1.ProbeHandler{
@@ -5676,7 +5676,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							},
 							PeriodSeconds:    5,
 							TimeoutSeconds:   4,
-							FailureThreshold: 1,
+							FailureThreshold: 3,
 						},
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{

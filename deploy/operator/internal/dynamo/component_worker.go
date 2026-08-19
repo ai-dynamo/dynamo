@@ -48,7 +48,7 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		},
 		PeriodSeconds:    5,
 		TimeoutSeconds:   4, // TimeoutSeconds should be < PeriodSeconds
-		FailureThreshold: 1, // Note this default FailureThreshold is 3, with 1 a single failure will restart Pod
+		FailureThreshold: 3,
 	}
 
 	// ReadinessProbe in Dynamo worker context doesn't determine that the worker is ready to receive traffic
