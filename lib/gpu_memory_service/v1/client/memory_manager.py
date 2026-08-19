@@ -24,6 +24,8 @@ from gpu_memory_service.v1.client.session import _GMSClientSession
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SLAB_SIZE = 2 * 1024 * 1024 * 1024
+
 _SessionFactory = Callable[
     [str, RequestedLockType],
     _GMSClientSession,
@@ -47,6 +49,7 @@ class GMSClientMemoryManager:
         device: int,
         *,
         session_factory: _SessionFactory = _GMSClientSession,
+        slab_size: int = DEFAULT_SLAB_SIZE,
     ):
         self._socket_path = socket_path
         self._vmm = vmm
@@ -54,12 +57,17 @@ class GMSClientMemoryManager:
         self._session_factory = session_factory
         self._session: _GMSClientSession | None = None
         self._mappings: dict[int, _InstalledMapping] = {}
+        self._regions: dict[int, tuple[int, int]] = {}
+        self._free: dict[int, list[tuple[int, int]]] = {}
         self._lock = threading.RLock()
         self._failure: str | None = None
         self._vmm.ensure_initialized()
         self._granularity = int(self._vmm.get_allocation_granularity(device))
         if self._granularity <= 0:
             raise ValueError("allocation granularity must be positive")
+        self._slab_size = self._align(slab_size)
+        if self._slab_size <= 0:
+            raise ValueError("slab size must be positive")
 
     @property
     def mappings(self) -> tuple[LocalMapping, ...]:
@@ -68,7 +76,7 @@ class GMSClientMemoryManager:
 
     def owns(self, va: int) -> bool:
         with self._lock:
-            return va in self._mappings
+            return va in self._regions
 
     def connect(self, lock_type: RequestedLockType) -> None:
         with self._lock:
@@ -92,35 +100,19 @@ class GMSClientMemoryManager:
     def create_mapping(self, size: int) -> int:
         with self._lock:
             self._check()
-            session = self._require_rw()
+            self._require_rw()
             if size <= 0:
                 raise ValueError("allocation size must be positive")
             aligned_size = self._align(size)
-            allocation_id = f"allocation-{uuid4()}"
             try:
-                session.allocate(allocation_id, aligned_size)
-                self._select_device()
-                mapping, handle = reserve_and_install_mapping(
-                    self._vmm,
-                    session.export(allocation_id),
-                    allocation_id,
-                    size,
-                    aligned_size,
-                    aligned_size,
-                    self._granularity,
-                    self._device,
-                    GrantedLockType.RW,
-                )
-                installed = _InstalledMapping(
-                    mapping.allocation_id,
-                    mapping.requested_size,
-                    mapping.aligned_size,
-                    mapping.base,
-                    mapping.reservation_size,
-                    handle,
-                )
-                self._mappings[mapping.base] = installed
-                return mapping.base
+                for mapping in self._ordered_mappings():
+                    offset = self._take_free(mapping.base, aligned_size)
+                    if offset is None:
+                        continue
+                    va = mapping.base + offset
+                    self._regions[va] = (mapping.base, size)
+                    return va
+                return self._add_slab(size, aligned_size)
             except Exception as exc:
                 raise self._latch("GMS mapping creation failed", exc) from exc
 
@@ -128,21 +120,17 @@ class GMSClientMemoryManager:
         with self._lock:
             self._check()
             try:
-                mapping = self._mappings[va]
+                slab_base, requested_size = self._regions[va]
             except KeyError:
                 raise RuntimeError(f"GMS does not own VA 0x{va:x}") from None
-            if size is not None and size != mapping.requested_size:
+            if size is not None and size != requested_size:
                 raise RuntimeError("allocator free does not match the GMS mapping")
             try:
-                self._select_device()
-                if mapping.handle:
-                    self._unmap(mapping)
-                if self._session is not None and (
-                    self._session.lock_type is GrantedLockType.RW
-                ):
-                    self._session.free(mapping.allocation_id)
-                self._vmm.address_free(mapping.base, mapping.reservation_size)
-                del self._mappings[va]
+                mapping = self._mappings[slab_base]
+                del self._regions[va]
+                self._put_free(slab_base, va - slab_base, self._align(requested_size))
+                if self._free[slab_base] == [(0, mapping.aligned_size)]:
+                    self._destroy_slab(mapping)
             except Exception as exc:
                 raise self._latch("GMS mapping destruction failed", exc) from exc
 
@@ -223,8 +211,8 @@ class GMSClientMemoryManager:
         """Release local mappings and VAs, then disconnect the socket lease."""
         with self._lock:
             self._check()
-            for mapping in reversed(self._ordered_mappings()):
-                self.destroy_mapping(mapping.base)
+            for va in reversed(sorted(self._regions)):
+                self.destroy_mapping(va)
             self.disconnect()
 
     def _ordered_mappings(self) -> tuple[_InstalledMapping, ...]:
@@ -250,6 +238,79 @@ class GMSClientMemoryManager:
 
     def _align(self, size: int) -> int:
         return (size + self._granularity - 1) // self._granularity * self._granularity
+
+    def _add_slab(self, size: int, aligned_size: int) -> int:
+        slab_bytes = max(self._slab_size, aligned_size)
+        session = self._require_rw()
+        allocation_id = f"allocation-{uuid4()}"
+        session.allocate(allocation_id, slab_bytes)
+        self._select_device()
+        mapping, handle = reserve_and_install_mapping(
+            self._vmm,
+            session.export(allocation_id),
+            allocation_id,
+            slab_bytes,
+            slab_bytes,
+            slab_bytes,
+            self._granularity,
+            self._device,
+            GrantedLockType.RW,
+        )
+        installed = _InstalledMapping(
+            mapping.allocation_id,
+            mapping.requested_size,
+            mapping.aligned_size,
+            mapping.base,
+            mapping.reservation_size,
+            handle,
+        )
+        self._mappings[mapping.base] = installed
+        leftover = slab_bytes - aligned_size
+        self._free[mapping.base] = [(aligned_size, leftover)] if leftover else []
+        self._regions[mapping.base] = (mapping.base, size)
+        return mapping.base
+
+    def _destroy_slab(self, mapping: _InstalledMapping) -> None:
+        self._select_device()
+        if mapping.handle:
+            self._unmap(mapping)
+        if self._session is not None and self._session.lock_type is GrantedLockType.RW:
+            self._session.free(mapping.allocation_id)
+        self._vmm.address_free(mapping.base, mapping.reservation_size)
+        del self._mappings[mapping.base]
+        del self._free[mapping.base]
+
+    def _take_free(self, slab_base: int, aligned_size: int) -> int | None:
+        holes = self._free[slab_base]
+        for index, (offset, length) in enumerate(holes):
+            if length < aligned_size:
+                continue
+            leftover = length - aligned_size
+            if leftover:
+                holes[index] = (offset + aligned_size, leftover)
+            else:
+                del holes[index]
+            return offset
+        return None
+
+    def _put_free(self, slab_base: int, offset: int, length: int) -> None:
+        holes = self._free[slab_base]
+        index = 0
+        while index < len(holes) and holes[index][0] < offset:
+            index += 1
+        holes.insert(index, (offset, length))
+        merged: list[tuple[int, int]] = []
+        for hole_offset, hole_length in holes:
+            if merged and hole_offset <= merged[-1][0] + merged[-1][1]:
+                prev_offset, prev_length = merged[-1]
+                merged[-1] = (
+                    prev_offset,
+                    max(prev_offset + prev_length, hole_offset + hole_length)
+                    - prev_offset,
+                )
+                continue
+            merged.append((hole_offset, hole_length))
+        self._free[slab_base] = merged
 
     def _check(self) -> None:
         if self._failure is not None:
