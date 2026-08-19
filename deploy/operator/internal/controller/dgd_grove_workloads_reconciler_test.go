@@ -42,6 +42,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
+const updatedWorkerVersion = "new"
+
 func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	t.Log("Build a ready frontend and its DGD")
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
@@ -143,7 +145,7 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 			currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 			require.NoError(t, err)
 			dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: currentHash}
-			dgd.GetComponentByName("prefill").PodTemplate.Spec.Containers[0].Env[0].Value = "new"
+			dgd.GetComponentByName("prefill").PodTemplate.Spec.Containers[0].Env[0].Value = updatedWorkerVersion
 			wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 			require.NoError(t, err)
 			require.NotEqual(t, currentHash, wantHash)
@@ -245,7 +247,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: currentHash}
-	dgd.GetComponentByName("prefill").PodTemplate.Spec.Containers[0].Env[0].Value = "new"
+	dgd.GetComponentByName("prefill").PodTemplate.Spec.Containers[0].Env[0].Value = updatedWorkerVersion
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 	legacyPCS := &grovev1alpha1.PodCliqueSet{

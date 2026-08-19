@@ -33,6 +33,7 @@ const (
 	groveSuffixTestTimeout  = 10 * time.Second
 	groveSuffixTestInterval = 100 * time.Millisecond
 	legacyGroveDGDSeeder    = "operatorenv-grove-legacy-seeder"
+	forceReconcileValue     = "true"
 )
 
 func TestGroveWorkerHashSuffixForNewDGD(t *testing.T) {
@@ -72,7 +73,7 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	if current.Annotations == nil {
 		current.Annotations = make(map[string]string)
 	}
-	current.Annotations["operatorenv.dynamo.nvidia.com/reconcile"] = "true"
+	current.Annotations["operatorenv.dynamo.nvidia.com/reconcile"] = forceReconcileValue
 	require.NoError(t, env.Client().Update(ctx, current))
 	waitForGroveWorkerHashSuffixes(t, ctx, env, dgd, "")
 

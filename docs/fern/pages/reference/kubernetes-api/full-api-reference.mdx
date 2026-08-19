@@ -2456,7 +2456,7 @@ componentNames is the list of underlying Kubernetes resource names for this Dyna
 </ParamField>
 
 <ParamField path="runtimeNamespace" type="string">
-runtimeNamespace is the effective Dynamo runtime namespace for this component. Worker components may include a generation suffix; non-workers and Grove-backed workers use the base namespace. During rolling updates, worker status keeps the old active revision namespace until cutover completes.
+runtimeNamespace is the effective Dynamo runtime namespace for this component. Worker components may include a generation suffix; non-workers use the base namespace. During rolling updates, worker status keeps the old active revision namespace until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
