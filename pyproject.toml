@@ -232,6 +232,10 @@ filterwarnings = [
     "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
     # torchao invalid escape sequences in docstrings at import time
     "ignore:.*invalid escape sequence.*:SyntaxWarning",
+    "ignore:.*invalid escape sequence.*:DeprecationWarning",
+    # PyTorch probes NVML while SGLang imports TorchAO; CPU-only test hosts do
+    # not have NVML available, and this warning is harmless for gpu_0 tests.
+    "ignore:Can't initialize NVML:UserWarning",
     # torchao import path changes (https://github.com/pytorch/ao/issues/2752)
     "ignore:Importing.*torchao\\.dtypes.*:DeprecationWarning",
     # Triton CPU fallback warning on CPU-only runners
