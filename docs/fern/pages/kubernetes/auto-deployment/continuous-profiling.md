@@ -156,8 +156,9 @@ Dynamo evaluates the baseline with the same trace and Replay implementation as e
 It does not compare simulated candidates with live baseline metrics because the two measurement
 methods are not equivalent.
 
-The baseline evaluation appears as a DGDC with `role: Baseline`. It contains the copied DGD spec and
-simulation metrics, remains visible with the other run results, and does not count against
+The baseline evaluation appears as a DGDC with `role: Baseline`. Its spec contains the flat copied
+DGD fields plus the resolved evaluation parameters, while its status contains simulation metrics.
+It remains visible with the other run results and does not count against
 `recommendation.maxCandidates`. If Replay cannot represent the active DGD, the baseline is
 `Unsupported` and the improvement condition remains `Unknown`.
 
@@ -221,9 +222,9 @@ kubectl get dynamographdeploymentrun "$RUN" -n inference -o yaml
 
 ## Promotion
 
-Promotion is manual. A candidate contains a complete DGD spec, but not every DGD change is safe to
-apply in place. Create a new DGD from the selected candidate, review it, move traffic to it, and
-retain the old DGD for rollback.
+Promotion is manual. A candidate contains the flat DGD fields plus resolved evaluation parameters,
+but not every DGD change is safe to apply in place. Create a new DGD from the selected candidate's
+DGD fields, review it, move traffic to it, and retain the old DGD for rollback.
 
 After the new deployment becomes the production baseline, update `targetRef` to its name. The next
 run snapshots and evaluates that DGD rather than continuing to compare with the retired deployment.

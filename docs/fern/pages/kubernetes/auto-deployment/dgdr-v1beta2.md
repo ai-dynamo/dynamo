@@ -5,12 +5,13 @@ title: Search Deployment Configurations with DGDR v1beta2
 subtitle: Run a replay-backed deployment search, inspect its candidates, and promote a candidate to a DynamoGraphDeployment
 ---
 
-`DynamoGraphDeploymentRequest` (DGDR) `v1beta2` uses [AI Simulate
+`DynamoGraphDeploymentRequest` (DGDR) `v1beta2` uses [AI Simulate's
 Sweeper](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md)
 to evaluate deployment configurations with Replay. A request can optimize one metric or search for
 a Pareto front. During the search, Dynamo publishes a bounded set of
-`DynamoGraphDeploymentCandidate` (DGDC) resources. Each candidate contains a complete
-`DynamoGraphDeployment` (DGD) spec that you can inspect and deploy.
+`DynamoGraphDeploymentCandidate` (DGDC) resources. Each candidate represents one evaluated point.
+Its spec contains the flat `DynamoGraphDeployment` (DGD) fields and the resolved non-deployment
+parameters that distinguish the point.
 
 Each accepted change to the DGDR spec creates an immutable `DynamoGraphDeploymentRun`. Its spec is
 a complete copy of the request that started it. The run owns the Sweeper Job, its DGDCs, progress,
@@ -52,17 +53,13 @@ spec:
         modelPath: minimax-m2.5
         mountPath: /opt/model-cache
 
-  backend: vllm
+  backends: [vllm]
   image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
 
   hardware:
     gpu:
       sku: b200_sxm
       budget: 32
-      perNode: 8
-    capabilities:
-      interconnect: nvlink
-      rdma: required
 
   workload:
     trace:
@@ -77,37 +74,52 @@ spec:
   objective:
     mode: optimize
     metric: goodputPerGpu
-    latency:
+    sla:
       ttftMs: 2000
       itlMs: 50
 
   search:
     budget:
       maxRounds: 80
-      maxConcurrentCandidates: 8
+      candidatesPerRound: 8
+      parallelEvaluations: 8
       maxEvaluationDuration: 120s
     parameters: # unstructured
-      fixed:
-        model/hw: MiniMax-M2.5 + B200
-        deployment: agg vLLM, TP4/EP4
-        replicas: planner-managed 1..8
-        gpu budget: 32
-        router: kv router, overlap=1.0
-        prefill_load_scale: 4.0
-      swept planner:
-        scaling_policy: throughput_180_5, throughput_600_5
-          load_180_5, load_180_10
-          hybrid_180_5, hybrid_600_5
-        load_sensitivity: aggressive, default, conservative
-        fpm_sampling: small, default, large, fine
-      workload: Mooncake trace, open-loop
+      search_space:
+        deployment_mode: [agg]
+        min_gpu_budget: 8
+        parallel_configs:
+          - tp: 4
+            attention_dp: 1
+            moe_tp: 4
+            moe_ep: 1
+            replicas: 2
+        agg_max_num_batched_tokens: [16384]
+        agg_max_num_seqs: [512]
+      workload:
+        shared_prefix_ratio: 0.25
+        num_prefix_groups: 4
+        turns_per_session: 1
+        inter_turn_delay_ms: 0
+      adapters:
+        dynamo.router:
+          search_space:
+            mode: [kv_router]
+            overlap_score_credit: [1.0]
+            prefill_load_scale: [4.0]
+            temperature: [0.0]
+        dynamo.planner:
+          search_space:
+            scaling_policy: [load_180_5]
+            load_sensitivity: [default]
+            fpm_sampling: [default]
 
   recommendation:
     maxCandidates: 5
 
   overrides:
     profilingJob:
-      backoffLimit: 2
+      backoffLimit: 0
     dgd:
       apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
@@ -179,7 +191,7 @@ spec:
   objective:
     mode: optimize
     metric: goodputPerGpu
-    latency:
+    sla:
       ttftMs: 2000
       itlMs: 50
 ```
@@ -197,12 +209,12 @@ spec:
     metrics:
       - goodput
       - goodputPerGpu
-      - meanE2eLatency
-    latency:
+      - e2eLatency
+    sla:
       e2eMs: 2000
 ```
 
-Set either `latency.ttftMs` with `latency.itlMs`, or `latency.e2eMs`. Do not combine both latency
+Set either `sla.ttftMs` with `sla.itlMs`, or `sla.e2eMs`. Do not combine both latency
 forms.
 
 Sweeper computes the complete non-dominated front. DGDR publishes no more than
@@ -212,11 +224,12 @@ Sweeper computes the complete non-dominated front. DGDR publishes no more than
 
 `search.budget` controls how long and how broadly Sweeper evaluates configurations:
 
-| Field                     | Meaning                                                |
-| ------------------------- | ------------------------------------------------------ |
-| `maxRounds`               | Maximum optimizer rounds                               |
-| `maxConcurrentCandidates` | Maximum candidates evaluated concurrently in one round |
-| `maxEvaluationDuration`   | Timeout for one candidate evaluation                   |
+| Field                   | Meaning                                                   |
+| ----------------------- | --------------------------------------------------------- |
+| `maxRounds`             | Maximum optimizer rounds per resolved deployment branch   |
+| `candidatesPerRound`    | Target successful unique candidates in one branch round   |
+| `parallelEvaluations`   | Replay worker-process fan-out                             |
+| `maxEvaluationDuration` | Timeout for one candidate evaluation                      |
 
 `search.parameters` is an unstructured object passed to the search implementation. The Kubernetes
 API preserves these values but does not validate their nested schema. Use [Sweeper
@@ -253,26 +266,38 @@ While the search is active, the run status resembles:
 
 ```yaml
 status:
-  phase: Searching
+  phase: Running
+  jobRef:
+    name: minimax-planner-search-run-4
   conditions:
     - type: Completed
       status: "False"
       reason: EvaluatingCandidates
   progress:
-    rounds:
-      completed: 23
-      limit: 80
-    candidates:
-      pending: 3
-      evaluating: 8
-      succeeded: 41
+    branches:
+      - name: agg
+        rounds:
+          completed: 23
+          total: 80
+    evaluations:
+      scheduled: 52
+      running: 8
+      feasible: 41
+      infeasible: 1
       failed: 2
-      published: 5
-    startedAt: "2026-07-16T13:20:00Z"
-    lastProgressTime: "2026-07-16T13:28:42Z"
-  recommendation:
-    selectedCandidateRef:
-      name: minimax-planner-search-g4-0
+      unsupported: 0
+      cacheHits: 3
+    candidates:
+      paretoFront: 0
+      published: 2
+  candidateRefs:
+    - name: minimax-planner-search-g4-4b5c3f31
+    - name: minimax-planner-search-g4-9a7d681c
+  provenance:
+    sweeperVersion: 0.2.0
+    replayVersion: 1.3.0
+  startTime: "2026-07-16T13:20:00Z"
+  lastProgressTime: "2026-07-16T13:28:42Z"
 ```
 
 `Completed=True` marks a terminal run. Inspect its `reason` to distinguish success, failure, and
@@ -336,20 +361,21 @@ kubectl get dgdc -n inference -l "nvidia.com/dgdr-run-uid=${RUN_UID}"
 Inspect the selected candidate:
 
 ```bash
-CANDIDATE=$(kubectl get dgdr minimax-planner-search -n inference \
-  -o jsonpath='{.status.recommendation.selectedCandidateRef.name}')
+CANDIDATE=$(kubectl get dynamographdeploymentrun "$RUN" -n inference \
+  -o jsonpath='{.status.candidateRefs[0].name}')
 
 kubectl get dgdc "$CANDIDATE" -n inference -o yaml
 ```
 
-A candidate contains a complete DGD spec. Its status reports simulation results rather than
-deployment health:
+A candidate spec contains the DGD fields flatly plus immutable, unstructured `parameters`. The
+parameters identify resolved evaluation inputs that are not part of the deployable DGD. The status
+reports simulation results rather than deployment health:
 
 ```yaml
 apiVersion: nvidia.com/v1beta2
 kind: DynamoGraphDeploymentCandidate
 metadata:
-  name: minimax-planner-search-g4-0
+  name: minimax-planner-search-g4-4b5c3f31
   ownerReferences:
     - apiVersion: nvidia.com/v1beta2
       kind: DynamoGraphDeploymentRun
@@ -358,7 +384,10 @@ metadata:
     nvidia.com/dgdr-run-uid: ddc22b7a-6557-4a3e-a1d7-a32da8849694
     nvidia.com/dgdr-generation: "4"
     nvidia.com/dgdr-input-hash: 7d3a9c18e24f9468b307c21f03c4a662
-spec: # exactly DynamoGraphDeployment.spec
+    nvidia.com/dgdc-point-hash: 4b5c3f31ef237481
+    nvidia.com/dgd-spec-hash: 8f2a0ab82d09d50d
+spec: # flat DGD fields plus DGDC-only parameters
+  backendFramework: vllm
   components:
     - name: Frontend
       type: frontend
@@ -368,52 +397,83 @@ spec: # exactly DynamoGraphDeployment.spec
           containers:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
-    - name: VllmDecodeWorker
-      type: worker
+              env:
+                - name: DYN_ROUTER_MODE
+                  value: kv
+                - name: DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT
+                  value: "1.0"
+                - name: DYN_ROUTER_PREFILL_LOAD_SCALE
+                  value: "4.0"
+                - name: DYN_ROUTER_TEMPERATURE
+                  value: "0.0"
+    - name: Planner
+      type: planner
       replicas: 1
       podTemplate:
         spec:
           containers:
             - name: main
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
+              command: [python3, -m, dynamo.planner]
+              args:
+                - --config
+                - '{"environment":"kubernetes","backend":"vllm","optimization_target":"sla","enable_throughput_scaling":false,"enable_load_scaling":true,"load_adjustment_interval_seconds":180,"load_scaling_down_sensitivity":80,"load_min_observations":5}'
+    - name: VllmWorker
+      type: worker
+      replicas: 2
+      podTemplate:
+        spec:
+          containers:
+            - name: main
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
-              command:
-                - python3
-                - -m
-                - dynamo.vllm
+              command: [python3, -m, dynamo.vllm]
+              args:
                 - --model
                 - MiniMaxAI/MiniMax-M2.5
+                - --tensor-parallel-size
+                - "4"
                 - --trust-remote-code
               resources:
                 limits:
-                  nvidia.com/gpu: "8"
-status:
+                  nvidia.com/gpu: "4"
+  parameters: # unstructured, resolved values rather than search ranges
+    workload:
+      kv_load_ratio: 0.5
+status: # candidate-specific, not DGD deployment status
   rank: 1
   conditions:
     - type: Evaluated
       status: "True"
-      reason: ReplayCompleted
+      reason: CandidateMaterialized
   experimental: # unstructured
+    score: 87.7
+    used_gpus: 8
+    backend_version: "0.11.0"
     metrics:
-      averageGpus: 8.3
-      goodputPerGpuTokensPerSecond: 87.7
-      meanTtftMs: 1840
-      meanItlMs: 42
-    replayReportRef:
-      configMap:
-        name: minimax-planner-search-g4-0
-        key: report.json
+      output_throughput_tok_s: 1200.0
+      mean_ttft_ms: 1840.0
+      mean_tpot_ms: 42.0
+      goodput_output_throughput_tok_s: 727.9
+      gpu_hours: 0.83
+      duration_ms: 360000.0
 ```
 
 The `experimental` status object is unstructured. Treat its metrics and diagnostics as specific to
 the Sweeper version that produced the candidate.
 
+The `nvidia.com/dgdc-point-hash` label covers the materialized DGD fields and `parameters`. The
+`nvidia.com/dgd-spec-hash` label covers only the deployable DGD fields. Multiple evaluated points
+can therefore share a DGD-spec hash when Sweeper evaluates the same deployment under different
+resolved workload parameters.
+
 ## Create a DGD from a Candidate
 
-Copy a candidate's `spec` into a DGD after the owning DGDR reports `Completed=True`:
+Create a DGD after the owning DGDRRun reports `Completed=True`.
 
 The Search UI shows the selected DGDC as syntax-highlighted YAML. Enter a name, review the
-materialized spec, and select **Create DGD**. The UI copies the candidate `spec` into a new,
-independent DGD. It does not modify or delete an existing deployment.
+materialized spec, and select **Create DGD**. The UI copies the flat DGD fields, omits the
+DGDC-only `parameters`, and creates an independent DGD. It does not modify or delete an existing
+deployment.
 
 The deployment action does not modify an Ingress, LoadBalancer, or HTTPRoute and does not shift
 traffic between two DGDs. After creating a new DGD, wait until it is ready and update external
@@ -422,12 +482,12 @@ routing separately.
 ![Mock dialog showing syntax-highlighted DGDC YAML, a new DGD name and namespace, unchanged traffic routing, and a Create DGD button](../../../assets/img/dgdr-candidate-create-dgd-ui-mock.svg)
 
 ```bash
-kubectl get dgdc minimax-planner-search-g4-0 -n inference -o json \
+kubectl get dgdc minimax-planner-search-g4-4b5c3f31 -n inference -o json \
   | jq '{
       apiVersion: "nvidia.com/v1beta1",
       kind: "DynamoGraphDeployment",
       metadata: {name: "minimax-production-g4", namespace: "inference"},
-      spec: .spec
+      spec: (.spec | del(.parameters))
     }' \
   | kubectl create -f -
 ```
@@ -503,15 +563,13 @@ spec:
           - name: Frontend
             podTemplate:
               spec:
-                containers:
-                  - name: main
-                    env:
-                      - name: DYN_ROUTER_MODE
-                        value: kv
+                nodeSelector:
+                  workload.nvidia.com/class: inference
 ```
 
 Use `spec.overrides.profilingJob` for Kubernetes Job settings such as tolerations, node selectors,
-and retry limits.
+and garbage-collection TTL. The MVP requires `backoffLimit: 0` because it does not resume a failed
+Sweeper process.
 
 ## Work with v1beta1 Clients
 
@@ -548,7 +606,7 @@ kubectl delete dgd minimax-production-g4 -n inference
 - [Auto Deploy with DGDR v1beta1](auto-deploy-with-dgdr.md)
 - [Continuous Profiling](continuous-profiling.md)
 - [DynamoGraphDeployment Reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx)
-- [AI Simulate Sweeper Overview](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md)
+- [AI Simulate's Sweeper Overview](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/overview.md)
 - [Sweeper Configuration](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/configuration.md)
 - [Sweeper Traffic](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/traffic.md)
 - [Sweeper Optimization Goals](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/sweeper-experimental/optimization-goals.md)
