@@ -138,7 +138,6 @@ jobs:
       - vllm-dev-build
       - vllm-test
       - vllm-multi-gpu-test
-      - vllm-h100-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-dev-build
@@ -767,33 +766,12 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and vllm and gpu_0
-      # H100-only cases run on the temporary vllm-h100-test lane below.
-      gpu_test_markers: pre_merge and vllm and gpu_1 and not h100
+      gpu_test_markers: pre_merge and vllm and gpu_1
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
-    secrets: inherit
-
-  # TEMPORARY (#13492): H100 lane on PR CI to validate the MinIO LoRA staging fix.
-  # Remove this job and restore the two LoRA tests' markers after they pass.
-  vllm-h100-test:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: vllm
-      test_type: H100 Test
-      # 2x 80 GiB H100: covers the one-worker and two-worker LoRA tests.
-      amd_runner: aws-dev-02-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64"]'
-      run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and h100 and (gpu_1 or gpu_2)
-      gpu_test_timeout_minutes: 60
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -813,8 +791,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      # H100-only cases run on the temporary vllm-h100-test lane above.
-      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4) and not h100
+      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -1945,7 +1922,6 @@ jobs:
       - planner-copy-to-acr
       - vllm-copy-to-acr
       - vllm-multi-gpu-test
-      - vllm-h100-test
       - vllm-efa-build
       - sglang-copy-to-acr
       - sglang-multi-gpu-test
@@ -1984,7 +1960,6 @@ jobs:
       - vllm-build
       - vllm-test
       - vllm-multi-gpu-test
-      - vllm-h100-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-test
