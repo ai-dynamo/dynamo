@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../common/launch_utils.sh"
 trap dynamo_exit_trap EXIT
 
 MODEL="${DYN_MODEL:-Qwen/Qwen3-0.6B}"
@@ -20,7 +20,7 @@ export DYN_EVENT_PLANE="${DYN_EVENT_PLANE:-zmq}"
 export DYN_REQUEST_PLANE="${DYN_REQUEST_PLANE:-tcp}"
 
 print_launch_banner --max-tokens 1 \
-    "Launching Dynamo with a dedicated orchestrator worker" \
+    "Launching the Hello World workflow" \
     "hello-world" \
     "$HTTP_PORT" \
     "Orchestrator: dyn://workflow-hello-world.orchestrator.generate" \
@@ -31,16 +31,16 @@ python3 -m dynamo.frontend \
     --http-port "$HTTP_PORT" &
 
 DYN_SYSTEM_PORT="$HELLO_SYSTEM_PORT" \
-python3 -m examples.custom_backend.workflow_hello_world.dynamo.worker hello &
+python3 -m examples.custom_backend.workflow_hello_world.stage_worker hello &
 
 DYN_SYSTEM_PORT="$WORLD_SYSTEM_PORT" \
-python3 -m examples.custom_backend.workflow_hello_world.dynamo.worker world &
+python3 -m examples.custom_backend.workflow_hello_world.stage_worker world &
 
 DYN_SYSTEM_PORT="$MERGE_SYSTEM_PORT" \
-python3 -m examples.custom_backend.workflow_hello_world.dynamo.worker merge &
+python3 -m examples.custom_backend.workflow_hello_world.stage_worker merge &
 
 DYN_MODEL="$MODEL" \
 DYN_SYSTEM_PORT="$ORCHESTRATOR_SYSTEM_PORT" \
-python3 -m examples.custom_backend.workflow_hello_world.dynamo_orchestrator.worker &
+python3 -m examples.custom_backend.workflow_hello_world.orchestrator_worker &
 
 wait_any_exit

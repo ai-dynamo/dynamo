@@ -13,8 +13,8 @@ from dynamo.workflow import (
     WorkflowOrchestrator,
     WorkflowTokenEngine,
 )
-from examples.custom_backend.workflow_hello_world.dynamo.stages import STAGES
-from examples.custom_backend.workflow_hello_world.dynamo.workflow import (
+from examples.custom_backend.workflow_hello_world.stages import STAGES
+from examples.custom_backend.workflow_hello_world.workflow import (
     ENDPOINTS,
     compile_remote_workflow,
 )

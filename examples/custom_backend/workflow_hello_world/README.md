@@ -3,92 +3,39 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Hello World Workflow Comparison
+# Hello World Workflow
 
-This comparison accepts an OpenAI chat-completions request, ignores its content,
-and returns `Hello, World!`. All implementations reuse the same stage behavior:
+This example serves a declarative workflow through a discovered orchestrator
+worker. It accepts an OpenAI chat-completions request, ignores its content, and
+returns `Hello, World!`:
 
 - `HelloStage` produces `Hello, `.
 - `WorldStage` produces `World!`.
 - `MergeStage` concatenates both values.
 
-The implementations differ in who owns orchestration.
-
-## Bespoke Orchestration
-
-The bespoke gateway owns the OpenAI endpoint, fixed worker URLs, concurrent
-fan-out, timeout and error handling, response validation, and response shaping.
-It calls the Hello and World HTTP workers concurrently, then runs the merge stage
-inline.
+The frontend remains generic. It discovers the orchestrator as an ordinary
+model worker and can continue serving other discovered models. The orchestrator
+owns dependency scheduling, fan-out, joins, cancellation, and stage-result
+validation; all three stages run behind discovery-backed remote endpoints.
 
 ```text
-OpenAI client -> aiohttp gateway --+--> Hello HTTP worker --+
-                                   +--> World HTTP worker --+--> inline merge
+OpenAI client -> generic Dynamo frontend -> orchestrator worker --+--> remote Hello --+
+                                                                +--> remote World --+--> remote Merge
 ```
 
-Run the gateway and both workers:
+## Run
+
+Start the frontend, orchestrator, and three stage workers:
 
 ```bash
-examples/custom_backend/workflow_hello_world/bespoke/launch.sh
+examples/custom_backend/workflow_hello_world/launch.sh
 ```
 
-## Dynamo Workflow Embedded in the Frontend
-
-The Dynamo implementation declares the graph and binds all three stages to
-discovery-backed remote endpoints. The existing frontend owns the OpenAI
-protocol, while `WorkflowOrchestrator` owns dependency scheduling, fan-out,
-join, cancellation, and result validation.
-
-```text
-OpenAI client -> Dynamo frontend --+--> remote Hello --+
-                                   +--> remote World --+--> remote Merge
-```
-
-Run the frontend and three workers:
+The frontend listens on port 8000 by default. Send a request with:
 
 ```bash
-examples/custom_backend/workflow_hello_world/dynamo/launch.sh
+python3 -m examples.custom_backend.workflow_hello_world.client
 ```
 
-## Dynamo with a Dedicated Orchestrator Worker
-
-This implementation places the same declarative `WorkflowOrchestrator` in a
-discovered worker at `dyn://workflow-hello-world.orchestrator.generate`. The
-existing frontend starts without a workflow provider or explicit model
-configuration, discovers the orchestrator as a normal model worker, and sends it
-the preprocessed request. The orchestrator runs Hello and World concurrently,
-then calls Merge; all three stages remain remote.
-
-```text
-OpenAI client -> Dynamo frontend -> orchestrator worker --+--> remote Hello --+
-                                                         +--> remote World --+--> remote Merge
-```
-
-Run the frontend, orchestrator, and three stage workers:
-
-```bash
-examples/custom_backend/workflow_hello_world/dynamo_orchestrator/launch.sh
-```
-
-## Send a Request
-
-All launchers listen on port 8000 by default. Send the same request to any
-implementation:
-
-```bash
-python3 -m examples.custom_backend.workflow_hello_world.common.client
-```
-
-Override `--base-url` when the selected launcher uses another port.
-
-## Responsibility Comparison
-
-| Concern | Bespoke HTTP | Embedded Dynamo workflow | Orchestrator worker |
-| --- | --- | --- | --- |
-| OpenAI request and response handling | Gateway code | Existing frontend | Existing frontend |
-| Frontend model configuration | Gateway code | Explicit frontend flags | Discovered orchestrator model card |
-| Worker location | Configured URLs | Three stage endpoint IDs | One model plus three stage endpoint IDs |
-| Fan-out and join | Gateway tasks | Frontend graph scheduler | Worker graph scheduler |
-| Merge placement | Inline gateway code | Remote binding | Remote binding |
-| Cancellation and stage failure | Gateway code | Frontend workflow attempt | Worker workflow attempt |
-| Stage input and output checks | HTTP adapter code | Stage contracts | Stage contracts |
+Set `DYN_HTTP_PORT` to change the frontend port and pass the matching
+`--base-url` to the client.
