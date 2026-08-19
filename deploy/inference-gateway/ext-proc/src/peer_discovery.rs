@@ -28,6 +28,14 @@ type Store = kube::runtime::reflector::Store<EndpointSlice>;
 /// Resolve the required aggregated replica-sync port from the peer Service's
 /// EndpointSlices. Every slice must expose the same named `replica-agg` port;
 /// missing or inconsistent ports fail EPP startup before replica sync is built.
+/// How many times to retry the EndpointSlice LIST when the observed slice is
+/// transiently incomplete (e.g. every pod restarting at once). The window is
+/// short (hundreds of ms), so a few bounded retries smooth it out without
+/// masking a genuine misconfiguration, which still fails after retries
+/// exhaust.
+const PORT_RESOLUTION_RETRIES: usize = 5;
+const PORT_RESOLUTION_INITIAL_BACKOFF_MS: u64 = 100;
+
 pub async fn resolve_replica_sync_port(namespace: &str, service_name: &str) -> Result<u16> {
     use kube::{Api, Client, api::ListParams};
 
@@ -35,19 +43,38 @@ pub async fn resolve_replica_sync_port(namespace: &str, service_name: &str) -> R
         .await
         .context("building Kubernetes client for EPP peer port resolution")?;
     let slices: Api<EndpointSlice> = Api::namespaced(client, namespace);
-    let list = slices
-        .list(&ListParams::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}")))
-        .await
-        .with_context(|| {
-            format!("listing EndpointSlices for EPP peer Service {namespace}/{service_name}")
-        })?;
 
-    replica_sync_port(list.items.iter()).with_context(|| {
-        format!(
-            "resolving named port {REPLICA_AGG_PORT_NAME:?} for EPP peer Service \
-             {namespace}/{service_name}"
-        )
-    })
+    let mut backoff = std::time::Duration::from_millis(PORT_RESOLUTION_INITIAL_BACKOFF_MS);
+    for attempt in 0..PORT_RESOLUTION_RETRIES {
+        let list = slices
+            .list(&ListParams::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}")))
+            .await
+            .with_context(|| {
+                format!("listing EndpointSlices for EPP peer Service {namespace}/{service_name}")
+            })?;
+        match replica_sync_port(list.items.iter()) {
+            Ok(port) => return Ok(port),
+            Err(error) if attempt + 1 < PORT_RESOLUTION_RETRIES => {
+                tracing::warn!(
+                    %error,
+                    attempt,
+                    backoff_ms = backoff.as_millis(),
+                    "EPP peer port resolution saw transient EndpointSlice state; retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = backoff.saturating_mul(2);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "resolving named port {REPLICA_AGG_PORT_NAME:?} for EPP peer Service \
+                         {namespace}/{service_name}"
+                    )
+                });
+            }
+        }
+    }
+    unreachable!("retry loop always returns or exhausts")
 }
 
 fn replica_sync_port<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Result<u16> {
