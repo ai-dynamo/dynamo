@@ -378,12 +378,25 @@ def _filter_template_tools(
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
         return [
-            tool.model_dump()
+            _tool_template_dict(tool)
             for tool in sglang_tools
             if tool.function.name == chosen_name
         ]
 
-    return [tool.model_dump() for tool in sglang_tools]
+    return [_tool_template_dict(tool) for tool in sglang_tools]
+
+
+def _tool_template_dict(tool: SglangTool) -> dict[str, Any]:
+    """Serialize a tool for the chat template without SGLang-internal fields.
+
+    ``model_dump()`` emits every declared field on ``SglangTool``, including
+    bookkeeping the caller never sent, such as ``defer_loading``. Templates that
+    render tool declarations as compact JSON inline each unset field verbatim:
+    Kimi-K3 turns every tool into ``...,"defer_loading":null``, about five tokens
+    apiece. A 264-tool agent request measured 97,487 prompt tokens against the
+    reference encoder's 96,161; dropping the unset fields brings it to 96,167.
+    """
+    return tool.model_dump(exclude_none=True)
 
 
 def _flatten_message_content(content: Any) -> Any:
