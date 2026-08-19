@@ -79,3 +79,31 @@ def test_patch_model_runner_leaves_baseline_unchanged_without_preload(monkeypatc
 
     assert runner.alloc_memory_pool() == 10.0
     assert runner.pre_model_load_memory == 10.0
+
+
+class _FrozenServerArgs(SimpleNamespace):
+    """SGLang >= 0.5.17 rejects assignment on a resolved ``ServerArgs``."""
+
+    def __setattr__(self, name, value):
+        raise AttributeError(
+            f"server_args.{name} assigned after resolution; server_args is read-only"
+        )
+
+
+def test_setup_gms_does_not_write_to_resolved_server_args():
+    """``--load-format gms`` runs after resolution, so setup must not assign."""
+    from gpu_memory_service.integrations.sglang import setup_gms
+
+    server_args = _FrozenServerArgs(
+        enable_weights_cpu_backup=False,
+        enable_draft_weights_cpu_backup=False,
+        model_loader_extra_config=None,
+        enable_memory_saver=False,
+        load_format="gms",
+    )
+
+    loader = setup_gms(server_args)
+
+    assert loader is not None
+    assert server_args.enable_memory_saver is False
+    assert server_args.load_format == "gms"

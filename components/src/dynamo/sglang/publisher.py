@@ -24,6 +24,7 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
+from dynamo.sglang._compat import set_resolved_server_args
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import (
@@ -49,9 +50,13 @@ def set_forward_pass_metrics_worker_id(
 
     import tempfile
 
-    server_args.forward_pass_metrics_worker_id = str(generate_endpoint.connection_id())
     ipc_path = tempfile.NamedTemporaryFile(delete=False).name
-    server_args.forward_pass_metrics_ipc_name = f"ipc://{ipc_path}"
+    set_resolved_server_args(
+        server_args,
+        "dynamo_forward_pass_metrics",
+        forward_pass_metrics_worker_id=str(generate_endpoint.connection_id()),
+        forward_pass_metrics_ipc_name=f"ipc://{ipc_path}",
+    )
 
 
 async def _resolve_multinode_leader_worker_id(

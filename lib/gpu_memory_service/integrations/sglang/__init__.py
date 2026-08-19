@@ -7,7 +7,9 @@ Usage:
     from gpu_memory_service.integrations.sglang import setup_gms
 
     if server_args.load_format == "gms":
-        server_args.load_format = setup_gms(server_args)
+        server_args.override(
+            "gms", load_format=setup_gms(server_args), enable_memory_saver=True
+        )
 """
 
 from __future__ import annotations
@@ -41,6 +43,11 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
     Args:
         server_args: SGLang ServerArgs instance.
 
+    The caller applies the result, and must also enable memory saver: GMS
+    releases GPU memory through SGLang's memory-saver path. This function does
+    not touch ``server_args`` because SGLang freezes it once resolved, and this
+    package deliberately does not depend on Dynamo's SGLang compatibility layer.
+
     Returns:
         GMSModelLoader class to use as load_format.
 
@@ -57,7 +64,6 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
             "Cannot use --enable-draft-weights-cpu-backup with --load-format gms."
         )
 
-    server_args.enable_memory_saver = True
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
     # before patches fire.
     global _gms_lock_mode

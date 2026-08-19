@@ -173,8 +173,34 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
     return kwargs
 
 
+def set_resolved_server_args(server_args: Any, source: str, **fields: Any) -> None:
+    """Mutate an already-resolved ``ServerArgs`` the way SGLang sanctions.
+
+    Configuration known before resolution belongs on ``parsed_args``, ahead of
+    ``ServerArgs.from_cli_args`` -- see ``args.py``. This is for the values that
+    only exist afterwards: an endpoint identity, a temp IPC path, a weight
+    version from a live request.
+
+    SGLang >= 0.5.16 provides ``ServerArgs.override(source, **fields)`` for that
+    and rejects bare assignment on a resolved instance, opt-in via
+    ``SGLANG_STRICT_CONFIG_MUTATION`` in 0.5.16 and unconditionally from 0.5.17:
+
+        AttributeError: server_args.<field> assigned after resolution
+
+    Fallback covers 0.5.15, which has neither the guard nor ``override``, and is
+    removable once 0.5.15 leaves the N/N-1 support window.
+    """
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override(source, **fields)
+        return
+    for name, value in fields.items():
+        setattr(server_args, name, value)
+
+
 __all__ = [
     "ensure_sglang_tensor_image_size",
+    "set_resolved_server_args",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
     "require_reasoning_kwargs",

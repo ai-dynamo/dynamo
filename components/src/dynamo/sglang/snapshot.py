@@ -16,8 +16,14 @@ from dynamo.common.snapshot.lifecycle import (
     SnapshotConfig,
     configure_snapshot_capture_env,
 )
+from dynamo.sglang._compat import set_resolved_server_args
 
 from .pause import SGLangEnginePauseController
+
+try:
+    from gpu_memory_service.integrations.sglang import is_gms_active
+except ImportError:  # GMS is an optional dependency.
+    is_gms_active = None
 
 logger = logging.getLogger(__name__)
 
@@ -138,15 +144,16 @@ async def prepare_snapshot_engine(
     # Enable memory_saver so GPU memory can be released for CRIU.
     # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
     # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
-    server_args.enable_memory_saver = True
-    try:
-        from gpu_memory_service.integrations.sglang import is_gms_active
-
-        _using_gms = is_gms_active()
-    except ImportError:
-        _using_gms = False
+    set_resolved_server_args(
+        server_args, "dynamo_snapshot_memory_saver", enable_memory_saver=True
+    )
+    _using_gms = is_gms_active() if is_gms_active is not None else False
     if not _using_gms:
-        server_args.enable_weights_cpu_backup = True
+        set_resolved_server_args(
+            server_args,
+            "dynamo_snapshot_weights_cpu_backup",
+            enable_weights_cpu_backup=True,
+        )
 
     start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
