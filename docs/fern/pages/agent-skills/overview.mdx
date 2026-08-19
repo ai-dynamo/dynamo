@@ -28,8 +28,8 @@ deployment and these guide the work. Sources live under
 An end-to-end optimization loop for tuning a Dynamo deployment against a stated goal. The
 agent captures an immutable baseline and workload contract, deploys and smoke-tests it,
 benchmarks with AIPerf, proposes one evidence-backed change at a time, reviews each proposal
-before spending GPU time, and iterates within budgets you set (GPU-hours, wall clock, failed
-deploys — the agent asks if you don't state them). The final handoff includes the recommended
+before spending GPU time, and iterates within budgets you set (GPU-hours, wall clock, and failed
+deploys; the agent asks if you don't state them). The final handoff includes the recommended
 configuration, reproduction commands, limitations, and preserved raw evidence.
 
 The workflow spine is documented in

@@ -43,7 +43,7 @@ tabs:
   agent-skills:
     display-name: Agent Skills
     icon: robot
-    skip-slug: true
+    slug: agent-skills
   developer-guide:
     display-name: Developer Guide
     icon: code
