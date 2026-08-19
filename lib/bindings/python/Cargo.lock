@@ -1813,6 +1813,7 @@ dependencies = [
  "futures-util",
  "galil-seiferas",
  "hf-hub 0.4.3",
+ "http-body-util",
  "image",
  "ipnet",
  "json-five",
