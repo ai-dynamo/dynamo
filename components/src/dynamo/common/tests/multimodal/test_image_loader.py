@@ -564,3 +564,126 @@ async def test_invalid_shared_cache_entry_is_deleted_and_refetched(monkeypatch) 
     client.delete.assert_awaited_once()
     origin_fetch.assert_awaited_once()
     client.set.assert_awaited_once()
+
+
+# --- Session-scoped image cache ---
+
+
+async def test_session_scoped_cache_partitions_local_and_shared_keys(
+    monkeypatch,
+) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = None
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(
+            cache_size=4,
+            url_policy=_permissive_policy(),
+            session_scoped_cache=True,
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-a"
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-b"
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-a"
+        )
+
+    assert origin_fetch.await_count == 2
+    assert client.get.await_count == 2
+    assert client.set.await_count == 2
+    assert (
+        client.get.await_args_list[0].args[0] != client.get.await_args_list[1].args[0]
+    )
+
+
+async def test_session_scoped_cache_partitions_inflight_dedup(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_ENABLED", "0")
+    origin_fetch = _mock_fetch_bytes(delay=0.05)
+    shared_loader = ImageLoader(
+        cache_size=4,
+        url_policy=_permissive_policy(),
+        session_scoped_cache=True,
+    )
+
+    with patch(_FETCH_BYTES_PATH, origin_fetch):
+        await asyncio.gather(
+            shared_loader.load_image(
+                "https://example.com/img.png", cache_scope="session-a"
+            ),
+            shared_loader.load_image(
+                "https://example.com/img.png", cache_scope="session-a"
+            ),
+            shared_loader.load_image(
+                "https://example.com/img.png", cache_scope="session-b"
+            ),
+        )
+
+    assert origin_fetch.await_count == 2
+
+
+async def test_session_scope_is_ignored_when_flag_is_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_ENABLED", "0")
+    origin_fetch = _mock_fetch_bytes()
+    shared_loader = ImageLoader(
+        cache_size=4,
+        url_policy=_permissive_policy(),
+        session_scoped_cache=False,
+    )
+
+    with patch(_FETCH_BYTES_PATH, origin_fetch):
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-a"
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-b"
+        )
+
+    origin_fetch.assert_awaited_once()
+
+
+async def test_session_scoped_cache_can_be_enabled_by_env(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_ENABLED", "0")
+    monkeypatch.setenv("DYN_MM_IMAGE_CACHE_SESSION_SCOPED", "1")
+    origin_fetch = _mock_fetch_bytes()
+    shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+
+    with patch(_FETCH_BYTES_PATH, origin_fetch):
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-a"
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-b"
+        )
+
+    assert origin_fetch.await_count == 2
+
+
+async def test_session_scoped_cache_bypasses_when_scope_is_missing(monkeypatch) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(
+            cache_size=4,
+            url_policy=_permissive_policy(),
+            session_scoped_cache=True,
+        )
+        await shared_loader.load_image("https://example.com/img.png")
+        await shared_loader.load_image("https://example.com/img.png")
+
+    assert origin_fetch.await_count == 2
+    assert shared_loader.cache_entries == 0
+    client.get.assert_not_awaited()
+    client.set.assert_not_awaited()

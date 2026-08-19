@@ -99,11 +99,49 @@ async def test_extracts_mixed_url_data_url_and_decoded_media():
 
     assert result == {"image": image, "video": video, "audio": [audio_a, audio_b]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
     processor.video_loader.load_video_batch.assert_awaited_once_with(video_items, {})
     processor.audio_loader.load_audio_batch.assert_awaited_once_with(audio_items)
     processor.audio_loader.load_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_image_cache_uses_agent_session_scope():
+    processor = _processor()
+    image_items = [{"Url": "https://example.com/image.png"}]
+
+    await processor.extract_multimodal_data(
+        {
+            "agent_context": {"session_id": " session-42 "},
+            "multi_modal_data": {"image_url": image_items},
+        },
+        "request-1",
+        None,
+    )
+
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope="session-42", preserve_uuid_slots=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_cache_has_no_scope_for_malformed_agent_context():
+    processor = _processor()
+    image_items = [{"Url": "https://example.com/image.png"}]
+
+    await processor.extract_multimodal_data(
+        {
+            "agent_context": {"session_id": "   "},
+            "multi_modal_data": {"image_url": image_items},
+        },
+        "request-1",
+        None,
+    )
+
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
 
 
 @pytest.mark.asyncio
@@ -288,7 +326,7 @@ async def test_extracts_uuid_only_media_as_aligned_none_slots():
 
     assert result == {"image": [image, None]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
     processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
 
@@ -307,7 +345,7 @@ async def test_extracts_uuid_only_unified_vision_chunk_as_bare_none_slot():
 
     assert result == {"vision_chunk": [None]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
 
 
