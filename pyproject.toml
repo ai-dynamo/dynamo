@@ -309,6 +309,7 @@ markers = [
     "pre_merge: marks tests to run before merging",
     "post_merge: marks tests to run after merge",
     "parallel: marks tests that can run in parallel with pytest-xdist",
+    "gpu_parallel_exclusive: reserves a whole GPU for startup-sensitive tests in the custom GPU-parallel scheduler",
     "nightly: marks tests to run nightly",
     "skip_in_nightly: excludes a test from the nightly pipeline only (still runs in pre_merge/post_merge). Used via `not skip_in_nightly` in nightly-ci.yml marker filters",
     "frontend_api_surface_compliance: marks tests that validate Dynamo's HTTP API surface (Responses/Anthropic wire shape, tool-call routing) against upstream compliance harnesses",

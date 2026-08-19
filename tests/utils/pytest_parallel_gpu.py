@@ -61,6 +61,7 @@ class _TestEntry:
     requested_sglang_vram_gib: float | None = None
     requested_trtllm_kv_tokens: int | None = None
     requested_trtllm_vram_gib: float | None = None
+    gpu_parallel_exclusive: bool = False
     skip_reason: str | None = None
     w_id: int = 0
     assigned_gpu: int | None = None
@@ -96,6 +97,7 @@ class _TentativeGpu:
     budget: float
     free: float
     count: int
+    exclusive: bool
 
 
 @dataclass
@@ -107,6 +109,7 @@ class _GpuState:
     budget_multi: float
     budget_used: float = 0.0
     running_count: int = 0
+    exclusive_running: bool = False
 
 
 @dataclass
@@ -315,20 +318,27 @@ def _parse_cuda_visible(raw: str | None, available: list[dict]) -> list[int]:
     return indices
 
 
-def _priority_key(test: _TestEntry) -> tuple[bool, float, float]:
+def _priority_key(test: _TestEntry) -> tuple[bool, bool, float, float]:
     """Scheduling-priority sort key (use with ``reverse=True``).
 
     Ordered so that, highest priority first:
-      1. VRAM tests (``profiled_gib > 0``) come before zero-VRAM fillers, so the
+      1. GPU-exclusive tests start first so they can claim and drain a GPU
+         without starving behind regular packed workloads.
+      2. VRAM tests (``profiled_gib > 0``) come before zero-VRAM fillers, so the
          memory-bound tests own the schedule and fillers only mop up spare slots.
-      2. Longest ``est_duration`` (= timeout/3) first (LPT) to minimize makespan.
-      3. Largest VRAM first, so a big test anchors an empty GPU at the full
+      3. Longest ``est_duration`` (= timeout/3) first (LPT) to minimize makespan.
+      4. Largest VRAM first, so a big test anchors an empty GPU at the full
          single-proc cap and smaller tests pack alongside it.
 
     Defined as a module function so ``run_parallel`` and its tests share one
     definition and can't drift.
     """
-    return (test.profiled_gib > 0, test.est_duration, test.profiled_gib)
+    return (
+        test.gpu_parallel_exclusive,
+        test.profiled_gib > 0,
+        test.est_duration,
+        test.profiled_gib,
+    )
 
 
 def _select_launches(
@@ -342,12 +352,16 @@ def _select_launches(
 
     Pure (no NVML / no subprocesses): the caller passes the live per-GPU budget
     state and the actual free VRAM (from nvidia-smi). ``pending`` must already be
-    in scheduling-priority order (VRAM tests by longest est_duration / largest
-    VRAM first, zero-VRAM fillers last -- see the sort in ``run_parallel``).
+    in scheduling-priority order (GPU-exclusive tests first, then VRAM tests by
+    longest est_duration / largest VRAM, with zero-VRAM fillers last -- see the
+    sort in ``run_parallel``).
 
     Returns a list of ``(pending_index, gpu_index)`` to launch now, honoring:
 
       * ``num_slots`` -- global cap on concurrently running subprocesses.
+      * GPU exclusivity -- a test marked ``gpu_parallel_exclusive`` runs only on
+        an idle GPU, blocks all backfill on that GPU, and reserves one busy GPU
+        to drain when none is idle.
       * Per-GPU VRAM budget with two independent gates (same as before): a test
         fits only if BOTH the reserved-budget sum AND the actual nvidia-smi
         usage leave room under the cap. The cap is the full card for the first
@@ -361,14 +375,15 @@ def _select_launches(
         tests may still backfill that GPU, but only up to ``cap - required`` so
         that once the current occupants free, the reserved test is guaranteed to
         fit (the backfill we add now can never sum past the space it needs).
-        Zero-VRAM fillers bypass the budget gates entirely (they allocate no
-        memory) so transient memory pressure can't strand an otherwise-free slot.
+        Zero-VRAM fillers bypass the normal budget gates (they allocate no
+        memory), but still honor exclusive GPUs and drain reservations.
     """
     tentative = {
         gi: _TentativeGpu(
             budget=gs.budget_used,
             free=actual_free[gi],
             count=gs.running_count,
+            exclusive=gs.exclusive_running,
         )
         for gi, gs in gpu_states.items()
     }
@@ -377,6 +392,7 @@ def _select_launches(
     # capped at cap - required so the reserved test still fits once occupants free.
     reserved_req: dict[int, float] = {}
     backfill_added: dict[int, float] = {}
+    exclusive_reserved: set[int] = set()
     to_launch: list[tuple[int, int]] = []
 
     def _cap(gi: int) -> float:
@@ -389,10 +405,59 @@ def _select_launches(
         if running_count + len(to_launch) >= num_slots:
             break
 
-        # Zero-VRAM filler: no budget impact, just needs a free slot. Place on
-        # the least-loaded GPU for balance; never reserves and is never blocked.
+        if test.gpu_parallel_exclusive:
+            # Exclusive tests may start only on a completely idle GPU. Once
+            # selected, mark the tentative GPU exclusive so nothing else in
+            # this scheduling pass can be packed beside it.
+            candidates = []
+            for gi, gs in gpu_states.items():
+                ts = tentative[gi]
+                actual_used = gs.total_gib - ts.free
+                if (
+                    ts.count == 0
+                    and not ts.exclusive
+                    and gi not in reserved_req
+                    and gi not in exclusive_reserved
+                    and actual_used + test.profiled_gib <= gs.total_gib
+                ):
+                    candidates.append(gi)
+            if candidates:
+                gi = max(candidates, key=lambda g: tentative[g].free)
+                to_launch.append((idx, gi))
+                tentative[gi].budget += test.profiled_gib
+                tentative[gi].free -= test.profiled_gib
+                tentative[gi].count += 1
+                tentative[gi].exclusive = True
+                continue
+
+            # No idle GPU: reserve the least-loaded available GPU so regular
+            # backfill cannot keep the exclusive test waiting indefinitely.
+            drain_candidates = [
+                gi
+                for gi in gpu_states
+                if not tentative[gi].exclusive
+                and gi not in reserved_req
+                and gi not in exclusive_reserved
+            ]
+            if drain_candidates:
+                gi = min(
+                    drain_candidates,
+                    key=lambda g: (tentative[g].count, tentative[g].budget),
+                )
+                exclusive_reserved.add(gi)
+            continue
+
+        # Zero-VRAM filler: no budget impact, just needs a non-exclusive slot.
+        # Place on the least-loaded eligible GPU for balance.
         if test.profiled_gib <= 0:
-            gi = min(gpu_states, key=lambda g: tentative[g].count)
+            candidates = [
+                gi
+                for gi in gpu_states
+                if not tentative[gi].exclusive and gi not in exclusive_reserved
+            ]
+            if not candidates:
+                continue
+            gi = min(candidates, key=lambda g: tentative[g].count)
             to_launch.append((idx, gi))
             tentative[gi].count += 1
             continue
@@ -403,6 +468,8 @@ def _select_launches(
         best_avail = -1.0
         for gi, gs in gpu_states.items():
             ts = tentative[gi]
+            if ts.exclusive or gi in exclusive_reserved:
+                continue
             cap = _cap(gi)
             avail = cap - ts.budget
             if avail < test.profiled_gib:
@@ -433,7 +500,11 @@ def _select_launches(
         cand: int | None = None
         cand_avail = -1.0
         for gi in gpu_states:
-            if gi in reserved_req:
+            if (
+                tentative[gi].exclusive
+                or gi in reserved_req
+                or gi in exclusive_reserved
+            ):
                 continue
             a = _cap(gi) - tentative[gi].budget
             if a > cand_avail:
@@ -517,6 +588,7 @@ def run_parallel(
                 requested_sglang_vram_gib=m.get("requested_sglang_vram_gib"),
                 requested_trtllm_kv_tokens=m.get("requested_trtllm_kv_tokens"),
                 requested_trtllm_vram_gib=m.get("requested_trtllm_vram_gib"),
+                gpu_parallel_exclusive=m.get("gpu_parallel_exclusive", False),
                 skip_reason=m.get("skip_reason"),
             )
         )
@@ -527,12 +599,13 @@ def run_parallel(
     tests = [t for t in tests if t.skip_reason is None]
 
     # Scheduling priority (highest first):
-    #   1. VRAM tests (profiled_gib > 0) before zero-VRAM fillers, so the
+    #   1. GPU-exclusive tests first so they can claim and drain a GPU.
+    #   2. VRAM tests (profiled_gib > 0) before zero-VRAM fillers, so the
     #      memory-bound tests own the schedule; fillers only mop up spare slots
     #      (they never consume the GPU budget, so they must not crowd a VRAM
     #      test out of a concurrency slot).
-    #   2. Longest est_duration (= timeout/3) first (LPT) to minimize makespan.
-    #   3. Largest VRAM first, so a big test anchors an empty GPU at the full
+    #   3. Longest est_duration (= timeout/3) first (LPT) to minimize makespan.
+    #   4. Largest VRAM first, so a big test anchors an empty GPU at the full
     #      single-proc cap and smaller tests pack into the remaining budget
     #      alongside it instead of the big test running alone on the tail.
     tests.sort(key=_priority_key, reverse=True)
@@ -618,11 +691,12 @@ def run_parallel(
 
     _print()
     for test in tests:
+        exclusive_str = ", gpu_exclusive" if test.gpu_parallel_exclusive else ""
         _print(
             f"[w{test.w_id}] {test.name}  "
             f"profiled={test.profiled_gib:.1f} GiB, "
             f"{_fmt_req(test)}, "
-            f"timeout={int(test.timeout)}s"
+            f"timeout={int(test.timeout)}s{exclusive_str}"
         )
     if over_budget:
         _print()
@@ -798,6 +872,8 @@ def run_parallel(
                         if gi is not None:
                             gpu_states[gi].budget_used -= test.profiled_gib
                             gpu_states[gi].running_count -= 1
+                            if test.gpu_parallel_exclusive:
+                                gpu_states[gi].exclusive_running = False
                         del running[w_id]
                         test.assigned_gpu = None
                         pending.insert(0, test)
@@ -844,6 +920,8 @@ def run_parallel(
                 if gi is not None:
                     gpu_states[gi].budget_used -= test.profiled_gib
                     gpu_states[gi].running_count -= 1
+                    if test.gpu_parallel_exclusive:
+                        gpu_states[gi].exclusive_running = False
                 completed.append(
                     _CompletedTest(
                         test=test,
@@ -912,6 +990,8 @@ def run_parallel(
 
                 gpu_states[gi].budget_used += entry.profiled_gib
                 gpu_states[gi].running_count += 1
+                if entry.gpu_parallel_exclusive:
+                    gpu_states[gi].exclusive_running = True
                 run_info = _launch_test(entry, env_base)
                 running[w_id] = run_info
 
@@ -919,10 +999,13 @@ def run_parallel(
                     last_vllm_launch[gi] = time.monotonic()
 
                 retry_str = f" (retry {entry.retries})" if entry.retries else ""
+                exclusive_str = (
+                    ", gpu_exclusive" if entry.gpu_parallel_exclusive else ""
+                )
                 _print(
                     f"[w{w_id}] {entry.name} "
                     f"(GPU{gi}, profiled={entry.profiled_gib:.1f} GiB, "
-                    f"{_fmt_req(entry)}) RUNNING{retry_str}"
+                    f"{_fmt_req(entry)}{exclusive_str}) RUNNING{retry_str}"
                 )
 
                 now = time.monotonic()
