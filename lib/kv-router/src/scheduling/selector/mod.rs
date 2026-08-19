@@ -12,8 +12,8 @@ pub use default::DefaultWorkerSelector;
 use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 pub use policy::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicy,
 };
 
 use default::{pick_default_worker, selection_weights};
@@ -212,13 +212,7 @@ impl<'a> WorkerSelectionInput<'a> {
             inputs,
             cache,
             load,
-            routing: if inputs.contains(WorkerInputs::ROUTING) {
-                WorkerRoutingInput {
-                    preferred_taint_multiplier,
-                }
-            } else {
-                WorkerRoutingInput::default()
-            },
+            preferred_taint_multiplier,
         }
     }
 }
@@ -382,7 +376,6 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 candidates,
                 cache_inputs,
                 load_inputs,
-                routing_inputs,
                 ..
             } = &mut *state;
             if candidates.is_empty() {
@@ -399,10 +392,6 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     !picker_inputs.contains(WorkerInputs::LOAD)
                         || load_inputs.len() == candidates.len()
                 );
-                debug_assert!(
-                    !picker_inputs.contains(WorkerInputs::ROUTING)
-                        || routing_inputs.len() == candidates.len()
-                );
                 let picker_input = WorkerInputView {
                     candidates,
                     cache: picker_inputs
@@ -411,9 +400,6 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     load: picker_inputs
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
-                    routing: picker_inputs
-                        .contains(WorkerInputs::ROUTING)
-                        .then_some(routing_inputs.as_slice()),
                 };
                 let row = picker.pick(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
