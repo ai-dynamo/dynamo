@@ -23,6 +23,16 @@ holds the operator, Helm charts, and gateway integration. Treat any change that 
 these boundaries as non-trivial. Dynamo also sits inside a wider `ai-dynamo` ecosystem of
 sibling repos (below) that it integrates with rather than vendors.
 
+## Agent Instruction Files
+
+- `AGENTS.md` is the canonical and only source of agent instructions at every
+  repository scope.
+- Every `AGENTS.md` must have a sibling `CLAUDE.md` containing exactly
+  `@AGENTS.md` so Claude loads the same instructions.
+- Do not put independent instructions in `CLAUDE.md`, and do not make
+  `AGENTS.md` a symlink to `CLAUDE.md`.
+- Add, move, or remove each `AGENTS.md` and `CLAUDE.md` pair together.
+
 ## Skills
 
 Skills live canonically in `.agents/skills/`; `skills/` and `.claude/skills/` are symlinks
