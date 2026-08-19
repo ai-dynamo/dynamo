@@ -21,6 +21,7 @@ const MM_HASHES_KEY: &str = "mm_hashes";
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 const MAX_PREPROCESSED_MM_FEATURES: usize = 64;
 const MAX_PREPROCESSED_MM_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PREPROCESSED_MM_HASH_BYTES: usize = 256;
 const PREPROCESSED_MM_ID_DOMAIN: &[u8] = b"vllm.grpc.preprocessed-mm.v1";
 
 #[derive(Debug, serde::Deserialize)]
@@ -213,7 +214,7 @@ fn validate_and_remove_vllm_tito(
     let Some(envelope) = extra.remove("vllm_tito") else {
         return Ok(VllmTitoProjection::default());
     };
-    let serde_json::Value::Object(envelope) = envelope else {
+    let serde_json::Value::Object(mut envelope) = envelope else {
         return Err(client::invalid_argument(
             "extra_args.vllm_tito must be a JSON object",
         ));
@@ -248,10 +249,10 @@ fn validate_and_remove_vllm_tito(
         ));
     }
     let features = envelope
-        .get("features")
+        .remove("features")
         .filter(|features| !features.is_null())
         .map(|features| {
-            serde_json::from_value::<VllmTitoFeatures>(features.clone()).map_err(|error| {
+            serde_json::from_value::<VllmTitoFeatures>(features).map_err(|error| {
                 client::invalid_argument(format!(
                     "extra_args.vllm_tito.features/kwargs_data is invalid: {error}"
                 ))
@@ -744,9 +745,9 @@ fn build_preprocessed_media(
         for (index, ((producer_hash, placeholder), encoded_kwargs)) in
             hashes.into_iter().zip(placeholders).zip(kwargs).enumerate()
         {
-            if producer_hash.is_empty() {
+            if producer_hash.is_empty() || producer_hash.len() > MAX_PREPROCESSED_MM_HASH_BYTES {
                 return Err(client::invalid_argument(format!(
-                    "extra_args.vllm_tito.features.mm_hashes.{modality}[{index}] must be non-empty"
+                    "extra_args.vllm_tito.features.mm_hashes.{modality}[{index}] must contain between 1 and {MAX_PREPROCESSED_MM_HASH_BYTES} bytes"
                 )));
             }
             if placeholder.length == 0 {
