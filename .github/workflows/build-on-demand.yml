@@ -30,6 +30,22 @@ on:
         description: 'Build and push SGLang snapshot placeholder FROM the SGLang runtime built in this run'
         type: boolean
         default: false
+      build_sglang_dump_placeholder:
+        description: 'Build dump-capable SGLang placeholder (cuda-checkpoint + VMM launch) FROM an existing ACR runtime; does not rebuild the runtime'
+        type: boolean
+        default: false
+      build_vllm_dump_placeholder:
+        description: 'Build dump-capable vLLM placeholder (cuda-checkpoint + VMM launch) FROM an existing ACR runtime; does not rebuild the runtime'
+        type: boolean
+        default: false
+      sglang_dump_placeholder_runtime_tag:
+        description: 'ACR tag of the SGLang runtime used as BASE_IMAGE for the dump placeholder'
+        type: string
+        default: '1.5.0-ci-b7cdec2fe3a75bd87d7ea919231af1d8ef9a7020-sglang-runtime'
+      vllm_dump_placeholder_runtime_tag:
+        description: 'ACR tag of the vLLM runtime used as BASE_IMAGE for the dump placeholder'
+        type: string
+        default: '1.5.0-ci-b7cdec2fe3a75bd87d7ea919231af1d8ef9a7020-vllm-runtime'
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -254,6 +270,66 @@ jobs:
           extra_build_args: |
             BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
 
+  # Dump-capable placeholders. Independent of the runtime build jobs so we can
+  # layer cuda-checkpoint + VMM launch onto a runtime already in ACR.
+  snapshot-dump-placeholder-sglang:
+    name: SGLang Dump Placeholder
+    needs: [init]
+    if: inputs.build_sglang_dump_placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push dump-capable snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: checkpoint-placeholder-dump
+          image_tag: ${{ github.sha }}-sglang-placeholder-dump
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-sglang-placeholder-dump
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.init.outputs.sanitized_ref_name }}-sglang-placeholder-dump
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.sglang_dump_placeholder_runtime_tag }}
+
+  snapshot-dump-placeholder-vllm:
+    name: vLLM Dump Placeholder
+    needs: [init]
+    if: inputs.build_vllm_dump_placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push dump-capable snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: checkpoint-placeholder-dump
+          image_tag: ${{ github.sha }}-vllm-placeholder-dump
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-vllm-placeholder-dump
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder-dump
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.vllm_dump_placeholder_runtime_tag }}
+
   # ============================================================================
   # CLEANUP
   # ============================================================================
@@ -262,7 +338,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-placeholder-vllm, snapshot-placeholder-sglang]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-placeholder-vllm, snapshot-placeholder-sglang, snapshot-dump-placeholder-sglang, snapshot-dump-placeholder-vllm]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
