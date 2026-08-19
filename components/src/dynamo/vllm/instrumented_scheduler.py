@@ -78,6 +78,7 @@ Inject via:
 from __future__ import annotations
 
 import enum
+import gc
 import hashlib
 import json
 import logging
@@ -133,6 +134,7 @@ DEFAULT_FPM_PORT = 20380
 ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
 ENV_FPM_WORKER_ID = "DYN_FPM_WORKER_ID"
 ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
+ENV_FPM_BENCHMARK_MANAGE_GC = "DYN_FPM_BENCHMARK_MANAGE_GC"
 
 
 def _utc_now_rfc3339() -> str:
@@ -2062,6 +2064,8 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_grid_built = False
         self._bench_expected_points = 0
         self._bench_drain_pending = False
+        self._bench_gc_paused = False
+        self._bench_gc_was_enabled = False
         self._bench_prefix_cache_cleared = False
         self._bench_grid_error: str | None = None
         self._bench_grid_digest: str | None = None
@@ -3358,6 +3362,7 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _bench_deactivate(self, *, resume_publisher: bool = True) -> None:
+        self._bench_resume_gc()
         if self._bench_synchronizer is not None:
             self._bench_synchronizer.close()
             self._bench_synchronizer = None
@@ -3522,9 +3527,38 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_transition_after_warmup()
         return None
 
+    def _bench_pause_gc(self) -> None:
+        """Keep cyclic GC outside measured passes."""
+        if (
+            self._bench_gc_paused
+            or os.environ.get(ENV_FPM_BENCHMARK_MANAGE_GC, "1") != "1"
+        ):
+            return
+        self._bench_gc_was_enabled = gc.isenabled()
+        gc.collect()
+        # vLLM owns the permanent generation and unfreezes it at shutdown.
+        gc.freeze()
+        if self._bench_gc_was_enabled:
+            gc.disable()
+        self._bench_gc_paused = True
+        logger.info("Benchmark: automatic cyclic GC paused")
+
+    def _bench_resume_gc(self) -> None:
+        """Restore the collector's pre-benchmark enabled state."""
+        if not self._bench_gc_paused:
+            return
+        self._bench_gc_paused = False
+        if self._bench_gc_was_enabled:
+            gc.enable()
+
+    def _bench_collect_between_points(self) -> None:
+        if self._bench_gc_paused:
+            gc.collect()
+
     def _bench_transition_after_warmup(self) -> None:
         self._bench_cleanup_requests()
         self._bench_current_fpms.clear()
+        self._bench_pause_gc()
         mode = self._bench_config.mode
         if mode in ("prefill", "agg"):
             self._bench_phase = _BenchPhase.PREFILL_SWEEP
@@ -3540,6 +3574,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_drain_pending = False
         self._bench_current_fpms.clear()
         self._schedule_times.clear()
+        self._bench_collect_between_points()
         return True
 
     def _bench_step_prefill(self) -> SchedulerOutput | None:

@@ -2887,6 +2887,96 @@ def test_benchmark_clear_prefix_cache_is_required_and_idempotent():
         InstrumentedScheduler._bench_clear_prefix_cache(failed)
 
 
+@pytest.mark.parametrize("gc_was_enabled", [True, False])
+def test_benchmark_gc_is_collected_between_points_and_restored(
+    monkeypatch, gc_was_enabled
+):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_gc_paused = False
+    stub._bench_gc_was_enabled = False
+    collect = MagicMock()
+    freeze = MagicMock()
+    disable = MagicMock()
+    enable = MagicMock()
+    monkeypatch.delenv(
+        instrumented_scheduler_module.ENV_FPM_BENCHMARK_MANAGE_GC,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.gc, "isenabled", lambda: gc_was_enabled
+    )
+    monkeypatch.setattr(instrumented_scheduler_module.gc, "collect", collect)
+    monkeypatch.setattr(instrumented_scheduler_module.gc, "freeze", freeze)
+    monkeypatch.setattr(instrumented_scheduler_module.gc, "disable", disable)
+    monkeypatch.setattr(instrumented_scheduler_module.gc, "enable", enable)
+
+    InstrumentedScheduler._bench_pause_gc(stub)
+    InstrumentedScheduler._bench_collect_between_points(stub)
+    InstrumentedScheduler._bench_resume_gc(stub)
+
+    assert collect.call_count == 2
+    freeze.assert_called_once_with()
+    assert disable.call_count == int(gc_was_enabled)
+    assert enable.call_count == int(gc_was_enabled)
+    assert stub._bench_gc_paused is False
+
+
+def test_benchmark_gc_management_can_be_disabled(monkeypatch):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_gc_paused = False
+    collect = MagicMock()
+    monkeypatch.setenv(instrumented_scheduler_module.ENV_FPM_BENCHMARK_MANAGE_GC, "0")
+    monkeypatch.setattr(instrumented_scheduler_module.gc, "collect", collect)
+
+    InstrumentedScheduler._bench_pause_gc(stub)
+
+    collect.assert_not_called()
+    assert stub._bench_gc_paused is False
+
+
+def test_benchmark_gc_hooks_wrap_the_measurement_sweep():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_cleanup_requests = MagicMock()
+    stub._bench_current_fpms = [{"warmup": True}]
+    stub._bench_pause_gc = MagicMock()
+    stub._bench_config = BenchmarkConfig(mode="decode")
+
+    InstrumentedScheduler._bench_transition_after_warmup(stub)
+
+    stub._bench_cleanup_requests.assert_called_once_with()
+    assert stub._bench_current_fpms == []
+    stub._bench_pause_gc.assert_called_once_with()
+    assert stub._bench_phase == _BenchPhase.DECODE_SWEEP
+
+    stub._bench_drain_pending = True
+    stub._bench_current_fpms = [{"point": True}]
+    stub._schedule_times = deque([1.0])
+    stub._bench_collect_between_points = MagicMock()
+
+    assert InstrumentedScheduler._bench_drain_if_pending(stub) is True
+    stub._bench_collect_between_points.assert_called_once_with()
+
+
+def test_benchmark_deactivation_restores_gc():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_resume_gc = MagicMock()
+    stub._bench_synchronizer = None
+    stub._bench_active = True
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
+    stub._bench_sync_pending = True
+    stub._bench_extra_steps_left = 1
+    stub._bench_expected_fpms = 2
+    stub._bench_decode_stage = _DecodePointStage.MEASURING
+    stub._schedule_times = deque([1.0])
+    stub._last_update_time = 1.0
+    stub._publisher = MagicMock()
+
+    InstrumentedScheduler._bench_deactivate(stub)
+
+    stub._bench_resume_gc.assert_called_once_with()
+    stub._publisher.resume.assert_called_once_with()
+
+
 def test_benchmark_abort_clears_synthetic_prefix_cache_before_deactivation():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_synchronizer = None
