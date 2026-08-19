@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Serve the declarative Hello World workflow as one discovered worker."""
+"""Serve the Hello World workflow as one discovered model worker."""
 
 import asyncio
 import os
@@ -15,7 +15,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.workflow import WorkflowOrchestrator, WorkflowTokenEngine
-from examples.custom_backend.workflow_hello_world.dynamo.workflow import (
+from examples.custom_backend.workflow_hello_world.workflow import (
     compile_remote_workflow,
 )
 

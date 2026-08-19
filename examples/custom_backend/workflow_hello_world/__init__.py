@@ -13,4 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Compare hand-written and declarative remote workflow orchestration."""
+"""Serve a declarative Hello World workflow through Dynamo."""
