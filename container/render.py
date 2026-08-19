@@ -207,8 +207,10 @@ def _inject_python_index_mounts(dockerfile: str) -> str:
     """Mount optional PyPI configuration in every Python package install layer."""
     instructions = re.split(r"(?=^[A-Z]+\b)", dockerfile, flags=re.MULTILINE)
     for index, instruction in enumerate(instructions):
+        # BuildKit strips full-line comments before parsing RUN flags; ignore them here too.
+        code = re.sub(r"(?m)^[ \t]*#[^\n]*$", "", instruction)
         if not instruction.startswith("RUN ") or not _PYTHON_PACKAGE_DOWNLOAD_RE.search(
-            instruction
+            code
         ):
             continue
 

@@ -39,6 +39,18 @@ def test_python_index_environment_follows_interleaved_mount_comments():
     assert rendered.index("export NETRC=") < rendered.index("uv pip install")
 
 
+def test_python_index_mounts_ignore_full_line_comments():
+    dockerfile = (
+        "RUN echo no-package-download \\\n"
+        "    # uv pip install --requirement /tmp/requirements.txt\n"
+        "    && true\n"
+    )
+
+    rendered = _load_render_module()._inject_python_index_mounts(dockerfile)
+
+    assert rendered == dockerfile
+
+
 def test_vllm_omni_installer_gets_python_index_mounts():
     template = (
         _REPO_ROOT / "container" / "templates" / "vllm_runtime.Dockerfile"
