@@ -32,6 +32,13 @@ use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, Worker
 /// External policies should compose [`WorkerScorer`] and [`WorkerPicker`] implementations with
 /// [`WorkerSelectionPolicy`] instead of implementing this trait directly.
 pub trait WorkerSelector<C: WorkerConfigLike> {
+    /// Declare the worker-signal groups required by this selector.
+    ///
+    /// Hosts use this declaration to initialize only the routing capabilities a policy needs.
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::NONE
+    }
+
     fn select_worker(
         &self,
         workers: &HashMap<WorkerId, C>,
