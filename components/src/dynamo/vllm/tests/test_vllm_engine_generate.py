@@ -206,6 +206,9 @@ async def test_engine_generate_worker_emits_native_terminal_metadata():
         engine_client=_FakeEngineClient(responses),
         _extract_logprobs=BaseWorkerHandler._extract_logprobs,
         _log_with_lora_context=lambda *args, **kwargs: None,
+        _generate_with_lora_admission_lock=(
+            lambda lora_request, create_generator: create_generator(lora_request)
+        ),
     )
 
     chunks = []
