@@ -93,6 +93,15 @@ impl GenerateRequest {
             return Err("sampling_params.max_tokens must be greater than 0.".to_string());
         }
 
+        if self
+            .sampling_params
+            .stop
+            .as_ref()
+            .is_some_and(StopStrings::has_empty)
+        {
+            return Err("sampling_params.stop cannot contain an empty string.".to_string());
+        }
+
         if let Some(logprobs) = self.sampling_params.logprobs()
             && logprobs < 0
             && logprobs != -1
@@ -170,8 +179,11 @@ pub struct SamplingParams {
     frequency_penalty: Option<f32>,
     presence_penalty: Option<f32>,
     repetition_penalty: Option<f32>,
+    stop: Option<StopStrings>,
     stop_token_ids: Option<Vec<u32>>,
     ignore_eos: bool,
+    include_stop_str_in_output: Option<bool>,
+    skip_special_tokens: Option<bool>,
     logit_bias: Option<HashMap<u32, f32>>,
     allowed_token_ids: Option<Vec<u32>>,
     bad_words: Option<Vec<String>>,
@@ -227,6 +239,7 @@ impl SamplingParams {
             top_k,
             min_p: self.min_p,
             seed: self.seed,
+            include_stop_str_in_output: self.include_stop_str_in_output,
             ..Default::default()
         })
     }
@@ -234,6 +247,7 @@ impl SamplingParams {
     pub(crate) fn project_stop_conditions(&self) -> StopConditions {
         StopConditions {
             max_tokens: self.max_tokens,
+            stop: self.stop.as_ref().map(StopStrings::to_vec),
             stop_token_ids: self.stop_token_ids.clone(),
             min_tokens: self.min_tokens,
             ignore_eos: Some(self.ignore_eos),
@@ -245,8 +259,32 @@ impl SamplingParams {
         Ok(OutputOptions {
             logprobs: project_logprob_count(self.logprobs, "logprobs")?,
             prompt_logprobs: project_logprob_count(self.prompt_logprobs, "prompt_logprobs")?,
+            skip_special_tokens: self.skip_special_tokens,
             ..Default::default()
         })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum StopStrings {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StopStrings {
+    fn has_empty(&self) -> bool {
+        match self {
+            Self::One(value) => value.is_empty(),
+            Self::Many(values) => values.iter().any(String::is_empty),
+        }
+    }
+
+    fn to_vec(&self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value.clone()],
+            Self::Many(values) => values.clone(),
+        }
     }
 }
 
@@ -305,9 +343,12 @@ impl<'de> Deserialize<'de> for SamplingParams {
             frequency_penalty: field!(frequency_penalty),
             presence_penalty: field!(presence_penalty),
             repetition_penalty: field!(repetition_penalty),
+            stop: field!(stop),
             stop_token_ids: field!(stop_token_ids),
             ignore_eos: sampling_field_or_default(object, "ignore_eos")
                 .map_err(serde::de::Error::custom)?,
+            include_stop_str_in_output: field!(include_stop_str_in_output),
+            skip_special_tokens: field!(skip_special_tokens),
             logit_bias: field!(logit_bias),
             allowed_token_ids: field!(allowed_token_ids),
             bad_words: field!(bad_words),

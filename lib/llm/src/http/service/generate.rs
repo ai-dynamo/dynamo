@@ -763,6 +763,8 @@ mod tests {
             r#"{"token_ids":[1],"sampling_params":{"logprobs":-2}}"#,
             r#"{"token_ids":[1],"sampling_params":{"prompt_logprobs":-2}}"#,
             r#"{"token_ids":[1],"sampling_params":{"min_tokens":3,"max_tokens":2}}"#,
+            r#"{"token_ids":[1],"sampling_params":{"stop":""}}"#,
+            r#"{"token_ids":[1],"sampling_params":{"stop":["done",""]}}"#,
         ];
 
         for body in invalid {
@@ -981,6 +983,34 @@ mod tests {
         assert_eq!(preprocessed.stop_conditions.ignore_eos, Some(true));
         assert_eq!(preprocessed.output_options.logprobs, Some(3));
         assert_eq!(preprocessed.output_options.prompt_logprobs, Some(4));
+    }
+
+    #[test]
+    fn generate_projects_python_vllm_text_output_controls() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "stop": ["done", "halt"],
+                "include_stop_str_in_output": true,
+                "skip_special_tokens": false
+            },
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request")
+                .expect("build request");
+
+        assert_eq!(
+            preprocessed.stop_conditions.stop.as_deref(),
+            Some(&["done".to_string(), "halt".to_string()][..])
+        );
+        assert_eq!(
+            preprocessed.sampling_options.include_stop_str_in_output,
+            Some(true)
+        );
+        assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
     }
 
     #[test]
