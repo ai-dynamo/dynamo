@@ -138,12 +138,17 @@ class MockerProcess:
         standalone_selector: bool = False,
         model_name: str = "mocker",
         zmq_replay: bool = False,
+        namespace: Optional[str] = None,
+        display_name: str = "dynamo-mocker",
     ):
+        """namespace lets multiple MockerProcess instances join the same endpoint,
+        one worker per process, so a single worker can be terminated on its own;
+        display_name keeps their ManagedProcess log files distinct within one test."""
         if standalone_selector and not standalone_indexer:
             raise ValueError("standalone_selector requires standalone_indexer=True")
 
         namespace_suffix = generate_random_suffix()
-        self.namespace = f"test-namespace-{namespace_suffix}"
+        self.namespace = namespace or f"test-namespace-{namespace_suffix}"
         self.component_name = "mocker"
         self.model_name = model_name
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
@@ -227,7 +232,7 @@ class MockerProcess:
                 health_check_urls=[],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
-                display_name="dynamo-mocker",
+                display_name=display_name,
             )
 
         logger.info(
@@ -309,6 +314,21 @@ class MockerProcess:
             logger.info("Starting mocker process with %s worker(s)", self.num_workers)
             self._process.__enter__()
         return self
+
+    def send_signal(self, sig: int) -> int:
+        """Send a signal to the mocker OS process and return its PID.
+
+        Only valid in single-process mode (standalone_indexer=False).
+        """
+        if self._process is None or self._process.proc is None:
+            raise RuntimeError(
+                "send_signal requires the single-process mocker mode "
+                "(standalone_indexer=False) with a started process"
+            )
+        pid = self._process.proc.pid
+        logger.info("Sending signal %s to mocker process pid %s", sig, pid)
+        os.kill(pid, sig)
+        return pid
 
     async def launch_workers_with_indexer(self, endpoint):
         """Launch workers one-by-one and register them with the standalone indexer."""

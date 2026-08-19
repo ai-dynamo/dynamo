@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -25,6 +26,7 @@ from tests.router.common import (
     _test_disagg_direct_mode,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
+    _test_kv_router_worker_failure,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
@@ -733,6 +735,43 @@ def test_kv_router_bindings(
             model_name=MODEL_NAME,
             num_workers=NUM_MOCKERS,
         )
+
+
+# Above the ~420s sum of the helper's internal step budgets (worker discovery,
+# router init, and the convergence polls), so a stalled stage fails with its
+# descriptive AssertionError before pytest's timeout; ~10-20s observed per variant.
+@pytest.mark.timeout(480)
+@pytest.mark.parametrize(
+    "kill_signal",
+    [signal.SIGKILL, signal.SIGTERM],
+    ids=["sigkill", "sigterm"],
+)
+@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
+def test_mocker_kv_router_worker_failure(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    kill_signal,
+):
+    """Validate the KV router worker-death lifecycle with mocker engines.
+
+    See _test_kv_router_worker_failure for the scenario and assertions.
+    """
+    logger.info("Starting KV router worker failure test: kill_signal=%s", kill_signal)
+
+    _test_kv_router_worker_failure(
+        request=request,
+        mocker_process_cls=MockerProcess,
+        mocker_args={
+            "speedup_ratio": SPEEDUP_RATIO,
+            "block_size": BLOCK_SIZE,
+        },
+        block_size=BLOCK_SIZE,
+        model_name=MODEL_NAME,
+        kill_signal=kill_signal,
+        request_plane=request_plane,
+    )
 
 
 @pytest.mark.parametrize(
