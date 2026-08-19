@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
 
     from dynamo.common.memory import MultimodalEmbeddingCacheManager
+    from dynamo.common.multimodal.image_loader import ImageLoader
 
 # Auto-label injection: always injects dynamo_namespace, dynamo_component, dynamo_endpoint labels
 # into engine metrics based on the endpoint hierarchy.
@@ -50,6 +51,38 @@ class EmbeddingCacheMetrics(str, enum.Enum):
     UTILIZATION = f"{EMBEDDING_CACHE_METRIC_PREFIX}_utilization"
     CURRENT_BYTES = f"{EMBEDDING_CACHE_METRIC_PREFIX}_current_bytes"
     ENTRIES = f"{EMBEDDING_CACHE_METRIC_PREFIX}_entries"
+
+
+# Single source of truth for image loader metric names.
+IMAGE_LOADER_METRIC_PREFIX = f"{name_prefix.COMPONENT}_image"
+
+
+class ImageLoaderMetrics(str, enum.Enum):
+    """Prometheus metric names for the multimodal image loader."""
+
+    CACHE_ENTRIES = f"{IMAGE_LOADER_METRIC_PREFIX}_cache_entries"
+    SHARED_CACHE_GET_DURATION_SECONDS = (
+        f"{IMAGE_LOADER_METRIC_PREFIX}_shared_cache_get_duration_seconds"
+    )
+    SHARED_CACHE_SET_DURATION_SECONDS = (
+        f"{IMAGE_LOADER_METRIC_PREFIX}_shared_cache_set_duration_seconds"
+    )
+
+
+_SHARED_IMAGE_CACHE_DURATION_BUCKETS = (
+    0.001,
+    0.0025,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0,
+)
 
 
 def register_engine_metrics_callback(
@@ -671,6 +704,97 @@ def register_embedding_cache_metrics(
     endpoint.metrics.register_prometheus_typed_callback(_collect_embedding_cache_typed)
     logging.info(
         "Registered embedding cache metrics (model=%s, component=%s)",
+        model_name,
+        component_name,
+    )
+
+
+def register_image_loader_metrics(
+    endpoint: "Endpoint",
+    loader: "ImageLoader",
+    model_name: str = "",
+    component_name: str = "",
+) -> None:
+    """Register Prometheus metrics for an ImageLoader instance.
+
+    Same mechanics as register_embedding_cache_metrics: a dedicated
+    CollectorRegistry (avoids prometheus_client import-ordering issues with
+    SGLang's multiprocess mode) and a threading.Lock against concurrent scrape
+    races. Shared-cache operation latencies are drained from the loader's
+    pending sample buffer and observed into the histograms once per scrape.
+
+    Must be called AFTER engine initialization to ensure prometheus_client is
+    safe to import.
+
+    Args:
+        endpoint: Dynamo Endpoint with metrics.register_prometheus_expfmt_callback().
+        loader: The ImageLoader instance to observe.
+        model_name: Model name for the 'model' label.
+        component_name: Component name for the 'dynamo_component' label.
+    """
+    from prometheus_client import CollectorRegistry, Gauge, Histogram, generate_latest
+
+    registry = CollectorRegistry()
+    label_names = [labels.MODEL, labels.COMPONENT]
+    label_values = {labels.MODEL: model_name, labels.COMPONENT: component_name}
+
+    ILM = ImageLoaderMetrics
+
+    shared_cache_get_duration_histogram = Histogram(
+        ILM.SHARED_CACHE_GET_DURATION_SECONDS,
+        "Shared encoded-image cache GET latency in seconds by terminal outcome "
+        "and encoded payload size bucket.",
+        labelnames=label_names + ["outcome", "size_bucket"],
+        registry=registry,
+        buckets=_SHARED_IMAGE_CACHE_DURATION_BUCKETS,
+    )
+    shared_cache_set_duration_histogram = Histogram(
+        ILM.SHARED_CACHE_SET_DURATION_SECONDS,
+        "Shared encoded-image cache SET latency in seconds by terminal outcome "
+        "and encoded payload size bucket.",
+        labelnames=label_names + ["outcome", "size_bucket"],
+        registry=registry,
+        buckets=_SHARED_IMAGE_CACHE_DURATION_BUCKETS,
+    )
+    entries_gauge = Gauge(
+        ILM.CACHE_ENTRIES,
+        "Number of entries in the image cache.",
+        labelnames=label_names,
+        registry=registry,
+    )
+
+    lock = threading.Lock()
+
+    def _collect_image_loader_metrics() -> str:
+        """Callback invoked on each /metrics scrape."""
+        with lock:
+            shared_cache_stats = loader.shared_image_cache_stats
+            if shared_cache_stats is not None:
+                shared_cache_durations = shared_cache_stats.snapshot_and_drain()
+                for (
+                    operation,
+                    outcome,
+                    size_bucket,
+                ), samples in shared_cache_durations.items():
+                    histogram = (
+                        shared_cache_get_duration_histogram
+                        if operation == "get"
+                        else shared_cache_set_duration_histogram
+                    )
+                    for duration in samples:
+                        histogram.labels(
+                            **label_values,
+                            outcome=outcome,
+                            size_bucket=size_bucket,
+                        ).observe(duration)
+
+            entries_gauge.labels(**label_values).set(loader.cache_entries)
+
+            return generate_latest(registry).decode("utf-8")
+
+    endpoint.metrics.register_prometheus_expfmt_callback(_collect_image_loader_metrics)
+    logging.info(
+        "Registered image loader metrics (model=%s, component=%s)",
         model_name,
         component_name,
     )
