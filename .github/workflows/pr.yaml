@@ -844,7 +844,7 @@ jobs:
       platform: '["arm64"]'
       enable_coverage: true
       run_sanity_check: false
-      gpu_platforms: '["arm64"]'
+      gpu_test_platforms: '["arm64"]'
       gpu_test_markers: vllm and (gpu_1 or gpu_2)
       gpu_test_timeout_minutes: 240
       run_gpu_parallel_tests: true
@@ -912,7 +912,7 @@ jobs:
       platform: '["arm64"]'
       enable_coverage: true
       run_sanity_check: false
-      gpu_platforms: '["arm64"]'
+      gpu_test_platforms: '["arm64"]'
       gpu_test_markers: sglang and (gpu_1 or gpu_2)
       gpu_test_timeout_minutes: 240
       run_gpu_parallel_tests: true
@@ -980,7 +980,7 @@ jobs:
       platform: '["arm64"]'
       enable_coverage: true
       run_sanity_check: false
-      gpu_platforms: '["arm64"]'
+      gpu_test_platforms: '["arm64"]'
       gpu_test_markers: trtllm and (gpu_1 or gpu_2)
       gpu_test_timeout_minutes: 240
       run_gpu_parallel_tests: true
