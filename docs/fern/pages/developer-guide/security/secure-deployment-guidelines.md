@@ -93,13 +93,26 @@ reference.
 
 ### Event plane
 
-Components exchange coordination events over NATS.
+Components exchange coordination events — including the KV-cache events used for
+KV-aware routing — over the event plane. Dynamo supports two event transports,
+selected by `DYN_EVENT_PLANE`:
 
-- Enable **NATS authentication and TLS**. Running NATS without authentication is
+- **NATS** (preferred where the event plane must be authenticated). Enable
+  **NATS authentication and TLS**. Running NATS without authentication is
   acceptable only on a private segment that untrusted parties cannot reach.
+- **ZMQ.** The event plane can run over ZMQ, and some backends (for example,
+  vLLM) publish KV-cache events over ZMQ natively regardless of the selected
+  transport. **ZMQ traffic in Dynamo is neither authenticated nor encrypted**
+  (plain TCP sockets), so a ZMQ event plane relies entirely on network isolation.
+  Keep every ZMQ endpoint on the trusted network: bind the broker
+  (`ZMQ_BROKER_XSUB_BIND` / `ZMQ_BROKER_XPUB_BIND`) and the advertised KV-event
+  host to cluster-internal addresses, keep intra-node sockets on loopback, and
+  restrict the ports with NetworkPolicy.
 
-**Why it matters:** an unauthenticated event plane allows forged events and
-eavesdropping on cluster coordination. See the
+**Why it matters:** an unauthenticated peer that can reach an event socket can
+subscribe to KV-cache event metadata (information disclosure) and, on the
+subscribe and replay sockets, inject forged events. Prefer NATS with
+authentication and TLS wherever the event plane crosses a trust boundary. See the
 [Event Plane](../knowledge-base/concepts/communication-planes/event-plane.md)
 reference.
 
@@ -209,7 +222,14 @@ Set restrictive values in your production manifests.
 | `ETCD_AUTH_USERNAME` / `ETCD_AUTH_PASSWORD` | etcd username/password authentication | unset |
 | `ETCD_AUTH_CA` / `ETCD_AUTH_CLIENT_CERT` / `ETCD_AUTH_CLIENT_KEY` | etcd mutual TLS | unset |
 
-**Event and request planes** — *available once transport mTLS support lands*
+**Event plane**
+
+| Setting | Purpose | Default |
+|---------|---------|---------|
+| `DYN_EVENT_PLANE=nats` | Use NATS (which can be authenticated and TLS-encrypted) as the event transport | auto (NATS with etcd/Kubernetes discovery) |
+| `ZMQ_BROKER_XSUB_BIND` / `ZMQ_BROKER_XPUB_BIND` | ZMQ event-broker bind addresses — keep cluster-internal (ZMQ has no auth/encryption) | — |
+
+**Request plane** — *available once transport mTLS support lands*
 
 | Setting | Purpose | Default |
 |---------|---------|---------|
