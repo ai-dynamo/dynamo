@@ -20,16 +20,54 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     extract_media_urls,
     raise_if_unextracted_multimodal,
 )
-from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
+from dynamo.sglang.request_handlers.llm.prefill_handler import (
+    PrefillWorkerHandler,
+    _prefill_cohort_kwargs,
+)
 from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
+
+
+def test_prefill_cohort_kwargs_preserves_unmarked_requests():
+    assert _prefill_cohort_kwargs(None) == {}
+    assert _prefill_cohort_kwargs(["unrelated:v1"]) == {}
+
+
+def test_prefill_cohort_kwargs_forwards_complete_contract():
+    annotations = ['sglang_prefill_cohort_v1:{"id":"wave-7","size":4,"index":2}']
+
+    assert _prefill_cohort_kwargs(annotations) == {
+        "prefill_cohort_id": "wave-7",
+        "prefill_cohort_size": 4,
+        "prefill_cohort_index": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    "annotations",
+    [
+        ["sglang_prefill_cohort_v1:not-json"],
+        ['sglang_prefill_cohort_v1:{"id":"wave-7"}'],
+        ['sglang_prefill_cohort_v1:{"id":"wave-7","size":0,"index":0}'],
+        ['sglang_prefill_cohort_v1:{"id":"wave-7","size":4,"index":4}'],
+        ['sglang_prefill_cohort_v1:{"id":"","size":1,"index":0}'],
+        [
+            'sglang_prefill_cohort_v1:{"id":"wave-7","size":1,"index":0}',
+            'sglang_prefill_cohort_v1:{"id":"wave-8","size":1,"index":0}',
+        ],
+    ],
+)
+def test_prefill_cohort_kwargs_rejects_invalid_contract(annotations):
+    with pytest.raises(ValueError):
+        _prefill_cohort_kwargs(annotations)
 
 
 def _read_zstd_payload(path):

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -23,6 +24,57 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
 # This remains as a compatibility fallback for older callers that still encode
 # an unresolved data-parallel rank in-band instead of omitting the field.
 _DP_RANK_UNSET = 2**32 - 1
+_PREFILL_COHORT_ANNOTATION_PREFIX = "sglang_prefill_cohort_v1:"
+
+
+def _prefill_cohort_kwargs(annotations: Any) -> Dict[str, Any]:
+    """Validate and forward an exact producer-owned admission transaction."""
+
+    if annotations is None:
+        return {}
+    if not isinstance(annotations, list) or not all(
+        isinstance(annotation, str) for annotation in annotations
+    ):
+        raise ValueError("request annotations must be a list of strings")
+    encoded = [
+        annotation[len(_PREFILL_COHORT_ANNOTATION_PREFIX) :]
+        for annotation in annotations
+        if annotation.startswith(_PREFILL_COHORT_ANNOTATION_PREFIX)
+    ]
+    if not encoded:
+        return {}
+    if len(encoded) != 1:
+        raise ValueError("request has multiple explicit prefill cohort annotations")
+    try:
+        payload = json.loads(encoded[0])
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid explicit prefill cohort annotation JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {"id", "size", "index"}:
+        raise ValueError(
+            "explicit prefill cohort annotation must contain exactly "
+            "id, size, and index"
+        )
+    cohort_id = payload["id"]
+    cohort_size = payload["size"]
+    cohort_index = payload["index"]
+    if not isinstance(cohort_id, str) or not cohort_id:
+        raise ValueError("prefill_cohort_id must be a non-empty string")
+    if not isinstance(cohort_size, int) or isinstance(cohort_size, bool):
+        raise ValueError("prefill_cohort_size must be an integer")
+    if cohort_size <= 0:
+        raise ValueError("prefill_cohort_size must be positive")
+    if not isinstance(cohort_index, int) or isinstance(cohort_index, bool):
+        raise ValueError("prefill_cohort_index must be an integer")
+    if cohort_index < 0 or cohort_index >= cohort_size:
+        raise ValueError(
+            "prefill_cohort_index must be in "
+            f"[0, prefill_cohort_size), got {cohort_index}"
+        )
+    return {
+        "prefill_cohort_id": cohort_id,
+        "prefill_cohort_size": cohort_size,
+        "prefill_cohort_index": cohort_index,
+    }
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
@@ -143,6 +195,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         routing = inner_request.get("routing") or {}
         priority = routing.get("priority")
         dp_rank = routing.get("dp_rank")
+        prefill_cohort_kwargs = _prefill_cohort_kwargs(
+            inner_request.get("annotations")
+        )
 
         if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
             dp_rank = None
@@ -167,6 +222,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             external_trace_header=trace_header,
             rid=trace_id,
             data_parallel_rank=dp_rank,
+            **prefill_cohort_kwargs,
             lora_path=lora_path,
             **self._priority_kwargs(priority),
         )
