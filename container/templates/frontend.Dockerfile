@@ -159,7 +159,11 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
-    uv pip install "nixl[cu13]==${NIXL_REF#v}" && \
+    # The meta package requires both backends unconditionally (its cu12/cu13
+    # extras are vestigial), so install the backend first and the meta module
+    # --no-deps to keep a single CUDA build and one libnixl_capi.so.
+    uv pip install "nixl-cu13==${NIXL_REF#v}" && \
+    uv pip install --no-deps "nixl==${NIXL_REF#v}" && \
     uv pip show nixl nixl-cu13 | grep -E '^(Name|Version)' | tee /opt/dynamo/nixl-versions.txt && \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
@@ -175,7 +179,15 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
 
 # Setup environment for all users
 USER root
-RUN chmod 755 /opt/dynamo/.launch_screen && \
+# nixl-sys resolves the C API with a bare dlopen("libnixl_capi.so"), and
+# dynamo/_core.abi3.so carries no RPATH, so without this the Rust bindings
+# silently fall back to stub mode while the Python ones work. The wheel keeps
+# its libraries in a private directory; put that on the loader path.
+RUN NIXL_LIB_DIR="$(/opt/dynamo/venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/.nixl_cu13.mesonpy.libs" && \
+    [ -f "${NIXL_LIB_DIR}/libnixl_capi.so" ] || { echo "missing ${NIXL_LIB_DIR}/libnixl_capi.so; NIXL wheel layout changed" >&2; exit 1; } && \
+    echo "${NIXL_LIB_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
+    ldconfig && \
+    chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
