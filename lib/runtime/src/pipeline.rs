@@ -15,6 +15,9 @@ pub mod context;
 pub mod error;
 pub mod network;
 pub use crate::routing_policy::RouteTarget;
+pub use crate::routing_policy::{
+    BuiltinRoutingPolicy, BuiltinWorkerPicker, BuiltinWorkerReservation,
+};
 pub use network::egress::addressed_router::{
     AddressedPushRouter, AddressedRequest, StreamingDispatch,
 };
