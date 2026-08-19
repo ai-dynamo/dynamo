@@ -26,7 +26,7 @@ use super::{
 };
 use crate::{
     discovery::ModelManager,
-    kv_router::{BuiltinRoutingHost, KvRouter, RoutingHost, WorkerSelectorFactory},
+    kv_router::{BuiltinRoutingPolicy, KvRouter, RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
@@ -380,7 +380,7 @@ where
 
             // Wrap it in the shared routing host.
             (
-                InnerPrefillRouter::Kv(Arc::new(RoutingHost::new_with_coordinator(
+                InnerPrefillRouter::KvRouter(Arc::new(RoutingHost::new_with_coordinator(
                     push_router,
                     kv_chooser,
                     affinity,
@@ -404,14 +404,12 @@ where
             )
             .await?;
 
-            let inner = if affinity.is_none()
-                && matches!(
-                    context.router_mode,
-                    RouterMode::RoundRobin | RouterMode::Random | RouterMode::PowerOfTwoChoices
-                ) {
-                InnerPrefillRouter::Builtin(Arc::new(BuiltinRoutingHost::new_builtin(push_router)?))
+            let router = if affinity.is_none()
+                && BuiltinRoutingPolicy::from_router_mode(context.router_mode).is_some()
+            {
+                InnerPrefillRouter::Builtin(Arc::new(RoutingHost::<Sel>::new_builtin(push_router)?))
             } else {
-                InnerPrefillRouter::Simple(Arc::new(
+                InnerPrefillRouter::SimpleRouter(Arc::new(
                     crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
                         push_router,
                         affinity,
@@ -419,7 +417,7 @@ where
                     ),
                 ))
             };
-            (inner, prefill_client)
+            (router, prefill_client)
         };
 
         Ok((
