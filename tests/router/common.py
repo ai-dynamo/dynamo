@@ -2309,6 +2309,26 @@ def _test_router_decisions_disagg(
         logger.info(
             "Waiting for prefill and decode workers to register with frontend..."
         )
+        readiness_payload = {
+            **test_payload,
+            "messages": [{"role": "user", "content": "readiness probe"}],
+            "max_tokens": 1,
+            "stream": True,
+            "nvext": {"extra_fields": ["worker_id"]},
+        }
+
+        def disagg_response_ready(body: str) -> bool:
+            for data in parse_sse_json_chunks(body):
+                worker_ids = data.get("nvext", {}).get("worker_id", {})
+                if not isinstance(worker_ids, dict):
+                    continue
+                if (
+                    worker_ids.get("prefill_worker_id") is not None
+                    and worker_ids.get("decode_worker_id") is not None
+                ):
+                    return True
+            return False
+
         asyncio.run(
             wait_for_frontend_ready(
                 frontend_url=frontend_url,
@@ -2319,6 +2339,8 @@ def _test_router_decisions_disagg(
                 engine_workers=[prefill_workers, decode_workers],
                 store_backend=store_backend,
                 request_plane=request_plane,
+                test_payload=readiness_payload,
+                response_validator=disagg_response_ready,
             )
         )
 

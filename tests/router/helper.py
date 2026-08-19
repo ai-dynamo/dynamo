@@ -9,6 +9,7 @@ import os
 import random
 import string
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -197,6 +198,7 @@ async def wait_for_frontend_ready(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     request_headers: dict[str, str] | None = None,
+    response_validator: Callable[[str], bool] | None = None,
 ):
     """Wait for backend worker(s) to be ready via the HTTP frontend (OpenAI API).
 
@@ -219,6 +221,8 @@ async def wait_for_frontend_ready(
         store_backend: Discovery backend used by the workers.
         request_plane: Request transport used by the workers.
         request_headers: Optional headers for the chat-completions readiness probe.
+        response_validator: Optional predicate for the successful response body.
+            The pipeline is ready only when it returns true.
 
     Raises:
         TimeoutError: If workers don't register or pipeline doesn't become ready within timeout
@@ -324,12 +328,16 @@ async def wait_for_frontend_ready(
                     headers=request_headers,
                 ) as response:
                     if response.status == 200:
-                        logger.info("Chat completions pipeline ready!")
-                        return
-                    else:
-                        logger.debug(
-                            f"Chat completions not ready yet, status {response.status} (elapsed: {elapsed:.1f}s)"
-                        )
+                        if response_validator is None:
+                            logger.info("Chat completions pipeline ready!")
+                            return
+                        response_body = await response.text()
+                        if response_validator(response_body):
+                            logger.info("Chat completions pipeline ready!")
+                            return
+                    logger.debug(
+                        f"Chat completions not ready yet, status {response.status} (elapsed: {elapsed:.1f}s)"
+                    )
         except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
             logger.debug(f"Error testing chat completions: {e}")
 
