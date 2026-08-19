@@ -1336,10 +1336,12 @@ class HandlerBase(BaseGenerativeHandler):
                             if prefill_prompt_tokens_details:
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                # cached_tokens may be absent on some engine builds.
+                                # Clamp to prompt size: image token_ids are unexpanded
+                                # placeholders, so the engine count (measured over the
+                                # expanded prompt) can exceed it.
                                 prompt_tokens_details = {
-                                    "cached_tokens": int(
-                                        getattr(res, "cached_tokens", 0) or 0
+                                    "cached_tokens": min(
+                                        num_input_tokens, int(res.cached_tokens or 0)
                                     ),
                                 }
 
