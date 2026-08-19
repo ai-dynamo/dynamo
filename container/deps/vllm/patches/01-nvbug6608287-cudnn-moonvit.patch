@@ -1,0 +1,19 @@
+From: Cheng Wang <chengwa@nvidia.com>
+Subject: [PATCH] fix(kimi-k3): disable cuDNN for MoonViT Conv2d patch-embed on GB200 (nvbug 6608287)
+
+On GB200 TP=16 with VLLM_USE_V2_MODEL_RUNNER=0, cudnnCreate() called
+concurrently across 16 mp-executor processes sharing the MNNVL symmetric-
+memory region triggers a native segfault inside MoonVision3dPatchEmbed._proj.
+Disabling cuDNN for that single Conv2d forces the non-cuDNN fallback kernel
+and avoids the crash. GB300 with VLLM_USE_V2_MODEL_RUNNER=1 is unaffected.
+
+--- a/vllm/model_executor/models/kimi_k25_vit.py
++++ b/vllm/model_executor/models/kimi_k25_vit.py
+@@ -1,6 +1,7 @@
+     def _proj(self, x: torch.Tensor) -> torch.Tensor:
+         if current_platform.is_rocm() and x.dtype in (torch.float16, torch.bfloat16):
+             from aiter.ops.triton.conv.conv2d import conv2d
+             return conv2d(x, self.proj.weight, self.proj.bias, stride=self.patch_size, layout="nchw")
+-        return self.proj(x)
++        with torch.backends.cudnn.flags(enabled=False):
++            return self.proj(x)
