@@ -149,7 +149,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --requirement /tmp/requirements.frontend.txt
 
 ARG ENABLE_GPU_MEMORY_SERVICE
-ARG NIXL_VERSION
+ARG NIXL_REF
 # In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
 # UV_FIND_LINKS points at the crick wheel pre-built in the crick_builder stage;
 # uv prefers it over the sdist on arm64 where no manylinux aarch64 wheel exists.
@@ -158,7 +158,8 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
-    uv pip install "nixl[cu13]==${NIXL_VERSION}" && \
+    echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
+    uv pip install "nixl[cu13]==${NIXL_REF#v}" && \
     uv pip show nixl nixl-cu13 | grep -E '^(Name|Version)' | tee /opt/dynamo/nixl-versions.txt && \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \

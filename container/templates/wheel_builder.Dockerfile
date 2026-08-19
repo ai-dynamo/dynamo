@@ -716,7 +716,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # Runtime templates COPY from this stage.
 # Note: XPU triggers this path even when the framework section lacks nixl_ref,
 # because no upstream XPU runtime image ships pre-built NIXL.
-# Note: frontend is excluded — it installs NIXL from PyPI (NIXL_VERSION) and does
+# Note: frontend is excluded — it installs NIXL from PyPI at NIXL_REF and does
 # not install KVBM, so nothing in that image consumes a from-source NIXL build.
 
 FROM wheel_builder_base AS wheel_builder
