@@ -1,0 +1,36 @@
+diff --git a/python/sglang/srt/mem_cache/kv_cache_builder.py b/python/sglang/srt/mem_cache/kv_cache_builder.py
+index 50f797101..df7c835b7 100644
+--- a/python/sglang/srt/mem_cache/kv_cache_builder.py
++++ b/python/sglang/srt/mem_cache/kv_cache_builder.py
+@@ -106,8 +106,10 @@ def maybe_register_hicache_draft(
+     # Create host pool for draft with the same slot count as the target host pool,
+     # so that host indices stay 1-to-1 between target and draft KV caches.
+     primary = tree_cache.cache_controller.mem_pool_host
++    # Note(kpham-sgl): DCP x DSpark draft KV is replicated and spans the virtual
++    # loc space, so match the target host's logical_size instead of physical size.
+     kw = dict(
+-        host_to_device_ratio=primary.size / pool.size,
++        host_to_device_ratio=primary.logical_size / pool.size,
+         host_size=0,
+         page_size=page_size,
+         layout=server_args.hicache_mem_layout,
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index 18664959e..8def354d3 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -7169,11 +7169,11 @@ class ServerArgs:
+                 "backup and the storage keys must become dcp_rank-aware "
+                 "first. Run HiCache+DCP with L1/L2 only."
+             )
+-        if self.speculative_algorithm is not None:
++        if self.speculative_algorithm not in (None, "DSPARK"):
+             raise NotImplementedError(
+-                "HiCache with --dcp-size > 1 does not support speculative "
+-                "decoding yet (the draft-model host pool has no DCP index "
+-                "translation)."
++                "HiCache with --dcp-size > 1 only supports DSPARK speculative "
++                "decoding; other draft-model host pools have no DCP index "
++                "translation."
+             )
+         if self.enable_lmcache:
+             raise NotImplementedError(
