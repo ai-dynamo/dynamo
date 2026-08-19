@@ -1958,6 +1958,16 @@ mod test_event_dedup_filter {
                 ExternalSequenceBlockHash(3),
             ]
         );
+        assert!(
+            filter
+                .filter_remove_in_domain(
+                    0,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::CacheOwner,
+                    remove_data(&[]),
+                )
+                .is_none()
+        );
     }
 
     #[test]

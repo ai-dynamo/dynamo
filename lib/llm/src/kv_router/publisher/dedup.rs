@@ -64,7 +64,7 @@ impl EventDedupFilter {
         mut data: KvCacheRemoveData,
     ) -> Option<KvCacheRemoveData> {
         if residency_domain == ResidencyDomain::CacheOwner {
-            return Some(data);
+            return (!data.block_hashes.is_empty()).then_some(data);
         }
         let refcounts = self
             .per_rank_tier
