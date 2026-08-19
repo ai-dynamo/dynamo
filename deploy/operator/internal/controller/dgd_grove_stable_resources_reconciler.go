@@ -242,15 +242,11 @@ func (r *groveStableResourcesReconciler) syncServiceAnnotations(
 //   - numberOfNodes > 1: worker pods share the component labels, so the Service would
 //     publish them as heads. That topology reaches its leader through the Grove leader
 //     hostname and does not need this Service.
+//
+// Delegates so the Service renderer and follower synthesis cannot drift: a shape that
+// synthesizes a follower must be a shape whose leader Service is emitted.
 func isSinglePodElasticEPLeader(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	container := dynamo.GetMainContainer(component)
-	if container == nil || !dynamo.IsElasticEPRayLaunch(container) {
-		return false
-	}
-	if component.GetNumberOfNodes() > 1 {
-		return false
-	}
-	return component.Replicas == nil || *component.Replicas == 1
+	return dynamo.IsSinglePodElasticEPLeader(component)
 }
 
 // reconcileElasticEPLeaderService creates the headless Service a single-pod elastic-EP

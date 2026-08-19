@@ -300,6 +300,13 @@ func GenerateDynamoComponentsDeployments(
 		return nil, err
 	}
 
+	// Collected up front so a derived follower identity is checked against every
+	// declared component, not just the ones generated before it.
+	declaredComponentNames := make(map[string]bool, len(parentDGD.Spec.Components))
+	for i := range parentDGD.Spec.Components {
+		declaredComponentNames[parentDGD.Spec.Components[i].ComponentName] = true
+	}
+
 	// Generate DCDs for each component.
 	for i := range parentDGD.Spec.Components {
 		component := &parentDGD.Spec.Components[i]
@@ -327,23 +334,67 @@ func GenerateDynamoComponentsDeployments(
 		// An elastic-EP leader also gets an optional follower: its own DCD resting at
 		// zero replicas, scaled up on demand without gang-blocking the leader. It lives
 		// on this pathway because a Grove clique cannot rest at zero (grove#676).
-		if follower := synthesizeElasticEPFollowerDCD(dcd, componentName); follower != nil {
-			deployments[follower.Labels[commonconsts.KubeLabelDynamoComponent]] = follower
+		follower := synthesizeElasticEPFollowerDCD(dcd, componentName)
+		if follower == nil {
+			continue
 		}
+
+		// The derived identity is not reserved, so a graph may already declare a
+		// component by that name. Storing it unchecked would drop one of the two from
+		// rendering, worker hashing, and status depending on component order, so fail
+		// loudly instead.
+		followerComponentName := GetDCDComponentName(follower)
+		if declaredComponentNames[followerComponentName] {
+			return nil, fmt.Errorf(
+				"elastic-EP component %q derives a follower named %q, which collides with a component declared in this graph; rename that component",
+				componentName, followerComponentName,
+			)
+		}
+		if _, exists := deployments[followerComponentName]; exists {
+			return nil, fmt.Errorf(
+				"elastic-EP component %q derives a follower named %q, which collides with an already-generated component",
+				componentName, followerComponentName,
+			)
+		}
+		deployments[followerComponentName] = follower
 	}
 
 	return deployments, nil
 }
 
+// IsSinglePodElasticEPLeader reports whether a component is the single-pod elastic-EP
+// leader that the headless Ray Service addresses and a follower can join.
+//
+// The Service selector matches every pod carrying the component labels, so it resolves
+// to exactly one Ray head only while the component renders as one pod. replicas > 1
+// gives each replica its own independent head behind one DNS name; numberOfNodes > 1
+// renders leader and worker pods that share the component labels, reconciles through
+// the LWS path, and already reaches its leader through the framework hostname.
+func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	container := GetMainContainer(component)
+	if container == nil || !IsElasticEPRayLaunch(container) {
+		return false
+	}
+	if component.GetNumberOfNodes() > 1 {
+		return false
+	}
+	return component.Replicas == nil || *component.Replicas == 1
+}
+
 // synthesizeElasticEPFollowerDCD derives the optional follower DCD for an elastic-EP
-// leader, or nil when the leader is not an elastic-EP Ray launch.
+// leader, or nil when the leader is not a single-pod elastic-EP Ray launch.
 //
 // The follower is a deep copy of the leader (same image, GPU, model args) resting at
 // zero replicas, marked so the renderer launches it as RoleFollower. Its component
 // identity is "<leader>-flw" so its Deployment, Service, and selector never collide
 // with the leader's; the renderer trims that suffix to rejoin the leader's Ray Service.
+//
+// The gate is the same predicate the Service renderer applies. Synthesizing on the
+// launch flags alone would emit a follower for shapes whose leader Service is never
+// rendered (replicas > 1) or that never route through RoleFollower at all (multinode,
+// which takes the LWS path), leaving it waiting on an address that does not exist.
 func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment, leaderComponentName string) *v1beta1.DynamoComponentDeployment {
-	if c := GetMainContainer(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec); c == nil || !IsElasticEPRayLaunch(c) {
+	if !IsSinglePodElasticEPLeader(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec) {
 		return nil
 	}
 	followerComponentName := leaderComponentName + "-" + commonconsts.GroveRoleSuffixFollower

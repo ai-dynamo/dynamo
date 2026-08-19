@@ -24,6 +24,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 // vllmComponent builds a single-pod vLLM component whose main container carries the
@@ -106,6 +108,20 @@ func TestSynthesizeElasticEPFollowerDCD_OnlyForElasticEP(t *testing.T) {
 		{name: "elastic EP on the ray backend gets a follower", component: elasticEPComponent(), wantSynthesis: true},
 		{name: "plain vLLM gets none", component: vllmComponent(), wantSynthesis: false},
 		{name: "elastic EP without the ray backend gets none", component: vllmComponent("--enable-elastic-ep"), wantSynthesis: false},
+		// The Service renderer emits the leader's headless Service only for the
+		// single-pod shape. Synthesizing outside that gate leaves a follower waiting on
+		// an address that is never created (replicas > 1) or that reconciles through the
+		// LWS path, where the marker never routes to RoleFollower (multinode).
+		{
+			name:          "replicas > 1 gets none: each replica is its own Ray head",
+			component:     withReplicas(elasticEPComponent(), 2),
+			wantSynthesis: false,
+		},
+		{
+			name:          "multinode gets none: it reaches its leader through the framework hostname",
+			component:     withNodeCount(elasticEPComponent(), 2),
+			wantSynthesis: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -113,11 +129,57 @@ func TestSynthesizeElasticEPFollowerDCD_OnlyForElasticEP(t *testing.T) {
 			t.Log("deriving the follower from the leader DCD")
 			follower := synthesizeElasticEPFollowerDCD(leaderDCD(tt.component), leaderComponent)
 
-			t.Log("only an elastic-EP Ray launch has a Ray cluster for a follower to join")
+			t.Log("a follower is synthesized only for a shape whose leader Service is emitted")
 			if gotSynthesis := follower != nil; gotSynthesis != tt.wantSynthesis {
 				t.Fatalf("synthesized = %v, want %v (got %+v)", gotSynthesis, tt.wantSynthesis, follower)
 			}
 		})
+	}
+}
+
+func withReplicas(c *v1beta1.DynamoComponentDeploymentSharedSpec, n int32) *v1beta1.DynamoComponentDeploymentSharedSpec {
+	c.Replicas = ptr.To(n)
+	return c
+}
+
+func withNodeCount(c *v1beta1.DynamoComponentDeploymentSharedSpec, n int32) *v1beta1.DynamoComponentDeploymentSharedSpec {
+	c.Multinode = &v1beta1.MultinodeSpec{NodeCount: n}
+	return c
+}
+
+// A user may legitimately declare a component whose name equals a derived follower
+// identity. Storing the derived DCD unchecked would drop one of the two from
+// rendering, worker hashing, and status depending on map order, so generation fails.
+func TestGenerateDynamoComponentsDeployments_RejectsFollowerNameCollision(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "mydgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: leaderComponent,
+					ComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(1)),
+					PodTemplate:   elasticEPComponent().PodTemplate,
+				},
+				{
+					ComponentName: leaderComponent + "-" + commonconsts.GroveRoleSuffixFollower,
+					ComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(1)),
+					PodTemplate:   vllmComponent().PodTemplate,
+				},
+			},
+		},
+	}
+
+	t.Log("generate with an elastic-EP leader and a declared component of the derived name")
+	_, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+
+	t.Log("generation fails loudly rather than silently dropping one of them")
+	if err == nil {
+		t.Fatal("expected a collision error, got nil")
+	}
+	if !strings.Contains(err.Error(), "collides") {
+		t.Errorf("error should name the collision; got: %v", err)
 	}
 }
 
