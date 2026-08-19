@@ -125,27 +125,6 @@ impl Indexer {
         )
     }
 
-    /// Validate configuration that requires an indexer before deciding whether to construct one.
-    pub fn validate_config(
-        kv_router_config: &KvRouterConfig,
-        model_name: Option<&str>,
-    ) -> Result<()> {
-        // Preserve the existing no-indexer behavior for zero-overlap deployments.
-        if kv_router_config.overlap_score_credit == 0.0 {
-            return Ok(());
-        }
-        if kv_router_config.router_predicted_ttl_secs.is_some() && !kv_router_config.use_kv_events {
-            anyhow::bail!(
-                "router_predicted_ttl_secs requires use_kv_events=true; \
-                 do not combine a primary approximate indexer with a side approximate indexer"
-            );
-        }
-        if kv_router_config.use_remote_indexer && model_name.is_none() {
-            anyhow::bail!("model_name is required when use_remote_indexer is configured");
-        }
-        Ok(())
-    }
-
     pub async fn new(
         component: &Component,
         kv_router_config: &KvRouterConfig,
@@ -153,13 +132,21 @@ impl Indexer {
         model_name: Option<&str>,
         cancellation_token: CancellationToken,
     ) -> Result<Self> {
-        Self::validate_config(kv_router_config, model_name)?;
         if kv_router_config.overlap_score_credit == 0.0 {
             return Ok(Self::None);
         }
+
+        if kv_router_config.router_predicted_ttl_secs.is_some() && !kv_router_config.use_kv_events {
+            anyhow::bail!(
+                "router_predicted_ttl_secs requires use_kv_events=true; \
+                 do not combine a primary approximate indexer with a side approximate indexer"
+            );
+        }
         if kv_router_config.use_remote_indexer {
             let model_name = model_name
-                .expect("validated remote-indexer configuration requires model_name")
+                .ok_or_else(|| {
+                    anyhow::anyhow!("model_name is required when use_remote_indexer is configured")
+                })?
                 .to_string();
             let indexer_component_name = component.name();
             tracing::info!(
@@ -280,7 +267,11 @@ impl Indexer {
                 ..
             } => dump_local_events(primary.dump_events().await?, lower_tier).await,
             Self::Remote { .. } => Ok(Vec::new()),
-            Self::None => Ok(Vec::new()),
+            Self::None => {
+                panic!(
+                    "Cannot dump events: indexer does not exist (is overlap_score_credit set to 0?)"
+                );
+            }
         }
     }
 
