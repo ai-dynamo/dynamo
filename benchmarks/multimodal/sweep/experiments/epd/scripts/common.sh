@@ -8,7 +8,7 @@ MPS_ROOT=
 ROLE_CACHE_ENV=()
 
 setup_dynamo_network() {
-    local default_namespace=$1 host
+    local default_namespace=$1
 
     export DYN_NAMESPACE=${DYN_NAMESPACE:-$default_namespace}
     export DYN_DISCOVERY_BACKEND=${DYN_DISCOVERY_BACKEND:-file}
@@ -17,15 +17,7 @@ setup_dynamo_network() {
         mkdir -p "$DYN_FILE_KV"
     fi
 
-    export DYN_REQUEST_PLANE=tcp DYN_EVENT_PLANE=zmq DYN_MM_ALLOW_INTERNAL=1
-    if [[ -z ${DYN_TCP_RPC_HOST:-} ]]; then
-        for host in $(hostname -I); do
-            [[ $host == 127.* || $host == ::1 ]] || { DYN_TCP_RPC_HOST=$host; break; }
-        done
-    fi
-    [[ -n ${DYN_TCP_RPC_HOST:-} ]] \
-        || die "set DYN_TCP_RPC_HOST to a non-loopback address"
-    export DYN_TCP_RPC_HOST
+    export DYN_MM_ALLOW_INTERNAL=1
 }
 
 setup_nixl_libs() {
@@ -48,10 +40,9 @@ PY
 }
 
 launch() {
-    local name=$1 cpus=$2
-    shift 2
+    local name=$1
+    shift
     local -a command=("$@")
-    [[ -z $cpus ]] || command=(taskset --cpu-list "$cpus" "${command[@]}")
     setsid "${command[@]}" >"$LOG_DIR/$name.log" 2>&1 &
     PIDS+=("$!")
 }
@@ -96,8 +87,6 @@ start_mps() {
     local -a command=(env CUDA_VISIBLE_DEVICES="$GPU"
         CUDA_MPS_PIPE_DIRECTORY="$MPS_ROOT/pipe"
         CUDA_MPS_LOG_DIRECTORY="$MPS_ROOT/log" nvidia-cuda-mps-control -d)
-    [[ -z ${DYN_CPUSET_MPS:-} ]] \
-        || command=(taskset --cpu-list "$DYN_CPUSET_MPS" "${command[@]}")
     "${command[@]}"
     for _ in {1..100}; do
         if echo get_server_list | env CUDA_MPS_PIPE_DIRECTORY="$MPS_ROOT/pipe" \
@@ -121,25 +110,13 @@ wait_for_worker_log() {
 }
 
 prepare_role_cache() {
-    local backend=$1 role=$2 cache_root="$LOG_DIR/cache/$2"
-    mkdir -p "$cache_root"/{home,xdg,triton,torchinductor,flashinfer,flashinfer_cubin/cubins}
+    local role=$1 cache_root="$LOG_DIR/cache/$1"
+    mkdir -p "$cache_root"/{home,xdg,triton,torchinductor,flashinfer}
     ROLE_CACHE_ENV=(
         HOME="$cache_root/home"
         XDG_CACHE_HOME="$cache_root/xdg"
         TRITON_CACHE_DIR="$cache_root/triton"
         TORCHINDUCTOR_CACHE_DIR="$cache_root/torchinductor"
         FLASHINFER_WORKSPACE_BASE="$cache_root/flashinfer"
-        FLASHINFER_CUBIN_DIR="$cache_root/flashinfer_cubin/cubins"
     )
-    case "$backend" in
-        vllm)
-            mkdir -p "$cache_root/vllm"
-            ROLE_CACHE_ENV+=(VLLM_CACHE_ROOT="$cache_root/vllm")
-            ;;
-        sglang)
-            mkdir -p "$cache_root/sglang"
-            ROLE_CACHE_ENV+=(SGLANG_CACHE_DIR="$cache_root/sglang")
-            ;;
-        *) die "unsupported cache backend: $backend" ;;
-    esac
 }

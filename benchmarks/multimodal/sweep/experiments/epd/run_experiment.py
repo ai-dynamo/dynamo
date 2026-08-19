@@ -35,8 +35,10 @@ TOPOLOGY_ALIASES = {
     "epd": "epd",
 }
 BACKEND_LAUNCHERS = {
-    "vllm": "run_vllm.sh",
-    "sglang": "run_sglang.sh",
+    ("vllm", "aggregate"): "run_vllm_agg.sh",
+    ("vllm", "epd"): "run_vllm_epd.sh",
+    ("sglang", "aggregate"): "run_sglang_agg.sh",
+    ("sglang", "epd"): "run_sglang_epd.sh",
 }
 INSTRUCTION = (
     "\nUse the first attached page to answer this question: "
@@ -373,11 +375,10 @@ def launcher_command(
     key: tuple[str, str, int | None], args: argparse.Namespace
 ) -> list[str]:
     backend, topology, budget = key
-    launcher = SCRIPT_DIR / "scripts" / BACKEND_LAUNCHERS[backend]
+    launcher = SCRIPT_DIR / "scripts" / BACKEND_LAUNCHERS[backend, topology]
     command = [
         "bash",
         str(launcher),
-        topology,
         "--model",
         args.model,
         "--served-model-name",
@@ -397,7 +398,6 @@ def managed_service(
     model_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update(DYN_HTTP_PORT=str(args.port), DYN_LOG_DIR=str(model_dir))
-    env.update(service_port_env(args.port))
     log_path = output_dir / "model-launcher.log"
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
@@ -435,22 +435,6 @@ def managed_service(
 
 def measured_requests(qps: Decimal) -> int:
     return max(24, math.ceil(float(qps * 60)) + 1)
-
-
-def service_port_env(http_port: int) -> dict[str, str]:
-    """Derive one collision-free worker-port block from the HTTP port."""
-    ports = {
-        **{f"DYN_SYSTEM_PORT{i}": http_port + 80 + i for i in range(1, 4)},
-        **{
-            f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{i}": http_port + 12096 + i
-            for i in range(1, 4)
-        },
-        **{f"DYN_WORKER_PORT{i}": http_port + 22000 + i for i in range(1, 4)},
-        **{f"DYN_NCCL_PORT{i}": http_port + 23000 + i for i in range(1, 4)},
-    }
-    if max(ports.values()) > 65535:
-        raise ValueError("--port is too high to derive backend worker ports")
-    return {name: str(port) for name, port in ports.items()}
 
 
 def aiperf_command(
