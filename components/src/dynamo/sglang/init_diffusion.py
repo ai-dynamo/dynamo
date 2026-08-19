@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import os
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import sglang as sgl
 
@@ -34,6 +34,27 @@ from dynamo.sglang.request_handlers import (
     ImageDiffusionWorkerHandler,
     VideoGenerationWorkerHandler,
 )
+
+
+def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
+    """Translate Dynamo's SGLang config into DiffGenerator arguments."""
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    kwargs = {
+        "model_path": server_args.model_path,
+        "num_gpus": tp_size * dp_size,
+        "tp_size": tp_size,
+        "dp_size": dp_size,
+        "dist_timeout": getattr(server_args, "dist_timeout", None),
+    }
+
+    # The text-engine CLI names this --nccl-port; DiffGenerator v0.5.15+
+    # names the same torch.distributed rendezvous setting ``master_port``.
+    # Omit it when unset so SGLang retains its own default/settling behavior.
+    if (master_port := getattr(server_args, "nccl_port", None)) is not None:
+        kwargs["master_port"] = master_port
+
+    return kwargs
 
 
 async def init_llm_diffusion(
@@ -141,18 +162,8 @@ async def init_image_diffusion(
     if not server_args.model_path:
         raise ValueError("--model is required for diffusion workers")
 
-    tp_size = getattr(server_args, "tp_size", 1)
-    dp_size = getattr(server_args, "dp_size", 1)
-    num_gpus = tp_size * dp_size
-
-    dist_timeout = getattr(server_args, "dist_timeout", None)
-
     generator = DiffGenerator.from_pretrained(
-        model_path=server_args.model_path,
-        num_gpus=num_gpus,
-        tp_size=tp_size,
-        dp_size=dp_size,
-        dist_timeout=dist_timeout,
+        **_diffusion_generator_kwargs(server_args)
     )
 
     fs_url = dynamo_args.media_output_fs_url
@@ -228,18 +239,8 @@ async def init_video_diffusion(
     if not server_args.model_path:
         raise ValueError("--model is required for video generation workers")
 
-    tp_size = getattr(server_args, "tp_size", 1)
-    dp_size = getattr(server_args, "dp_size", 1)
-    num_gpus = tp_size * dp_size
-
-    dist_timeout = getattr(server_args, "dist_timeout", None)
-
     generator = DiffGenerator.from_pretrained(
-        model_path=server_args.model_path,
-        num_gpus=num_gpus,
-        tp_size=tp_size,
-        dp_size=dp_size,
-        dist_timeout=dist_timeout,
+        **_diffusion_generator_kwargs(server_args)
     )
 
     fs_url = dynamo_args.media_output_fs_url
