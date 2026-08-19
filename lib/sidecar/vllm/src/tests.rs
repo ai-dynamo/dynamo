@@ -740,6 +740,43 @@ fn routed_expert_prompt_offset_is_forwarded() {
 }
 
 #[test]
+fn routed_expert_prompt_offset_preserves_optional_and_boundary_values() {
+    for (sampling_params, expected) in [
+        (json!({}), None),
+        (json!({"routed_experts_prompt_start": null}), None),
+        (json!({"routed_experts_prompt_start": 0}), Some(0)),
+        (
+            json!({"routed_experts_prompt_start": u32::MAX}),
+            Some(u32::MAX),
+        ),
+    ] {
+        let mut request = request();
+        request.extra_args = Some(json!({
+            "vllm_tito": {
+                "request_id": "request-1",
+                "sampling_params": sampling_params,
+                "stream": false,
+                "priority": 0
+            }
+        }));
+
+        let wire = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect("valid routed-expert prompt offset boundary");
+
+        assert_eq!(
+            wire.response
+                .expect("response options")
+                .routed_experts_prompt_start,
+            expected
+        );
+    }
+}
+
+#[test]
 fn routed_expert_prompt_offset_rejects_invalid_values() {
     for value in [
         json!(-1),
