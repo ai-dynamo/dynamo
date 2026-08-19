@@ -135,6 +135,11 @@ runs:
           BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+          # k8s label values must end alphanumeric; truncation can leave a
+          # trailing separator (release/1.4.1 -> release-1-)
+          while [[ "${BRANCH_SANITIZED}" == *[-.] ]]; do
+            BRANCH_SANITIZED="${BRANCH_SANITIZED%[-.]}"
+          done
           while [[ "${BRANCH_SANITIZED}" =~ [^[:alnum:]]$ ]]; do
             BRANCH_SANITIZED="${BRANCH_SANITIZED%?}"
           done
