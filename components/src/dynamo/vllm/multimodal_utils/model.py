@@ -40,7 +40,7 @@ def _encoder_only_noop(*_args: Any, **_kwargs: Any) -> None:
 
 def _patch_qwen_text_warmup_for_encoder() -> None:
     module = import_module("vllm.model_executor.warmup.kernel_warmup")
-    module.qwen_triton_warmup = _encoder_only_noop
+    setattr(module, "qwen_triton_warmup", _encoder_only_noop)
 
 
 class ModelFamily(str, Enum):

@@ -19,14 +19,13 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
-
-from make_payload import build_payload, load_tokenizer, write_dataset
+from typing import Any, Protocol
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EXPECTED_AIPERF_VERSION = "0.10.0"
@@ -39,6 +38,156 @@ BACKEND_LAUNCHERS = {
     "vllm": "run_vllm.sh",
     "sglang": "run_sglang.sh",
 }
+INSTRUCTION = (
+    "\nUse the first attached page to answer this question: "
+    "What is the actual value per 1000 during 1975? "
+    "Then transcribe the visible content verbatim from each subsequent page."
+)
+ROLE_CONTEXT = {
+    "system": (
+        " Document pages may combine headings, tables, dates, quantities, labels,"
+        " and annotations. Nearby rows and columns can clarify abbreviated or"
+        " ambiguous entries, while units and punctuation distinguish similar values."
+    ),
+    "user": (
+        " The attached material may contain headings, tables, dates, numerical values,"
+        " labels, and short annotations. Consider each section in context, distinguish"
+        " printed entries from surrounding notes, and report only information visible"
+        " in the documents."
+    ),
+}
+
+
+class Tokenizer(Protocol):
+    def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
+        ...
+
+    def decode(
+        self,
+        ids: Sequence[int],
+        *,
+        skip_special_tokens: bool = True,
+        clean_up_tokenization_spaces: bool = False,
+    ) -> str:
+        ...
+
+
+def load_tokenizer(path: str) -> Tokenizer:
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(
+        path, trust_remote_code=True, local_files_only=True
+    )
+
+
+def _count(tokenizer: Tokenizer, text: str) -> int:
+    return len(tokenizer.encode(text, add_special_tokens=False))
+
+
+def exact_text(
+    tokenizer: Tokenizer, target: int, *, role: str, suffix: str = ""
+) -> str:
+    """Build stable text containing exactly ``target`` tokenizer tokens."""
+
+    suffix_tokens = _count(tokenizer, suffix)
+    if target < suffix_tokens:
+        raise ValueError(
+            f"ISL segment {target} cannot fit {suffix_tokens}-token suffix"
+        )
+    if target == 0:
+        return ""
+    unit = ROLE_CONTEXT[role]
+    repeats = max(2, target // _count(tokenizer, unit) + 2)
+    keep = target - suffix_tokens
+    for _ in range(64):
+        ids = tokenizer.encode(unit * repeats, add_special_tokens=False)
+        while len(ids) < keep:
+            repeats *= 2
+            ids = tokenizer.encode(unit * repeats, add_special_tokens=False)
+        prefix = tokenizer.decode(
+            ids[:keep],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        value = prefix + suffix
+        observed = _count(tokenizer, value)
+        if observed == target:
+            return value
+        keep += target - observed
+    raise RuntimeError(f"could not construct exact {target}-token text")
+
+
+def text_blocks(tokenizer: Tokenizer, isl: int) -> tuple[str, str, str]:
+    """Use the historical 2:7 system/user split (2000+7000 at ISL 9000)."""
+
+    if isl <= 0:
+        raise ValueError("ISL must be positive")
+    system_tokens = (isl * 2) // 9
+    system = exact_text(tokenizer, system_tokens, role="system")
+    user = exact_text(tokenizer, isl - system_tokens, role="user", suffix=INSTRUCTION)
+    if _count(tokenizer, system) + _count(tokenizer, user) != isl:
+        raise AssertionError("generated text does not match ISL")
+    return system, user[: -len(INSTRUCTION)], INSTRUCTION
+
+
+def select_images(image_dir: Path, count: int) -> list[Path]:
+    from PIL import Image
+
+    paths = sorted(image_dir.glob("*.png"))
+    if count <= 0 or len(paths) < count:
+        raise ValueError(f"requested {count} images; found {len(paths)} in {image_dir}")
+    for path in paths[:count]:
+        with Image.open(path) as image:
+            if image.format != "PNG" or image.mode != "RGB":
+                raise ValueError(f"expected normalized downloaded PNG: {path}")
+    return paths[:count]
+
+
+def build_payload(
+    *,
+    tokenizer: Tokenizer,
+    backend: str,
+    model: str,
+    image_dir: Path,
+    image_url_root: str,
+    image_count: int,
+    image_token_budget: int | None,
+    isl: int,
+    osl: int,
+) -> dict[str, Any]:
+    system, prefix, instruction = text_blocks(tokenizer, isl)
+    content: list[dict[str, Any]] = [{"type": "text", "text": prefix}]
+    for image in select_images(image_dir, image_count):
+        url = f"{image_url_root.rstrip('/')}/{urllib.parse.quote(image.name)}"
+        content.append({"type": "image_url", "image_url": {"url": url}})
+    content.append({"type": "text", "text": instruction})
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ],
+        "min_tokens": osl,
+        "max_tokens": osl,
+        "ignore_eos": True,
+        "temperature": 0,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if backend == "vllm" and image_token_budget is not None:
+        payload["mm_processor_kwargs"] = {
+            "min_pixels": 65_536,
+            "max_pixels": image_token_budget * 1_024,
+        }
+    elif backend not in {"vllm", "sglang"}:
+        raise ValueError(f"unsupported backend: {backend}")
+    return payload
+
+
+def write_dataset(path: Path, payload: dict[str, Any], records: int = 64) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    path.write_text((line + "\n") * records, encoding="utf-8")
 
 
 def decimal_text(value: Decimal) -> str:
@@ -46,18 +195,22 @@ def decimal_text(value: Decimal) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
+def budget_label(value: int | None) -> str:
+    return f"cap{value}" if value is not None else "default"
+
+
 @dataclass(frozen=True)
 class Cell:
     backend: str
     topology: str
     image_count: int
-    image_token_budget: int
+    image_token_budget: int | None
     isl: int
     osl: int
     qps: Decimal
 
     @property
-    def service_key(self) -> tuple[str, str, int]:
+    def service_key(self) -> tuple[str, str, int | None]:
         return self.backend, self.topology, self.image_token_budget
 
     @property
@@ -85,6 +238,16 @@ def _positive_ints(raw: Sequence[str], name: str, minimum: int = 1) -> list[int]
     return values
 
 
+def _image_token_budgets(raw: Sequence[str]) -> list[int | None]:
+    try:
+        values = [int(value) for value in _tokens(raw)]
+    except ValueError as error:
+        raise ValueError("image-token-budget values must be integers") from error
+    if any(value != -1 and value < 64 for value in values):
+        raise ValueError("image-token-budget values must be -1 or >= 64")
+    return [None if value == -1 else value for value in values]
+
+
 def build_cells(args: argparse.Namespace) -> list[Cell]:
     backends = [value.lower() for value in _tokens(args.backend)]
     if any(value not in {"vllm", "sglang"} for value in backends):
@@ -105,7 +268,7 @@ def build_cells(args: argparse.Namespace) -> list[Cell]:
         raise ValueError("QPS values must be finite and positive")
 
     counts = _positive_ints(args.image_count, "image-count")
-    budgets = _positive_ints(args.image_token_budget, "image-token-budget", 64)
+    budgets = _image_token_budgets(args.image_token_budget)
     isls = _positive_ints(args.isl, "isl")
     osls = _positive_ints(args.osl, "osl")
     return [
@@ -125,15 +288,33 @@ def build_parser() -> argparse.ArgumentParser:
         "backend",
         "topology",
         "image-count",
-        "image-token-budget",
-        "isl",
         "osl",
-        "qps",
     ):
         parser.add_argument(f"--{option}", nargs="+", required=True)
+    parser.add_argument(
+        "--isl",
+        nargs="+",
+        default=["9000"],
+        help="input sequence lengths",
+    )
+    parser.add_argument(
+        "--qps",
+        nargs="+",
+        default=["0.5"],
+        help="request rates",
+    )
+    parser.add_argument(
+        "--image-token-budget",
+        nargs="+",
+        default=["-1"],
+        help="per-image visual-token caps; -1 leaves processor limits unchanged",
+    )
     parser.add_argument("--model", required=True)
-    parser.add_argument("--served-model-name", required=True)
-    parser.add_argument("--tokenizer", help="defaults to --model")
+    parser.add_argument(
+        "--served-model-name",
+        help="OpenAI model name",
+    )
+    parser.add_argument("--tokenizer", help="tokenizer path or Hugging Face ID")
     parser.add_argument("--image-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--aiperf-bin", default=os.environ.get("AIPERF_BIN", "aiperf"))
@@ -188,10 +369,12 @@ def wait_for_model(
     raise TimeoutError(f"model {model!r} was not ready at {url} within {timeout}s")
 
 
-def launcher_command(key: tuple[str, str, int], args: argparse.Namespace) -> list[str]:
+def launcher_command(
+    key: tuple[str, str, int | None], args: argparse.Namespace
+) -> list[str]:
     backend, topology, budget = key
     launcher = SCRIPT_DIR / "scripts" / BACKEND_LAUNCHERS[backend]
-    return [
+    command = [
         "bash",
         str(launcher),
         topology,
@@ -199,14 +382,15 @@ def launcher_command(key: tuple[str, str, int], args: argparse.Namespace) -> lis
         args.model,
         "--served-model-name",
         args.served_model_name,
-        "--image-token-budget",
-        str(budget),
     ]
+    if budget is not None:
+        command.extend(("--image-token-budget", str(budget)))
+    return command
 
 
 @contextlib.contextmanager
 def managed_service(
-    key: tuple[str, str, int], args: argparse.Namespace, output_dir: Path
+    key: tuple[str, str, int | None], args: argparse.Namespace, output_dir: Path
 ) -> Iterator[str]:
     command = launcher_command(key, args)
     model_dir = output_dir / "model"
@@ -413,6 +597,10 @@ def run_cell(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.served_model_name is None:
+        args.served_model_name = Path(args.model.rstrip("/")).name
+    if not args.served_model_name:
+        raise ValueError("could not derive --served-model-name from --model")
     cells = build_cells(args)
     groups = [
         (key, list(items))
@@ -421,7 +609,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Planned {len(cells)} cells in {len(groups)} service groups")
     for cell in cells:
         print(
-            f"  {cell.backend}/{cell.topology}/cap{cell.image_token_budget}/{cell.name}"
+            f"  {cell.backend}/{cell.topology}/"
+            f"{budget_label(cell.image_token_budget)}/{cell.name}"
         )
     if args.dry_run:
         return 0
@@ -445,7 +634,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     with image_origin(args.image_dir) as root:
         for key, group_cells in groups:
             backend, topology, budget = key
-            group_dir = args.output_dir / f"{backend}-{topology}-cap{budget}"
+            group_dir = args.output_dir / (
+                f"{backend}-{topology}-{budget_label(budget)}"
+            )
             group_dir.mkdir(parents=True, exist_ok=True)
             with managed_service(key, args, group_dir) as endpoint:
                 for cell in group_cells:

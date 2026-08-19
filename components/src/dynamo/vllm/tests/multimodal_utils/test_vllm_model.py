@@ -56,7 +56,9 @@ class TestLoadVisionModel:
         fake_llm = MagicMock()
         fake_warmup_module = MagicMock()
         fake_import_module = MagicMock(return_value=fake_warmup_module)
-        model_runner = fake_llm.return_value.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner
+        model_runner = (
+            fake_llm.return_value.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner
+        )
         model_runner.model.visual = fake_visual
 
         monkeypatch.setattr(model_module, "VLLM_ENCODER", 1)

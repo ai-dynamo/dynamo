@@ -25,12 +25,12 @@ esac
 
 usage() {
     cat <<'EOF'
-Usage: run_vllm.sh {aggregate|epd} --image-token-budget N [OPTIONS]
+Usage: run_vllm.sh {aggregate|epd} [--image-token-budget N] [OPTIONS]
 
 Options:
   --model MODEL                 Model path or Hugging Face ID
   --served-model-name NAME      Name returned by the OpenAI endpoint
-  --image-token-budget N        Per-image visual-token upper bound
+  --image-token-budget N        Per-image cap; -1 leaves processor limits unchanged
   -h, --help
 
 GPU, ports, logs, and optional CPU placement are configured with DYN_GPU,
@@ -40,7 +40,7 @@ EOF
 
 MODEL=${MODEL_PATH:-${MODEL:-nvidia/Qwen3.5-122B-A10B-NVFP4}}
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-qwen35-122b-a10b-nvfp4}
-IMAGE_TOKEN_BUDGET=
+IMAGE_TOKEN_BUDGET=-1
 
 while (($#)); do
     case "$1" in
@@ -52,10 +52,12 @@ while (($#)); do
     esac
 done
 
-[[ "$IMAGE_TOKEN_BUDGET" =~ ^[0-9]+$ ]] && ((IMAGE_TOKEN_BUDGET >= 64)) \
-    || die "--image-token-budget must be an integer >= 64"
+if [[ $IMAGE_TOKEN_BUDGET != -1 ]]; then
+    [[ "$IMAGE_TOKEN_BUDGET" =~ ^[0-9]+$ ]] && ((IMAGE_TOKEN_BUDGET >= 64)) \
+        || die "--image-token-budget must be -1 or an integer >= 64"
+fi
 
-case ${DYN_RUNTIME_SOURCE_MODE:-} in
+case ${DYN_RUNTIME_SOURCE_MODE:-worktree} in
     worktree) export PYTHONPATH="$DYNAMO_HOME/components/src:$DYNAMO_HOME/lib/bindings/python/src${PYTHONPATH:+:$PYTHONPATH}" ;;
     installed) export PYTHONPATH=${DYN_INSTALLED_RUNTIME_PYTHONPATH:-} ;;
     *) die "set DYN_RUNTIME_SOURCE_MODE to worktree or installed" ;;
@@ -64,7 +66,7 @@ esac
 HTTP_PORT=${DYN_HTTP_PORT:-8000}
 GPU=${DYN_GPU:-${CUDA_VISIBLE_DEVICES:-0}}
 [[ "$GPU" != *,* ]] || die "one launch must select exactly one GPU"
-LOG_DIR=${DYN_LOG_DIR:-"$PWD/results/vllm-${TOPOLOGY}-cap${IMAGE_TOKEN_BUDGET}"}
+LOG_DIR=${DYN_LOG_DIR:-"$PWD/results/vllm-${TOPOLOGY}"}
 mkdir -p "$LOG_DIR"
 
 setup_dynamo_network "epd-vllm-${TOPOLOGY}-$$"
@@ -81,29 +83,37 @@ python3 -c 'import dynamo.frontend.main, dynamo.vllm.main' \
 
 install_cleanup_traps
 
-MAX_PIXELS=$((IMAGE_TOKEN_BUDGET * 1024))
-MM_PROCESSOR_KWARGS=$(printf '{"min_pixels":65536,"max_pixels":%s}' "$MAX_PIXELS")
+MM_PROCESSOR_ARGS=()
+if [[ $IMAGE_TOKEN_BUDGET != -1 ]]; then
+    MAX_PIXELS=$((IMAGE_TOKEN_BUDGET * 1024))
+    MM_PROCESSOR_KWARGS=$(printf '{"min_pixels":65536,"max_pixels":%s}' "$MAX_PIXELS")
+    MM_PROCESSOR_ARGS=(--mm-processor-kwargs "$MM_PROCESSOR_KWARGS")
+fi
 read -r -a PROFILE_MEM_ARGS <<<"$(build_vllm_gpu_mem_args)"
 AGG_MEM_ARGS=(--gpu-memory-utilization 0.85)
-ENCODER_MEM_ARGS=(--gpu-memory-utilization 0.20)
 PD_MEM_ARGS=(--gpu-memory-utilization 0.78)
 if ((${#PROFILE_MEM_ARGS[@]})); then
     AGG_MEM_ARGS=("${PROFILE_MEM_ARGS[@]}")
-    ENCODER_MEM_ARGS=("${PROFILE_MEM_ARGS[@]}")
     PD_MEM_ARGS=("${PROFILE_MEM_ARGS[@]}")
 fi
 
 COMMON_ARGS=(
     --enable-multimodal --model "$MODEL" --served-model-name "$SERVED_MODEL_NAME"
-    --trust-remote-code --dtype bfloat16 --embedding-transfer-mode nixl-write
     --limit-mm-per-prompt '{"image":50,"video":0,"audio":0}'
-    --no-enable-log-requests --frontend-decoding --max-model-len 32768
+    --frontend-decoding
     --max-num-seqs 128 --max-num-batched-tokens 131072
-    --kv-cache-dtype fp8_e4m3 --no-enable-prefix-caching
-    --quantization modelopt_fp4 --mm-encoder-attn-backend FLASH_ATTN
-    --mm-processor-cache-gb 0 --mm-processor-kwargs "$MM_PROCESSOR_KWARGS"
-    --moe-backend flashinfer_cutedsl
+    --no-enable-prefix-caching
+    --mm-processor-cache-gb 0 --moe-backend flashinfer_cutedsl
 )
+ENCODER_ARGS=(
+    --model "$MODEL" --served-model-name "$SERVED_MODEL_NAME"
+    --embedding-transfer-mode nixl-write
+    --frontend-decoding
+)
+if ((${#MM_PROCESSOR_ARGS[@]})); then
+    COMMON_ARGS+=("${MM_PROCESSOR_ARGS[@]}")
+    ENCODER_ARGS+=("${MM_PROCESSOR_ARGS[@]}")
+fi
 
 print_launch_banner --multimodal --no-curl \
     "Launching vLLM benchmark ${TOPOLOGY}" "$MODEL" "$HTTP_PORT"
@@ -130,7 +140,7 @@ else
         DYN_QWEN36_MOE_ENCODER_FAMILY_PATCH=1 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
         VLLM_NIXL_SIDE_CHANNEL_PORT="${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1:-20097}" \
         "${ROLE_CACHE_ENV[@]}" "${MPS_ENV[@]}" python3 -m dynamo.vllm \
-        "${COMMON_ARGS[@]}" "${ENCODER_MEM_ARGS[@]}" --disaggregation-mode encode
+        "${ENCODER_ARGS[@]}" --disaggregation-mode encode
     wait_for_worker_log encoder-0 "Starting to serve the encode worker endpoint"
 
     prepare_role_cache vllm encoder-1
@@ -139,7 +149,7 @@ else
         DYN_QWEN36_MOE_ENCODER_FAMILY_PATCH=1 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
         VLLM_NIXL_SIDE_CHANNEL_PORT="${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2:-20098}" \
         "${ROLE_CACHE_ENV[@]}" "${MPS_ENV[@]}" python3 -m dynamo.vllm \
-        "${COMMON_ARGS[@]}" "${ENCODER_MEM_ARGS[@]}" --disaggregation-mode encode
+        "${ENCODER_ARGS[@]}" --disaggregation-mode encode
     wait_for_worker_log encoder-1 "Starting to serve the encode worker endpoint"
 
     prepare_role_cache vllm pd
@@ -148,8 +158,8 @@ else
         DYN_QWEN36_MOE_ENCODER_FAMILY_PATCH=1 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT3:-8083}" \
         VLLM_NIXL_SIDE_CHANNEL_PORT="${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT3:-20099}" \
         "${ROLE_CACHE_ENV[@]}" "${MPS_ENV[@]}" python3 -m dynamo.vllm \
-        "${COMMON_ARGS[@]}" "${PD_MEM_ARGS[@]}" \
-        --route-to-encoder --disaggregation-mode pd --enable-mm-embeds
+        "${COMMON_ARGS[@]}" --embedding-transfer-mode nixl-write "${PD_MEM_ARGS[@]}" \
+        --route-to-encoder --enable-mm-embeds
 fi
 
 set +e
