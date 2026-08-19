@@ -82,8 +82,8 @@ TCP is the default request plane and provides direct, low-latency communication 
 # But you can explicitly set it if desired:
 export DYN_REQUEST_PLANE=tcp
 
-# Optional: Configure TCP server host and port
-export DYN_TCP_RPC_HOST=0.0.0.0  # Default host
+# Optional: Configure the TCP server host and port
+export DYN_TCP_RPC_HOST=eth0
 # export DYN_TCP_RPC_PORT=9999   # Optional: specify a fixed port
 
 # Run your Dynamo service
@@ -101,8 +101,10 @@ DYN_REQUEST_PLANE=tcp python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 **TCP Configuration Options:**
 
 Additional TCP-specific environment variables:
-- `DYN_TCP_RPC_HOST`: Server host address (default: auto-detected)
+- `DYN_TCP_RPC_HOST`: Request-plane server host. Accepts IPv4 and IPv6 literals, bracketed IPv6 literals, wildcards, and interface names such as `eth0:1`. If unset, Dynamo selects the first usable non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6 loopback. A wildcard uses a reachable address in its requested family. If only the other family has a usable non-loopback address, Dynamo switches the bind wildcard to that family. IPv4 link-local addresses are accepted. Unspecified, multicast, broadcast, and unscoped IPv6 link-local advertisement addresses are rejected.
 - `DYN_TCP_RPC_PORT`: Server port. If not set, the OS assigns a free port automatically (recommended for most deployments). Set explicitly only if you need a specific port for firewall rules.
+- `DYN_TCP_RESPONSE_STREAM_HOST`: TCP response-stream server host. It accepts the same host grammar and uses the same selection and wildcard-family rules as `DYN_TCP_RPC_HOST`.
+- Auto-resolution cache policy: Dynamo caches only successful non-loopback selections. It retries after interface-enumeration errors and loopback fallbacks.
 - `DYN_TCP_MAX_MESSAGE_SIZE`: Maximum message size for TCP client (default: 32MB)
 - `DYN_TCP_SHRINK_MESSAGE_SIZE`: Threshold for shrinking the zero-copy decoder buffer back to initial size after processing large messages (default: 8MB, max: DYN_TCP_MAX_MESSAGE_SIZE)
 - `DYN_TCP_REQUEST_TIMEOUT`: Request timeout for TCP client (default: 10 seconds)
