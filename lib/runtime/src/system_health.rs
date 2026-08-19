@@ -248,6 +248,35 @@ impl SystemHealth {
         endpoint_health.get(endpoint).cloned()
     }
 
+    /// Remove an endpoint's health check target, notifier and status.
+    ///
+    /// `register_health_check_target` refuses a second registration under the
+    /// same name, so an endpoint that goes away without clearing its entries
+    /// leaves a restarted endpoint of that name monitoring the previous
+    /// instance's target and payload.
+    pub fn unregister_health_check_target(&self, endpoint_subject: &str) {
+        let removed = self
+            .health_check_targets
+            .write()
+            .unwrap()
+            .remove(endpoint_subject)
+            .is_some();
+        self.health_check_notifiers
+            .write()
+            .unwrap()
+            .remove(endpoint_subject);
+        self.endpoint_health
+            .write()
+            .unwrap()
+            .remove(endpoint_subject);
+        if removed {
+            tracing::debug!(
+                endpoint = %endpoint_subject,
+                "Removed endpoint health check target"
+            );
+        }
+    }
+
     /// Get the endpoint-specific health check notifier
     pub fn get_endpoint_health_check_notifier(
         &self,
@@ -328,6 +357,49 @@ mod tests {
             device_type: None,
             request_plane_codec: None,
         }
+    }
+
+    /// `register_health_check_target` refuses a second registration under the
+    /// same name, so an endpoint that goes away without clearing its entries
+    /// leaves a restarted endpoint of that name monitoring the previous
+    /// instance's target and payload.
+    #[test]
+    fn unregistering_lets_the_same_endpoint_name_register_again() {
+        let health = system_health(true);
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({"gen": 1}));
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_some()
+        );
+
+        health.unregister_health_check_target(ENDPOINT);
+
+        assert!(
+            health.get_health_check_target(ENDPOINT).is_none(),
+            "target survived unregistration"
+        );
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_none(),
+            "notifier survived unregistration"
+        );
+        assert!(
+            health.get_endpoint_health_status(ENDPOINT).is_none(),
+            "endpoint health status survived unregistration"
+        );
+
+        // The point of removing it: a restart of this endpoint name installs its
+        // own target rather than inheriting the previous instance's payload.
+        let mut restarted = instance();
+        restarted.instance_id = 2;
+        health.register_health_check_target(ENDPOINT, restarted, serde_json::json!({"gen": 2}));
+        let target = health
+            .get_health_check_target(ENDPOINT)
+            .expect("restarted endpoint should own the target");
+        assert_eq!(target.instance.instance_id, 2);
+        assert_eq!(target.payload, serde_json::json!({"gen": 2}));
     }
 
     /// A worker that registers a health-check payload reports ready once its

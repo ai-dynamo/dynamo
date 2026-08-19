@@ -130,6 +130,25 @@ impl EndpointConfigBuilder {
     }
 
     /// Start an endpoint and return once its exact discovery instance is callable.
+    /// Release the endpoint-scoped state that startup installs before any fallible
+    /// registration: the local engine and, if one was registered, the health check
+    /// target with its notifier and status.
+    ///
+    /// Safe to call when neither was installed; both removals are no-ops for an
+    /// unknown endpoint name.
+    fn release_endpoint_local_state(
+        endpoint: &Endpoint,
+        system_health: &Arc<parking_lot::Mutex<crate::system_health::SystemHealth>>,
+    ) {
+        endpoint
+            .drt()
+            .local_endpoint_registry()
+            .remove(&endpoint.name);
+        system_health
+            .lock()
+            .unregister_health_check_target(&endpoint.name);
+    }
+
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
         let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
             self.build_internal()?.dissolve();
@@ -204,7 +223,7 @@ impl EndpointConfigBuilder {
         );
 
         // Register endpoint with the server (unified interface)
-        server
+        if let Err(error) = server
             .register_endpoint(
                 endpoint_name_for_task.clone(),
                 handler,
@@ -213,7 +232,15 @@ impl EndpointConfigBuilder {
                 component_name_for_task.clone(),
                 system_health.clone(),
             )
-            .await?;
+            .await
+        {
+            // The local engine and the health check target were installed before
+            // this point. Returning without releasing them leaves the endpoint
+            // callable and its canary target in place for an endpoint that never
+            // started.
+            Self::release_endpoint_local_state(&endpoint, &system_health);
+            return Err(error);
+        }
 
         let tracker_clone = if graceful_shutdown {
             tracing::debug!(
@@ -254,6 +281,7 @@ impl EndpointConfigBuilder {
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
                 }
+                Self::release_endpoint_local_state(&endpoint, &system_health);
                 anyhow::bail!(
                     "Unable to register service for discovery. Check discovery service status"
                 );
@@ -266,6 +294,8 @@ impl EndpointConfigBuilder {
 
         // Create cleanup task that unregisters on cancellation.
         let endpoint_name_for_cleanup = endpoint_name_for_task;
+        let local_registry_for_cleanup = endpoint.drt().local_endpoint_registry().clone();
+        let system_health_for_cleanup = system_health.clone();
         let server_for_cleanup = server;
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
         let discovery_for_cleanup = discovery;
@@ -297,6 +327,14 @@ impl EndpointConfigBuilder {
                 tracing::debug!("Unregister endpoint from graceful shutdown tracker");
                 tracker.unregister_endpoint();
             }
+
+            // Release the state installed before startup too, so restarting this
+            // endpoint name picks up the new engine and canary target instead of
+            // the previous instance's.
+            local_registry_for_cleanup.remove(&endpoint_name_for_cleanup);
+            system_health_for_cleanup
+                .lock()
+                .unregister_health_check_target(&endpoint_name_for_cleanup);
 
             anyhow::Ok(())
         });

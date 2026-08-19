@@ -55,4 +55,16 @@ impl LocalEndpointRegistry {
     pub fn get(&self, endpoint_name: &str) -> Option<LocalAsyncEngine> {
         self.engines.get(endpoint_name).map(|e| e.clone())
     }
+
+    /// Remove a registered local endpoint.
+    ///
+    /// Registration happens before endpoint startup, so a start that fails part
+    /// way through, or an endpoint that is shut down, has to give the engine
+    /// back. Leaving it behind keeps the endpoint callable and lets a canary go
+    /// on reporting a torn-down endpoint as ready.
+    pub fn remove(&self, endpoint_name: &str) {
+        if self.engines.remove(endpoint_name).is_some() {
+            tracing::debug!("Removed local endpoint: {endpoint_name}");
+        }
+    }
 }
