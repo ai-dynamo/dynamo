@@ -6,17 +6,16 @@
 Covers two independent concerns of the same method:
 
 * input validation and the TP-derived EP-size floor, and
-* the failed-grow rollback and engine-death handling.
+* fail-fast handling of a failed grow.
+
+vLLM performs no rollback or cleanup on a failed elastic-EP scale, so the handler
+does not try to recover in process: on any failed grow it restarts the worker
+(``_shutdown_worker`` / ``_shutdown_on_engine_dead``) so it comes back clean. The
+fail-fast tests verify that shutdown is actually triggered (not just that a
+boolean was returned) via the ``_WorkerShutdown`` stand-in.
 
 ``ray`` is imported lazily inside the scale path and is absent in CI, so it is
-stubbed in ``sys.modules`` via the ``stub_ray`` fixture. ``_FakeVllmEngine``
-mirrors two subtle semantics of vLLM v0.26's ``AsyncLLM.scale_elastic_ep`` that
-a plain mock would paper over: it records ``parallel_config.data_parallel_size``
-only *after* a reconfigure succeeds, and it short-circuits to a no-op when asked
-to scale to the size it already records. Together those mean a naive rollback to
-``prev_dp`` after a failed grow would be silently skipped; the handler advances
-the recorded size before rolling back so the rollback drives a *real* reconfigure,
-which the rollback tests assert via ``real_reconfigures``.
+stubbed in ``sys.modules`` via the ``stub_ray`` fixture.
 """
 
 import asyncio
@@ -185,19 +184,27 @@ async def test_prefill_context_parallelism_is_rejected(size):
 
 
 # --------------------------------------------------------------------------- #
-# Failed-grow rollback and engine-death handling.
+# Fail-fast handling of a failed grow.
 # --------------------------------------------------------------------------- #
 
 
-class _FakeVllmEngine:
-    """Stand-in engine client that models vLLM v0.26 scale semantics.
+class _WorkerShutdown(BaseException):
+    """Stand-in for the real _shutdown_worker / _shutdown_on_engine_dead, which
+    never return (they call runtime.shutdown() + os._exit). Subclassing
+    BaseException (not Exception) means the handler's broad ``except Exception``
+    cannot swallow it, so a test observes the restart exactly as production does:
+    control leaves scale_elastic_ep and it never reports success.
+    """
 
-    Mirrors ``AsyncLLM.scale_elastic_ep``: a request to the currently-recorded
-    size is a no-op (vLLM's "already at this size, skipping scale" guard), and the
-    recorded size is only advanced *after* a reconfigure succeeds. Sizes in
-    ``fail_sizes`` raise ``RuntimeError``; sizes in ``dead_sizes`` raise
-    ``EngineDeadError``. ``tensor_parallel_size`` is exposed so the handler's
-    TP-derived floor check passes and the rollback path is reached.
+
+_RESTARTED = object()  # sentinel: handler restarted the worker instead of returning
+
+
+class _FakeVllmEngine:
+    """Stand-in engine client. Scaling to a size in ``fail_sizes`` raises
+    ``RuntimeError`` and to a size in ``dead_sizes`` raises ``EngineDeadError``;
+    ``tensor_parallel_size`` is exposed so the handler's TP-derived floor check
+    passes and the grow is actually attempted.
     """
 
     def __init__(self, prev_dp, fail_sizes=(), dead_sizes=(), tensor_parallel_size=1):
@@ -210,104 +217,80 @@ class _FakeVllmEngine:
         self._fail_sizes = list(fail_sizes)
         self._dead_sizes = list(dead_sizes)
         self.calls: list[int] = []  # every requested size, in order
-        self.real_reconfigures: list[int] = []  # sizes that did real work
 
     async def scale_elastic_ep(self, size: int) -> None:
         self.calls.append(size)
-        if self.vllm_config.parallel_config.data_parallel_size == size:
-            # vLLM guard: no reconfigure, recorded size unchanged.
-            return
-        self.real_reconfigures.append(size)
         if size in self._dead_sizes:
             raise EngineDeadError()
         if size in self._fail_sizes:
-            raise RuntimeError(f"reconfigure to {size} failed")
-        # Only advance the recorded size on success, exactly like vLLM.
+            raise RuntimeError(f"scale to {size} failed")
         self.vllm_config.parallel_config.data_parallel_size = size
 
 
-def _make_self(engine: _FakeVllmEngine) -> SimpleNamespace:
+def _make_self(engine: _FakeVllmEngine, shutdown_log: list) -> SimpleNamespace:
+    def _shutdown_worker():
+        shutdown_log.append("worker")
+        raise _WorkerShutdown()
+
+    def _shutdown_on_engine_dead(err):
+        shutdown_log.append("engine_dead")
+        raise _WorkerShutdown()
+
     return SimpleNamespace(
         _scale_ep_lock=asyncio.Lock(),
         _scale_ep_in_progress=False,
         engine_client=engine,
+        _shutdown_worker=_shutdown_worker,
+        _shutdown_on_engine_dead=_shutdown_on_engine_dead,
     )
 
 
-def _run(engine: _FakeVllmEngine, body: dict) -> dict:
+def _run(engine: _FakeVllmEngine, body: dict):
+    """Drive scale_elastic_ep. Returns ``(result, shutdown_log)``; ``result`` is
+    ``_RESTARTED`` when the handler restarted the worker instead of returning."""
+    shutdown_log: list[str] = []
+
     async def _coro():
-        fake_self = _make_self(engine)
-        result = await BaseWorkerHandler.scale_elastic_ep(fake_self, body)
-        # The in-progress flag must always be cleared for the next request.
-        assert fake_self._scale_ep_in_progress is False
-        return result
+        fake_self = _make_self(engine, shutdown_log)
+        return await BaseWorkerHandler.scale_elastic_ep(fake_self, body)
 
-    return asyncio.run(_coro())
-
-
-def _recorded_dp(engine: _FakeVllmEngine) -> int:
-    return engine.vllm_config.parallel_config.data_parallel_size
+    try:
+        result = asyncio.run(_coro())
+    except _WorkerShutdown:
+        result = _RESTARTED
+    return result, shutdown_log
 
 
 def test_scale_success(stub_ray):
     engine = _FakeVllmEngine(prev_dp=2)
 
-    result = _run(engine, {"new_data_parallel_size": 3})
+    result, shutdown = _run(engine, {"new_data_parallel_size": 3})
 
+    assert shutdown == []  # no restart on success
     assert result["status"] == "ok"
     assert result["new_data_parallel_size"] == 3
-    # grow only, no rollback; a real reconfigure happened and stuck.
     assert engine.calls == [3]
-    assert engine.real_reconfigures == [3]
-    assert _recorded_dp(engine) == 3
 
 
-def test_failed_grow_rolls_back_with_a_real_reconfigure(stub_ray):
-    # The grow to 3 fails; the rollback to 2 must be a *real* reconfigure, not a
-    # no-op. vLLM records dp only after success, so unless the handler advances
-    # the recorded size before rolling back, vLLM's guard silently skips it.
+def test_failed_grow_restarts_the_worker(stub_ray):
+    # vLLM does not roll back a failed scale, so a failed grow must fail fast:
+    # restart the worker rather than report a recovery that no caller acts on.
     engine = _FakeVllmEngine(prev_dp=2, fail_sizes=[3])
 
-    result = _run(engine, {"new_data_parallel_size": 3})
+    result, shutdown = _run(engine, {"new_data_parallel_size": 3})
 
-    assert result["status"] == "error"
-    assert result["recoverable"] is True
-    assert result["data_parallel_size"] == 2
-    assert "rolled back to dp=2" in result["message"]
-    # grow(3) then rollback(2)...
-    assert engine.calls == [3, 2]
-    # ...and both were *real* reconfigures -- the rollback was NOT swallowed by
-    # vLLM's "already at this size" guard. If the guard-bypass in the handler is
-    # dropped, this drops to [3] and the test fails.
-    assert engine.real_reconfigures == [3, 2]
-    # Engine ends back at the last good size.
-    assert _recorded_dp(engine) == 2
+    assert result is _RESTARTED  # never returned a success/recovery dict
+    assert shutdown == ["worker"]  # worker restart was triggered
+    assert engine.calls == [3]  # grow attempted once; no rollback call
 
 
-def test_failed_rollback_reports_unrecoverable(stub_ray):
-    # Both the grow and the (real) rollback fail -> unrecoverable, needs restart.
-    engine = _FakeVllmEngine(prev_dp=2, fail_sizes=[3, 2])
-
-    result = _run(engine, {"new_data_parallel_size": 3})
-
-    assert result["status"] == "error"
-    assert result["recoverable"] is False
-    assert "must be restarted" in result["message"]
-    # The rollback was actually attempted (a real reconfigure), not skipped.
-    assert engine.calls == [3, 2]
-    assert engine.real_reconfigures == [3, 2]
-
-
-def test_engine_dead_error_is_fatal_and_skips_rollback(stub_ray):
-    # vLLM raises EngineDeadError when the engine core is gone. A dead engine
-    # cannot be reconfigured, so the handler must report unrecoverable and must
-    # NOT attempt a rollback (which would only mask the dead engine).
+def test_engine_dead_restarts_the_worker(stub_ray):
+    # A dead engine routes through the same _shutdown_on_engine_dead path the rest
+    # of the handler uses for engine death.
     engine = _FakeVllmEngine(prev_dp=2, dead_sizes=[3])
 
-    result = _run(engine, {"new_data_parallel_size": 3})
+    result, shutdown = _run(engine, {"new_data_parallel_size": 3})
 
-    assert result["status"] == "error"
-    assert result["recoverable"] is False
-    assert "restart" in result["message"].lower()
-    # only the failed grow reached the engine -- no rollback call
-    assert engine.calls == [3]
+    assert result is _RESTARTED
+    assert shutdown == ["engine_dead"]
+    assert engine.calls == [3]  # no rollback call

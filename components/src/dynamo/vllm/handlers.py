@@ -1523,7 +1523,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             async def _scale_engine(size: int) -> None:
                 # add_dp_placement_groups calls ray.util.state.list_nodes();
                 # patch it to the GCS API for the duration of the reconfigure.
-                # Both the grow and any rollback go through this path.
                 original_list_nodes = _ray_util_state.list_nodes
                 try:
                     _ray_util_state.list_nodes = lambda **kw: [
@@ -1533,92 +1532,42 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 finally:
                     _ray_util_state.list_nodes = original_list_nodes
 
-            # Capture the current dp up front so a failed grow can be rolled back
-            # to it instead of wedging the engine at a size it cannot fulfill: a
-            # half-created rank that dies leaves its peers expecting a collective
-            # that never completes, so the leader survives but stops serving.
-            prev_dp = self.engine_client.vllm_config.parallel_config.data_parallel_size
-
             try:
                 await _scale_engine(new_dp_size)
             except EngineDeadError as dead_err:
-                # vLLM raises EngineDeadError when the engine core is gone. There
-                # is nothing to roll back and no in-process recovery is possible,
-                # so report unrecoverable and let the worker restart rather than
-                # attempting a rollback that cannot succeed and would only mask a
-                # dead engine as a recovered one.
+                # A failed grow can leave the engine core dead. Restart the worker
+                # the same way every other engine path in this handler does, so it
+                # comes back clean and re-registers (the fail-fast rationale is in
+                # the broad handler below).
                 logger.error(
                     "[ElasticEP] Engine died during scale to dp=%s: %s",
                     new_dp_size,
                     dead_err,
                 )
-                return {
-                    "status": "error",
-                    "recoverable": False,
-                    "message": (
-                        f"scale to dp={new_dp_size} failed: the engine core is "
-                        f"dead ({dead_err}); the worker must be restarted"
-                    ),
-                }
+                self._shutdown_on_engine_dead(dead_err)  # NoReturn: restarts worker
             except Exception as grow_err:
+                # Fail fast on a failed scale. vLLM performs NO rollback or cleanup
+                # of its own -- _scale_up_elastic_ep has no try/except and vLLM's
+                # own /scale_elastic_ep endpoint simply returns 500 -- so a failed
+                # grow leaves the engine in a partial state: the existing ranks were
+                # already told to reconfigure toward a peer that never joined, so
+                # they wedge on a collective that never completes. Because vLLM
+                # gives us no rollback protection, there is no safe way to recover
+                # in process: an in-handler rollback would race vLLM's still-running
+                # grow tasks (its asyncio.gather does not cancel the siblings of the
+                # failed task) and could not repair a wedged engine anyway. The only
+                # safe response is to fail fast -- shut the worker down so it
+                # restarts clean at the previous size and re-registers, instead of
+                # returning a "recovered" status that nothing consumes while a
+                # broken worker keeps taking traffic.
                 logger.error(
-                    "[ElasticEP] Scaling to dp=%s failed: %s", new_dp_size, grow_err
+                    "[ElasticEP] Scaling to dp=%s failed: %s. vLLM does not roll "
+                    "back a failed scale; restarting the worker to recover a clean "
+                    "state.",
+                    new_dp_size,
+                    grow_err,
                 )
-                if new_dp_size == prev_dp:
-                    # No size change was applied; nothing to roll back.
-                    raise
-                # vLLM records parallel_config.data_parallel_size only *after* a
-                # successful reconfigure, so after a failed grow the engine still
-                # believes it is at prev_dp. A rollback call to prev_dp would then
-                # hit vLLM's "already at this size, skipping scale" guard and be a
-                # silent no-op -- leaving the half-created ranks in place while we
-                # falsely report recovery. Advance the recorded size to the
-                # attempted target so the rollback drives a real scale-down.
-                self.engine_client.vllm_config.parallel_config.data_parallel_size = (
-                    new_dp_size
-                )
-                # Roll back to the last good dp: "either it grows, or nothing
-                # changes" for the engine, not just the pod.
-                try:
-                    logger.warning(
-                        "[ElasticEP] Rolling back to data_parallel_size=%s", prev_dp
-                    )
-                    await _scale_engine(prev_dp)
-                except Exception as rollback_err:
-                    # Rollback itself failed: the engine is unrecoverable in
-                    # process (e.g. an uncorrectable NVLink error poisoned the
-                    # CUDA/NCCL context, or the grow died before the new ranks were
-                    # registered so there is nothing left to scale back down).
-                    # Signal that the worker must be restarted rather than report a
-                    # false recovery.
-                    logger.error(
-                        "[ElasticEP] Rollback to dp=%s also failed: %s. Engine is "
-                        "unrecoverable and must be restarted.",
-                        prev_dp,
-                        rollback_err,
-                    )
-                    return {
-                        "status": "error",
-                        "recoverable": False,
-                        "message": (
-                            f"scale to dp={new_dp_size} failed ({grow_err}); "
-                            f"rollback to dp={prev_dp} also failed ({rollback_err}); "
-                            "the engine is in an unrecoverable state and must be "
-                            "restarted"
-                        ),
-                    }
-                logger.info(
-                    "[ElasticEP] Rolled back to dp=%s; engine still serving", prev_dp
-                )
-                return {
-                    "status": "error",
-                    "recoverable": True,
-                    "data_parallel_size": prev_dp,
-                    "message": (
-                        f"scale to dp={new_dp_size} failed and was rolled back to "
-                        f"dp={prev_dp}: {grow_err}"
-                    ),
-                }
+                self._shutdown_worker()  # NoReturn: runtime.shutdown() + os._exit(1)
 
             logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
             return {
