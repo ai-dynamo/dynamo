@@ -230,6 +230,7 @@ mod tests {
                 0.0,
                 0,
                 None,
+                None,
                 RoutingConstraints::default(),
             )
             .await
