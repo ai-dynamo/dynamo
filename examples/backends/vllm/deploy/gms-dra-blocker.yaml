@@ -8,8 +8,10 @@
 # deploying a GMS workload steers the generated claims onto free devices.
 #
 # Devices are selected by GPU UUID. List the UUIDs with `nvidia-smi -L` on the
-# node, or map DRA device names to UUIDs from the ResourceSlices:
-#   kubectl get resourceslices -o jsonpath='{range .items[*].spec.devices[*]}{.name}{" "}{.attributes.uuid.string}{"\n"}{end}'
+# node, or map DRA device names to UUIDs from the v1 ResourceSlices (the shape
+# below is resource.k8s.io/v1; querying the version explicitly fails loudly on
+# clusters that do not serve it):
+#   kubectl get resourceslices.v1.resource.k8s.io -o jsonpath='{range .items[*].spec.devices[*]}{.name}{" "}{.attributes.uuid.string}{"\n"}{end}'
 # Replace the UUIDs and count below with the occupied GPUs on your node, then:
 #   kubectl apply -n <namespace> -f gms-dra-blocker.yaml
 # The busybox pod holds the devices in the DRA ledger without starting any CUDA
