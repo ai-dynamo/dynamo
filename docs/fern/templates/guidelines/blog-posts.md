@@ -1,15 +1,18 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Writing Blog Posts
+subtitle: Publish dated technical and project articles in the Dynamo Blog.
+---
 
-# Adding a Blog Post
-
-Follow these steps to publish a post in the Dynamo Blog tab.
+Use blog posts for dated editorial content, technical narratives, research summaries, and project
+announcements. Keep canonical installation, task, architecture, and reference material in the
+corresponding documentation tabs and link to it from the post.
 
 ## Step 1: Write the Post
 
-Create an MDX file under `docs/fern/pages/blog/<year>/`; put supporting files under `docs/fern/pages/blog/_assets/<topic>/`:
+Create an MDX file under `docs/fern/pages/blog/<year>/`; put supporting files under
+`docs/fern/pages/blog/_assets/<topic>/`:
 
 ```text
 docs/fern/pages/blog/2026/my-post.mdx
@@ -32,6 +35,9 @@ Import and render the editorial metadata component immediately after the frontma
 
 ```mdx
 import { BlogArticleMeta } from "@/components/BlogArticleMeta";
+import { BlogStyles } from "@/components/BlogStyles";
+
+<BlogStyles />
 
 <BlogArticleMeta
   authors={[
@@ -54,12 +60,13 @@ images in the article body receive the standard focus-to-sharp scroll reveal aut
 
 ## Step 2: Add the Post to the Blog Navigation
 
-Open `docs/fern/index.yml`, find the `blog` tab, and add the post at the correct position in the reverse-chronological list:
+Open `docs/fern/index.yml`, find the `blog` tab, and add the post at the correct position in
+the reverse-chronological list:
 
 ```yaml
 contents:
   - page: Your Blog Post Title
-    path: blog/2026/my-post.mdx
+    path: pages/blog/2026/my-post.mdx
     slug: my-post
 ```
 
@@ -67,7 +74,8 @@ Keep the explicit `slug` stable after publication. The public URL is `/dynamo/de
 
 ## Step 3: Add the Post to the Landing Page
 
-Open `docs/fern/components/BlogLanding.tsx` and add an entry to `ARTICLES` in reverse chronological order:
+Open `docs/fern/components/BlogLanding.tsx` and add an entry to `ARTICLES` in reverse
+chronological order:
 
 ```tsx
 {
@@ -81,11 +89,14 @@ Open `docs/fern/components/BlogLanding.tsx` and add an entry to `ARTICLES` in re
 },
 ```
 
-Use an existing `art` treatment unless the post needs a deliberately new visual direction. The landing page uses custom React and CSS rather than Fern card components.
+Use an existing `art` treatment unless the post needs a deliberately new visual direction. The
+landing page uses custom React and CSS rather than Fern card components.
 
 ## Step 4: Add the Sidebar Date Label
 
-Add the post date to the Blog archive selectors in `docs/fern/main.css`. Scope the selector to the post slug so the label appears only in the Blog sidebar. After editing `main.css`, run `python3 docs/fern/scripts/sync_site_css.py` so the footer's SITE_CSS mirror stays in sync (pre-commit enforces this).
+Add the post date to the Blog archive selectors in `docs/fern/components/BlogStyles.tsx`.
+Scope each selector to the stable post slug so the label appears only beside that Blog entry. Follow
+a neighboring post and update each sidebar date-label block that contains the existing article slugs.
 
 ## Quick Checklist
 
@@ -94,6 +105,6 @@ Add the post date to the Blog archive selectors in `docs/fern/main.css`. Scope t
 - [ ] Generated cover labels and category palette fit the article
 - [ ] Post is added to the `blog` tab in `index.yml` in reverse chronological order
 - [ ] Post is added to `BlogLanding.tsx`
-- [ ] Sidebar date label is added to `main.css`
+- [ ] Sidebar date label is added to `BlogStyles.tsx`
 - [ ] Internal links include the `.mdx` extension
 - [ ] `fern check --local --warnings` passes without new errors

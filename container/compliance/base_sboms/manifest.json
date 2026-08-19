@@ -7,9 +7,9 @@
       "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
       "baseline_tag": "13.0.2-base-ubuntu24.04",
       "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
+      "from_digest": "sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a",
       "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.22.1-ubuntu2404",
+      "from_tag": "v0.27.1-ubuntu2404",
       "layer_prefix_check_skipped": true,
       "platform": "linux/amd64"
     },
@@ -31,9 +31,9 @@
       "baseline_sbom": "cuda@2ab6381d-arm64.cdx.json",
       "baseline_tag": "13.0.2-base-ubuntu24.04",
       "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
+      "from_digest": "sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a",
       "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.22.1-ubuntu2404",
+      "from_tag": "v0.27.1-ubuntu2404",
       "layer_prefix_check_skipped": true,
       "platform": "linux/arm64"
     },
@@ -80,16 +80,6 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:e2ab50957fc309d3fb110e6331ab8bfb7dd4f0074df41cbbf0bc3c64c8bc0e52",
-      "baseline_image": "vllm/vllm-openai-xpu",
-      "baseline_sbom": "vllm-openai-xpu@e2ab5095-amd64.cdx.json",
-      "baseline_tag": "v0.26.0",
-      "from_digest": "sha256:e2ab50957fc309d3fb110e6331ab8bfb7dd4f0074df41cbbf0bc3c64c8bc0e52",
-      "from_image": "vllm/vllm-openai-xpu",
-      "from_tag": "v0.26.0",
-      "platform": "linux/amd64"
-    },
-    {
       "baseline_digest": "sha256:316b840a08a8174fc3f6b5716828bdfe1daaf629ee1ac2a8b7a22526d141a007",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
       "baseline_sbom": "release@316b840a-amd64.cdx.json",
@@ -108,6 +98,16 @@
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
       "from_tag": "1.3.0rc23",
       "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:3309c2e1f7b1048fea9f392423afd91080c9f9e63796692872cff477e2562220",
+      "baseline_image": "vllm/vllm-openai-xpu",
+      "baseline_sbom": "vllm-openai-xpu@3309c2e1-amd64.cdx.json",
+      "baseline_tag": "v0.27.1",
+      "from_digest": "sha256:3309c2e1f7b1048fea9f392423afd91080c9f9e63796692872cff477e2562220",
+      "from_image": "vllm/vllm-openai-xpu",
+      "from_tag": "v0.27.1",
+      "platform": "linux/amd64"
     },
     {
       "baseline_digest": "sha256:ec133be967ceae0d3cd6f6e7da729161a8b87b4e68927a0c7ed5c78f057f203e",
@@ -162,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-08-13T18:50:01+00:00",
+  "generated_at": "2026-08-13T23:32:12+00:00",
   "schema_version": 2
 }

@@ -12,7 +12,12 @@ spec:
       podTemplate:
         spec:
           containers:
-            - image: $ignore
+            - args:
+                - -m
+                - dynamo.frontend
+              command:
+                - python3
+              image: $ignore
               name: main
       replicas: 1
       runtimeVersionOverride: 1.4.0
@@ -753,7 +758,12 @@ spec:
         nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
     spec:
       containers:
-        - image: $ignore
+        - args:
+            - -m
+            - dynamo.frontend
+          command:
+            - python3
+          image: $ignore
           name: main
   replicas: 1
   runtimeVersionOverride: 1.4.0

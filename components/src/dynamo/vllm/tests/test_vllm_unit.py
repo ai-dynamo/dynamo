@@ -861,6 +861,7 @@ class TestBenchmarkConfig:
             "decode_max_kv_read_token_samples": 128,
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
+            "collect_imbalanced": False,
         }
 
     def test_benchmark_points_file_is_embedded_in_benchmark_config(
@@ -1436,6 +1437,24 @@ def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
     assert error.value.code == 400
 
 
+@pytest.mark.parametrize(
+    ("error_type", "expected_status"),
+    [
+        ("VLLMValidationError", 400),
+        ("VLLMNotFoundError", 404),
+        ("VLLMUnprocessableEntityError", 422),
+    ],
+)
+def test_vllm_client_error_preserves_http_status(error_type, expected_status):
+    from vllm import exceptions as vllm_exceptions
+
+    from dynamo.vllm.errors import vllm_client_error_to_http_error
+
+    error = getattr(vllm_exceptions, error_type)("invalid request")
+
+    assert vllm_client_error_to_http_error(error).code == expected_status
+
+
 def test_build_sampling_params_accepts_productive_recursive_guided_json():
     from dynamo.vllm.handlers import build_sampling_params
 
@@ -1519,6 +1538,7 @@ def _make_dynamo_config(**overrides):
         "decode_max_kv_read_token_samples": 128,
         "decode_max_batch_size_samples": 128,
         "prefix_max_batch_size_samples": 3,
+        "benchmark_collect_imbalanced": False,
         "_benchmark_points": None,
     }
     defaults.update(overrides)
