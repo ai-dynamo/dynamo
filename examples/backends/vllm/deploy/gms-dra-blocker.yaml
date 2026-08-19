@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Blocker claim for verifying GMS on clusters where the NVIDIA device plugin
+# also serves nvidia.com/gpu workloads. The DRA scheduler cannot see
+# device-plugin allocations, so it can place the GMS claim on a GPU that is
+# already fully occupied. Reserving the occupied indexes with this claim before
+# deploying a GMS workload steers the generated claims onto free devices.
+#
+# Adjust the CEL expression and count to the GPUs occupied on your node, then:
+#   kubectl apply -n <namespace> -f gms-dra-blocker.yaml
+# The busybox pod holds the devices in the DRA ledger without starting any CUDA
+# process, so the occupied GPUs keep serving their existing workloads.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: gms-dra-blocker
+spec:
+  devices:
+    requests:
+      - name: blocked
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          allocationMode: ExactCount
+          count: 2
+          selectors:
+            - cel:
+                expression: 'device.attributes["gpu.nvidia.com"].index == 3 || device.attributes["gpu.nvidia.com"].index == 6'
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gms-dra-blocker
+spec:
+  restartPolicy: Never
+  resourceClaims:
+    - name: blocker
+      resourceClaimName: gms-dra-blocker
+  containers:
+    - name: hold
+      image: busybox:1.36
+      command: ["sleep", "infinity"]
+      resources:
+        claims:
+          - name: blocker
