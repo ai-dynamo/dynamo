@@ -368,6 +368,7 @@ where
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    request_metrics: Arc<metrics::RouterRequestMetrics>,
 }
 
 fn resolve_tracking_model_name(
@@ -479,6 +480,7 @@ where
             )
             .await?
         } else {
+            Indexer::validate_config(&kv_router_config, model_name.as_deref())?;
             Indexer::None
         };
 
@@ -599,6 +601,7 @@ where
             lora_filter,
             endpoint_registration: None,
             teardown_task_guard: None,
+            request_metrics: metrics::RouterRequestMetrics::from_component(component),
         })
     }
 
@@ -1160,10 +1163,8 @@ where
         }
 
         // Observe per-request shared cache metrics.
-        if is_admitted_routing
-            && let Some(hits) = sc_hits_for_metrics
-            && let Some(m) = metrics::RouterRequestMetrics::get()
-        {
+        if is_admitted_routing && let Some(hits) = sc_hits_for_metrics {
+            let m = &self.request_metrics;
             if num_blocks > 0 {
                 m.shared_cache_hit_rate
                     .observe(hits.total_hits as f64 / num_blocks as f64);

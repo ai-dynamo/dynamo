@@ -70,6 +70,7 @@ where
             workers_with_configs.borrow().clone();
 
         let router_id = endpoint.drt().discovery().instance_id();
+        let request_metrics = RouterRequestMetrics::from_component(endpoint.component());
         let slots = create_multi_worker_sequences(
             endpoint,
             block_size as usize,
@@ -123,9 +124,8 @@ where
             let locality_observer: NonMaxOverlapSelectionObserver =
                 Arc::new(move |request_id, selection| {
                     let overlap_blocks_lost = selection.overlap_blocks_lost();
-                    if let Some(metrics) = RouterRequestMetrics::get() {
-                        metrics.observe_non_max_overlap_selection(worker_type, overlap_blocks_lost);
-                    }
+                    request_metrics
+                        .observe_non_max_overlap_selection(worker_type, overlap_blocks_lost);
                     tracing::debug!(
                         request_id,
                         worker_type,
