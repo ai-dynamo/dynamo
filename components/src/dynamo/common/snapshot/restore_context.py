@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import uuid
-from dataclasses import dataclass, field
 from inspect import isawaitable
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, TypeVar
@@ -37,31 +36,6 @@ _SUPPORTED_RESTORE_ENV_NAMES = {
     *KUBERNETES_OPTIONAL_ENV_NAMES,
     *RESTORE_RUNTIME_ENV_NAMES,
 }
-
-
-@dataclass(frozen=True)
-class RestoreIdentity:
-    """Restore-pod identity written by standby before CRIU resumes the image.
-
-    ``incarnation_id`` is minted on every restore. ``POD_IP`` is often unchanged
-    (hostNetwork, recycled CNI), so P/D NIXL rebind is keyed by incarnation,
-    not address.
-    """
-
-    incarnation_id: str
-    env: Mapping[str, object] = field(default_factory=dict)
-
-    def env_str(self, name: str) -> str | None:
-        value = self.env.get(name)
-        return value if isinstance(value, str) and value else None
-
-    @property
-    def pod_ip(self) -> str | None:
-        return self.env_str("POD_IP")
-
-    @property
-    def side_channel_host(self) -> str | None:
-        return self.env_str("VLLM_NIXL_SIDE_CHANNEL_HOST") or self.pod_ip
 
 
 async def refresh_snapshot_restore_config(
@@ -151,12 +125,11 @@ def apply_snapshot_restore_env() -> dict[str, str | None]:
     return _apply_restore_env(env_config, source=str(context_path))
 
 
-def load_restore_identity(control_dir: str | None = None) -> RestoreIdentity | None:
-    """Read restore identity from the snapshot-control volume.
+def load_restore_incarnation_id(control_dir: str | None = None) -> str | None:
+    """Read the restore ``incarnation_id`` from the snapshot-control volume.
 
-    Workers and scheduler children must call this instead of trusting
-    API-process ``os.environ``. Returns ``None`` when the file is missing
-    (capture path) or has no ``incarnation_id`` (legacy context).
+    Workers must read the file. ``POD_IP`` is often unchanged after restore, so
+    P/D NIXL rebind is keyed by this id, not by address.
     """
 
     restore_context, _ = _read_restore_context(control_dir, missing_ok=True)
@@ -165,26 +138,14 @@ def load_restore_identity(control_dir: str | None = None) -> RestoreIdentity | N
     incarnation_id = restore_context.get("incarnation_id")
     if not isinstance(incarnation_id, str) or not incarnation_id:
         return None
-    env_config = restore_context.get("env")
-    env = env_config if isinstance(env_config, dict) else {}
-    return RestoreIdentity(incarnation_id=incarnation_id, env=env)
+    return incarnation_id
 
 
-def should_rebind_pd(
-    captured_incarnation_id: str | None,
-    identity: RestoreIdentity | None = None,
-) -> bool:
-    """Return True when restore context exists and the incarnation changed.
+def should_rebind_pd(bound_incarnation_id: str | None) -> bool:
+    """True when a restore context exists and this process has not bound it yet."""
 
-    Rebind is not triggered by ``POD_IP`` changes. Same IP after hostNetwork
-    restart still rebinds when standby minted a new ``incarnation_id``.
-    """
-
-    if identity is None:
-        identity = load_restore_identity()
-    if identity is None:
-        return False
-    return captured_incarnation_id != identity.incarnation_id
+    incarnation_id = load_restore_incarnation_id()
+    return incarnation_id is not None and incarnation_id != bound_incarnation_id
 
 
 def _restore_context_path(control_dir: str | None = None) -> Path:
