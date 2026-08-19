@@ -212,7 +212,61 @@ struct DeviceAwareCandidates {
     request_cache_keys: usize,
 }
 
+/// A DeviceAware policy decision whose optional occupancy booking is owned by
+/// the caller's request lifecycle.
+pub struct DeviceAwareSelection {
+    worker_id: u64,
+    candidate_count: usize,
+    load: u64,
+    is_cpu: bool,
+    embedding_cache_hit: bool,
+    request_cache_keys: usize,
+    reservation: Option<OccupancyReservation>,
+}
+
+impl DeviceAwareSelection {
+    pub fn worker_id(&self) -> u64 {
+        self.worker_id
+    }
+
+    pub fn candidate_count(&self) -> usize {
+        self.candidate_count
+    }
+
+    pub fn load(&self) -> u64 {
+        self.load
+    }
+
+    pub fn is_cpu(&self) -> bool {
+        self.is_cpu
+    }
+
+    pub fn embedding_cache_hit(&self) -> bool {
+        self.embedding_cache_hit
+    }
+
+    pub fn request_cache_keys(&self) -> usize {
+        self.request_cache_keys
+    }
+
+    pub fn into_reservation(self) -> Option<OccupancyReservation> {
+        self.reservation
+    }
+}
+
 impl RouterMode {
+    pub const fn telemetry_label(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "round-robin",
+            Self::Random => "random",
+            Self::PowerOfTwoChoices => "power-of-two-choices",
+            Self::KV => "kv",
+            Self::Direct => "direct",
+            Self::LeastLoaded => "least-loaded",
+            Self::DeviceAwareWeighted => "device-aware-weighted",
+        }
+    }
+
     pub fn is_kv_routing(&self) -> bool {
         *self == RouterMode::KV
     }
@@ -737,6 +791,72 @@ where
         self.occupancy_state.clone()
     }
 
+    /// Select a DeviceAware worker while leaving request-lifecycle cleanup to
+    /// the routing host. Request and device metadata is prepared before the
+    /// occupancy admission lock is acquired.
+    pub fn select_device_aware_and_reserve(
+        &self,
+        request: &T,
+        pinned_worker: Option<u64>,
+    ) -> anyhow::Result<DeviceAwareSelection> {
+        anyhow::ensure!(
+            self.router_mode == RouterMode::DeviceAwareWeighted,
+            "{:?} routing is not DeviceAwareWeighted",
+            self.router_mode
+        );
+
+        let state = self.occupancy_state()?;
+        if let Some(worker_id) = pinned_worker {
+            self.ensure_routable(worker_id)?;
+            let selection = self.device_aware_candidates(request, &[worker_id]);
+            let is_cpu = selection
+                .candidates
+                .first()
+                .is_some_and(|candidate| candidate.device == RouteDevice::Cpu);
+            let reservation = state.reserve(worker_id);
+            let load = reservation.load();
+            return Ok(DeviceAwareSelection {
+                worker_id,
+                candidate_count: 1,
+                load,
+                is_cpu,
+                embedding_cache_hit: selection.embedding_cache_hit,
+                request_cache_keys: selection.request_cache_keys,
+                reservation: Some(reservation),
+            });
+        }
+
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids();
+        if instance_ids.is_empty() {
+            return Err(self.empty_free_pool_error(&routing_instances));
+        }
+        let selection = self.device_aware_candidates(request, instance_ids);
+        let (decision, counter) = state
+            .select_and_admit(
+                self.picker()?,
+                CandidateView::DeviceAware(&selection.candidates),
+                selection.context,
+            )
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+        let worker_id = decision.target.worker_id;
+        let is_cpu = selection.candidates.iter().any(|candidate| {
+            candidate.target.worker_id == worker_id && candidate.device == RouteDevice::Cpu
+        });
+        let reservation = counter
+            .map(|counter| OccupancyReservation::from_counter(state.clone(), worker_id, counter));
+
+        Ok(DeviceAwareSelection {
+            worker_id,
+            candidate_count: selection.candidates.len(),
+            load: state.load(worker_id),
+            is_cpu,
+            embedding_cache_hit: selection.embedding_cache_hit,
+            request_cache_keys: selection.request_cache_keys,
+            reservation,
+        })
+    }
+
     /// Reject an exact target that local fault detection has removed from routing.
     pub fn ensure_routable(&self, instance_id: u64) -> anyhow::Result<()> {
         if self
@@ -952,14 +1072,50 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        self.ensure_discovered_for_dispatch(instance_id)?;
+        // Fallback resolution owns the unavailable-target decision. Allowing it
+        // to see a worker already absent from discovery preserves Direct's
+        // historical standalone fallback; `Deny` remains exact-target behavior.
+        let selected_is_discovered = self
+            .client
+            .instances()
+            .iter()
+            .any(|instance| instance.instance_id == instance_id);
+        if !selected_is_discovered {
+            let fallback_is_available = self
+                .client
+                .routing_instances()
+                .free_ids()
+                .iter()
+                .copied()
+                .any(|candidate| {
+                    candidate != instance_id
+                        && match fallback {
+                            TransportFallback::Allow => true,
+                            TransportFallback::Deny => false,
+                            TransportFallback::Within(allowed) => allowed.contains(&candidate),
+                        }
+                });
+            if !fallback_is_available {
+                self.ensure_discovered_for_dispatch(instance_id)?;
+            }
+        }
+        let ((metadata, resolved_instance_id), response_stream) = self
+            .generate_with_fault_detection_prepared(
+                instance_id,
+                request,
+                fallback,
+                |request, resolved_instance_id| {
+                    prepare(request, resolved_instance_id)
+                        .map(|metadata| (metadata, resolved_instance_id))
+                },
+            )
+            .await?;
         tracing::info!(
-            router_mode = "direct",
-            worker_id = instance_id,
+            router_mode = self.router_mode.telemetry_label(),
+            worker_id = resolved_instance_id,
             "Selected worker"
         );
-        self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
-            .await
+        Ok((metadata, response_stream))
     }
 
     async fn dispatch_preselected_with_fallback<M, F>(
@@ -1975,6 +2131,23 @@ mod tests {
     }
 
     #[test]
+    fn router_mode_telemetry_labels_are_stable() {
+        assert_eq!(RouterMode::RoundRobin.telemetry_label(), "round-robin");
+        assert_eq!(RouterMode::Random.telemetry_label(), "random");
+        assert_eq!(
+            RouterMode::PowerOfTwoChoices.telemetry_label(),
+            "power-of-two-choices"
+        );
+        assert_eq!(RouterMode::KV.telemetry_label(), "kv");
+        assert_eq!(RouterMode::Direct.telemetry_label(), "direct");
+        assert_eq!(RouterMode::LeastLoaded.telemetry_label(), "least-loaded");
+        assert_eq!(
+            RouterMode::DeviceAwareWeighted.telemetry_label(),
+            "device-aware-weighted"
+        );
+    }
+
+    #[test]
     fn p2c_selects_lower_load_worker() {
         let state = RoutingOccupancyState::default();
         for _ in 0..10 {
@@ -2748,10 +2921,10 @@ mod tests {
         .await
         .unwrap();
 
-        let (worker_id, permit) = router.select_exact_target(&42, None).await.unwrap();
-        assert_eq!(worker_id, cache_worker);
+        let selection = router.select_device_aware_and_reserve(&42, None).unwrap();
+        assert_eq!(selection.worker_id(), cache_worker);
         assert!(
-            permit.is_none(),
+            selection.into_reservation().is_none(),
             "full cache hits bypass occupancy charging"
         );
 

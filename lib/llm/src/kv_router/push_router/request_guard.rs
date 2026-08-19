@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{
     kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
     local_model::runtime_config::ModelRuntimeConfig,
+    lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -29,6 +30,27 @@ use dynamo_runtime::{
     pipeline::OccupancyReservation,
     protocols::annotated::Annotated,
 };
+
+pub(super) struct LoraLoadGuard {
+    estimator: Arc<LoadEstimator>,
+    lora_name: String,
+}
+
+impl LoraLoadGuard {
+    pub(super) fn new(estimator: Arc<LoadEstimator>, lora_name: String) -> Self {
+        estimator.increment_load(&lora_name);
+        Self {
+            estimator,
+            lora_name,
+        }
+    }
+}
+
+impl Drop for LoraLoadGuard {
+    fn drop(&mut self) {
+        self.estimator.decrement_load(&self.lora_name);
+    }
+}
 
 #[derive(Clone)]
 struct OutputHashBranch {
@@ -553,6 +575,7 @@ where
     record_itl_at_completion: bool,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
+    _lora_load: Option<LoraLoadGuard>,
 }
 
 impl<Sel> RequestGuard<Sel>
@@ -612,6 +635,7 @@ where
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            _lora_load: None,
         }
     }
 
@@ -619,6 +643,7 @@ where
         request_metrics: Arc<RouterRequestMetrics>,
         worker_id: u64,
         occupancy_reservation: Option<OccupancyReservation>,
+        lora_load: Option<LoraLoadGuard>,
         request: &PreprocessedRequest,
     ) -> Self {
         request_metrics.requests_started_total().inc();
@@ -639,6 +664,7 @@ where
             record_itl_at_completion: true,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            _lora_load: lora_load,
         }
     }
 
