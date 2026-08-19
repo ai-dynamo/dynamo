@@ -808,7 +808,6 @@ jobs:
       dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: GB200 Test
-      amd_runner: prod-tester-amd-gpu-v2 # Unused for this arm64-only matrix
       # 2x GB200 ARM64 lane; validates the nightly single- and dual-GPU test pool.
       arm_runner: aws-dev-01-tester-arm-gpu-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -877,7 +876,6 @@ jobs:
       dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: GB200 Test
-      amd_runner: prod-tester-amd-gpu-v2 # Unused for this arm64-only matrix
       # 2x GB200 ARM64 lane; validates the nightly single- and dual-GPU test pool.
       arm_runner: aws-dev-01-tester-arm-gpu-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -946,7 +944,6 @@ jobs:
       dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: GB200 Test
-      amd_runner: prod-tester-amd-gpu-v2 # Unused for this arm64-only matrix
       # 2x GB200 ARM64 lane; validates the nightly single- and dual-GPU test pool.
       arm_runner: aws-dev-01-tester-arm-gpu-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}

@@ -16,8 +16,9 @@ on:
         type: string
       amd_runner:
         description: 'Runner to execute tests on (amd64 only)'
-        required: true
+        required: false
         type: string
+        default: 'prod-tester-amd-gpu-v2'
       arm_runner:
         description: 'Runner to execute tests on (arm64 only)'
         required: false
