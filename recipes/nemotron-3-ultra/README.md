@@ -41,45 +41,44 @@ Aggregated no-MTP fallback manifests are also included under `vllm/agg-*-256k-no
 
 ### Refresh Profiles
 
-Refresh profiles add 256K and 1M aggregated and disaggregated 1P1D agentic configurations for B200, GB200, and H200. They use the following runtime image:
+Refresh profiles add 256K and 1M aggregated and disaggregated agentic configurations for B200, GB200, and H200. The selected 256K B200 and GB200 deployments use 1P2D; the other selected disaggregated deployments use 1P1D. They use the released runtime image:
 
 ```text
-nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
 ```
 
 | GPU | Context | Worker shape | MTP | Max sequences | Max batched tokens | Reference concurrency | Manifest |
 |---|---:|---:|---:|---:|---:|---:|---|
-| B200 | 256K | 2 × TP4 | 5 tokens | 64 | 32768 | 94 | `vllm/agg-b200-agentic-256k-2w-kv/deploy.yaml` |
-| B200 | 1M | 2 × TP4 | disabled | 32 | 49152 | 46 | `vllm/agg-b200-agentic-1m-2w-kv/deploy.yaml` |
-| GB200 | 256K | 2 × TP4 | 5 tokens | 64 | 32768 | 96 | `vllm/agg-gb200-agentic-256k-2w-kv/deploy.yaml` |
-| GB200 | 1M | 2 × TP4 | disabled | 32 | 49152 | 48 | `vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml` |
-| H200 | 256K | 2 × TP8 | 5 tokens | 48 | 24576 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
-| H200 | 1M | 2 × TP8 | disabled | 32 | 24576 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
-| B200 | 256K | 1P TP4 + 1D TP4 | disabled | 64 | 32768 | 72 | `vllm/disagg-b200-agentic-256k-1p1d/deploy.yaml` |
-| B200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 32 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
-| GB200 | 256K | 1P TP4 + 1D TP4 | disabled | 64 | 32768 | 64 | `vllm/disagg-gb200-agentic-256k-1p1d/deploy.yaml` |
-| GB200 | 1M | 1P TP4 + 1D TP4 | disabled | 32 | 49152 | 28 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
-| H200 | 256K | 1P TP8 + 1D TP8 | disabled | 48 | 24576 | 36 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
-| H200 | 1M | 1P TP8 + 1D TP8 | disabled | 32 | 24576 | 32 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
+| B200 | 256K | 2 × TP4 | 5 tokens | 256 | 32768 | 94 | `vllm/agg-b200-agentic-256k-2w-kv/deploy.yaml` |
+| B200 | 1M | 2 × TP4 | disabled | 256 | 49152 | 46 | `vllm/agg-b200-agentic-1m-2w-kv/deploy.yaml` |
+| GB200 | 256K | 2 × TP4 | 5 tokens | 256 | 32768 | 96 | `vllm/agg-gb200-agentic-256k-2w-kv/deploy.yaml` |
+| GB200 | 1M | 2 × TP4 | disabled | 256 | 49152 | 48 | `vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml` |
+| H200 | 256K | 2 × TP8 | 5 tokens | 256 | 24576 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
+| H200 | 1M | 2 × TP8 | disabled | 256 | 24576 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
+| B200 | 256K | 1P TP4 + 2D TP4 | disabled | 256 | 32768 | 144 | `vllm/disagg-b200-agentic-256k-1p2d/deploy.yaml` |
+| B200 | 1M | 1P TP4 + 1D TP4 | disabled | 256 | 49152 | 38 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
+| GB200 | 256K | 1P TP4 + 2D TP4 | disabled | 256 | 32768 | 140 | `vllm/disagg-gb200-agentic-256k-1p2d/deploy.yaml` |
+| GB200 | 1M | 1P TP4 + 1D TP4 | disabled | 256 | 49152 | 48 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
+| H200 | 256K | 1P TP8 + 1D TP8 | disabled | 256 | 24576 | 42 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
+| H200 | 1M | 1P TP8 + 1D TP8 | disabled | 256 | 24576 | pending | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
 
 The Refresh manifests enable KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and hybrid KV cache management. Expert Parallelism is disabled.
 
-The H200 and B200 1P1D profiles use UCX/RDMA and request one `rdma/ib` resource per GPU. The GB200 1P1D profile uses UCX/TCP and does not require an RDMA device resource.
+The H200 and B200 disaggregated profiles use UCX/RDMA and request one `rdma/ib` resource per GPU. The qualified GB200 profiles use GKE multi-network MRDMA and request the four `networking.gke.io.networks/rdma-*` interfaces used by the measured GCP deployment.
 
-The B200 and GB200 256K 1P1D profiles use FlashInfer attention; the H200 256K profile uses FlashAttention. These explicit backends are part of the qualified configurations.
+The B200 and GB200 256K 1P2D profiles use FlashInfer attention; the H200 256K 1P1D profile uses FlashAttention. These explicit backends are part of the qualified configurations.
 
-The following 1P1D reference points passed the 50 output tok/s/user SLA on the complete 3,541-row agentic trace. The 256K rows and the H200/B200 1M rows are closed boundaries: each is the highest passing concurrency before the first complete SLA-failing point. GB200 1M concurrency 28 is the current passing anchor; its next boundary point remains to be rerun after an infrastructure interruption.
+The following selected disaggregated reference points passed all three gates on the complete 3,541-row agentic trace: 50 output tok/s/user, 5,000 ms p50 TTFT, and 20 ms p50 ITL. H200 1M remains in lower-concurrency qualification because its complete CC32 result missed the TTFT gate.
 
 | GPU | Context | Concurrency | Output tok/s/GPU | Output tok/s/user | TTFT p50 (ms) | ITL p50 (ms) |
 |---|---:|---:|---:|---:|---:|---:|
-| B200 | 256K | 72 | 418.37 | 54.57 | 4969.22 | 18.32 |
-| B200 | 1M | 32 | 213.66 | 60.52 | 904.54 | 16.52 |
-| GB200 | 256K | 64 | 351.59 | 51.00 | 1973.98 | 19.61 |
-| GB200 | 1M | 28 | 187.86 | 65.45 | 3077.87 | 15.28 |
-| H200 | 256K | 36 | 118.35 | 61.04 | 4351.19 | 16.38 |
-| H200 | 1M | 32 | 91.42 | 59.59 | 4574.20 | 16.78 |
+| B200 | 256K | 144 | 510.82 | 52.08 | 3680.71 | 19.200 |
+| B200 | 1M | 38 | 223.49 | 53.57 | 1293.55 | 18.668 |
+| GB200 | 256K | 140 | 534.82 | 55.47 | 3342.87 | 18.026 |
+| GB200 | 1M | 48 | 270.93 | 50.55 | 1696.20 | 19.783 |
+| H200 | 256K | 42 | 124.94 | 50.75 | 422.92 | 19.703 |
 
-All six aggregate two-worker profiles have selected concurrency values. Exact checked-in-runtime confirmation is complete for H200 256K/1M, B200 1M, and GB200 256K. B200 256K at concurrency 94 and GB200 1M at concurrency 48 remain selected candidates pending exact release-runtime confirmation; no additional aggregate knob sweep is planned for those two profiles.
+All six aggregate two-worker profiles are finalized on released Dynamo 1.4.0 with MNS 256. Each selected point passed the exact trace and is bracketed by a higher-load SLA failure.
 
 ## Supported Features
 
@@ -165,17 +164,21 @@ kubectl apply -f vllm/${PROFILE}/deploy.yaml -n ${NAMESPACE}
 
 The aggregated DGD name is `ultra-agg-<gpu>-<context>-2w-kv`.
 
-For a Refresh disaggregated deployment, use the corresponding 1P1D profile:
+For a Refresh disaggregated deployment, use the selected topology for the GPU and context. B200 and GB200 256K select 1P2D; the remaining profiles use 1P1D:
 
 ```bash
 GPU=h200       # b200, gb200, or h200
 CONTEXT=256k   # 256k or 1m
-PROFILE=disagg-${GPU}-agentic-${CONTEXT}-1p1d
+case "${GPU}-${CONTEXT}" in
+  b200-256k|gb200-256k) SHAPE=1p2d ;;
+  *) SHAPE=1p1d ;;
+esac
+PROFILE=disagg-${GPU}-agentic-${CONTEXT}-${SHAPE}
 
 kubectl apply -f vllm/${PROFILE}/deploy.yaml -n ${NAMESPACE}
 ```
 
-The disaggregated DGD name is `ultra-disagg-<gpu>-<context>-1p1d`.
+The disaggregated DGD name is `ultra-disagg-<gpu>-<context>-<shape>`.
 
 ### 3. Smoke Test
 
@@ -274,9 +277,9 @@ recipes/nemotron-3-ultra/
     agg-gb200-agentic-1m-2w-kv/deploy.yaml
     agg-h200-agentic-256k-2w-kv/deploy.yaml
     agg-h200-agentic-1m-2w-kv/deploy.yaml
-    disagg-b200-agentic-256k-1p1d/deploy.yaml
+    disagg-b200-agentic-256k-1p2d/deploy.yaml
     disagg-b200-agentic-1m-1p1d/deploy.yaml
-    disagg-gb200-agentic-256k-1p1d/deploy.yaml
+    disagg-gb200-agentic-256k-1p2d/deploy.yaml
     disagg-gb200-agentic-1m-1p1d/deploy.yaml
     disagg-h200-agentic-256k-1p1d/deploy.yaml
     disagg-h200-agentic-1m-1p1d/deploy.yaml

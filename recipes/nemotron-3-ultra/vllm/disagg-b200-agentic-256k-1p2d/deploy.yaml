@@ -4,17 +4,17 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: ultra-disagg-b200-256k-1p1d
+  name: ultra-disagg-b200-256k-1p2d
   annotations:
     nemotron-ultra-refresh.nvidia.com/mtp: disabled
     nemotron-ultra-refresh.nvidia.com/prefix-caching: enabled
     nemotron-ultra-refresh.nvidia.com/async-scheduling: enabled
   labels:
-    app.kubernetes.io/name: ultra-disagg-b200-256k-1p1d
+    app.kubernetes.io/name: ultra-disagg-b200-256k-1p2d
     app.kubernetes.io/part-of: nemotron-3-ultra
     nemotron-ultra-refresh.nvidia.com/sku: b200
     nemotron-ultra-refresh.nvidia.com/backend: vllm
-    nemotron-ultra-refresh.nvidia.com/topology: 1p1d-tp4
+    nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp4
     nemotron-ultra-refresh.nvidia.com/context: 256k
     nemotron-ultra-refresh.nvidia.com/workload: agentic
 spec:
@@ -76,14 +76,14 @@ spec:
       metadata:
         labels:
           nemotron-ultra-refresh.nvidia.com/role: frontend
-          nemotron-ultra-refresh.nvidia.com/topology: 1p1d-tp4
-          nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-b200-256k-1p1d
+          nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp4
+          nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-b200-256k-1p2d
       spec:
         imagePullSecrets:
         - name: nvcr-secret
         containers:
         - name: main
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
           imagePullPolicy: IfNotPresent
           command:
           - "/bin/bash"
@@ -91,7 +91,7 @@ spec:
           args:
           - |
             set -Eeuo pipefail
-            exec python3 -m dynamo.frontend   --router-mode kv   --router-kv-events   --kv-cache-block-size 64   --http-host 0.0.0.0   --http-port 8000
+            exec python3 -m dynamo.frontend   --router-mode kv   --router-kv-events   --kv-cache-block-size 64   --router-track-prefill-tokens   --router-kv-overlap-score-credit-decay 0.1   --http-host 0.0.0.0   --http-port 8000
           ports:
           - name: http
             containerPort: 8000
@@ -137,8 +137,8 @@ spec:
       metadata:
         labels:
           nemotron-ultra-refresh.nvidia.com/role: prefill
-          nemotron-ultra-refresh.nvidia.com/topology: 1p1d-tp4
-          nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-b200-256k-1p1d
+          nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp4
+          nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-b200-256k-1p2d
       spec:
         imagePullSecrets:
         - name: nvcr-secret
@@ -152,7 +152,7 @@ spec:
           effect: NoSchedule
         containers:
         - name: main
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
           imagePullPolicy: IfNotPresent
           workingDir: "/workspace"
           command:
@@ -186,7 +186,7 @@ spec:
               --trust-remote-code \
               --kv-cache-dtype fp8 \
               --max-model-len 262144 \
-              --max-num-seqs 64 \
+              --max-num-seqs 256 \
               --max-num-batched-tokens 32768 \
               --gpu-memory-utilization 0.9 \
               --attention-backend FLASHINFER \
@@ -279,14 +279,14 @@ spec:
             medium: Memory
   - name: VllmDecodeWorker
     type: decode
-    replicas: 1
+    replicas: 2
     sharedMemorySize: 64Gi
     podTemplate:
       metadata:
         labels:
           nemotron-ultra-refresh.nvidia.com/role: decode
-          nemotron-ultra-refresh.nvidia.com/topology: 1p1d-tp4
-          nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-b200-256k-1p1d
+          nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp4
+          nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-b200-256k-1p2d
       spec:
         imagePullSecrets:
         - name: nvcr-secret
@@ -300,7 +300,7 @@ spec:
           effect: NoSchedule
         containers:
         - name: main
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.0-rc.4@sha256:3f8cbbf4b8d0919fd3e81595da0a00029fe11af251ca5a9ecd7e66cd50ae03ea
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
           imagePullPolicy: IfNotPresent
           workingDir: "/workspace"
           command:
@@ -334,7 +334,7 @@ spec:
               --trust-remote-code \
               --kv-cache-dtype fp8 \
               --max-model-len 262144 \
-              --max-num-seqs 64 \
+              --max-num-seqs 256 \
               --max-num-batched-tokens 32768 \
               --gpu-memory-utilization 0.9 \
               --attention-backend FLASHINFER \

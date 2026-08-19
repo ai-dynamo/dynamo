@@ -62,7 +62,7 @@ spec:
         - name: EXPECTED_ERROR_COUNT
           value: '130'
         - name: SERVER_RUNTIME
-          value: 1.4.0-rc.4
+          value: 1.4.0
         - name: AIPERF_HTTP_CONNECTION_LIMIT
           value: '200'
         - name: AIPERF_HTTP_SO_RCVTIMEO
