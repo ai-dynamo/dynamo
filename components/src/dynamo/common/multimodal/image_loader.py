@@ -28,6 +28,7 @@ from ..http.url_validator import (
     UrlValidationPolicy,
     validate_media_url,
 )
+from .shared_image_cache import SharedImageCache, SharedImageCacheStats
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class ImageLoader:
         self._cache_size = cache_size
         self._image_cache: OrderedDict[str, Image.Image] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[Image.Image]] = {}
+        self._shared_image_cache = SharedImageCache.from_env()
         self._enable_frontend_decoding = enable_frontend_decoding
         self._url_policy = url_policy or UrlValidationPolicy.from_env()
         # Lazy-init NIXL connector only when frontend decoding is enabled
@@ -99,6 +101,18 @@ class ImageLoader:
             run_async(
                 self._nixl_connector.initialize
             )  # Synchronously wait for async init
+
+    @property
+    def cache_entries(self) -> int:
+        """Current number of cached images (read by metrics export)."""
+        return len(self._image_cache)
+
+    @property
+    def shared_image_cache_stats(self) -> SharedImageCacheStats | None:
+        """Latency samples for the optional shared encoded-image cache."""
+        if self._shared_image_cache is None:
+            return None
+        return self._shared_image_cache.stats
 
     @staticmethod
     def _open_image_sync(image_data: BytesIO) -> Image.Image:
@@ -126,13 +140,27 @@ class ImageLoader:
                 self._image_cache.popitem(last=False)
             self._image_cache[key] = image
 
-    async def _fetch_and_process(self, image_url: str) -> Image.Image:
+    async def _fetch_and_process(self, key: str, image_url: str) -> Image.Image:
         """Fetch image via HTTP(S), decode with PIL, return RGB Image.
 
-        All exception normalization happens here so shared callers
-        see identical error types.
+        Checks the optional shared encoded-image cache before hitting the
+        origin and refills it after a successful origin fetch. All exception
+        normalization happens here so shared callers see identical error types.
         """
         try:
+            if self._shared_image_cache is not None:
+                cached_content = await self._shared_image_cache.get(key)
+                if cached_content is not None:
+                    try:
+                        return await self._open_image(BytesIO(cached_content))
+                    except (Image.UnidentifiedImageError, ValueError) as exc:
+                        logger.warning(
+                            "Discarding invalid shared image cache entry for '%s': %s",
+                            image_url[:80],
+                            exc,
+                        )
+                        await self._shared_image_cache.delete(key)
+
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
                 content = await fetch_bytes(
                     image_url, self._http_timeout, policy=self._url_policy
@@ -141,7 +169,10 @@ class ImageLoader:
                     raise ValueError("Empty response content from image URL")
                 image_data = BytesIO(content)
 
-            return await self._open_image(image_data)
+            image = await self._open_image(image_data)
+            if self._shared_image_cache is not None:
+                await self._shared_image_cache.put(key, content)
+            return image
 
         except HttpStatusError as e:
             logger.error(f"HTTP {e.status} loading image: '{image_url}'")
@@ -190,7 +221,7 @@ class ImageLoader:
     async def _fetch_and_cache(self, key: str, image_url: str) -> Image.Image:
         """Shared task: fetch, cache, then remove from _inflight."""
         try:
-            image = await self._fetch_and_process(image_url)
+            image = await self._fetch_and_process(key, image_url)
             self._cache_put(key, image)
             return image
         finally:
