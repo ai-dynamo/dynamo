@@ -21,6 +21,7 @@ use dynamo_kv_router::{
         ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
         effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
+    selector::WorkerInputs,
 };
 use dynamo_runtime::{
     CancellationToken,
@@ -448,20 +449,31 @@ where
             resolve_tracking_model_name(tracking_hash.algorithm(), model_name.as_deref())?;
         let kv_event_source_requirement =
             KvEventSourceRequirement::derive(worker_role, &kv_router_config);
+        let cache_required = required_worker_inputs.contains(WorkerInputs::CACHE)
+            || kv_router_config.serve_indexer
+            || matches!(
+                kv_event_source_requirement,
+                KvEventSourceRequirement::ConditionalDisaggDecodeCache
+                    | KvEventSourceRequirement::Unknown
+            );
         let component = endpoint.component();
         // Router-owned tasks derive from this token so a rebuild cannot cancel the runtime.
         let cancellation_token = component.drt().child_token();
         let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
 
-        let indexer = Indexer::new(
-            component,
-            &kv_router_config,
-            block_size,
-            model_name.as_deref(),
-            cancellation_token.child_token(),
-        )
-        .await?;
+        let indexer = if cache_required {
+            Indexer::new(
+                component,
+                &kv_router_config,
+                block_size,
+                model_name.as_deref(),
+                cancellation_token.child_token(),
+            )
+            .await?
+        } else {
+            Indexer::None
+        };
 
         if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {
             let mut startup_watch = workers_with_configs.clone();
@@ -508,8 +520,8 @@ where
         .await?;
 
         // Start KV event subscription if needed — skip when using a remote indexer.
-        let kv_event_subscription = if kv_event_source_requirement
-            .should_subscribe(&kv_router_config)
+        let kv_event_subscription = if cache_required
+            && kv_event_source_requirement.should_subscribe(&kv_router_config)
         {
             let membership_watch = kv_source_membership.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -533,6 +545,7 @@ where
         } else {
             tracing::info!(
                 requirement = %kv_event_source_requirement,
+                cache_required,
                 "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={}, use_remote_indexer={})",
                 kv_router_config.use_kv_events,
                 kv_router_config.overlap_score_credit,
@@ -1994,6 +2007,24 @@ mod tests {
         }
     }
 
+    struct LoadOnlySelector;
+
+    impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> for LoadOnlySelector {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::LOAD
+        }
+
+        fn select_worker(
+            &self,
+            _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
+            _request: &dynamo_kv_router::scheduling::SchedulingRequest,
+            _eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
+            _block_size: u32,
+        ) -> Result<dynamo_kv_router::protocols::WorkerSelectionResult, KvSchedulerError> {
+            unreachable!("capability construction test does not select a worker")
+        }
+    }
+
     async fn make_test_component(name: &str) -> dynamo_runtime::component::Component {
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
@@ -2051,6 +2082,42 @@ mod tests {
                 .to_string()
                 .contains("KV source membership watch is required")
         );
+    }
+
+    #[tokio::test]
+    async fn load_only_selector_skips_indexer_and_event_subscription() {
+        let component = make_test_component("load-only-capability").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            router_event_threads: 1,
+            ..Default::default()
+        };
+
+        let router = KvRouter::new_with_worker_role(
+            endpoint,
+            client,
+            workers,
+            None,
+            16,
+            LoadOnlySelector,
+            Some(config),
+            None,
+            Some(WorkerType::Prefill),
+            "prefill",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(router.required_worker_inputs(), WorkerInputs::LOAD);
+        assert!(matches!(router.indexer, Indexer::None));
+        assert!(router.kv_event_subscription.is_none());
     }
 
     async fn make_test_router_with_workers(
