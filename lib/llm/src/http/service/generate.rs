@@ -33,7 +33,6 @@ use super::openai::{
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
-use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
@@ -216,8 +215,13 @@ fn preprocessed_from_generate(
 ) -> anyhow::Result<PreprocessedRequest> {
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
-    let min_tokens = sampling.min_tokens();
-    let ignore_eos = sampling.ignore_eos();
+    let stop_conditions = sampling.project_stop_conditions();
+    let sampling_options = sampling
+        .project_sampling_options()
+        .map_err(anyhow::Error::msg)?;
+    let output_options = sampling
+        .project_output_options()
+        .map_err(anyhow::Error::msg)?;
     let routing_priority = dynamo_routing_priority(request.priority);
     let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
     let GenerateRequest {
@@ -229,17 +233,9 @@ fn preprocessed_from_generate(
     PreprocessedRequest::builder()
         .model(model.to_string())
         .token_ids(token_ids)
-        .stop_conditions(StopConditions {
-            max_tokens,
-            min_tokens,
-            ignore_eos: Some(ignore_eos),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            n: Some(1),
-            ..Default::default()
-        })
-        .output_options(Default::default())
+        .stop_conditions(stop_conditions)
+        .sampling_options(sampling_options)
+        .output_options(output_options)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
             expected_output_tokens: max_tokens,
@@ -764,6 +760,7 @@ mod tests {
         let invalid = [
             r#"{"token_ids":[1],"sampling_params":{},"stream_options":{"include_usage":true}}"#,
             r#"{"token_ids":[1],"sampling_params":{"max_tokens":0}}"#,
+            r#"{"token_ids":[1],"sampling_params":{"logprobs":-2}}"#,
             r#"{"token_ids":[1],"sampling_params":{"prompt_logprobs":-2}}"#,
             r#"{"token_ids":[1],"sampling_params":{"min_tokens":3,"max_tokens":2}}"#,
         ];
@@ -937,6 +934,91 @@ mod tests {
             preprocessed_from_generate(request, "test-model", None, "resolved-request")
                 .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
+    }
+
+    #[test]
+    fn generate_projects_vllm_sampling_and_output_controls() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "temperature": 0.25,
+                "top_p": 0.9,
+                "top_k": 17,
+                "min_p": 0.05,
+                "seed": 23,
+                "max_tokens": 8,
+                "min_tokens": 2,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "repetition_penalty": 1.1,
+                "stop_token_ids": [7, 8],
+                "ignore_eos": true,
+                "logprobs": 3,
+                "prompt_logprobs": 4
+            },
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request")
+                .expect("build request");
+
+        assert_eq!(preprocessed.sampling_options.temperature, Some(0.25));
+        assert_eq!(preprocessed.sampling_options.top_p, Some(0.9));
+        assert_eq!(preprocessed.sampling_options.top_k, Some(17));
+        assert_eq!(preprocessed.sampling_options.min_p, Some(0.05));
+        assert_eq!(preprocessed.sampling_options.seed, Some(23));
+        assert_eq!(preprocessed.sampling_options.presence_penalty, Some(0.1));
+        assert_eq!(preprocessed.sampling_options.frequency_penalty, Some(0.2));
+        assert_eq!(preprocessed.sampling_options.repetition_penalty, Some(1.1));
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
+        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(2));
+        assert_eq!(
+            preprocessed.stop_conditions.stop_token_ids.as_deref(),
+            Some(&[7, 8][..])
+        );
+        assert_eq!(preprocessed.stop_conditions.ignore_eos, Some(true));
+        assert_eq!(preprocessed.output_options.logprobs, Some(3));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(4));
+    }
+
+    #[test]
+    fn generate_projects_all_logprobs() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "logprobs": -1,
+                "prompt_logprobs": -1
+            },
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request")
+                .expect("build request");
+
+        assert_eq!(preprocessed.output_options.logprobs, Some(u32::MAX));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(u32::MAX));
+    }
+
+    #[test]
+    fn generate_rejects_top_k_outside_dynamo_range() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {"top_k": u32::MAX},
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let error = preprocessed_from_generate(request, "test-model", None, "resolved-request")
+            .expect_err("reject unsupported top_k range");
+
+        assert_eq!(
+            error.to_string(),
+            "sampling_params.top_k exceeds Dynamo's supported range: 4294967295"
+        );
     }
 
     #[test]

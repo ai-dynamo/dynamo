@@ -22,6 +22,7 @@ use serde_json::{Map, Value};
 use super::{convert_backend_top_logprobs, token_to_utf8_bytes};
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
+use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
 /// Token-in/token-out generation request.
 ///
@@ -90,6 +91,13 @@ impl GenerateRequest {
 
         if self.sampling_params.max_tokens() == Some(0) {
             return Err("sampling_params.max_tokens must be greater than 0.".to_string());
+        }
+
+        if let Some(logprobs) = self.sampling_params.logprobs()
+            && logprobs < 0
+            && logprobs != -1
+        {
+            return Err("sampling_params.logprobs must be non-negative or -1.".to_string());
         }
 
         if let Some(prompt_logprobs) = self.sampling_params.prompt_logprobs() {
@@ -198,6 +206,58 @@ impl SamplingParams {
 
     pub fn as_value(&self) -> &Value {
         &self.raw
+    }
+
+    pub(crate) fn project_sampling_options(&self) -> Result<SamplingOptions, String> {
+        let top_k = self
+            .top_k
+            .map(|value| {
+                i32::try_from(value).map_err(|_| {
+                    format!("sampling_params.top_k exceeds Dynamo's supported range: {value}")
+                })
+            })
+            .transpose()?;
+        Ok(SamplingOptions {
+            n: Some(1),
+            presence_penalty: self.presence_penalty,
+            frequency_penalty: self.frequency_penalty,
+            repetition_penalty: self.repetition_penalty,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            top_k,
+            min_p: self.min_p,
+            seed: self.seed,
+            ..Default::default()
+        })
+    }
+
+    pub(crate) fn project_stop_conditions(&self) -> StopConditions {
+        StopConditions {
+            max_tokens: self.max_tokens,
+            stop_token_ids: self.stop_token_ids.clone(),
+            min_tokens: self.min_tokens,
+            ignore_eos: Some(self.ignore_eos),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn project_output_options(&self) -> Result<OutputOptions, String> {
+        Ok(OutputOptions {
+            logprobs: project_logprob_count(self.logprobs, "logprobs")?,
+            prompt_logprobs: project_logprob_count(self.prompt_logprobs, "prompt_logprobs")?,
+            ..Default::default()
+        })
+    }
+}
+
+fn project_logprob_count(value: Option<i32>, field: &str) -> Result<Option<u32>, String> {
+    match value {
+        None => Ok(None),
+        Some(-1) => Ok(Some(u32::MAX)),
+        Some(value) if value >= 0 => Ok(Some(value as u32)),
+        Some(value) => Err(format!(
+            "sampling_params.{field} must be non-negative or -1, got {value}"
+        )),
     }
 }
 
@@ -762,6 +822,13 @@ mod tests {
                     "sampling_params": {"max_tokens": 0}
                 }),
                 "max_tokens",
+            ),
+            (
+                json!({
+                    "token_ids": [1],
+                    "sampling_params": {"logprobs": -2}
+                }),
+                "logprobs",
             ),
             (
                 json!({
