@@ -12,15 +12,16 @@ language, and the relevant skills activate.
 
 ```text
 "Optimize this Dynamo deployment for my target SLO."
-"Deploy Llama-3.3-70B on my 4-GPU node and confirm it serves traffic."
+"Deploy GLM-5.2 on my 4-GPU node and confirm it serves traffic."
 "My TTFT doubled after I raised concurrency. Diagnose it and fix the config."
 ```
 
 ## Deployment skills
 
-Skills for creating, inspecting, and debugging DynamoGraphDeployments: `dep-create`,
-`dep-status`, and `debug-session`. Ask your agent to deploy a model or investigate a broken
-deployment and these guide the work. Sources live under
+Skills for deploying and diagnosing DynamoGraphDeployments: `deploy-dynamo-recipe`,
+`troubleshoot-dynamo`, `dynamo-router-starter`, and `dynamo-interconnect-check`. Ask your
+agent to deploy a model or investigate a broken deployment and these guide the work. Sources
+live under
 [`.agents/skills/`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills).
 
 ## Performance optimization skills
@@ -49,4 +50,4 @@ other harnesses run the same roles in one agent.
 
 ## Coming later
 
-Setup and additional debugging skill families will join this page as they land.
+Additional skill families will join this page as they land.
