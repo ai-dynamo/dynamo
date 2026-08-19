@@ -937,6 +937,19 @@ fn preprocessed_multimodal_features_require_inline_kwargs() {
 }
 
 #[test]
+fn preprocessed_multimodal_features_bound_producer_hashes() {
+    let mut features = image_features(json!("AQIDBA=="));
+    features["mm_hashes"]["image"][0] = json!("h".repeat(257));
+    let error = build_generate_request(
+        request_with_preprocessed_features(features),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unused producer hashes must still be bounded");
+    assert!(error.to_string().contains("between 1 and 256 bytes"));
+}
+
+#[test]
 fn preprocessed_multimodal_features_enforce_count_and_byte_limits() {
     let hashes = vec!["producer-controlled-hash"; 65];
     let placeholders = (0..65)
