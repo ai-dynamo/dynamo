@@ -341,6 +341,30 @@ RUN set -eux; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 
+# aarch64/Grace only: the upstream vllm/vllm-openai arm64 image is Ubuntu 22.04
+# and ships gcc/g++ 11.4, but torch >= 2.13 detects Grace as armv9-a and its
+# inductor CPU backend codegens `-march=armv9-a+sve2+fp16fml+sha3+bf16+i8mm`
+# (torch/_inductor/cpu_vec_isa.py: VecSVE.build_arch_flags). GCC only learned
+# `armv9-a` in 12, so gcc-11 rejects torch's OWN generated flags:
+#   cc1plus: error: unknown value 'armv9-a' for '-march'
+# That breaks the smoke guard below AND every runtime inductor/Triton CPU JIT on
+# a Grace host. gcc-12 is in the jammy archive (gcc-12-base is already pulled in
+# as a dependency), so switch the default toolchain to it. amd64 is untouched.
+# `cc`/`c++` are their own update-alternatives masters here, so each link is
+# registered separately rather than as a slave of gcc.
+RUN set -eux; \
+    if [ "$(uname -m)" = "aarch64" ]; then \
+        apt-get update; \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-12 g++-12; \
+        for pair in gcc:gcc-12 g++:g++-12 cc:gcc-12 c++:g++-12; do \
+            name="${pair%%:*}"; impl="${pair##*:}"; \
+            update-alternatives --install "/usr/bin/$name" "$name" "/usr/bin/$impl" 120; \
+            update-alternatives --set "$name" "/usr/bin/$impl"; \
+        done; \
+        rm -rf /var/lib/apt/lists/*; \
+        echo 'int main(){return 0;}' | g++ -march=armv9-a+sve2+fp16fml+sha3+bf16+i8mm -msve-vector-bits=128 -x c++ - -c -o /dev/null; \
+    fi
+
 # Regression guard for the codec purge above: torch.inductor/Triton JIT shell
 # out to a host C/C++ compiler at runtime, so a missing toolchain only surfaces
 # on the first compile in production. Reproduce that compile path at build time
