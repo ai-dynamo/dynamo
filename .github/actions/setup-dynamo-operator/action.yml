@@ -155,7 +155,11 @@ runs:
         echo "::group::Create host namespace $NAMESPACE"
         set -euo pipefail
         set -x
-        kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+        # Client-side apply is a GET followed by a POST, so concurrent callers
+        # both create and the loser fails. Server-side apply is one atomic
+        # create-or-update request.
+        kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml \
+          | kubectl apply --server-side --force-conflicts --field-manager=ci-setup -f -
         LABELS=(
           ngc-api=enabled
           nvcr-imagepull=enabled
@@ -364,14 +368,25 @@ runs:
           - operator: Exists
         EOF
 
-        helm upgrade --install vcluster-hpm vcluster-hpm \
-          --repo https://charts.loft.sh \
-          --namespace "${NAMESPACE}" \
-          --wait \
-          --timeout 10m \
-          --set VclusterReleaseName="${VCLUSTER_NAME}" \
-          --values "${HPM_VALUES}" \
-          --debug
+        # helm reads release history before writing it, so concurrent callers
+        # both choose install and the loser collides. The rollout wait below
+        # synchronizes on whichever caller won.
+        HPM_LOG="$(mktemp)"
+        if ! helm upgrade --install vcluster-hpm vcluster-hpm \
+             --repo https://charts.loft.sh \
+             --namespace "${NAMESPACE}" \
+             --wait \
+             --timeout 10m \
+             --set VclusterReleaseName="${VCLUSTER_NAME}" \
+             --values "${HPM_VALUES}" \
+             --debug 2>&1 | tee "${HPM_LOG}"; then
+          if grep -qE 'release: already exists|another operation \(install/upgrade/rollback\) is in progress' \
+               "${HPM_LOG}"; then
+            echo "vcluster-hpm was installed concurrently; adopting it"
+          else
+            exit 1
+          fi
+        fi
 
         kubectl rollout status daemonset/vcluster-hpm-hostpath-mapper \
           -n "${NAMESPACE}" \
@@ -393,10 +408,13 @@ runs:
         HF_TOKEN: ${{ inputs.hf_token }}
       run: |
         echo "::group::Create HF token secret inside vCluster"
+        set -euo pipefail
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
           create secret generic hf-token-secret \
-          --from-literal=HF_TOKEN=${HF_TOKEN} \
-          -n default || true
+          --from-literal=HF_TOKEN="${HF_TOKEN}" \
+          -n default --dry-run=client -o yaml \
+          | kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+              apply --server-side --force-conflicts --field-manager=ci-setup -f -
         echo "::endgroup::"
 
     - name: Create shared model cache PV/PVC
@@ -411,7 +429,8 @@ runs:
         set -euo pipefail
         # Static PV + bound PVC in the default namespace; deploy tests reference
         # the PVC by name via --model-cache-pvc. Capacity is nominal (not enforced).
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster apply -f - <<EOF
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          apply --server-side --force-conflicts --field-manager=ci-setup -f - <<EOF
         apiVersion: v1
         kind: PersistentVolume
         metadata:
@@ -505,22 +524,45 @@ runs:
           )
         fi
 
-        KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
-        helm upgrade --install dynamo-platform . --namespace default \
-          "${IMAGE_ARGS[@]}" \
-          --set dynamo-operator.gpuDiscovery.enabled=false \
-          "${CHECKPOINT_HELM_ARGS[@]}" \
-          --set global.grove.install=true \
-          --set global.kai-scheduler.install=false \
-          --set 'nats.container.merge.resources.requests.cpu=100m' \
-          --set 'nats.container.merge.resources.requests.memory=128Mi' \
-          --set 'nats.container.merge.resources.limits.cpu=500m' \
-          --set 'nats.container.merge.resources.limits.memory=512Mi' \
-          --set 'nats.reloader.merge.resources.requests.cpu=10m' \
-          --set 'nats.reloader.merge.resources.requests.memory=32Mi' \
-          --set 'nats.reloader.merge.resources.limits.cpu=100m' \
-          --set 'nats.reloader.merge.resources.limits.memory=64Mi' \
-          --debug
+        # helm reads release history before writing it, so concurrent bootstrap
+        # callers both choose install and the loser collides on the same release.
+        HELM_LOG="$(mktemp)"
+        if ! KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
+             helm upgrade --install dynamo-platform . --namespace default \
+               "${IMAGE_ARGS[@]}" \
+               --set dynamo-operator.gpuDiscovery.enabled=false \
+               "${CHECKPOINT_HELM_ARGS[@]}" \
+               --set global.grove.install=true \
+               --set global.kai-scheduler.install=false \
+               --set 'nats.container.merge.resources.requests.cpu=100m' \
+               --set 'nats.container.merge.resources.requests.memory=128Mi' \
+               --set 'nats.container.merge.resources.limits.cpu=500m' \
+               --set 'nats.container.merge.resources.limits.memory=512Mi' \
+               --set 'nats.reloader.merge.resources.requests.cpu=10m' \
+               --set 'nats.reloader.merge.resources.requests.memory=32Mi' \
+               --set 'nats.reloader.merge.resources.limits.cpu=100m' \
+               --set 'nats.reloader.merge.resources.limits.memory=64Mi' \
+               --debug 2>&1 | tee "${HELM_LOG}"; then
+          if grep -qE 'release: already exists|another operation \(install/upgrade/rollback\) is in progress' \
+               "${HELM_LOG}"; then
+            echo "dynamo-platform was installed concurrently; adopting it"
+          else
+            exit 1
+          fi
+        fi
+
+        # An adopted release can still be mid-install; the CRD and container
+        # waits below assume its manifests are committed.
+        DEADLINE=$(( SECONDS + 600 ))
+        until [ "$(KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
+                   helm status dynamo-platform -n default -o json 2>/dev/null \
+                   | jq -r '.info.status // empty')" = "deployed" ]; do
+          if [ "${SECONDS}" -ge "${DEADLINE}" ]; then
+            echo "::error::dynamo-platform did not reach status=deployed within 600s"
+            exit 1
+          fi
+          sleep 5
+        done
         echo "::endgroup::"
 
     - name: Wait for operator CRDs to be established
