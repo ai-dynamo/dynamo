@@ -140,7 +140,9 @@ modules:
 ```bash
 python3 -m pytest -m "unit and not post_merge" tests/ \
   --ignore=tests/serve/test_vllm.py --ignore=tests/serve/test_sglang.py \
-  --ignore=tests/serve/test_trtllm.py --ignore=tests/fault_tolerance/test_canary_rank_pause.py
+  --ignore=tests/serve/test_trtllm.py --ignore=tests/serve/test_trtllm_mm_hashes_protocol.py \
+  --ignore=tests/frontend/test_prompt_embeds.py \
+  --ignore=tests/fault_tolerance/test_canary_rank_pause.py
 ```
 
 Markers are strict (`--strict-markers`); the full marker list lives in
