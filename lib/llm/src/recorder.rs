@@ -57,6 +57,12 @@ pub struct Recorder<T> {
     event_count: Arc<Mutex<usize>>,
     /// Time when the first event was received
     first_event_time: Arc<Mutex<Option<Instant>>>,
+    /// Handle to the background writer task. Retained so
+    /// [`Self::shutdown_drain`] can drain accepted records and await the
+    /// final flush rather than only cancelling the task and hoping it
+    /// finishes before the process exits. [`Self::shutdown`] only signals
+    /// cancellation; it does not wait for the drain or flush.
+    worker: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl<T> Recorder<T>
@@ -131,7 +137,7 @@ where
         let file_path = output_path.as_ref().to_path_buf();
 
         // Spawn a task to receive events and write them to the file
-        tokio::spawn(async move {
+        let worker = tokio::spawn(async move {
             let start_time = start_time;
             let mut writer = BufWriter::with_capacity(options.buffer_bytes.max(1), file);
             let mut line_count = 0;
@@ -168,6 +174,63 @@ where
                     biased;
 
                     _ = cancel_clone.cancelled() => {
+                        // Drain records already accepted into the channel
+                        // before flushing. Without this, a record whose
+                        // `send` completed can sit in `event_rx` while the
+                        // recorder flushes only what the BufWriter already
+                        // holds, and the record is lost.
+                        while let Ok(event) = event_rx.try_recv() {
+                            let elapsed_ms = start_time.elapsed().as_millis() as u64;
+                            let entry = RecordEntry {
+                                timestamp: elapsed_ms,
+                                event,
+                            };
+                            let json = match serde_json::to_string(&entry) {
+                                Ok(json) => json,
+                                Err(e) => {
+                                    tracing::error!("Failed to serialize event: {}", e);
+                                    continue;
+                                }
+                            };
+                            if let Err(e) = writer.write_all(json.as_bytes()).await {
+                                tracing::error!("Failed to write event: {}", e);
+                                continue;
+                            }
+                            if let Err(e) = writer.write_all(b"\n").await {
+                                tracing::error!("Failed to write newline: {}", e);
+                                continue;
+                            }
+                            line_count += 1;
+                            if let Some(max_lines) = options.max_lines_per_file
+                                && line_count >= max_lines
+                            {
+                                if let Err(e) = writer.flush().await {
+                                    tracing::error!("Failed to flush file before rotation: {}", e);
+                                }
+                                file_index += 1;
+                                let new_path = create_rotated_path(&base_path, file_index);
+                                match OpenOptions::new()
+                                    .create(true)
+                                    .write(true)
+                                    .truncate(true)
+                                    .open(&new_path)
+                                    .await
+                                {
+                                    Ok(new_file) => {
+                                        writer =
+                                            BufWriter::with_capacity(options.buffer_bytes.max(1), new_file);
+                                        line_count = 0;
+                                        tracing::info!("Rotated to new file: {}", new_path.display());
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to open rotated file {}: {}", new_path.display(), e);
+                                    }
+                                }
+                            }
+                            let mut count = event_count_clone.lock().await;
+                            *count += 1;
+                        }
+
                         // Flush any pending writes before shutting down
                         if let Err(e) = writer.flush().await {
                             tracing::error!("Failed to flush on shutdown: {}", e);
@@ -283,6 +346,7 @@ where
             cancel: token,
             event_count,
             first_event_time,
+            worker: Some(worker),
         })
     }
 
@@ -307,9 +371,26 @@ where
         }
     }
 
-    /// Shutdown the recorder
+    /// Cancel the recorder's background writer task.
+    ///
+    /// This only signals cancellation; it does not wait for the writer to
+    /// finish draining accepted records or to flush. Use [`Self::shutdown_drain`]
+    /// when the caller must know every accepted record reached disk.
     pub fn shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    /// Cancel the writer task and wait for it to drain every record already
+    /// accepted into the channel and flush the buffered writer before
+    /// returning. A second call is harmless: the worker handle is taken on the
+    /// first call, so a second call returns immediately.
+    pub async fn shutdown_drain(&mut self) {
+        self.cancel.cancel();
+        if let Some(worker) = self.worker.take()
+            && let Err(error) = worker.await
+        {
+            tracing::warn!("Recorder writer task panicked during shutdown: {error}");
+        }
     }
 
     /// Send events from a JSONL file to the provided event sender
@@ -430,7 +511,12 @@ where
 
 impl<T> Drop for Recorder<T> {
     fn drop(&mut self) {
+        // Cancel only. Aborting the worker here would drop the future
+        // before its cancel branch runs, losing records still buffered in
+        // the channel or the BufWriter. The cancel branch drains and
+        // flushes, then returns, so the task completes on its own.
         self.cancel.cancel();
+        let _ = self.worker.take();
     }
 }
 
