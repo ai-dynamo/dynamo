@@ -109,6 +109,13 @@ fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
     let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(unset_labels);
 }
 
+fn expected_worker_dp_ranks(states: &DashMap<u64, WorkerLoadState>, worker_id: u64) -> Vec<u32> {
+    states.get(&worker_id).map_or_else(
+        || vec![0],
+        |state| state.expected_dp_ranks.iter().copied().collect(),
+    )
+}
+
 /// Default value for `max_num_batched_tokens` when the runtime config does not
 /// report it. Set high enough that the frac-based overload check (which multiplies
 /// this value by the threshold fraction) can never fire with realistic loads.
@@ -1094,17 +1101,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             let mut prefill_configs_rx: Option<RuntimeConfigWatch> = None;
             let mut decode_configs_rx = decode_configs_rx;
 
-            // Track decode worker IDs (for ITL cleanup)
-            let mut known_decode_workers: std::collections::HashSet<u64> =
-                decode_instances_rx.borrow().iter().copied().collect();
-
-            // Track prefill worker IDs (for TTFT cleanup in disaggregated mode)
-            let mut known_prefill_workers: std::collections::HashSet<u64> =
-                std::collections::HashSet::new();
             let mut prefill_instances_rx: Option<tokio::sync::watch::Receiver<Vec<u64>>> = None;
 
-            let mut known_worker_dp_ranks: HashMap<u64, std::collections::HashSet<u32>> =
-                HashMap::new();
             let mut overloaded_tracker = OverloadedWorkerTracker::default();
             let mut last_thresholds = thresholds.read().unwrap().clone();
             let mut decode_sequences = HashMap::new();
@@ -1118,7 +1116,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             metrics_reconnect.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             {
                 let mut source_state = sources.write().unwrap();
-                source_state.decode_workers = known_decode_workers.clone();
+                source_state.decode_workers =
+                    decode_instances_rx.borrow().iter().copied().collect();
                 source_state.decode_metrics_healthy = decode_metrics_healthy;
                 source_state.decode_configs_healthy = true;
             }
@@ -1174,16 +1173,19 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             &decode_configs_rx,
                             prefill_configs_rx.as_ref(),
                         );
-                        for worker_id in known_worker_dp_ranks.keys() {
-                            if runtime_configs.contains_key(worker_id) {
-                                continue;
-                            }
-                            let dp_ranks: Vec<u32> = known_worker_dp_ranks[worker_id]
-                                .iter()
-                                .copied()
-                                .collect();
-                            cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_DECODE);
-                            cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_PREFILL);
+                        let removed_workers = worker_load_states
+                            .iter()
+                            .filter(|state| !runtime_configs.contains_key(state.key()))
+                            .map(|state| {
+                                (
+                                    *state.key(),
+                                    state.expected_dp_ranks.iter().copied().collect::<Vec<_>>(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        for (worker_id, dp_ranks) in removed_workers {
+                            cleanup_worker_metrics(worker_id, &dp_ranks, WORKER_TYPE_DECODE);
+                            cleanup_worker_metrics(worker_id, &dp_ranks, WORKER_TYPE_PREFILL);
                         }
                         break;
                     }
@@ -1253,24 +1255,23 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         );
 
                         // Find workers that are being removed (not in runtime_configs anymore)
-                        let removed_workers: Vec<u64> = known_worker_dp_ranks
-                            .keys()
-                            .filter(|id| !runtime_configs.contains_key(id))
-                            .copied()
+                        let removed_workers: Vec<u64> = worker_load_states
+                            .iter()
+                            .filter(|state| !runtime_configs.contains_key(state.key()))
+                            .map(|state| *state.key())
                             .collect();
 
                         // Clean up Prometheus metrics for removed workers
                         for worker_id in &removed_workers {
-                            if let Some(dp_ranks) = known_worker_dp_ranks.remove(worker_id) {
-                                let dp_ranks_vec: Vec<u32> = dp_ranks.into_iter().collect();
-                                // Clean up metrics for both worker types since we don't know which type this worker was
-                                cleanup_worker_metrics(*worker_id, &dp_ranks_vec, WORKER_TYPE_DECODE);
-                                cleanup_worker_metrics(*worker_id, &dp_ranks_vec, WORKER_TYPE_PREFILL);
-                                tracing::debug!(
-                                    "Removed Prometheus metrics for worker {}",
-                                    worker_id
-                                );
-                            }
+                            let dp_ranks =
+                                expected_worker_dp_ranks(&worker_load_states, *worker_id);
+                            // Clean up metrics for both worker types since we don't know which type this worker was
+                            cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_DECODE);
+                            cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_PREFILL);
+                            tracing::debug!(
+                                "Removed Prometheus metrics for worker {}",
+                                worker_id
+                            );
                             forget_worker_publisher(
                                 &mut decode_sequences,
                                 &mut decode_publishers,
@@ -1303,9 +1304,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             let dp_end = dp_start + runtime_config.data_parallel_size;
                             let expected_dp_ranks = (dp_start..dp_end).collect::<HashSet<_>>();
 
-                            // Track dp_ranks for this worker (for cleanup when worker disappears)
-                            known_worker_dp_ranks.insert(*lease_id, expected_dp_ranks.clone());
-                            state.expected_dp_ranks = expected_dp_ranks.clone();
                             state
                                 .active_decode_blocks
                                 .retain(|rank, _| expected_dp_ranks.contains(rank));
@@ -1327,6 +1325,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             state
                                 .decode_overload_latches
                                 .retain(|rank, _| expected_dp_ranks.contains(rank));
+                            state.expected_dp_ranks = expected_dp_ranks;
 
                             // Populate total_blocks for all dp_ranks (they share the same total)
                             state.kv_total_blocks.clear();
@@ -1398,21 +1397,25 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let worker_id = active_load.worker_id;
                         let dp_rank = active_load.dp_rank;
 
-                        let (source_workers, other_workers, endpoint_role) = if prefill_scope {
-                            (
-                                &known_prefill_workers,
-                                &known_decode_workers,
-                                "prefill",
-                            )
-                        } else {
-                            (
-                                &known_decode_workers,
-                                &known_prefill_workers,
-                                "decode",
-                            )
+                        let endpoint_role = if prefill_scope { "prefill" } else { "decode" };
+                        let membership = {
+                            let source_state = sources.read().unwrap();
+                            if prefill_scope {
+                                classify_load_membership(
+                                    worker_id,
+                                    &source_state.prefill_workers,
+                                    &source_state.decode_workers,
+                                )
+                            } else {
+                                classify_load_membership(
+                                    worker_id,
+                                    &source_state.decode_workers,
+                                    &source_state.prefill_workers,
+                                )
+                            }
                         };
 
-                        match classify_load_membership(worker_id, source_workers, other_workers) {
+                        match membership {
                             LoadMembership::Unknown => {
                                 tracing::debug!(
                                     worker_id,
@@ -1514,12 +1517,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             );
                         }
 
-                        // Track known worker/dp_rank combinations for cleanup
-                        known_worker_dp_ranks
-                            .entry(worker_id)
-                            .or_default()
-                            .insert(dp_rank);
-
                         // Snapshot thresholds once per event — rare writes (HTTP endpoint)
                         // mean RwLock contention is effectively zero.
                         let cfg = thresholds.read().unwrap().clone();
@@ -1579,7 +1576,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                     // Handle decode endpoint instance changes (for ITL and decode metrics cleanup)
                     result = decode_instances_rx.changed() => {
                         if result.is_err() {
-                            known_decode_workers.clear();
                             sources.write().unwrap().decode_workers.clear();
                             tracing::info!("decode endpoint watcher closed");
                             break;
@@ -1588,19 +1584,20 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             decode_instances_rx.borrow().iter().copied().collect();
 
                         // Find decode workers that disappeared
-                        let removed_workers: Vec<u64> = known_decode_workers
-                            .difference(&current_instances)
-                            .copied()
-                            .collect();
+                        let removed_workers: Vec<u64> = {
+                            let source_state = sources.read().unwrap();
+                            source_state
+                                .decode_workers
+                                .difference(&current_instances)
+                                .copied()
+                                .collect()
+                        };
 
                         if !removed_workers.is_empty() {
                             // Clean up metrics for removed decode workers (with worker_type=decode label)
                             for worker_id in &removed_workers {
-                                // Get dp_ranks from known_worker_dp_ranks if available, otherwise use [0]
-                                let dp_ranks: Vec<u32> = known_worker_dp_ranks
-                                    .get(worker_id)
-                                    .map(|ranks| ranks.iter().copied().collect())
-                                    .unwrap_or_else(|| vec![0]);
+                                let dp_ranks =
+                                    expected_worker_dp_ranks(&worker_load_states, *worker_id);
                                 cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_DECODE);
                                 tracing::debug!(
                                     "Cleaned up metrics for removed decode worker {}",
@@ -1619,8 +1616,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
 
-                        known_decode_workers = current_instances;
-                        sources.write().unwrap().decode_workers = known_decode_workers.clone();
+                        sources.write().unwrap().decode_workers = current_instances;
                     }
 
                     // Handle prefill endpoint instance changes (for TTFT and prefill metrics cleanup in disaggregated mode)
@@ -1636,7 +1632,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let Ok(()) = result else {
                             // Prefill endpoint closed - stop watching to avoid busy loop
                             prefill_instances_rx = None;
-                            known_prefill_workers.clear();
                             sources.write().unwrap().prefill_workers.clear();
                             tracing::info!("Prefill endpoint watcher closed, will re-activate when client is set");
                             continue;
@@ -1650,19 +1645,20 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             rx.borrow().iter().copied().collect();
 
                         // Find prefill workers that disappeared
-                        let removed_workers: Vec<u64> = known_prefill_workers
-                            .difference(&current_instances)
-                            .copied()
-                            .collect();
+                        let removed_workers: Vec<u64> = {
+                            let source_state = sources.read().unwrap();
+                            source_state
+                                .prefill_workers
+                                .difference(&current_instances)
+                                .copied()
+                                .collect()
+                        };
 
                         if !removed_workers.is_empty() {
                             // Clean up metrics for removed prefill workers (with worker_type=prefill label)
                             for worker_id in &removed_workers {
-                                // Get dp_ranks from known_worker_dp_ranks if available, otherwise use [0]
-                                let dp_ranks: Vec<u32> = known_worker_dp_ranks
-                                    .get(worker_id)
-                                    .map(|ranks| ranks.iter().copied().collect())
-                                    .unwrap_or_else(|| vec![0]);
+                                let dp_ranks =
+                                    expected_worker_dp_ranks(&worker_load_states, *worker_id);
                                 cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_PREFILL);
                                 tracing::debug!(
                                     "Cleaned up metrics for removed prefill worker {}",
@@ -1681,8 +1677,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
 
-                        known_prefill_workers = current_instances;
-                        sources.write().unwrap().prefill_workers = known_prefill_workers.clone();
+                        sources.write().unwrap().prefill_workers = current_instances;
                     }
 
                     // Wait for prefill client to be registered (push-based notification)
@@ -1691,7 +1686,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         if let Some(prefill_client) = prefill_client {
                             let prefill_endpoint = prefill_client.endpoint.clone();
                             let rx = prefill_client.instance_avail_watcher();
-                            known_prefill_workers = rx.borrow().iter().copied().collect();
+                            let prefill_workers = rx.borrow().iter().copied().collect::<HashSet<_>>();
+                            let prefill_worker_count = prefill_workers.len();
                             prefill_instances_rx = Some(rx);
 
                             let metrics_result = tokio::select! {
@@ -1739,13 +1735,13 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             {
                                 let mut source_state = sources.write().unwrap();
                                 source_state.prefill_endpoint = Some(prefill_endpoint.id());
-                                source_state.prefill_workers = known_prefill_workers.clone();
+                                source_state.prefill_workers = prefill_workers;
                                 source_state.prefill_recovery_after = Some(Instant::now());
                             }
                             tracing::info!(
                                 endpoint = %prefill_endpoint.id(),
                                 "KvWorkerMonitor: prefill endpoint watcher activated, tracking {} workers",
-                                known_prefill_workers.len()
+                                prefill_worker_count
                             );
 
                             // Seed the freshly-registered prefill Client with the current

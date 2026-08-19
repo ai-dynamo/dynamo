@@ -50,7 +50,6 @@ struct RoutingCacheStats {
     capacity_tokens: u64,
     used_tokens: u64,
     free_tokens: u64,
-    complete: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,7 +229,6 @@ fn routing_cache(pools: &[KvPoolStats]) -> Option<RoutingCacheStats> {
         capacity_tokens: capacity,
         used_tokens: used,
         free_tokens: free,
-        complete: true,
     })
 }
 
@@ -277,7 +275,12 @@ mod tests {
         assert_eq!(stats.capacity_tokens, 1_600);
         assert_eq!(stats.used_tokens, 400);
         assert_eq!(stats.free_tokens, 1_200);
-        assert!(stats.complete);
+        assert!(
+            serde_json::to_value(&stats)
+                .unwrap()
+                .get("complete")
+                .is_none()
+        );
     }
 
     #[test]
