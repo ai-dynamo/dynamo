@@ -700,16 +700,6 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 		if err != nil || deleted || service == nil || opt.serviceTargetReady {
 			return service, deleted, err
 		}
-		existing := &corev1.Service{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(service), existing); err != nil {
-			if k8serrors.IsNotFound(err) {
-				return service, false, nil
-			}
-			return nil, false, fmt.Errorf("failed to get existing Service before selector cutover: %w", err)
-		}
-		if isDisaggregatedSetServiceSelector(existing) {
-			service.Spec.Selector = maps.Clone(existing.Spec.Selector)
-		}
 		return service, false, nil
 	})
 	if err != nil {

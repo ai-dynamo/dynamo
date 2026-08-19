@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"maps"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -57,7 +56,6 @@ func (r *groveStableResourcesReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
-	targetReady bool,
 ) ([]Resource, error) {
 	logger := log.FromContext(ctx)
 	if err := dynamo.ReconcileModelServicesForComponents(
@@ -85,7 +83,6 @@ func (r *groveStableResourcesReconciler) Reconcile(
 				renderDeployment,
 				component,
 				isK8sDiscoveryEnabled,
-				targetReady,
 			)
 			if err != nil {
 				return nil, err
@@ -118,7 +115,6 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	isK8sDiscoveryEnabled bool,
-	targetReady bool,
 ) (Resource, error) {
 	logger := log.FromContext(ctx)
 	componentName := component.ComponentName
@@ -136,15 +132,6 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		logger.Error(err, "failed to generate the main component service")
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
 	}
-	existingService := &corev1.Service{}
-	existingServiceErr := r.Get(ctx, client.ObjectKeyFromObject(service), existingService)
-	if client.IgnoreNotFound(existingServiceErr) != nil {
-		return nil, fmt.Errorf("failed to get existing main component service: %w", existingServiceErr)
-	}
-	if existingServiceErr == nil && !targetReady && isDisaggregatedSetServiceSelector(existingService) {
-		service.Spec.Selector = maps.Clone(existingService.Spec.Selector)
-	}
-
 	_, syncedService, err := commoncontroller.SyncResource(
 		ctx,
 		r,

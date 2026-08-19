@@ -104,7 +104,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	if err != nil {
 		return ReconcileResult{}, err
 	}
-	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderDeployment, readiness.Ready)
+	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderDeployment)
 	if err != nil {
 		return ReconcileResult{}, err
 	}

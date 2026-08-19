@@ -103,21 +103,22 @@ func providerFromOwnedWorkloads(
 		return "", false, err
 	}
 
-	// Adopt one unambiguous family and fail closed when multiple families exist.
+	// DisaggregatedSet and Grove are the only ambiguous combination. DS takes
+	// precedence over legacy DCDs; Grove takes precedence over DCDs.
 	switch {
-	case hasComponents && hasGrove || hasComponents && hasDisaggregatedSet || hasGrove && hasDisaggregatedSet:
+	case hasGrove && hasDisaggregatedSet:
 		return "", false, fmt.Errorf(
 			"%w: DynamoGraphDeployment %s/%s owns workloads from multiple providers",
 			errConflictingWorkloadProviders,
 			dgd.Namespace,
 			dgd.Name,
 		)
+	case hasDisaggregatedSet:
+		return workloadProviderDisaggregatedSet, true, nil
 	case hasGrove:
 		return workloadProviderGrove, true, nil
 	case hasComponents:
 		return workloadProviderComponent, true, nil
-	case hasDisaggregatedSet:
-		return workloadProviderDisaggregatedSet, true, nil
 	default:
 		return "", false, nil
 	}

@@ -123,13 +123,34 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 			wantProvider: workloadProviderDisaggregatedSet,
 		},
 		{
-			name: "mixed owned workload families fail closed",
+			name: "DisaggregatedSet adopts alongside auxiliary DCDs",
 			workloads: []providerTestWorkload{
 				{provider: workloadProviderComponent, owned: true},
 				{provider: workloadProviderDisaggregatedSet, owned: true},
 			},
+			wantProvider: workloadProviderDisaggregatedSet,
+		},
+		{
+			name: "Grove adopts alongside auxiliary DCDs",
+			workloads: []providerTestWorkload{
+				{provider: workloadProviderComponent, owned: true},
+				{provider: workloadProviderGrove, owned: true},
+			},
+			wantProvider: workloadProviderGrove,
+		},
+		{
+			name: "DisaggregatedSet and Grove fail closed",
+			workloads: []providerTestWorkload{
+				{provider: workloadProviderGrove, owned: true},
+				{provider: workloadProviderDisaggregatedSet, owned: true},
+			},
 			wantErr:   "owns workloads from multiple providers",
 			wantErrIs: errConflictingWorkloadProviders,
+		},
+		{
+			name:         "unannotated DGD with only DCDs adopts component",
+			workloads:    []providerTestWorkload{{provider: workloadProviderComponent, owned: true}},
+			wantProvider: workloadProviderComponent,
 		},
 		{
 			name: "foreign workloads are ignored",

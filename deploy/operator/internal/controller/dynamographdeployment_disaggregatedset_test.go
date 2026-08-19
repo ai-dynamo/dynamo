@@ -109,7 +109,6 @@ func TestDisaggregatedSetServiceSelectorIsRevisionScoped(t *testing.T) {
 	service := &corev1.Service{}
 	setDisaggregatedSetServiceSelector(service, "demo-ds", "prefill", "abc12345")
 
-	require.True(t, isDisaggregatedSetServiceSelector(service))
 	require.Equal(t, map[string]string{
 		disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
 		disaggregatedsetv1.RoleLabelKey:     "prefill",

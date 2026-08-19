@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 )
 
 func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
@@ -114,7 +115,7 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	assert.Equal(t, 1, podCliqueReads)
 }
 
-func TestGroveServiceWaitsForReadyWorkloadBeforeDisaggregatedSetCutover(t *testing.T) {
+func TestGroveServiceDoesNotPreserveDisaggregatedSetSelector(t *testing.T) {
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
@@ -140,13 +141,8 @@ func TestGroveServiceWaitsForReadyWorkloadBeforeDisaggregatedSetCutover(t *testi
 		&configv1alpha1.OperatorConfiguration{},
 	)
 
-	_, err := reconciler.reconcileComponentService(t.Context(), dgd, dgd, component, false, false)
+	_, err := reconciler.reconcileComponentService(t.Context(), dgd, dgd, component, false)
 	require.NoError(t, err)
 	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(service), service))
-	require.True(t, isDisaggregatedSetServiceSelector(service))
-
-	_, err = reconciler.reconcileComponentService(t.Context(), dgd, dgd, component, false, true)
-	require.NoError(t, err)
-	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(service), service))
-	require.False(t, isDisaggregatedSetServiceSelector(service))
+	require.NotContains(t, service.Spec.Selector, disaggregatedsetv1.SetNameLabelKey)
 }
