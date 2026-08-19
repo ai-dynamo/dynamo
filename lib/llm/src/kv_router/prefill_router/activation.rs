@@ -21,9 +21,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use super::{
-    InnerPrefillRouter, PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter,
-};
+use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::ModelManager,
     kv_router::{
@@ -240,7 +238,7 @@ where
             .get_or_create_runtime_config_watcher(&endpoint)
             .await?;
 
-        let inner_router = if context.router_mode.is_kv_routing() {
+        let (router, prefill_client) = if context.router_mode.is_kv_routing() {
             let discovered_cards = endpoint
                 .component()
                 .drt()
@@ -298,25 +296,24 @@ where
             )
             .await?;
 
-            // Wrap it in the shared routing host.
             (
-                InnerPrefillRouter::RoutingHost(Arc::new(RoutingHost::new_with_coordinator(
+                Arc::new(RoutingHost::new_with_coordinator(
                     push_router,
                     kv_chooser,
                     affinity,
-                ))),
+                )),
                 prefill_client,
             )
         } else {
-            // Create client for simple router
+            // Create the cache-free routing client.
             let client = endpoint.client().await?;
             let affinity =
                 create_affinity_coordinator(context.session_affinity_ttl, client.clone()).await?;
             let prefill_client = client.clone();
 
-            // Create simple push router with the frontend's router mode
-            // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
-            // available in KV routing mode where the router has actual bookkeeping.
+            // Create the transport and discovery layer for the builtin policy.
+            // Capability-free policies retain the cache-free path; load-aware policies
+            // lazily construct the shared slot tracker below.
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
                 client,
                 context.router_mode,
@@ -342,22 +339,20 @@ where
             } else {
                 None
             };
-            let router = InnerPrefillRouter::RoutingHost(Arc::new(
-                RoutingHost::<Sel>::new_builtin_with_coordinator(
-                    push_router,
-                    load_state,
-                    affinity,
-                )?,
-            ));
+            let router = Arc::new(RoutingHost::<Sel>::new_builtin_with_coordinator(
+                push_router,
+                load_state,
+                affinity,
+            )?);
             (router, prefill_client)
         };
 
         Ok((
             PrefillBinding {
                 endpoint_id,
-                router: inner_router.0,
+                router,
             },
-            inner_router.1,
+            prefill_client,
         ))
     }
 

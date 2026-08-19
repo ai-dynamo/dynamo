@@ -7,7 +7,7 @@ use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::selector::WorkerSelector;
 use dynamo_runtime::pipeline::{Context, SingleIn};
 
-use super::{InnerPrefillRouter, PrefillRouter};
+use super::PrefillRouter;
 use crate::kv_router::to_worker_selection_session_context;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::common::{
@@ -304,10 +304,7 @@ where
     ) -> Option<bool> {
         let threshold = self.conditional_disagg_prefill_busy_threshold?;
         let binding = self.binding.load_full()?;
-        let router = match &binding.router {
-            InnerPrefillRouter::RoutingHost(router) => router,
-            InnerPrefillRouter::SimpleRouter(_) => return None,
-        };
+        let router = &binding.router;
         let kv_router = router.kv_router_if_enabled()?;
 
         let lora_name = req

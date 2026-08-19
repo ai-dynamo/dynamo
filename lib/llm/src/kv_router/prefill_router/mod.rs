@@ -30,7 +30,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::ModelManager,
-    kv_router::WorkerSelectorFactory,
+    kv_router::{RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -45,8 +45,6 @@ mod activation;
 mod admission;
 mod conditional_bypass;
 mod query;
-
-use admission::InnerPrefillRouter;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -219,7 +217,7 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     endpoint_id: EndpointId,
-    router: InnerPrefillRouter<Sel>,
+    router: Arc<RoutingHost<Sel>>,
 }
 
 struct PrefillBuildContext<Sel>
