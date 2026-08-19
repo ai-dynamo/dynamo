@@ -156,81 +156,53 @@ expected, use `base.dynamographdeployment | only`; this fails clearly if the
 source changes to contain zero or multiple such resources. Templates may use
 embedded patches or ordinary local Kustomize source paths.
 
-#### Inheriting Template Bundles
+#### Inheriting Template Files
 
-Put common files and defaults in a parent template bundle when several concrete
-instance types share the same Kustomize structure. A concrete template source
-declares its parent explicitly in `.kustomize-template.yaml`; `unfold` never
-searches parent directories for templates:
+Put common YAML files and defaults directly in the parent of concrete template
+directories when several variants share the same Kustomize structure:
 
 ```text
 aws-efa/
 ├── kustomization.yaml.j2
+├── resources.yaml.j2
 ├── values.yaml
-└── p5/
-    ├── .kustomize-template.yaml
-    ├── values.yaml
-    └── p5.48xlarge/
-        ├── .kustomize-template.yaml
-        └── values.yaml
+├── p5.48xlarge/
+│   ├── kustomization.yaml.j2
+│   └── values.yaml
+└── p6-b200.48xlarge/
+    └── values.yaml
 ```
 
-Each child metadata file contains one relative parent path:
-
-```yaml
-extends: ..
-```
-
-The matrix still selects only the concrete leaf:
+The matrix selects one concrete directory:
 
 ```yaml
 templates:
-  - source: ../../../kustomize/templates/aws-efa/p5/p5.48xlarge
+  - source: ../../../kustomize/templates/aws-efa/p5.48xlarge
     path: components/efa
 ```
 
-`unfold` resolves the explicit chain from root to leaf. For each relative file
-path, the most specific file replaces the inherited file. It does not merge YAML
-content. A directory containing `.kustomize-template.yaml` is a child bundle
-boundary and is not copied as an asset of its parent, so unselected sibling
-instance types never enter the generated Component. Values use shallow,
-top-level replacement in this order:
+`unfold` reads only direct `*.yaml` and `*.yaml.j2` files from the selected
+directory's parent and then from the selected directory. It never scans either
+directory recursively. Files are matched by their output name after removing a
+final `.j2`; for example, a selected `resources.yaml` replaces an inherited
+`resources.yaml.j2`, and a selected `resources.yaml.j2` likewise replaces an
+inherited `resources.yaml`. It replaces complete files and does not merge YAML
+content.
+Values use shallow, top-level replacement in this order:
 
 ```text
-root values.yaml -> child values.yaml -> leaf values.yaml -> matrix values
+parent values.yaml -> selected values.yaml -> matrix values
 ```
 
-The effective bundle is rendered once into the selected output path. A
-Values-only leaf therefore produces the same flat Component layout as a
-standalone template. A leaf can replace `kustomization.yaml.j2` or any other
-inherited file by providing a file at the same relative path. Files inherited
-from other levels retain their source location for external Kustomize path
-rebasing.
-
-Model Kustomize layers explicitly in the source bundle when they are useful;
-the generator does not infer or merge Components. For example, a parent can
-provide `base/kustomization.yaml.j2` and a root wrapper that selects `base`. A
-specialized child can override the root wrapper and add
-`instance/kustomization.yaml.j2`, producing this ordinary generated Component:
-
-```text
-components/efa/
-├── kustomization.yaml
-├── base/
-│   └── kustomization.yaml
-└── instance/
-    └── kustomization.yaml
-```
-
-`unfold` materializes every effective template file except `values.yaml` and
-`.kustomize-template.yaml`. Files ending in `*.j2` are rendered without that
-suffix. A template can select shared Components; `unfold` rebases those external
-Component paths for the generated location. Jinja rendering uses strict,
-immutable sandboxed values: undefined names and attempts to mutate data are
-errors. Rendering a matrix that selects templates requires `jinja2==3.1.6`,
-which is installed in the development and test dependency sets. Missing parent
-directories, inheritance cycles, and chains without `kustomization.yaml.j2` are
-errors.
+The effective files are rendered once into the selected output path. A
+values-only selected directory inherits the parent's files unchanged. A
+specialized directory can replace `kustomization.yaml.j2` or any other inherited
+YAML file by providing the same output name. Subdirectories and non-YAML files
+are never materialized. A template can select shared Components; `unfold`
+rebases those external paths for the generated location. Jinja rendering uses
+strict, immutable sandboxed values: undefined names and attempts to mutate data
+are errors. Rendering a matrix that selects templates requires
+`jinja2==3.1.6`, which is installed in the development and test dependency sets.
 
 Regenerate derived artifacts in order: `unfold` writes every checked-in Level-2
 public overlay `kustomization.yaml` file for the matrix; `render` invokes
