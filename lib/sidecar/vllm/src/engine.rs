@@ -17,7 +17,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::convert::{ResponseState, build_generate_request, data_parallel_rank};
+use crate::convert::{
+    ResponseState, build_generate_request, data_parallel_rank, request_has_multimodal_input,
+};
 use crate::model::DiscoveredModel;
 
 pub struct VllmSidecarEngine {
@@ -194,12 +196,7 @@ impl LLMEngine for VllmSidecarEngine {
         request: dynamo_backend_common::PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        if request
-            .multi_modal_data
-            .as_ref()
-            .is_some_and(|media| media.values().any(|items| !items.is_empty()))
-            && !self.model.supports_multimodal
-        {
+        if request_has_multimodal_input(&request) && !self.model.supports_multimodal {
             return Err(client::invalid_argument(format!(
                 "model `{}` does not advertise multimodal support",
                 self.model.served_name

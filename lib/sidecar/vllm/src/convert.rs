@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, MultimodalData,
     PrefillResult, PreprocessedRequest, StopReason, TopLogprob, usage,
 };
+use sha2::{Digest, Sha256};
 
 use crate::client;
 use crate::json::{json_to_struct, struct_to_json};
@@ -15,10 +19,53 @@ const MULTIMODAL_PROMPT_TOKEN_IDS_KEY: &str = "_dynamo_sidecar_multimodal_prompt
 const MM_HASHES_KEY: &str = "mm_hashes";
 // Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
+const MAX_PREPROCESSED_MM_FEATURES: usize = 64;
+const MAX_PREPROCESSED_MM_BYTES: usize = 16 * 1024 * 1024;
+const PREPROCESSED_MM_ID_DOMAIN: &[u8] = b"vllm.grpc.preprocessed-mm.v1";
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmTitoFeatures {
+    mm_hashes: BTreeMap<String, Vec<String>>,
+    mm_placeholders: BTreeMap<String, Vec<VllmTitoPlaceholder>>,
+    kwargs_data: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmTitoPlaceholder {
+    offset: u64,
+    length: u64,
+    #[serde(default)]
+    is_embed: Option<Vec<bool>>,
+}
 
 #[derive(Default)]
 struct VllmTitoProjection {
     priority: Option<i32>,
+    features: Option<VllmTitoFeatures>,
+}
+
+fn request_has_raw_media(request: &PreprocessedRequest) -> bool {
+    request
+        .multi_modal_data
+        .as_ref()
+        .is_some_and(|media| media.values().any(|items| !items.is_empty()))
+}
+
+fn request_has_preprocessed_media(request: &PreprocessedRequest) -> bool {
+    request
+        .extra_args
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|extra| extra.get("vllm_tito"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|envelope| envelope.get("features"))
+        .is_some_and(|features| !features.is_null())
+}
+
+pub(crate) fn request_has_multimodal_input(request: &PreprocessedRequest) -> bool {
+    request_has_raw_media(request) || request_has_preprocessed_media(request)
 }
 
 pub(crate) fn build_generate_request(
@@ -28,21 +75,26 @@ pub(crate) fn build_generate_request(
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode)?;
 
-    let has_media = request
-        .multi_modal_data
-        .as_ref()
-        .is_some_and(|media| media.values().any(|items| !items.is_empty()));
+    let has_raw_media = request_has_raw_media(&request);
+    let has_preprocessed_media = request_has_preprocessed_media(&request);
+    let has_media = has_raw_media || has_preprocessed_media;
+    if has_raw_media && has_preprocessed_media {
+        return Err(client::invalid_argument(
+            "raw multimodal data and preprocessed features cannot be mixed",
+        ));
+    }
     // Decode reuses the prefill-expanded tokens without reprocessing media.
-    let forwarded_mm_uuids = if has_media && !mode.is_decode() {
+    let forwarded_mm_uuids = if has_raw_media && !mode.is_decode() {
         forwarded_mm_uuids(&request)?
     } else {
         None
     };
-    let media = if mode.is_decode() {
+    let raw_media = if mode.is_decode() || !has_raw_media {
         Vec::new()
     } else {
         build_media(&request, forwarded_mm_uuids.as_deref())?
     };
+    let prompt_token_count = request.token_ids.len();
     let mut prefill_result = request.prefill_result;
     let mut token_ids = request.token_ids;
     if mode.is_decode() && has_media {
@@ -81,6 +133,13 @@ pub(crate) fn build_generate_request(
     if let Some(vllm_priority) = vllm_tito.priority {
         priority = vllm_priority;
     }
+    let media = if mode.is_decode() {
+        Vec::new()
+    } else if let Some(features) = vllm_tito.features {
+        build_preprocessed_media(features, prompt_token_count)?
+    } else {
+        raw_media
+    };
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
         // These fields are already represented by token_ids and media.
@@ -188,14 +247,17 @@ fn validate_and_remove_vllm_tito(
             "extra_args.vllm_tito.request_id must match the canonical request ID",
         ));
     }
-    if envelope
+    let features = envelope
         .get("features")
-        .is_some_and(|features| !features.is_null())
-    {
-        return Err(client::invalid_argument(
-            "extra_args.vllm_tito.features requires preprocessed multimodal gRPC support",
-        ));
-    }
+        .filter(|features| !features.is_null())
+        .map(|features| {
+            serde_json::from_value::<VllmTitoFeatures>(features.clone()).map_err(|error| {
+                client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features/kwargs_data is invalid: {error}"
+                ))
+            })
+        })
+        .transpose()?;
     if envelope
         .get("model")
         .is_some_and(|model| !model.is_null() && !model.is_string())
@@ -340,6 +402,7 @@ fn validate_and_remove_vllm_tito(
     }
     Ok(VllmTitoProjection {
         priority: Some(priority),
+        features,
     })
 }
 
@@ -612,6 +675,189 @@ fn build_media(
         }
     }
     Ok(media)
+}
+
+fn build_preprocessed_media(
+    features: VllmTitoFeatures,
+    prompt_token_count: usize,
+) -> Result<Vec<pb::MediaItem>, DynamoError> {
+    if features.mm_hashes.is_empty() {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.features.mm_hashes must contain at least one modality",
+        ));
+    }
+    if !features
+        .mm_hashes
+        .keys()
+        .eq(features.mm_placeholders.keys())
+        || !features.mm_hashes.keys().eq(features.kwargs_data.keys())
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.features hashes, placeholders, and kwargs_data must contain the same modalities",
+        ));
+    }
+
+    let feature_count = features
+        .mm_hashes
+        .values()
+        .try_fold(0usize, |count, hashes| count.checked_add(hashes.len()))
+        .ok_or_else(|| {
+            client::invalid_argument("preprocessed multimodal feature count overflows")
+        })?;
+    if feature_count == 0 || feature_count > MAX_PREPROCESSED_MM_FEATURES {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.features must contain at least 1 and at most {MAX_PREPROCESSED_MM_FEATURES} features"
+        )));
+    }
+
+    let VllmTitoFeatures {
+        mm_hashes,
+        mm_placeholders,
+        kwargs_data,
+    } = features;
+    let prompt_token_count = u64::try_from(prompt_token_count).map_err(|_| {
+        client::invalid_argument("preprocessed multimodal prompt length exceeds platform limits")
+    })?;
+    let mut decoded_bytes = 0usize;
+    let mut ranges = Vec::with_capacity(feature_count);
+    let mut media = Vec::with_capacity(feature_count);
+
+    for (modality, hashes) in mm_hashes {
+        let modality_code = match modality.as_str() {
+            "image" => pb::Modality::Image,
+            "video" => pb::Modality::Video,
+            "audio" => pb::Modality::Audio,
+            _ => {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features modality `{modality}` is not supported"
+                )));
+            }
+        };
+        let placeholders = &mm_placeholders[&modality];
+        let kwargs = &kwargs_data[&modality];
+        if hashes.len() != placeholders.len() || hashes.len() != kwargs.len() {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.features.{modality} hashes, placeholders, and kwargs_data must have equal lengths"
+            )));
+        }
+
+        for (index, ((producer_hash, placeholder), encoded_kwargs)) in
+            hashes.into_iter().zip(placeholders).zip(kwargs).enumerate()
+        {
+            if producer_hash.is_empty() {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features.mm_hashes.{modality}[{index}] must be non-empty"
+                )));
+            }
+            if placeholder.length == 0 {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}].length must be positive"
+                )));
+            }
+            let end = placeholder
+                .offset
+                .checked_add(placeholder.length)
+                .ok_or_else(|| {
+                    client::invalid_argument(format!(
+                        "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}] range overflows"
+                    ))
+                })?;
+            if end > prompt_token_count {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}] exceeds the prompt token count"
+                )));
+            }
+            if let Some(is_embed) = placeholder.is_embed.as_ref() {
+                let expected = usize::try_from(placeholder.length).map_err(|_| {
+                    client::invalid_argument(format!(
+                        "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}].length exceeds platform limits"
+                    ))
+                })?;
+                if is_embed.len() != expected {
+                    return Err(client::invalid_argument(format!(
+                        "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}].is_embed must match length"
+                    )));
+                }
+            }
+
+            let decoded_kwargs =
+                decode_preprocessed_kwargs(encoded_kwargs, &mut decoded_bytes, &modality, index)?;
+            let identifier = preprocessed_mm_identifier(&modality, &decoded_kwargs);
+            ranges.push((placeholder.offset, end));
+            media.push(pb::MediaItem {
+                modality: modality_code as i32,
+                source: Some(pb::media_item::Source::Features(
+                    pb::PreprocessedMediaFeatures {
+                        kwargs: Some(decoded_kwargs),
+                        identifier: identifier.clone(),
+                        offset: placeholder.offset,
+                        length: placeholder.length,
+                        mm_hash: Some(identifier),
+                        is_embed: placeholder.is_embed.clone().unwrap_or_default(),
+                    },
+                )),
+                mime_type: String::new(),
+                uuid: String::new(),
+            });
+        }
+    }
+
+    ranges.sort_unstable_by_key(|range| range.0);
+    if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return Err(client::invalid_argument(
+            "preprocessed multimodal placeholder ranges cannot overlap",
+        ));
+    }
+    Ok(media)
+}
+
+fn decode_preprocessed_kwargs(
+    encoded: &str,
+    decoded_bytes: &mut usize,
+    modality: &str,
+    index: usize,
+) -> Result<Vec<u8>, DynamoError> {
+    if encoded.is_empty() {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.features.kwargs_data.{modality}[{index}] must contain inline base64 kwargs"
+        )));
+    }
+    let remaining = MAX_PREPROCESSED_MM_BYTES.saturating_sub(*decoded_bytes);
+    let max_encoded_len = remaining.div_ceil(3).saturating_mul(4);
+    if encoded.len() > max_encoded_len {
+        return Err(client::invalid_argument(
+            "preprocessed multimodal kwargs exceed 16 MiB",
+        ));
+    }
+    let decoded = BASE64_STANDARD.decode(encoded).map_err(|error| {
+        client::invalid_argument(format!(
+            "extra_args.vllm_tito.features.kwargs_data.{modality}[{index}] is not valid base64: {error}"
+        ))
+    })?;
+    if decoded.is_empty() {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.features.kwargs_data.{modality}[{index}] must contain inline kwargs"
+        )));
+    }
+    *decoded_bytes = decoded_bytes.checked_add(decoded.len()).ok_or_else(|| {
+        client::invalid_argument("preprocessed multimodal kwargs byte count overflows")
+    })?;
+    if *decoded_bytes > MAX_PREPROCESSED_MM_BYTES {
+        return Err(client::invalid_argument(
+            "preprocessed multimodal kwargs exceed 16 MiB",
+        ));
+    }
+    Ok(decoded)
+}
+
+fn preprocessed_mm_identifier(modality: &str, raw_kwargs: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(PREPROCESSED_MM_ID_DOMAIN);
+    hasher.update((modality.len() as u64).to_be_bytes());
+    hasher.update(modality.as_bytes());
+    hasher.update((raw_kwargs.len() as u64).to_be_bytes());
+    hasher.update(raw_kwargs);
+    format!("grpc-mm:{:x}", hasher.finalize())
 }
 
 fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
@@ -901,10 +1147,7 @@ impl ResponseState {
     pub(crate) fn new(request: &PreprocessedRequest, mode: DisaggregationMode) -> Self {
         Self {
             prompt_tokens: request.token_ids.len() as u32,
-            has_media: request
-                .multi_modal_data
-                .as_ref()
-                .is_some_and(|media| media.values().any(|items| !items.is_empty())),
+            has_media: request_has_multimodal_input(request),
             multimodal_prompt_token_ids: None,
             completion_tokens: 0,
             is_prefill: mode.is_prefill(),
