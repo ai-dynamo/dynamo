@@ -862,6 +862,9 @@ fn request_with_preprocessed_features(features: serde_json::Value) -> Preprocess
     request
 }
 
+const VALID_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgOlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+
 fn image_features(kwargs: serde_json::Value) -> serde_json::Value {
     json!({
         "mm_hashes": {"image": ["producer-controlled-hash"]},
@@ -872,7 +875,7 @@ fn image_features(kwargs: serde_json::Value) -> serde_json::Value {
 
 #[test]
 fn preprocessed_multimodal_features_use_vllm_derived_identifiers() {
-    let request = request_with_preprocessed_features(image_features(json!("AQIDBA==")));
+    let request = request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
 
     let wire = build_generate_request(
         request,
@@ -885,10 +888,10 @@ fn preprocessed_multimodal_features_use_vllm_derived_identifiers() {
         Some(pb::media_item::Source::Features(feature)) => feature,
         other => panic!("expected preprocessed features, got {other:?}"),
     };
-    assert_eq!(feature.kwargs.as_deref(), Some(&[1, 2, 3, 4][..]));
+    assert_eq!(feature.kwargs.as_ref().map(Vec::len), Some(64));
     assert_eq!(
         feature.identifier,
-        "grpc-mm:c280b3ce06886fca7341a5da70b0e8beaf2b4f1d6904232891683ce1dc2b638f"
+        "grpc-mm:eb917f9e320304a5c5fc538e0de431ccc7237ba302a2aa8b6f0dd39bde78509f"
     );
     assert_eq!(
         feature.mm_hash.as_deref(),
@@ -899,7 +902,7 @@ fn preprocessed_multimodal_features_use_vllm_derived_identifiers() {
 
 #[test]
 fn preprocessed_multimodal_features_reject_unknown_nested_fields() {
-    let mut features = image_features(json!("AQIDBA=="));
+    let mut features = image_features(json!(VALID_MM_KWARGS_BASE64));
     features["future_field"] = json!(true);
     let root_error = build_generate_request(
         request_with_preprocessed_features(features),
@@ -909,7 +912,7 @@ fn preprocessed_multimodal_features_reject_unknown_nested_fields() {
     .expect_err("unknown feature fields must fail closed");
     assert!(root_error.to_string().contains("future_field"));
 
-    let mut features = image_features(json!("AQIDBA=="));
+    let mut features = image_features(json!(VALID_MM_KWARGS_BASE64));
     features["mm_placeholders"]["image"][0]["future_field"] = json!(true);
     let placeholder_error = build_generate_request(
         request_with_preprocessed_features(features),
@@ -938,7 +941,7 @@ fn preprocessed_multimodal_features_require_inline_kwargs() {
 
 #[test]
 fn preprocessed_multimodal_features_bound_producer_hashes() {
-    let mut features = image_features(json!("AQIDBA=="));
+    let mut features = image_features(json!(VALID_MM_KWARGS_BASE64));
     features["mm_hashes"]["image"][0] = json!("h".repeat(257));
     let error = build_generate_request(
         request_with_preprocessed_features(features),
@@ -955,7 +958,7 @@ fn preprocessed_multimodal_features_enforce_count_and_byte_limits() {
     let placeholders = (0..65)
         .map(|offset| json!({"offset": offset, "length": 1}))
         .collect::<Vec<_>>();
-    let kwargs = vec!["AQIDBA=="; 65];
+    let kwargs = vec![VALID_MM_KWARGS_BASE64; 65];
     let too_many = json!({
         "mm_hashes": {"image": hashes},
         "mm_placeholders": {"image": placeholders},
@@ -985,7 +988,7 @@ fn preprocessed_multimodal_features_accept_transport_boundaries() {
     let placeholders = (0..64)
         .map(|offset| json!({"offset": offset, "length": 1}))
         .collect::<Vec<_>>();
-    let kwargs = vec!["AQIDBA=="; 64];
+    let kwargs = vec![VALID_MM_KWARGS_BASE64; 64];
     let mut count_request = request_with_preprocessed_features(json!({
         "mm_hashes": {"image": hashes},
         "mm_placeholders": {"image": placeholders},
@@ -1016,7 +1019,7 @@ fn preprocessed_multimodal_features_validate_alignment_and_ranges() {
             json!({
                 "mm_hashes": {"image": ["hash"]},
                 "mm_placeholders": {"video": [{"offset": 1, "length": 1}]},
-                "kwargs_data": {"image": ["AQIDBA=="]}
+                "kwargs_data": {"image": [VALID_MM_KWARGS_BASE64]}
             }),
             "same modalities",
         ),
@@ -1024,7 +1027,7 @@ fn preprocessed_multimodal_features_validate_alignment_and_ranges() {
             json!({
                 "mm_hashes": {"image": ["hash", "hash-2"]},
                 "mm_placeholders": {"image": [{"offset": 1, "length": 1}]},
-                "kwargs_data": {"image": ["AQIDBA=="]}
+                "kwargs_data": {"image": [VALID_MM_KWARGS_BASE64]}
             }),
             "equal lengths",
         ),
@@ -1036,7 +1039,7 @@ fn preprocessed_multimodal_features_validate_alignment_and_ranges() {
                     {"offset": 0, "length": 2},
                     {"offset": 1, "length": 2}
                 ]},
-                "kwargs_data": {"image": ["AQIDBA==", "AQIDBA=="]}
+                "kwargs_data": {"image": [VALID_MM_KWARGS_BASE64, VALID_MM_KWARGS_BASE64]}
             }),
             "cannot overlap",
         ),
@@ -1044,7 +1047,7 @@ fn preprocessed_multimodal_features_validate_alignment_and_ranges() {
             json!({
                 "mm_hashes": {"image": ["hash"]},
                 "mm_placeholders": {"image": [{"offset": 2, "length": 2}]},
-                "kwargs_data": {"image": ["AQIDBA=="]}
+                "kwargs_data": {"image": [VALID_MM_KWARGS_BASE64]}
             }),
             "exceeds the prompt token count",
         ),
@@ -1056,7 +1059,7 @@ fn preprocessed_multimodal_features_validate_alignment_and_ranges() {
                     "length": 2,
                     "is_embed": [true]
                 }]},
-                "kwargs_data": {"image": ["AQIDBA=="]}
+                "kwargs_data": {"image": [VALID_MM_KWARGS_BASE64]}
             }),
             "is_embed must match length",
         ),
@@ -1078,7 +1081,8 @@ fn preprocessed_multimodal_features_validate_alignment_and_ranges() {
 
 #[test]
 fn preprocessed_multimodal_features_cannot_mix_with_raw_media() {
-    let mut request = request_with_preprocessed_features(image_features(json!("AQIDBA==")));
+    let mut request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
     request.multi_modal_data = Some(std::collections::HashMap::from([(
         "image_url".to_string(),
         vec![MultimodalData::RawUrl(
@@ -1107,7 +1111,7 @@ async fn preprocessed_multimodal_features_require_model_support() {
     let context = dynamo_backend_common::testing::mock_context();
     let result = engine
         .generate(
-            request_with_preprocessed_features(image_features(json!("AQIDBA=="))),
+            request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64))),
             GenerateContext::new(context, None),
         )
         .await;
@@ -1838,7 +1842,8 @@ async fn preprocessed_multimodal_features_preserve_disaggregated_handoff() {
     prefill.start(1).await.expect("start prefill");
     decode.start(2).await.expect("start decode");
 
-    let mut feature_request = request_with_preprocessed_features(image_features(json!("AQIDBA==")));
+    let mut feature_request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
     feature_request.output_options.prompt_logprobs = None;
     let prefill_context = dynamo_backend_common::testing::mock_context();
     feature_request.extra_args.as_mut().unwrap()["vllm_tito"]["request_id"] =
