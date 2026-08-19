@@ -7,11 +7,31 @@ import importlib.metadata
 import importlib.util
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 pytestmark = pytest.mark.timeout(30)
+
+
+def _source_checkout_roots() -> tuple[Path, Path]:
+    """Return the AISimulate and repository roots for source-only contracts."""
+    aisimulate_root = Path(__file__).resolve().parents[2]
+    repo_root = aisimulate_root.parent
+    source_tree_markers = (
+        aisimulate_root / "pyproject.toml",
+        aisimulate_root / "crates/core/Cargo.toml",
+        repo_root / "Cargo.toml",
+    )
+    if not all(path.is_file() for path in source_tree_markers):
+        pytest.skip("requires the Dynamo source checkout, not only the installed wheel")
+    return aisimulate_root, repo_root
 
 
 def test_aisimulate_distribution_publishes_aisimulate_sweeper_package():
@@ -19,13 +39,23 @@ def test_aisimulate_distribution_publishes_aisimulate_sweeper_package():
     packaged_files = {str(path) for path in distribution.files or ()}
 
     assert distribution.metadata["Name"] == "aisimulate"
+    assert importlib.util.find_spec("aisimulate.replay") is not None
     assert importlib.util.find_spec("aisimulate.sweeper") is not None
     # Editable installs expose only their .pth/dist-info records. In wheel-based
     # Planner CI, assert the artifact contains the canonical package and no alias.
     if any(path.startswith("aisimulate/") for path in packaged_files):
         assert any(path.startswith("aisimulate/sweeper/") for path in packaged_files)
+        assert any(path.startswith("aisimulate/replay/") for path in packaged_files)
         assert not any(path.startswith("aisimulate/spica/") for path in packaged_files)
         assert not any(path.startswith("sweeper/") for path in packaged_files)
+
+
+def test_aisimulate_native_runtime_imports_from_installed_distribution():
+    runtime_spec = importlib.util.find_spec("aisimulate._runtime")
+
+    assert runtime_spec is not None
+    runtime = importlib.import_module("aisimulate._runtime")
+    assert callable(runtime.run_replay_json)
 
 
 def test_aisimulate_has_no_console_script():
@@ -34,12 +64,11 @@ def test_aisimulate_has_no_console_script():
     assert all(entry.group != "console_scripts" for entry in distribution.entry_points)
 
 
-def test_ai_dynamo_has_no_sweeper_extra():
+def test_ai_dynamo_has_no_aisimulate_extra():
     distribution = importlib.metadata.distribution("ai-dynamo")
 
-    extras = distribution.metadata.get_all("Provides-Extra", [])
-    assert "sweeper" not in extras
-    assert "simulation" not in extras
+    extras = set(distribution.metadata.get_all("Provides-Extra", []))
+    assert {"sweeper", "simulate", "simulation"}.isdisjoint(extras)
 
 
 def test_aisimulate_has_no_dynamo_or_component_adapter_dependencies():
@@ -72,7 +101,7 @@ def test_importing_sweeper_does_not_import_dynamo():
     )
 
 
-def test_ai_dynamo_registers_optional_sweeper_adapters():
+def test_ai_dynamo_registers_optional_sweeper_providers():
     distribution = importlib.metadata.distribution("ai-dynamo")
     entry_points = {
         entry_point.name: entry_point.value
@@ -84,6 +113,53 @@ def test_ai_dynamo_registers_optional_sweeper_adapters():
         "dynamo.planner": "dynamo.planner.simulation:create_provider",
         "dynamo.router": "dynamo.router.simulation:create_provider",
     }
+
+
+def test_aisimulate_source_versions_are_synchronized():
+    root, repo_root = _source_checkout_roots()
+    project = tomllib.loads((root / "pyproject.toml").read_text())
+    core = tomllib.loads((root / "crates/core/Cargo.toml").read_text())
+    python = tomllib.loads((root / "crates/python/Cargo.toml").read_text())
+    workspace = tomllib.loads((repo_root / "Cargo.toml").read_text())
+
+    expected_python = "0.1.0.dev1"
+    expected_cargo = "0.1.0-dev.1"
+    assert project["project"]["version"] == expected_python
+    assert core["package"]["version"] == expected_cargo
+    assert python["package"]["version"] == expected_cargo
+    assert workspace["workspace"]["dependencies"]["aisimulate-core"]["version"] == (
+        expected_cargo
+    )
+
+
+def test_runtime_wheel_context_covers_every_root_workspace_member():
+    _, repo_root = _source_checkout_roots()
+    workspace = tomllib.loads((repo_root / "Cargo.toml").read_text())
+    wheel_builder = (
+        repo_root / "container/templates/wheel_builder.Dockerfile"
+    ).read_text()
+
+    runtime_stage = wheel_builder.split(
+        "FROM wheel_builder_base AS runtime_wheel_builder", 1
+    )[1]
+    shared_context = runtime_stage.split("# AI Simulate is", 1)[0]
+    copied_roots = {
+        source.rstrip("/")
+        for line in shared_context.splitlines()
+        if line.startswith("COPY ")
+        for source in line.split()[1:-1]
+        if source.endswith("/") and not source.startswith("--from=")
+    }
+
+    missing = [
+        member
+        for member in workspace["workspace"]["members"]
+        if not any(
+            member == copied_root or member.startswith(f"{copied_root}/")
+            for copied_root in copied_roots
+        )
+    ]
+    assert not missing, f"Runtime wheel context omits workspace members: {missing}"
 
 
 def test_profiler_does_not_publish_or_reexport_sweeper():

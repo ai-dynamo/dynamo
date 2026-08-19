@@ -13,7 +13,7 @@ use axum::{
     body::Body,
     extract::State,
     http::Request,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -29,6 +29,7 @@ use dynamo_runtime::{
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{StreamExt, stream};
+use http_body_util::LengthLimitError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
@@ -704,9 +705,9 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
-    ensure_json_content_type(&headers)?;
+    let body = read_json_request_body(&headers, body).await?;
     let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
@@ -1866,9 +1867,9 @@ async fn pooling(
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
-    ensure_json_content_type(&headers)?;
+    let body = read_json_request_body(&headers, body).await?;
     let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
@@ -2029,6 +2030,61 @@ fn unsupported_media_type_error() -> ErrorResponse {
             metric_error_type: None,
         }),
     )
+}
+
+/// Returns the standard error response for a request body that exceeds the
+/// configured size limit.
+fn payload_too_large_error() -> ErrorResponse {
+    let code = StatusCode::PAYLOAD_TOO_LARGE;
+    (
+        code,
+        Json(ErrorMessage {
+            message: format!(
+                "Request body exceeds the limit of {} MB set by {}",
+                get_body_limit() / (1024 * 1024),
+                env_llm::DYN_HTTP_BODY_LIMIT_MB
+            ),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+            metric_error_type: None,
+        }),
+    )
+}
+
+/// Returns the standard error response when the request body cannot be read.
+fn failed_to_read_request_body_error() -> ErrorResponse {
+    let code = StatusCode::BAD_REQUEST;
+    (
+        code,
+        Json(ErrorMessage {
+            message: "Failed to read request body".to_string(),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+            metric_error_type: None,
+        }),
+    )
+}
+
+/// Reads and buffers a JSON request body.
+///
+/// Validates the `Content-Type` before reading the body and limits buffering to [`get_body_limit`].
+async fn read_json_request_body(headers: &HeaderMap, body: Body) -> Result<Bytes, ErrorResponse> {
+    ensure_json_content_type(headers)?;
+    axum::body::to_bytes(body, get_body_limit())
+        .await
+        .map_err(|error| {
+            // `to_bytes` wraps an oversized-body failure in its error source
+            // rather than returning `LengthLimitError` directly.
+            if std::error::Error::source(&error)
+                .is_some_and(|source| source.is::<LengthLimitError>())
+            {
+                payload_too_large_error()
+            } else {
+                failed_to_read_request_body_error()
+            }
+        })
 }
 
 fn is_json_content_type(content_type: &str) -> bool {
@@ -3055,8 +3111,11 @@ pub fn validate_completion_fields_generic(
 async fn handler_responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateResponse>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateResponse = parse_json_request("responses", &body)?;
+
     // return a 503 if the service or model is not ready.
     // Resolve the templated model first so empty/missing `model` fields
     // don't bypass the gate.
@@ -3185,6 +3244,12 @@ async fn responses(
         return Ok(resp.into_response());
     }
 
+    // Validate sampling and output parameters
+    if let Err(err_response) = validate_responses_fields(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
@@ -3278,6 +3343,13 @@ async fn responses(
             request.inner.tool_choice.as_ref(),
         ),
     );
+
+    // Responses requests share the chat-completions aggregator for the unary
+    // path. Thread this option through so its post-parse fallback also caps a
+    // model-produced batch to the first tool call when parallel calls are
+    // disabled. The streaming Responses converter enforces the same contract.
+    let parsing_options =
+        parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
 
     // NOTE: `move_reasoning_to_content_when_empty` is the aggregator flag and is
     // not set here. A non-streaming Responses request DOES reach the aggregator
@@ -3517,12 +3589,53 @@ pub fn validate_response_unsupported_fields(
     None
 }
 
+/// Validates sampling and output parameters on the Responses API request.
+pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
+    use crate::protocols::openai::validate;
+
+    let map_err = |e: anyhow::Error| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    };
+
+    validate::validate_temperature(request.inner.temperature).map_err(&map_err)?;
+    validate::validate_top_p(request.inner.top_p).map_err(&map_err)?;
+    validate::validate_max_tokens(request.inner.max_output_tokens).map_err(&map_err)?;
+
+    if let Some(text) = &request.inner.text {
+        use crate::protocols::openai::responses::convert_text_format;
+        if let Some(response_format) = convert_text_format(text) {
+            validate::validate_response_format(&Some(response_format)).map_err(&map_err)?;
+        }
+    }
+
+    Ok(())
+}
+
 // todo - abstract this to the top level lib.rs to be reused
 pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
     if !state.is_ready() {
         return Err(ErrorMessage::_service_unavailable());
     }
     Ok(())
+}
+
+/// Returns an OpenAI-compatible JSON `404` error response for an
+/// unmatched route.
+pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> ErrorResponse {
+    let code = StatusCode::NOT_FOUND;
+    (
+        code,
+        Json(ErrorMessage {
+            message: format!("Route not found: {} {}", method, uri.path()),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+            metric_error_type: None,
+        }),
+    )
 }
 
 /// Canonical, customer-facing message for "model is registered but not yet
@@ -5471,6 +5584,84 @@ mod tests {
         );
 
         assert!(validate_response_unsupported_fields(&request).is_none());
+    }
+
+    #[test]
+    fn test_validate_responses_fields_accepts_clean_request() {
+        assert!(validate_responses_fields(&make_base_request()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_responses_fields_rejects_zero_max_output_tokens() {
+        let mut request = make_base_request();
+        request.inner.max_output_tokens = Some(0);
+
+        let (code, body) =
+            validate_responses_fields(&request).expect_err("max_output_tokens: 0 must be rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.message,
+            format!("{VALIDATION_PREFIX}Max tokens must be greater than 0, got 0")
+        );
+    }
+
+    #[test]
+    fn test_validate_responses_fields_rejects_zero_top_p() {
+        let mut request = make_base_request();
+        request.inner.top_p = Some(0.0);
+
+        let (code, body) =
+            validate_responses_fields(&request).expect_err("top_p: 0 must be rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.message,
+            format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got 0")
+        );
+    }
+
+    #[test]
+    fn test_validate_responses_fields_rejects_non_object_json_schema() {
+        use dynamo_protocols::types::ResponseFormatJsonSchema;
+        use dynamo_protocols::types::responses::{
+            ResponseTextParam, TextResponseFormatConfiguration,
+        };
+
+        let mut request = make_base_request();
+        request.inner.text = Some(ResponseTextParam {
+            format: TextResponseFormatConfiguration::JsonSchema(ResponseFormatJsonSchema {
+                name: "city".into(),
+                description: None,
+                schema: serde_json::json!(42), // Invalid: not an object
+                strict: None,
+            }),
+            verbosity: None,
+        });
+
+        let (code, body) = validate_responses_fields(&request)
+            .expect_err("non-object json_schema must be rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(body.message.contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn test_validate_responses_fields_accepts_object_json_schema() {
+        use dynamo_protocols::types::ResponseFormatJsonSchema;
+        use dynamo_protocols::types::responses::{
+            ResponseTextParam, TextResponseFormatConfiguration,
+        };
+
+        let mut request = make_base_request();
+        request.inner.text = Some(ResponseTextParam {
+            format: TextResponseFormatConfiguration::JsonSchema(ResponseFormatJsonSchema {
+                name: "city".into(),
+                description: None,
+                schema: serde_json::json!({"type": "object"}),
+                strict: None,
+            }),
+            verbosity: None,
+        });
+
+        assert!(validate_responses_fields(&request).is_ok());
     }
 
     #[test]
