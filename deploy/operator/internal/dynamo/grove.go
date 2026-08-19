@@ -232,12 +232,15 @@ type groveComponentRevisionState struct {
 	replicas               int32
 	updatedReplicas        int32
 	desiredReplicas        int32
+	updateInProgress       bool
 	updateEnded            bool
 }
 
 // hasCompletedAcceptedPCSRevision reports whether this child completed the
 // accepted PCS revision. A nil acceptedPCSRevisionHash means no revision has
 // been accepted yet.
+// A child completes either during its initial realization with no update
+// progress, or after a tracked update has ended.
 func (s groveComponentRevisionState) hasCompletedAcceptedPCSRevision(acceptedPCSRevisionHash *string) bool {
 	return acceptedPCSRevisionHash != nil &&
 		s.generationObserved &&
@@ -245,7 +248,7 @@ func (s groveComponentRevisionState) hasCompletedAcceptedPCSRevision(acceptedPCS
 		*s.currentPCSRevisionHash == *acceptedPCSRevisionHash &&
 		s.replicas == s.desiredReplicas &&
 		s.updatedReplicas == s.desiredReplicas &&
-		s.updateEnded
+		(!s.updateInProgress || s.updateEnded)
 }
 
 // groveRuntimeNamespacePlan is derived from one accepted PCS observation and
@@ -455,6 +458,7 @@ func observePodCliqueReadiness(ctx context.Context, reader client.Reader, resour
 			replicas:               replicas,
 			updatedReplicas:        updatedReplicas,
 			desiredReplicas:        desiredReplicas,
+			updateInProgress:       podClique.Status.UpdateProgress != nil,
 			updateEnded: podClique.Status.UpdateProgress != nil &&
 				podClique.Status.UpdateProgress.UpdateEndedAt != nil,
 		},
@@ -581,6 +585,7 @@ func observePCSGReadiness(ctx context.Context, reader client.Reader, resourceNam
 			replicas:               replicas,
 			updatedReplicas:        updatedReplicas,
 			desiredReplicas:        desiredReplicas,
+			updateInProgress:       pcsg.Status.UpdateProgress != nil,
 			updateEnded: pcsg.Status.UpdateProgress != nil &&
 				pcsg.Status.UpdateProgress.UpdateEndedAt != nil,
 		},

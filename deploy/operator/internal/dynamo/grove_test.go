@@ -1344,6 +1344,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 		activeNamespace            bool
 		pcsAccepted                bool
 		childRevision              string
+		updateInProgress           bool
 		updateEnded                bool
 		childReady                 bool
 		legacyPCS                  bool
@@ -1356,12 +1357,13 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 		{name: "unaccepted legacy PCS preserves the previous worker namespace", legacyPCS: true, childRevision: previousRevision},
 		{name: "unaccepted PCS preserves the active worker namespace", activeNamespace: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted PCS with a previous child revision preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: previousRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
-		{name: "accepted PCS with an unfinished child update preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, wantReady: true, wantNamespace: "active"},
+		{name: "accepted PCS initial realization publishes its rendered hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, wantReady: true, wantNamespace: acceptedHash},
+		{name: "accepted PCS with an unfinished child update preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted PCS revision publishes its rendered hash instead of the desired DGD hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
 		{name: "PCS observation ahead of its generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, pcsObservedGenerationAhead: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted PCS with a stale child generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, childGenerationStale: true, wantNamespace: "active"},
 		{name: "accepted completed PCS revision remains published after worker health loss", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, wantNamespace: acceptedHash},
-		{name: "accepted legacy PCS with an unfinished child preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, childReady: true, wantReady: true, wantNamespace: "active"},
+		{name: "accepted legacy PCS with an unfinished child preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted legacy PCS publishes the base namespace", pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "base"},
 	}
 
@@ -1434,8 +1436,11 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 					CurrentPodCliqueSetGenerationHash: ptr.To(tt.childRevision),
 				},
 			}
-			if tt.updateEnded {
-				podClique.Status.UpdateProgress = &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}
+			if tt.updateInProgress || tt.updateEnded {
+				podClique.Status.UpdateProgress = &grovev1alpha1.PodCliqueUpdateProgress{}
+				if tt.updateEnded {
+					podClique.Status.UpdateProgress.UpdateEndedAt = &completedAt
+				}
 			}
 			if !tt.childReady {
 				podClique.Status.ReadyReplicas = 0
@@ -1722,7 +1727,7 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build an accepted suffixed PCS and a completed zero-replica worker")
+			t.Log("Build an accepted suffixed PCS and an initially realized zero-replica worker")
 			component := v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: componentName,
 				ComponentType: v1beta1.ComponentTypePrefill,
@@ -1753,7 +1758,6 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 					CurrentGenerationHash: ptr.To(acceptedRevision),
 				},
 			}
-			completedAt := metav1.Now()
 			var child client.Object
 			if tt.multinode {
 				child = &grovev1alpha1.PodCliqueScalingGroup{
@@ -1766,7 +1770,6 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
 						ObservedGeneration:                ptr.To(int64(1)),
 						CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision),
-						UpdateProgress:                    &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: &completedAt},
 					},
 				}
 			} else {
@@ -1780,7 +1783,6 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 					Status: grovev1alpha1.PodCliqueStatus{
 						ObservedGeneration:                ptr.To(int64(1)),
 						CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision),
-						UpdateProgress:                    &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt},
 					},
 				}
 			}
@@ -1892,16 +1894,18 @@ func TestGroveComponentRevisionStateHasCompletedAcceptedPCSRevision(t *testing.T
 	tests := []struct {
 		name               string
 		generationObserved bool
+		updateInProgress   bool
 		finished           bool
 		replicas           int32
 		updatedReplicas    int32
 		desiredReplicas    int32
 		want               bool
 	}{
-		{name: "completed component completes the PCS revision", generationObserved: true, finished: true, replicas: 1, updatedReplicas: 1, desiredReplicas: 1, want: true},
-		{name: "zero-replica component completes after its update ends", generationObserved: true, finished: true, want: true},
+		{name: "initial realization completes the PCS revision without update progress", generationObserved: true, replicas: 1, updatedReplicas: 1, desiredReplicas: 1, want: true},
+		{name: "completed component completes the PCS revision", generationObserved: true, updateInProgress: true, finished: true, replicas: 1, updatedReplicas: 1, desiredReplicas: 1, want: true},
+		{name: "zero-replica component completes after its update ends", generationObserved: true, updateInProgress: true, finished: true, want: true},
 		{name: "unobserved child generation keeps the PCS revision pending", finished: true, replicas: 1, updatedReplicas: 1, desiredReplicas: 1, want: false},
-		{name: "unfinished component keeps the PCS revision pending", generationObserved: true, finished: false, replicas: 1, updatedReplicas: 1, desiredReplicas: 1, want: false},
+		{name: "unfinished component keeps the PCS revision pending", generationObserved: true, updateInProgress: true, finished: false, replicas: 1, updatedReplicas: 1, desiredReplicas: 1, want: false},
 		{name: "component with stale update count keeps the PCS revision pending", generationObserved: true, finished: true, replicas: 1, desiredReplicas: 1, want: false},
 	}
 
@@ -1914,6 +1918,7 @@ func TestGroveComponentRevisionStateHasCompletedAcceptedPCSRevision(t *testing.T
 				replicas:               tt.replicas,
 				updatedReplicas:        tt.updatedReplicas,
 				desiredReplicas:        tt.desiredReplicas,
+				updateInProgress:       tt.updateInProgress,
 				updateEnded:            tt.finished,
 			}
 			completed := state.hasCompletedAcceptedPCSRevision(&targetRevision)
