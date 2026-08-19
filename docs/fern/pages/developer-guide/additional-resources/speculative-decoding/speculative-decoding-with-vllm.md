@@ -109,12 +109,14 @@ See `examples/backends/vllm/launch/agg_spec_decoding.sh` for the full configurat
 
 - Currently only supports Eagle3 as the draft model
 - Requires compatible model architectures between target and draft
-- The draft checkpoint should carry its own `embed_tokens` weights
+- Draft checkpoints that share the target's embedding table instead of shipping their
+  own `embed_tokens` weights are not loadable on every vLLM build (see below)
 
 ### Draft Checkpoints Without Their Own `embed_tokens`
 
-Some draft checkpoints ship no embedding table of their own and expect vLLM to share the
-target model's. vLLM detects this at load and logs a line such as:
+The Quick Start configuration above is not affected: its Eagle3 draft ships its own
+embedding table. This section covers draft checkpoints that ship none and expect vLLM to
+share the target model's instead. vLLM detects that at load and logs a line such as:
 
 ```text
 Detected EAGLE model without its own embed_tokens in the checkpoint.
@@ -122,19 +124,24 @@ Sharing target model embedding weights with the draft model.
 ```
 
 > [!WARNING]
-> On some vLLM builds this path fails at load with `AttributeError: 'NoneType' object has
-> no attribute 'weight'`, raised while vLLM compares the target and draft embedding
-> dimensions. Every tensor-parallel worker fails identically during `WorkerProc` init, so
-> the engine never becomes ready and no request is ever served.
+> On the `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1` image
+> (vLLM `0.1.dev19251+g13c59a3da.d20260726`), that sharing path fails at load with
+> `AttributeError: 'NoneType' object has no attribute 'weight'`. The traceback lands in
+> vLLM's speculative-decoding proposer (`vllm/v1/spec_decode/llm_base_proposer.py`) while
+> it compares the target and draft embedding dimensions. Every tensor-parallel worker
+> fails identically during `WorkerProc` init, so the engine never becomes ready and no
+> request is ever served. Reported with `moonshotai/Kimi-K3` plus the
+> `Inferact/Kimi-K3-DSpark` draft on TP16.
 
-The fault is in vLLM's speculative-decoding proposer, not in Dynamo: the dimension check
-dereferences the draft embedding on exactly the branch that runs when the draft has no
-embedding to dereference. Dynamo passes `--speculative-config` through to vLLM unchanged
-and has no configuration that avoids the branch.
+The failure is on the vLLM side of the boundary, not in Dynamo: Dynamo passes
+`--speculative-config` through to vLLM unchanged and has no setting that changes how the
+draft embedding is resolved. Other vLLM builds carry a different version of that code, so
+whether a given image is affected has to be checked against the image, not assumed from
+this note.
 
-To work around it, use a draft checkpoint that ships its own `embed_tokens`, run a vLLM
-build whose dimension check skips a missing draft embedding, or drop `--speculative-config`
-and serve the target model on its own.
+Workarounds: use a draft checkpoint that ships its own `embed_tokens`, run a vLLM build
+that loads the shared-embedding path successfully, or drop `--speculative-config` and
+serve the target model on its own.
 
 ## See Also
 
