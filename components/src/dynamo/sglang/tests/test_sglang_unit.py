@@ -1569,13 +1569,22 @@ def _resolved_server_args(tmp_path):
         pytest.skip(f"cannot resolve ServerArgs here: {exc}")
 
 
-def test_real_server_args_rejects_bare_assignment(tmp_path):
-    """The regression itself, against the installed SGLang rather than a double."""
+def test_real_server_args_rejects_bare_assignment(tmp_path, monkeypatch):
+    """The regression itself, against the installed SGLang rather than a double.
+
+    0.5.16 -- the version pinned here -- reads SGLANG_STRICT_CONFIG_MUTATION on
+    every assignment and only guards when it is set; 0.5.17 guards
+    unconditionally and ignores the variable. Setting it covers both.
+    """
     server_args = _resolved_server_args(tmp_path)
     if not hasattr(server_args, "override"):
         pytest.skip("SGLang < 0.5.16 has no ServerArgs.override")
+    monkeypatch.setenv("SGLANG_STRICT_CONFIG_MUTATION", "1")
 
-    with pytest.raises(AttributeError, match="read-only"):
+    # Match only the wording common to both: 0.5.16 says "use
+    # server_args.override(source, ...) instead", 0.5.17 says "server_args is
+    # read-only -- use get_context().override(source, ...)".
+    with pytest.raises(AttributeError, match="assigned after resolution"):
         server_args.enable_memory_saver = True
 
 
