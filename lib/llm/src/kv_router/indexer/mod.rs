@@ -12,7 +12,7 @@ use dynamo_kv_router::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
         ThreadPoolIndexer, record_unsupported_residency_event,
     },
-    protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId},
+    protocols::{DpRank, KvCacheEventData, ResidencyProjection, RouterEvent, WorkerId},
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -44,7 +44,9 @@ pub(crate) use recovery::{
 };
 #[cfg(test)]
 pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
-pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
+pub(crate) use recovery::{
+    start_subscriber, start_worker_kv_query_endpoint, start_worker_kv_query_endpoint_with_status,
+};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
 /// to this router, even when the primary indexer is served or consumed
@@ -77,7 +79,33 @@ pub enum Indexer {
     None,
 }
 
+async fn dump_local_events(
+    mut events: Vec<RouterEvent>,
+    lower_tiers: &LowerTierIndexers,
+) -> Result<Vec<RouterEvent>, KvRouterError> {
+    for (tier, indexer) in lower_tiers.entries() {
+        events.extend(indexer.dump_events().await?.into_iter().map(|mut event| {
+            event.storage_tier = tier;
+            event
+        }));
+    }
+    Ok(events)
+}
+
 impl Indexer {
+    /// Publish a control-plane projection snapshot for subsequent lookups.
+    ///
+    /// Discovery and attachment reconciliation stay in lib/llm; router-core
+    /// only consumes this immutable resolved view.
+    pub fn set_residency_projection(&self, projection: ResidencyProjection) {
+        match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                lower_tier.set_residency_projection(projection)
+            }
+            Self::Remote { .. } | Self::None => {}
+        }
+    }
+
     pub(crate) fn supports_overlap_refresh(&self) -> bool {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
     }
@@ -228,8 +256,16 @@ impl Indexer {
 
     pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         match self {
-            Self::KvIndexer { primary, .. } => primary.dump_events().await,
-            Self::Concurrent { primary, .. } => primary.dump_events().await,
+            Self::KvIndexer {
+                primary,
+                lower_tier,
+                ..
+            } => dump_local_events(primary.dump_events().await?, lower_tier).await,
+            Self::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } => dump_local_events(primary.dump_events().await?, lower_tier).await,
             Self::Remote { .. } => Ok(Vec::new()),
             Self::None => {
                 panic!(
@@ -653,6 +689,30 @@ mod tests {
                 .and_then(|tier| tier.hits.get(&worker)),
             Some(&1)
         );
+    }
+
+    #[tokio::test]
+    async fn router_dump_includes_all_allocated_physical_tiers() {
+        let indexer = make_test_indexer();
+        for (event_id, tier, block) in [
+            (1, StorageTier::Device, 11),
+            (2, StorageTier::HostPinned, 12),
+            (3, StorageTier::Disk, 13),
+        ] {
+            indexer
+                .apply_event(store_event(7, 0, event_id, &[], &[block], tier))
+                .await;
+        }
+        flush_indexer(&indexer).await;
+
+        let events = indexer.dump_events().await.unwrap();
+        for tier in [
+            StorageTier::Device,
+            StorageTier::HostPinned,
+            StorageTier::Disk,
+        ] {
+            assert!(events.iter().any(|event| event.storage_tier == tier));
+        }
     }
 
     #[tokio::test]

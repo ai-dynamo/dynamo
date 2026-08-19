@@ -30,7 +30,9 @@ Dynamo owns discovery, eligibility, queueing, validation, reservations, accounti
 
 The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
-The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Prefill and decode workers then use separate scorers and pickers.
+The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Its factory matches the routing stage and calls separate prefill and decode policy builders. Each builder shows the complete filter, scorer, and picker composition for that stage.
+
+The embedded frontend supplies `WorkerType::Prefill` or `WorkerType::Decode` after discovery scopes the worker pool. This disaggregated policy rejects the standalone EPP's `WorkerType::Aggregated` pool because it cannot apply separate prefill and decode behavior. Other unsupported roles also stop instead of silently using the prefill policy.
 
 The `simple-stacked-score-pick` policy has no custom filter. It adds active-request and uncached-request costs before its picker selects the lowest total.
 
@@ -101,7 +103,7 @@ fn provider(
 
         WorkerSelectionPolicy::new_with_filters(
             config.clone(),
-            worker_type,
+            worker_type.as_str(),
             filters,
             vec![Box::new(ActiveRequestsScorer)],
             Box::new(RequestAwarePicker),
@@ -110,6 +112,8 @@ fn provider(
 }
 ```
 
+`worker_type` is a typed `WorkerType`. `WorkerSelectionPolicy` accepts a static worker label for its routing logs, so `as_str()` converts only at the constructor boundary. Match on the enum before this conversion when each role needs different behavior.
+
 The provider and factory have different lifetimes:
 
 1. The registry matches the YAML `type` to a provider.
@@ -117,7 +121,7 @@ The provider and factory have different lifetimes:
 3. Dynamo calls the factory once for each model and routing-group partition.
 4. Each factory call creates a new filter, scorer, and picker set for that partition.
 
-The factory also receives `worker_type`. The Python frontend supplies `prefill` or `decode`. A standalone EPP supplies `select`. Use the partition value when models or routing groups need separate policy state.
+The factory also receives the typed `WorkerType` role. Hosts pass `Aggregated`, `Prefill`, or `Decode` when they construct that worker pool. Use the partition value when models or routing groups need separate policy state.
 
 ## 4. Register the Policy Type
 
@@ -141,7 +145,10 @@ Create a YAML file outside the source tree:
 
 ```yaml
 worker_selection:
-  default: simple-filter-score-pick
+  aggregated: simple-filter-score-pick
+  prefill: disagg-prefill
+  decode: disagg-decode
+  encode: simple-filter-score-pick
   instances:
     - name: simple-filter-score-pick
       type: simple-filter-score-pick
@@ -151,7 +158,11 @@ worker_selection:
       type: simple-filter-score-pick
       parameters:
         min_device_overlap_blocks: 8
-    - name: disagg-filter-score-pick
+    - name: disagg-prefill
+      type: disagg-filter-score-pick
+      parameters:
+        min_device_overlap_blocks: 0
+    - name: disagg-decode
       type: disagg-filter-score-pick
       parameters:
         min_device_overlap_blocks: 0
@@ -162,8 +173,11 @@ worker_selection:
 
 - `type` selects a registered provider.
 - `name` identifies one configured instance.
-- `worker_selection.default` selects an instance at startup.
-- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the selected instance by name.
+- `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` select separate instances for their matching worker pools.
+- `worker_selection.encode` applies only to surface-carrying encode worker sets that construct the standard KV chooser. The surface-less multimodal encoder hop uses `EncoderRouter` and round-robin selection instead.
+- `--router-prefill-policy` and `--router-decode-policy` override the matching YAML selections.
+- `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY` provide stage-specific environment overrides.
+- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every worker-type YAML selection.
 - The override value `default` selects Dynamo's built-in policy.
 
 Unknown policy types, duplicate registrations, and invalid parameters stop startup.
@@ -213,7 +227,7 @@ python3 -m dynamo.frontend \
   --router-policy-config /path/to/worker-selection.yaml
 ```
 
-For a private catalog, keep the dependency alias and change the package name and path. Linked policies apply to the embedded frontend selection service. They do not apply to `python3 -m dynamo.router`.
+For a private catalog, keep the dependency alias and change the package name and path. Linked policies apply to the embedded frontend selection service and to `python3 -m dynamo.router`. The standalone Python router waits for a worker model card so it can dispatch built-in or linked policy behavior by the typed role. `DYN_ROUTER_MODEL_CARD_WAIT_SECS` bounds this wait and defaults to 600 seconds.
 
 ## Run With EPP
 
@@ -234,7 +248,7 @@ DYN_ROUTER_WORKER_SELECTION_POLICY=simple-filter-score-pick \
   cargo run --release -p dynamo-custom-policy-example-epp
 ```
 
-Standalone EPP supplies `select` as `worker_type` because it selects from one worker pool. A policy that branches on `worker_type` must handle `select`.
+Standalone EPP supplies `WorkerType::Aggregated` because it selects from one full-request worker pool. `disagg-filter-score-pick` intentionally rejects that role and is only usable with disaggregated frontend pools. The Rust EPP's Dynamo-runtime mode has native prefill/decode routing, but linked custom policy catalogs are not supported in that mode.
 
 Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) for discovery, KV events, tokenization, and Kubernetes resources.
 
@@ -308,16 +322,19 @@ Send the same request. This time, `logit` is the sum of the active-request and u
 
 ### Disaggregated Policy
 
-Stop the frontend and Mocker processes. Start the frontend with the disaggregated policy:
+Stop the frontend and Mocker processes. Start the frontend with separate named prefill and decode policy instances:
 
 ```bash
-DYN_ROUTER_WORKER_SELECTION_POLICY=disagg-filter-score-pick \
 python -m dynamo.frontend \
   --router-mode kv \
   --router-policy-config /tmp/worker-selection.yaml \
+  --router-prefill-policy disagg-prefill \
+  --router-decode-policy disagg-decode \
   --discovery-backend file \
   --http-port 8000
 ```
+
+The two flags override `worker_selection.prefill` and `worker_selection.decode`. Omit the flags to use the YAML selections.
 
 In the second terminal, start two prefill Mocker workers:
 

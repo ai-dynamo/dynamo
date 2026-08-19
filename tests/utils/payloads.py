@@ -29,7 +29,7 @@ import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
-from tests.utils.prometheus import sum_metric_samples
+from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
 
 logger = logging.getLogger(__name__)
@@ -1691,12 +1691,28 @@ class KvEventMetricsPayload(BasePayload):
             f"event_type={self.event_type!r}, got {accepted:g}"
         )
 
+        # Regression guard: this counter silently failed to register
+        # because it declared `worker_id` as a variable label, which
+        # collides with the const label the runtime auto-injects under the same
+        # name. It only increments on an event_id gap, so a healthy run leaves it
+        # at zero -- assert that it is exposed at all, not that it has a value.
+        dropped_metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.kv_publisher.ENGINES_DROPPED_EVENTS_TOTAL}"
+        )
+        assert find_metric_samples(content, dropped_metric_name), (
+            f"{dropped_metric_name} is absent from /metrics. The KV publisher "
+            "registers it unconditionally at startup, so absence means it never "
+            "reached the metrics registry"
+        )
+
         logger.info(
             "SUCCESS: KV event metrics found for event_type=%s: "
-            "received=%s accepted=%s",
+            "received=%s accepted=%s; %s is registered",
             self.event_type,
             received,
             accepted,
+            dropped_metric_name,
         )
 
 

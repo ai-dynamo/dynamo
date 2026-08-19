@@ -64,7 +64,7 @@ pub mod logging {
         pub const OTEL_EXPORTER_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
         /// OTLP exporter endpoint URL for traces
-        /// Spec: https://opentelemetry.io/docs/specs/otel/protocol/exporter/
+        /// Spec: <https://opentelemetry.io/docs/specs/otel/protocol/exporter/>
         pub const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
         /// OTLP exporter endpoint URL for logs. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT or the protocol default when unset.
@@ -175,6 +175,17 @@ pub mod nats {
     pub mod stream {
         /// Maximum age for messages in NATS stream (in seconds)
         pub const DYN_NATS_STREAM_MAX_AGE: &str = "DYN_NATS_STREAM_MAX_AGE";
+    }
+
+    /// NATS TLS configuration
+    pub mod tls {
+        /// Path to the PEM CA certificate used to verify the NATS server's certificate.
+        /// When set, a custom TLS config with this CA is applied to the NATS connection.
+        pub const NATS_TLS_CA_CERT_PATH: &str = "NATS_TLS_CA_CERT_PATH";
+
+        /// Disable TLS certificate verification. Set to a truthy value to skip.
+        /// WARNING: Only for local development. Never use in production.
+        pub const NATS_TLS_INSECURE: &str = "NATS_TLS_INSECURE";
     }
 }
 
@@ -289,7 +300,7 @@ pub mod kvbm {
     /// NIXL backend configuration
     pub mod nixl {
         /// Prefix for NIXL backend environment variables
-        /// Pattern: DYN_KVBM_NIXL_BACKEND_<backend>=true/false
+        /// Pattern: `DYN_KVBM_NIXL_BACKEND_<backend>`=true/false
         /// Example: DYN_KVBM_NIXL_BACKEND_UCX=true
         pub const PREFIX: &str = "DYN_KVBM_NIXL_BACKEND_";
     }
@@ -435,7 +446,7 @@ pub mod llm {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
         pub const DYN_METRICS_PREFIX: &str = "DYN_METRICS_PREFIX";
 
-        /// Histogram bucket configuration (pattern: <PREFIX>_MIN, <PREFIX>_MAX, <PREFIX>_COUNT)
+        /// Histogram bucket configuration (pattern: `<PREFIX>_MIN`, `<PREFIX>_MAX`, `<PREFIX>_COUNT`)
         /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
@@ -747,7 +758,7 @@ pub mod event_plane {
 /// ZMQ Broker environment variables
 pub mod zmq_broker {
     /// Explicit ZMQ broker URL (takes precedence over discovery)
-    /// Format: "xsub=<url1>[;<url2>...] , xpub=<url1>[;<url2>...]"
+    /// Format: `"xsub=<url1>[;<url2>...] , xpub=<url1>[;<url2>...]"`
     /// Example: "xsub=tcp://broker:5555 , xpub=tcp://broker:5556"
     pub const DYN_ZMQ_BROKER_URL: &str = "DYN_ZMQ_BROKER_URL";
 
@@ -867,6 +878,8 @@ mod tests {
             nats::auth::NATS_AUTH_NKEY,
             nats::auth::NATS_AUTH_CREDENTIALS_FILE,
             nats::stream::DYN_NATS_STREAM_MAX_AGE,
+            nats::tls::NATS_TLS_CA_CERT_PATH,
+            nats::tls::NATS_TLS_INSECURE,
             // ETCD
             etcd::ETCD_ENDPOINTS,
             etcd::ETCD_LEASE_TTL,

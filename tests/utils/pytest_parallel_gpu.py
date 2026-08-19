@@ -577,6 +577,10 @@ def run_parallel(
         test.w_id = idx
 
     os.makedirs(_JUNIT_DIR, exist_ok=True)
+    # Children mkdir their nested --basetemp non-recursively, so the root
+    # has to exist first.
+    if parent_basetemp:
+        os.makedirs(parent_basetemp, exist_ok=True)
 
     # --- Plan header ---
     n_run = len(tests)

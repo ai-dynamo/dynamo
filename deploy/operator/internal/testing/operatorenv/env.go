@@ -337,6 +337,11 @@ func (e *TestEnv) RESTConfig() *rest.Config {
 	return rest.CopyConfig(e.rt.config)
 }
 
+// Scheme returns the runtime scheme used by the envtest API server and its clients.
+func (e *TestEnv) Scheme() *k8sruntime.Scheme {
+	return e.rt.scheme
+}
+
 // AddUser provisions an authenticated envtest user and returns its REST configuration.
 // Authorization must be granted separately so it does not alter the admission identity.
 func (e *TestEnv) AddUser(user envtest.User) (*rest.Config, error) {
@@ -465,6 +470,8 @@ func defaultOperatorConfig(in *configv1alpha1.OperatorConfiguration) *configv1al
 }
 
 func defaultRuntimeConfig(cfg *configv1alpha1.OperatorConfiguration) *commoncontroller.RuntimeConfig {
+	// Build config-derived defaults before the envtest API server exists. Tests that override
+	// dependency CRDs must resolve API-derived gates with features.New after creating a manager.
 	gate := features.Defaults()
 	gate.Checkpoint = cfg.Checkpoint.Enabled
 	gate.GPUDiscovery = cfg.Namespace.Restricted == "" || ptr.Deref(cfg.GPU.DiscoveryEnabled, true)

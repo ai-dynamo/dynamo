@@ -5,9 +5,9 @@
 //!
 //! Gated behind
 //! [`DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`](dynamo_runtime::config::environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2).
-//! When enabled, the families in [`V2_FAMILIES`] (Qwen3-Coder, DeepSeek-V4) stream
+//! When enabled, the families in `V2_FAMILIES` (Qwen3-Coder, DeepSeek-V4) stream
 //! straight through their `dynamo_parsers_v2` parser instead of
-//! [`JailedStream`](super::jail::JailedStream): the v2 parser owns incremental
+//! `JailedStream`: the v2 parser owns incremental
 //! tool-call emission and drops a parameter value truncated at EOF rather than
 //! guessing it. The jail is never built for these families in either path
 //! (`apply_stream` for streaming, `parse_complete` for batch). Other families, and

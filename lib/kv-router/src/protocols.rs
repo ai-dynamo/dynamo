@@ -11,6 +11,8 @@ use dynamo_tokens::{SequenceHash, Token, compute_hash_v2, compute_next_sequence_
 use rustc_hash::FxHashMap;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::identity::CacheOwnerId;
 use xxhash_rust::xxh3;
 
 const fn default_track_prefill_tokens() -> bool {
@@ -471,16 +473,149 @@ pub enum ResidencyDomain {
 }
 
 /// Exact logical owner recorded inside a physical-tier index.
+///
+/// Worker ownership is tied to one serving attachment. Cache-owner ownership
+/// is stable across those attachments and is projected to a ready worker only
+/// by the lib/llm reconciliation layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResidencyOwner {
+    Worker(WorkerWithDpRank),
+    CacheOwner(CacheOwnerId),
+}
+
+/// Compact mutation-path identity for an exact residency owner.
+///
+/// Lower-tier edges carry this fixed-size value instead of embedding the full
+/// [`CacheOwnerId`] in every ownership entry. The full owner remains in the
+/// reverse index once per logical owner so dumps can round-trip it exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ResidencyOwner {
-    pub worker: WorkerWithDpRank,
-    pub domain: ResidencyDomain,
+pub struct ResidencyOwnerKey([u8; 16]);
+
+impl ResidencyOwnerKey {
+    pub const fn digest(self) -> [u8; 16] {
+        self.0
+    }
 }
 
 impl ResidencyOwner {
-    pub fn new(worker: WorkerWithDpRank, domain: ResidencyDomain) -> Self {
-        Self { worker, domain }
+    pub const fn worker(worker: WorkerWithDpRank) -> Self {
+        Self::Worker(worker)
     }
+
+    pub const fn cache_owner(cache_owner: CacheOwnerId) -> Self {
+        Self::CacheOwner(cache_owner)
+    }
+
+    pub const fn domain(self) -> ResidencyDomain {
+        match self {
+            Self::Worker(_) => ResidencyDomain::Worker,
+            Self::CacheOwner(_) => ResidencyDomain::CacheOwner,
+        }
+    }
+
+    pub const fn as_worker(self) -> Option<WorkerWithDpRank> {
+        match self {
+            Self::Worker(worker) => Some(worker),
+            Self::CacheOwner(_) => None,
+        }
+    }
+
+    pub fn compact_key(self) -> ResidencyOwnerKey {
+        let mut hasher = blake3::Hasher::new();
+        match self {
+            Self::Worker(worker) => {
+                hasher.update(b"dynamo/residency-owner/worker/v1");
+                hasher.update(&worker.worker_id.to_be_bytes());
+                hasher.update(&worker.dp_rank.to_be_bytes());
+            }
+            Self::CacheOwner(cache_owner) => {
+                hasher.update(b"dynamo/residency-owner/cache-owner/v1");
+                update_cache_owner_hash(&mut hasher, cache_owner);
+            }
+        }
+        let digest = hasher.finalize();
+        ResidencyOwnerKey(
+            digest.as_bytes()[..16]
+                .try_into()
+                .expect("BLAKE3 output is 32 bytes"),
+        )
+    }
+}
+
+fn update_cache_owner_hash(hasher: &mut blake3::Hasher, owner: CacheOwnerId) {
+    let domain = owner.pool().indexer_domain();
+    hasher.update(&domain.cache_semantics().digest());
+    hasher.update(&[domain.cache_semantics().source() as u8]);
+    hasher.update(&domain.routing_scope().digest());
+    hasher.update(&[domain.routing_scope().source() as u8]);
+    hasher.update(&owner.pool().dc_id().get().to_be_bytes());
+    hasher.update(&owner.slot().digest());
+    hasher.update(&[owner.slot().source() as u8]);
+}
+
+/// Immutable control-plane projection from exact residency owners to workers
+/// that may currently consume those blocks.
+///
+/// Router-core stores no discovery state. The lib/llm wrapper resolves and
+/// swaps this snapshot when source, attachment, or readability membership
+/// changes; one snapshot is pinned for each tiered lookup.
+#[derive(Debug, Clone, Default)]
+pub struct ResidencyProjection {
+    exact_owners: FxHashMap<ResidencyOwnerKey, WorkerWithDpRank>,
+}
+
+impl ResidencyProjection {
+    pub fn new(
+        cache_owners: impl IntoIterator<Item = (CacheOwnerId, WorkerWithDpRank)>,
+    ) -> Result<Self, ResidencyProjectionError> {
+        let mut projection = Self::default();
+        for (cache_owner, worker) in cache_owners {
+            let key = ResidencyOwner::cache_owner(cache_owner).compact_key();
+            match projection.exact_owners.insert(key, worker) {
+                Some(existing) if existing != worker => {
+                    return Err(ResidencyProjectionError::ConflictingAttachment {
+                        cache_owner,
+                        existing,
+                        proposed: worker,
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(projection)
+    }
+
+    #[inline]
+    pub fn project(&self, owner: ResidencyOwner) -> Option<WorkerWithDpRank> {
+        match owner {
+            ResidencyOwner::Worker(worker) => Some(worker),
+            ResidencyOwner::CacheOwner(_) => self.project_key(owner.compact_key()),
+        }
+    }
+
+    #[inline]
+    pub fn project_key(&self, key: ResidencyOwnerKey) -> Option<WorkerWithDpRank> {
+        self.exact_owners.get(&key).copied()
+    }
+
+    pub fn cache_owner_worker(&self, cache_owner: CacheOwnerId) -> Option<WorkerWithDpRank> {
+        self.project(ResidencyOwner::cache_owner(cache_owner))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.exact_owners.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ResidencyProjectionError {
+    #[error("cache owner {cache_owner} is projected to both {existing:?} and {proposed:?}")]
+    ConflictingAttachment {
+        cache_owner: CacheOwnerId,
+        existing: WorkerWithDpRank,
+        proposed: WorkerWithDpRank,
+    },
 }
 
 /// Scope of a cache-residency reset.
@@ -1191,7 +1326,10 @@ pub enum KvCacheEventError {
     #[error("Invalid block sequence")]
     InvalidBlockSequence,
 
-    /// A bounded, pre-commit index omission; this does not prove the backing table is full.
+    /// A bounded physical-index omission; this does not prove the backing table is full.
+    ///
+    /// An indexer may still commit exact source lineage and ownership so removal and later
+    /// re-admission remain correct.
     #[error("Indexer capacity exhausted")]
     CapacityExhausted,
 
@@ -1224,6 +1362,14 @@ pub struct RouterEvent {
     pub residency_domain: WireResidencyDomain,
     /// The cache event associated with the worker.
     pub event: KvCacheEvent,
+    /// Stable state source that owns this event stream.
+    ///
+    /// This is absent on the legacy Worker-only wire. CacheOwner events are
+    /// valid only on a versioned, residency-aware source where this field is
+    /// present; they must never be sent to legacy consumers. Keep this field
+    /// last so legacy positional MessagePack remains prefix-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_source: Option<CacheOwnerId>,
 }
 
 impl RouterEvent {
@@ -1259,26 +1405,55 @@ impl RouterEvent {
     ) -> Self {
         Self {
             worker_id,
+            state_source: None,
             storage_tier,
             residency_domain: WireResidencyDomain::explicit(residency_domain),
             event,
         }
     }
 
+    /// Create a CacheOwner event with its required stable state source.
+    pub fn with_cache_owner(
+        worker_id: WorkerId,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+        cache_owner: CacheOwnerId,
+    ) -> Self {
+        Self::with_residency_domain(worker_id, event, storage_tier, ResidencyDomain::CacheOwner)
+            .with_state_source(cache_owner)
+    }
+
+    /// Attach an explicit stable source to a residency-aware event.
+    pub fn with_state_source(mut self, state_source: CacheOwnerId) -> Self {
+        self.state_source = Some(state_source);
+        self
+    }
+
     /// Resolve a storage mutation to its canonical logical domain.
     pub fn resolved_residency_domain(&self) -> Result<ResidencyDomain, UnsupportedResidencyDomain> {
         let domain = self.residency_domain.parse()?.unwrap_or_default();
-        if domain == ResidencyDomain::CacheOwner && self.storage_tier.is_gpu() {
+        // A domain-scoped clear has no physical residency tier. Raw clears use Device
+        // as a wire placeholder; allow that sentinel without permitting CacheOwner
+        // stores or removes in Device.
+        if domain == ResidencyDomain::CacheOwner
+            && self.storage_tier.is_gpu()
+            && !matches!(self.event.data, KvCacheEventData::Cleared)
+        {
             return Err(UnsupportedResidencyDomain);
         }
         Ok(domain)
     }
 
     pub fn residency_owner(&self) -> Result<ResidencyOwner, UnsupportedResidencyDomain> {
-        Ok(ResidencyOwner::new(
-            WorkerWithDpRank::new(self.worker_id, self.event.dp_rank),
-            self.resolved_residency_domain()?,
-        ))
+        Ok(match self.resolved_residency_domain()? {
+            ResidencyDomain::Worker => {
+                let worker = WorkerWithDpRank::new(self.worker_id, self.event.dp_rank);
+                ResidencyOwner::worker(worker)
+            }
+            ResidencyDomain::CacheOwner => {
+                ResidencyOwner::cache_owner(self.state_source.ok_or(UnsupportedResidencyDomain)?)
+            }
+        })
     }
 
     /// Resolve `Cleared` semantics while preserving legacy all-domain clears.
