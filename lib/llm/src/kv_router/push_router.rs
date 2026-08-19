@@ -595,6 +595,7 @@ where
         let mut guard: RequestGuard<Sel> =
             RequestGuard::new_stateless(self.request_metrics.clone(), initial_worker, &request);
         let tracker = request.tracker.clone();
+        let request_context = request.context().clone();
         self.request_metrics
             .input_sequence_tokens
             .observe(request.token_ids.len() as f64);
@@ -611,19 +612,29 @@ where
                     return Err(error);
                 }
             };
-            self.inner
-                .dispatch_exact(request, target.worker_id)
-                .await
-                .map(|stream| (metadata, target, stream))
+            cancel_on_stop(
+                request_context.as_ref(),
+                self.inner.dispatch_exact(request, target.worker_id),
+            )
+            .await
+            .and_then(|result| result)
+            .map(|stream| (metadata, target, stream))
         } else {
-            self.inner
-                .dispatch_selected_untracked(initial_worker, request, |request, worker_id| {
-                    let target = AffinityTarget::new(worker_id, None);
-                    request.routing_mut().dp_rank = None;
-                    prepare(request, target).map(|metadata| (metadata, target))
-                })
-                .await
-                .map(|((metadata, target), stream)| (metadata, target, stream))
+            cancel_on_stop(
+                request_context.as_ref(),
+                self.inner.dispatch_selected_untracked(
+                    initial_worker,
+                    request,
+                    |request, worker_id| {
+                        let target = AffinityTarget::new(worker_id, None);
+                        request.routing_mut().dp_rank = None;
+                        prepare(request, target).map(|metadata| (metadata, target))
+                    },
+                ),
+            )
+            .await
+            .and_then(|result| result)
+            .map(|((metadata, target), stream)| (metadata, target, stream))
         };
 
         let (metadata, target, response_stream) = match dispatch_result {
