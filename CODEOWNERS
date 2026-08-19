@@ -720,3 +720,10 @@
 /components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/mocker/utils/planner_profiler_perf_data_converter.py  @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners
 /tests/fault_tolerance/hardware/fault_injection_service/api_service/main.py  @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
+
+# --- Explicitly unowned: no codeowner review required (wins via last-match).
+# Deterministic generator outputs whose integrity is guarded by CI
+# (freshness --check gates), so human review of the artifact is redundant
+# and would route source-only PRs to unrelated reviewers. ---
+/docs/fern/pages/reference/api/rust/
+/docs/fern/pages/reference/api/python/

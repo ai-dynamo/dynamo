@@ -104,7 +104,7 @@ def main() -> int:
         owners_str = (
             " ".join(owners)
             if owners
-            else "(no owner -- falls through; CI coverage gate should block this)"
+            else "(no owner -- explicitly unowned or uncovered; no codeowner review requested)"
         )
         print(f"{f}\n    review: {owners_str}")
 

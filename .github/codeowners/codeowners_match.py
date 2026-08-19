@@ -113,6 +113,7 @@ class ResolvedModel:
     shared: list[SharedSpec]
     filetype_shared: list[FiletypeShared]
     meta: dict = field(default_factory=dict)
+    unowned: list[str] = field(default_factory=list)
 
     def label_to_team(self) -> dict[str, str]:
         return {a.label: a.github_team for a in self.areas}
@@ -138,6 +139,10 @@ class ResolvedModel:
         # keep them unanchored in the coverage set too.
         for fs in self.filetype_shared:
             pats.append(fs.glob)
+        # Explicitly unowned globs are a deliberate routing decision (review
+        # exemption), not a coverage hole -- the gate must not report them as
+        # catch-all-only.
+        pats.extend(anchor(g) for g in self.unowned)
         return pats
 
     def unmatched_paths(self, tree: Iterable[str]) -> list[str]:
@@ -232,15 +237,20 @@ def resolve_owners(rules: list[tuple[str, list[str]]], filepath: str) -> list[st
 
 
 def parse_codeowners(text: str) -> list[tuple[str, list[str]]]:
-    """Parse a CODEOWNERS file body into ordered ``(pattern, [owner, ...])``."""
+    """Parse a CODEOWNERS file body into ordered ``(pattern, [owner, ...])``.
+
+    A pattern with no owners is kept as ``(pattern, [])`` -- GitHub treats
+    such a line as an explicit review exemption (last-match still applies),
+    so dropping it would make ``resolve_owners`` fall back to whatever owner
+    an earlier, broader rule declared.
+    """
     rules: list[tuple[str, list[str]]] = []
     for line in text.splitlines():
         stripped = line.split("#", 1)[0].strip()
         if not stripped:
             continue
         pattern, *owners = stripped.split()
-        if owners:
-            rules.append((pattern, owners))
+        rules.append((pattern, owners))
     return rules
 
 
@@ -313,6 +323,11 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
 
     * ``areas``       -- ``path_globs`` are emitted verbatim (sorted).
     * ``shared``      -- passed through as declared.
+    * ``unowned``     -- globs emitted LAST with no owner: an explicit
+      review exemption (GitHub's ownerless-pattern semantics) for content
+      whose integrity is guarded by CI rather than human review, e.g.
+      deterministic generator outputs. The coverage gate counts these as
+      claimed, not as catch-all holes.
     * ``advisory``    -- no longer supported. Every owner in CODEOWNERS blocks,
       so a leftover ``advisory:`` block, an ``advisory`` key on a ``shared``
       entry, or one on a filetype rule, is rejected rather than silently
@@ -373,6 +388,22 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
                 "'advisory' key; shared entries always block -- remove it"
             )
 
+    raw_unowned = spec.get("unowned", []) or []
+    for g in raw_unowned:
+        if not isinstance(g, str) or not g.strip():
+            raise SystemExit(
+                f"areas.yaml: unowned entry {g!r} must be a non-empty glob string"
+            )
+    unowned = sorted(set(raw_unowned))
+    shared_globs = {s["glob"] for s in spec_shared}
+    conflict = shared_globs & set(unowned)
+    if conflict:
+        raise SystemExit(
+            "areas.yaml: glob(s) declared both shared and unowned "
+            f"({sorted(conflict)}); pick one -- unowned is emitted last and "
+            "would silently strip the shared owners"
+        )
+
     areas = [
         ResolvedArea(
             label=a["label"],
@@ -404,6 +435,7 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         shared=list(spec_shared),
         filetype_shared=filetype_shared,
         meta=dict(spec.get("meta", {})),
+        unowned=unowned,
     )
 
 

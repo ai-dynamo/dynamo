@@ -356,11 +356,25 @@ def _render_codeowners(
         ]
         lines += [fmt(p, deco(t)) for p, t in shared_rules]
 
+    unowned_rules = sorted(
+        (anchor(g) for g in model.unowned), key=lambda p: (len(p), p)
+    )
+    if unowned_rules:
+        lines += [
+            "",
+            "# --- Explicitly unowned: no codeowner review required (wins via last-match).",
+            "# Deterministic generator outputs whose integrity is guarded by CI",
+            "# (freshness --check gates), so human review of the artifact is redundant",
+            "# and would route source-only PRs to unrelated reviewers. ---",
+        ]
+        lines += unowned_rules
+
     stats = {
         "base": len(base_rules),
         "shared": len(shared_rules),
         "filetype": len(ft_rules),
         "overrides": len(overrides),
+        "unowned": len(unowned_rules),
         "teams": len(teams),
     }
     return lines, stats
@@ -413,11 +427,13 @@ def main() -> int:
         stats["base"]
         + stats["shared"]
         + stats["filetype"]
+        + stats["unowned"]
         + (1 if model.catch_all else 0)
     )
     print(
         f"wrote {args.out} | rules: {total} (base {stats['base']} | "
-        f"shared {stats['shared']} | file-type {stats['filetype']}) | "
+        f"shared {stats['shared']} | file-type {stats['filetype']} | "
+        f"unowned {stats['unowned']}) | "
         f"overrides pulled out: {stats['overrides']} | "
         f"teams referenced: {stats['teams']}"
     )

@@ -93,9 +93,17 @@ generated outputs together.
   `external_contributors.yaml`. Adding, deleting, or moving unrelated tracked
   files cannot rewrite the generated rules.
 - Rule precedence follows CODEOWNERS last-match-wins semantics: catch-all and
-  base area rules, file-type defaults, nested path overrides, then explicit
-  `shared` rules. Overlapping file-type rules retain their YAML declaration
-  order, so later entries refine earlier ones.
+  base area rules, file-type defaults, nested path overrides, explicit
+  `shared` rules, then `unowned` globs. Overlapping file-type rules retain
+  their YAML declaration order, so later entries refine earlier ones.
+- `unowned:` globs are emitted **last with no owner** — GitHub's ownerless-
+  pattern semantics — so matching files require no codeowner review at all.
+  Reserved for deterministic generator outputs whose integrity a CI freshness
+  gate already guards (hand edits fail `--check`); a human sign-off on such an
+  artifact adds a reviewer without adding scrutiny, and routes source-only PRs
+  to unrelated teams. The generators themselves stay owned. The coverage gate
+  counts unowned globs as claimed, and declaring the same glob `shared` and
+  `unowned` is rejected.
 - Legacy `classify.keyword_rules` are rejected because auto-classification and
   keyword co-ownership required a live tree. Declare ownership with explicit
   area `path_globs` or `shared` entries.

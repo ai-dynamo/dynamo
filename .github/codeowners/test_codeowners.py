@@ -1102,3 +1102,74 @@ class TestRenderCodeownersWithExternals:
         model = self._model()
         plain, _ = _render_codeowners(model, group=True, external=[])
         assert not any("@jane" in ln for ln in plain)
+
+
+class TestUnowned:
+    """``unowned:`` -- explicit review exemption for CI-guarded generated files."""
+
+    def _spec(self) -> dict:
+        return {
+            "meta": {"catch_all": "@root"},
+            "areas": [
+                {
+                    "label": "docs",
+                    "github_team": "@docs",
+                    "path_globs": ["docs/"],
+                },
+            ],
+            "shared": [],
+            "unowned": ["docs/fern/pages/reference/api/python/"],
+        }
+
+    def _rendered(self, spec: dict) -> str:
+        model = compute_resolution(spec)
+        lines, _ = _render_codeowners(model, group=True, external=[])
+        return "\n".join(lines) + "\n"
+
+    def test_unowned_line_wins_last_match_with_no_owner(self) -> None:
+        rules = parse_codeowners(self._rendered(self._spec()))
+        assert (
+            resolve_owners(rules, "docs/fern/pages/reference/api/python/frontend.mdx")
+            == []
+        )
+        # Everything else under docs/ stays docs-owned.
+        assert resolve_owners(rules, "docs/fern/scripts/gen_python_api.py") == ["@docs"]
+        assert resolve_owners(rules, "docs/fern/pages/reference/api/README.mdx") == [
+            "@docs"
+        ]
+
+    def test_unowned_is_emitted_after_shared(self) -> None:
+        spec = self._spec()
+        spec["shared"] = [
+            {"glob": "docs/fern/pages/", "owners": ["docs"]},
+        ]
+        rendered = self._rendered(spec)
+        shared_idx = rendered.index("/docs/fern/pages/ ")
+        unowned_idx = rendered.index("/docs/fern/pages/reference/api/python/\n")
+        assert unowned_idx > shared_idx
+
+    def test_unowned_counts_as_claimed_for_coverage(self) -> None:
+        model = compute_resolution(self._spec())
+        tree = [
+            "docs/fern/pages/reference/api/python/frontend.mdx",
+            "src/orphan.rs",
+        ]
+        assert model.unmatched_paths(tree) == ["src/orphan.rs"]
+
+    def test_parse_codeowners_keeps_ownerless_rules(self) -> None:
+        rules = parse_codeowners("*  @root\n/generated/\n")
+        assert rules == [("*", ["@root"]), ("/generated/", [])]
+
+    def test_glob_both_shared_and_unowned_is_fatal(self) -> None:
+        spec = self._spec()
+        spec["shared"] = [
+            {"glob": "docs/fern/pages/reference/api/python/", "owners": ["docs"]},
+        ]
+        with pytest.raises(SystemExit, match="shared and unowned"):
+            compute_resolution(spec)
+
+    def test_empty_unowned_entry_is_fatal(self) -> None:
+        spec = self._spec()
+        spec["unowned"] = ["  "]
+        with pytest.raises(SystemExit, match="non-empty glob"):
+            compute_resolution(spec)

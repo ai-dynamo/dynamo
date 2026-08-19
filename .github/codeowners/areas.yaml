@@ -1098,3 +1098,6 @@ classify:
   filetype_rules:
   - pattern: '*Dockerfile*'
     coowner: ops
+unowned:
+- docs/fern/pages/reference/api/python/
+- docs/fern/pages/reference/api/rust/
