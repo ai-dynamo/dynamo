@@ -6,6 +6,8 @@
 import json
 import logging
 import os
+import uuid
+from dataclasses import dataclass, field
 from inspect import isawaitable
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, TypeVar
@@ -35,6 +37,31 @@ _SUPPORTED_RESTORE_ENV_NAMES = {
     *KUBERNETES_OPTIONAL_ENV_NAMES,
     *RESTORE_RUNTIME_ENV_NAMES,
 }
+
+
+@dataclass(frozen=True)
+class RestoreIdentity:
+    """Restore-pod identity written by standby before CRIU resumes the image.
+
+    ``incarnation_id`` is minted on every restore. ``POD_IP`` is often unchanged
+    (hostNetwork, recycled CNI), so P/D NIXL rebind is keyed by incarnation,
+    not address.
+    """
+
+    incarnation_id: str
+    env: Mapping[str, object] = field(default_factory=dict)
+
+    def env_str(self, name: str) -> str | None:
+        value = self.env.get(name)
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def pod_ip(self) -> str | None:
+        return self.env_str("POD_IP")
+
+    @property
+    def side_channel_host(self) -> str | None:
+        return self.env_str("VLLM_NIXL_SIDE_CHANNEL_HOST") or self.pod_ip
 
 
 async def refresh_snapshot_restore_config(
@@ -116,12 +143,64 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
 def apply_snapshot_restore_env() -> dict[str, str | None]:
     """Load restore-context JSON and apply its runtime env to ``os.environ``."""
 
-    # Load the restore-context JSON captured by the restore standby process. It
-    # contains the target container's actual restore-time env after Kubernetes
-    # resolved literals, Downward API values, ConfigMaps, and Secrets.
-    control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
-    context_path = Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE
+    restore_context, context_path = _read_restore_context()
+    assert restore_context is not None
+    env_config = restore_context.get("env")
+    if not isinstance(env_config, dict):
+        raise RuntimeError("snapshot restore context requires an object env field")
+    return _apply_restore_env(env_config, source=str(context_path))
+
+
+def load_restore_identity(control_dir: str | None = None) -> RestoreIdentity | None:
+    """Read restore identity from the snapshot-control volume.
+
+    Workers and scheduler children must call this instead of trusting
+    API-process ``os.environ``. Returns ``None`` when the file is missing
+    (capture path) or has no ``incarnation_id`` (legacy context).
+    """
+
+    restore_context, _ = _read_restore_context(control_dir, missing_ok=True)
+    if restore_context is None:
+        return None
+    incarnation_id = restore_context.get("incarnation_id")
+    if not isinstance(incarnation_id, str) or not incarnation_id:
+        return None
+    env_config = restore_context.get("env")
+    env = env_config if isinstance(env_config, dict) else {}
+    return RestoreIdentity(incarnation_id=incarnation_id, env=env)
+
+
+def should_rebind_pd(
+    captured_incarnation_id: str | None,
+    identity: RestoreIdentity | None = None,
+) -> bool:
+    """Return True when restore context exists and the incarnation changed.
+
+    Rebind is not triggered by ``POD_IP`` changes. Same IP after hostNetwork
+    restart still rebinds when standby minted a new ``incarnation_id``.
+    """
+
+    if identity is None:
+        identity = load_restore_identity()
+    if identity is None:
+        return False
+    return captured_incarnation_id != identity.incarnation_id
+
+
+def _restore_context_path(control_dir: str | None = None) -> Path:
+    root = control_dir or os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
+    return Path(root) / SNAPSHOT_RESTORE_CONTEXT_FILE
+
+
+def _read_restore_context(
+    control_dir: str | None = None,
+    *,
+    missing_ok: bool = False,
+) -> tuple[dict[str, object] | None, Path]:
+    context_path = _restore_context_path(control_dir)
     if not context_path.is_file():
+        if missing_ok:
+            return None, context_path
         raise RuntimeError(f"snapshot restore context file not found: {context_path}")
 
     source = str(context_path)
@@ -134,10 +213,7 @@ def apply_snapshot_restore_env() -> dict[str, str | None]:
 
     if not isinstance(restore_context, dict):
         raise RuntimeError("snapshot restore context requires an object payload")
-    env_config = restore_context.get("env")
-    if not isinstance(env_config, dict):
-        raise RuntimeError("snapshot restore context requires an object env field")
-    return _apply_restore_env(env_config, source=source)
+    return restore_context, context_path
 
 
 def write_snapshot_restore_context(control_dir: str | None = None) -> None:
@@ -155,7 +231,10 @@ def write_snapshot_restore_context(control_dir: str | None = None) -> None:
 
     # Capture only the non-secret env names Dynamo needs after restore. Missing
     # values are written as null so stale snapshot-time env can be cleared.
+    # incarnation_id is generated here (not an env var) so same-IP / same-UID
+    # restores still get a new P/D NIXL identity.
     context = {
+        "incarnation_id": str(uuid.uuid4()),
         "env": {
             name: os.environ.get(name) if name in os.environ else None
             for name in sorted(_SUPPORTED_RESTORE_ENV_NAMES)
@@ -175,7 +254,11 @@ def write_snapshot_restore_context(control_dir: str | None = None) -> None:
         encoding="utf-8",
     )
     tmp_path.replace(context_file)
-    logger.info("Captured snapshot restore context at %s", context_file)
+    logger.info(
+        "Captured snapshot restore context at %s incarnation_id=%s",
+        context_file,
+        context["incarnation_id"],
+    )
 
 
 def _validate_kubernetes_restore_env_for_config(config: object) -> None:

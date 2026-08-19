@@ -3,6 +3,7 @@
 
 import json
 import os
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -16,8 +17,12 @@ from dynamo.common.snapshot.constants import (
     SNAPSHOT_RESTORE_STANDBY_ENV,
 )
 from dynamo.common.snapshot.restore_context import (
+    RestoreIdentity,
     apply_snapshot_restore_env,
+    load_restore_identity,
     refresh_snapshot_restore_config,
+    should_rebind_pd,
+    write_snapshot_restore_context,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -220,3 +225,74 @@ async def test_refresh_snapshot_restore_config_validates_kubernetes_env(
                 event_plane=None,
             ),
         )
+
+
+def test_write_snapshot_restore_context_records_incarnation_and_pod_ip(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("POD_IP", "10.0.0.5")
+    monkeypatch.setenv("POD_UID", "uid-1")
+    write_snapshot_restore_context(str(tmp_path))
+
+    payload = json.loads(
+        (tmp_path / SNAPSHOT_RESTORE_CONTEXT_FILE).read_text(encoding="utf-8")
+    )
+    first_id = payload["incarnation_id"]
+    uuid.UUID(first_id)
+    assert payload["env"]["POD_IP"] == "10.0.0.5"
+    assert payload["env"]["POD_UID"] == "uid-1"
+
+    write_snapshot_restore_context(str(tmp_path))
+    second = json.loads(
+        (tmp_path / SNAPSHOT_RESTORE_CONTEXT_FILE).read_text(encoding="utf-8")
+    )
+    assert second["incarnation_id"] != first_id
+
+
+def test_load_restore_identity_missing_context_returns_none(monkeypatch, tmp_path):
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    assert load_restore_identity() is None
+
+
+def test_should_rebind_pd_same_ip_new_incarnation():
+    identity = RestoreIdentity(
+        incarnation_id="inc-2",
+        env={"POD_IP": "10.0.0.5", "POD_UID": "uid-1"},
+    )
+    assert should_rebind_pd("inc-1", identity) is True
+    assert should_rebind_pd("inc-2", identity) is False
+    assert should_rebind_pd(None, identity) is True
+
+
+def test_should_rebind_pd_missing_context_does_not_rebind(monkeypatch, tmp_path):
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    assert should_rebind_pd("inc-1") is False
+    assert should_rebind_pd(None) is False
+
+
+def test_should_rebind_pd_same_uid_same_ip_new_incarnation(monkeypatch, tmp_path):
+    write_restore_context(
+        monkeypatch,
+        tmp_path,
+        {"POD_IP": "10.0.0.5", "POD_UID": "uid-1"},
+    )
+    (tmp_path / SNAPSHOT_RESTORE_CONTEXT_FILE).write_text(
+        json.dumps(
+            {
+                "incarnation_id": "inc-restore",
+                "env": {"POD_IP": "10.0.0.5", "POD_UID": "uid-1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    identity = load_restore_identity()
+    assert identity is not None
+    assert identity.pod_ip == "10.0.0.5"
+    assert should_rebind_pd("inc-capture", identity) is True
+
+
+def test_autoinstall_is_noop_without_snapshot_mode(monkeypatch):
+    monkeypatch.delenv(SNAPSHOT_CONTROL_DIR_ENV, raising=False)
+    from dynamo.common.snapshot.autoinstall import install_snapshot_backends
+
+    install_snapshot_backends()

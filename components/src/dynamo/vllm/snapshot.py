@@ -37,6 +37,9 @@ async def prepare_snapshot_engine(
     configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
     config.engine_args.enable_sleep_mode = True
+    from .snapshot_nixl import configure_snapshot_nixl_connector
+
+    configure_snapshot_nixl_connector(config.engine_args.kv_transfer_config)
 
     engine = setup_vllm_engine(config)
     gc.collect()
@@ -49,5 +52,11 @@ async def prepare_snapshot_engine(
     if not await snapshot_controller.wait_for_restore():
         logger.info("vLLM snapshot captured successfully")
         os._exit(0)
+
+    from .args import _uses_nixl_connector
+    from .snapshot_nixl import rebind_vllm_nixl_after_restore
+
+    if _uses_nixl_connector(config.engine_args):
+        await rebind_vllm_nixl_after_restore(engine[0])
 
     return snapshot_controller
