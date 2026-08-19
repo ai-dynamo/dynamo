@@ -155,7 +155,11 @@ func invalidVLLMDistributedExecutorBackendAnnotation(annotations map[string]stri
 // inferencePoolAvailabilityError checks the InferencePool API.
 // ctx and mgr must not be nil.
 func inferencePoolAvailabilityError(ctx context.Context, mgr ctrl.Manager) error {
-	if features.DetectInferencePoolAvailability(ctx, mgr) {
+	available, err := features.DetectInferencePoolAvailability(ctx, mgr)
+	if err != nil {
+		return fmt.Errorf("detect InferencePool API availability: %w", err)
+	}
+	if available {
 		return nil
 	}
 	return fmt.Errorf(

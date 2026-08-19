@@ -437,24 +437,11 @@ areas:
   path_globs:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
-  - deploy/helm/charts/snapshot/
+  - components/src/dynamo/common/tests/test_snapshot*
+  - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
+  - deploy/operator/internal/checkpointjob/
   - deploy/operator/internal/gms/
-  - deploy/snapshot/
-  - deploy/snapshot/cmd/
-  - deploy/snapshot/cmd/agent/
-  - deploy/snapshot/cmd/cuda-checkpoint-helper/
-  - deploy/snapshot/cmd/nsrestore/
-  - deploy/snapshot/cmd/snapshotctl/
-  - deploy/snapshot/internal/
-  - deploy/snapshot/internal/controller/
-  - deploy/snapshot/internal/criu/
-  - deploy/snapshot/internal/cuda/
-  - deploy/snapshot/internal/executor/
-  - deploy/snapshot/internal/logging/
-  - deploy/snapshot/internal/runtime/
-  - deploy/snapshot/internal/types/
-  - deploy/snapshot/protocol/
   - lib/gpu_memory_service/
   - lib/gpu_memory_service/cli/
   - lib/gpu_memory_service/client/
@@ -488,6 +475,8 @@ areas:
 - label: performance
   github_team: '@ai-dynamo/dynamo-performance-codeowners'
   path_globs:
+  - aisimulate/crates/core/src/engine/cache/
+  - aisimulate/crates/core/src/engine/kv_manager/
   - benchmarks/README.md
   - benchmarks/__init__.py
   - benchmarks/burstgpt_loadgen/
@@ -519,10 +508,7 @@ areas:
   - lib/bench/tests/
   - lib/data-gen/
   - lib/mocker/
-  - lib/mocker/src/cache/
   - lib/mocker/src/common/
-  - lib/mocker/src/kv_manager/
-  - lib/mocker/src/kvbm_offload/
   - lib/mocker/src/loadgen/
   - lib/mocker/src/replay/
   - lib/mocker/src/scheduler/
@@ -899,6 +885,10 @@ shared:
   owners:
   - backend-sglang
   - gms
+- glob: components/src/dynamo/trtllm/snapshot.py
+  owners:
+  - backend-trtllm
+  - gms
 - glob: components/src/dynamo/trtllm/workers/llm_worker.py
   owners:
   - backend-trtllm
@@ -923,6 +913,10 @@ shared:
   owners:
   - backend-trtllm
   - gms
+- glob: components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py
+  owners:
+  - backend-trtllm
+  - gms
 - glob: deploy/inference-gateway/ext-proc/
   owners:
   - epp
@@ -943,6 +937,26 @@ shared:
   owners:
   - operator
   - observability
+- glob: deploy/operator/api/v1alpha1/dynamocheckpoint*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/config/**/*dynamocheckpoint*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/controller/*checkpoint*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/**/*podsnapshot*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/webhook/**/*checkpoint*
+  owners:
+  - operator
+  - gms
 - glob: dev/docker-compose.yml
   owners:
   - ops
@@ -1036,11 +1050,7 @@ shared:
   owners:
   - frontend
   - diffusion
-- glob: lib/mocker/src/kv_manager/
-  owners:
-  - performance
-  - kv-memory
-- glob: lib/mocker/src/kvbm_offload/
+- glob: aisimulate/crates/core/src/engine/kv_manager/
   owners:
   - performance
   - kv-memory
@@ -1060,6 +1070,11 @@ shared:
   owners:
   - ops
   - operator
+- glob: tests/deploy/test_dynamocheckpoint.py
+  owners:
+  - ops
+  - operator
+  - gms
 - glob: tests/fault_tolerance/cancellation/utils.py
   owners:
   - fault-tolerance

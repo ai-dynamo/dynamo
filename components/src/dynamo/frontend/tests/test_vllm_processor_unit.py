@@ -1042,7 +1042,7 @@ async def test_generator_preserves_zero_top_logprobs(
     caplog,
 ):
     class RequestForSampling(SimpleNamespace):
-        model_fields = {}
+        model_fields = frozenset()
 
     monkeypatch.setattr(
         vllm_processor_module,

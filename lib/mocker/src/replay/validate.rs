@@ -42,12 +42,7 @@ pub fn validate_replay_args_mode(
     }
 }
 
-fn validate_replay_args(
-    args: &MockEngineArgs,
-    num_workers: usize,
-    mode: &str,
-    allow_dp_replication: bool,
-) -> Result<()> {
+fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -> Result<()> {
     if num_workers == 0 {
         bail!("{mode} requires num_workers >= 1");
     }
@@ -57,16 +52,6 @@ fn validate_replay_args(
             args.worker_type,
         );
     }
-    // Offline replay treats dp_size>1 as rank topology: each mocker worker gets
-    // that many independent scheduler/KV-pool states, mirroring the live path.
-    // Online replay does not support it.
-    if args.dp_size != 1 && !allow_dp_replication {
-        bail!(
-            "{mode} only supports data_parallel_size=1, got {}",
-            args.dp_size,
-        );
-    }
-
     Ok(())
 }
 
@@ -95,7 +80,7 @@ pub(super) fn validate_offline_replay_args(
     scaling_enabled: bool,
 ) -> Result<()> {
     validate_offline_router_mode(router_mode, num_workers, args.dp_size, scaling_enabled)?;
-    validate_replay_args(args, num_workers, "trace replay", true)
+    validate_replay_args(args, num_workers, "trace replay")
 }
 
 pub(super) fn validate_offline_concurrency_args(
@@ -110,12 +95,11 @@ pub(super) fn validate_offline_concurrency_args(
     }
 
     validate_offline_router_mode(router_mode, num_workers, args.dp_size, scaling_enabled)?;
-    validate_replay_args(args, num_workers, "concurrency replay", true)
+    validate_replay_args(args, num_workers, "concurrency replay")
 }
 
 pub(super) fn validate_online_replay_args(args: &MockEngineArgs, num_workers: usize) -> Result<()> {
-    validate_replay_args(args, num_workers, "online replay", false)?;
-    validate_online_kv_offload(args)
+    validate_replay_args(args, num_workers, "online replay")
 }
 
 pub(super) fn validate_online_concurrency_args(
@@ -127,17 +111,7 @@ pub(super) fn validate_online_concurrency_args(
         bail!("online concurrency replay requires max_in_flight >= 1");
     }
 
-    validate_replay_args(args, num_workers, "online replay", false)?;
-    validate_online_kv_offload(args)
-}
-
-fn validate_online_kv_offload(args: &MockEngineArgs) -> Result<()> {
-    if args.num_g3_blocks.is_some() || args.enable_g4_storage {
-        bail!(
-            "online replay does not support G3 or G4 KV offload; only G1/G2 offload is supported"
-        );
-    }
-    Ok(())
+    validate_replay_args(args, num_workers, "online replay")
 }
 
 fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Result<()> {
@@ -286,6 +260,15 @@ mod tests {
         let mut args = args(EngineType::Vllm, WorkerType::Aggregated);
         args.dp_size = 2;
         validate_offline_replay_args(&args, 1, ReplayRouterMode::KvRouter, false).unwrap();
+    }
+
+    #[test]
+    fn online_replay_accepts_attention_dp() {
+        let mut args = args(EngineType::Vllm, WorkerType::Aggregated);
+        args.dp_size = 2;
+
+        validate_online_replay_args(&args, 1).unwrap();
+        validate_online_concurrency_args(&args, 1, 1).unwrap();
     }
 
     #[test]
