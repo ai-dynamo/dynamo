@@ -4,10 +4,13 @@
 # Blocker claim for verifying GMS on clusters where the NVIDIA device plugin
 # also serves nvidia.com/gpu workloads. The DRA scheduler cannot see
 # device-plugin allocations, so it can place the GMS claim on a GPU that is
-# already fully occupied. Reserving the occupied indexes with this claim before
+# already fully occupied. Reserving the occupied devices with this claim before
 # deploying a GMS workload steers the generated claims onto free devices.
 #
-# Adjust the CEL expression and count to the GPUs occupied on your node, then:
+# Devices are selected by GPU UUID. List the UUIDs with `nvidia-smi -L` on the
+# node, or map DRA device names to UUIDs from the ResourceSlices:
+#   kubectl get resourceslices -o jsonpath='{range .items[*].spec.devices[*]}{.name}{" "}{.attributes.uuid.string}{"\n"}{end}'
+# Replace the UUIDs and count below with the occupied GPUs on your node, then:
 #   kubectl apply -n <namespace> -f gms-dra-blocker.yaml
 # The busybox pod holds the devices in the DRA ledger without starting any CUDA
 # process, so the occupied GPUs keep serving their existing workloads.
@@ -25,7 +28,9 @@ spec:
           count: 2
           selectors:
             - cel:
-                expression: 'device.attributes["gpu.nvidia.com"].index == 3 || device.attributes["gpu.nvidia.com"].index == 6'
+                expression: >-
+                  device.attributes["gpu.nvidia.com"].uuid == "GPU-b390fd89-5025-58d1-977b-75e706fe0fc1" ||
+                  device.attributes["gpu.nvidia.com"].uuid == "GPU-190d0ebe-9b3f-4c01-9c3f-47abe8f34439"
 ---
 apiVersion: v1
 kind: Pod
