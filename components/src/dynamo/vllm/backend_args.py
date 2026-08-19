@@ -6,6 +6,7 @@
 import argparse
 import logging
 import os
+import re
 import warnings
 from typing import List, Optional, Union
 
@@ -27,6 +28,12 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
+
+
+def parse_connector_metric_prefixes(value: str) -> list[str]:
+    """Parse comma- or whitespace-separated connector metric prefixes."""
+    prefixes = [prefix for prefix in re.split(r"[\s,]+", value.strip()) if prefix]
+    return list(dict.fromkeys(prefixes))
 
 
 def _warn_deprecated(message: str) -> None:
@@ -229,6 +236,18 @@ class DynamoVllmArgGroup(ArgGroup):
                 "allocation at startup, automatically pause after initialization, "
                 "and resume on demand when the active engine dies. "
                 "Requires --load-format=gms."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--connector-metric-prefixes",
+            env_var="DYN_VLLM_CONNECTOR_METRIC_PREFIXES",
+            default=None,
+            arg_type=parse_connector_metric_prefixes,
+            help=(
+                "Comma- or whitespace-separated metric name prefixes to append "
+                "to the vLLM worker metrics allowlist for external KV connectors."
             ),
         )
 
@@ -475,6 +494,9 @@ class DynamoVllmConfig(ConfigBase):
 
     # ModelExpress P2P
     model_express_url: Optional[str] = None
+
+    # Additional Prometheus prefixes exposed for external KV connectors.
+    connector_metric_prefixes: Optional[List[str]] = None
 
     # GMS shadow mode
     gms_shadow_mode: bool = False

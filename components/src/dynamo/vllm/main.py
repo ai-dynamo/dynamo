@@ -237,7 +237,7 @@ async def worker(argv: list[str] | None = None) -> None:
 def setup_metrics_collection(
     config: "Config | OmniConfig", generate_endpoint: Endpoint, logger: logging.Logger
 ) -> None:
-    """Set up metrics collection for vLLM and LMCache metrics.
+    """Set up metrics collection for vLLM and connector metrics.
 
     In multiprocess mode (PROMETHEUS_MULTIPROC_DIR set), metrics are stored:
       1. In-memory: Metric objects in global REGISTRY
@@ -258,18 +258,7 @@ def setup_metrics_collection(
     """
     metrics_model_name = get_metrics_model_name(config)
 
-    # The DynamoMultimodalEmbeddingCacheConnector (scheduler side, EngineCore
-    # process) publishes its cache metrics through the multiprocess .db files.
-    # Forward that family only when the connector is configured — the
-    # encode-routing path exposes the same metric names in-process via
-    # register_embedding_cache_metrics instead.
-    engine_metric_prefixes = ["vllm:", "lmcache:"]
-    ec_config = getattr(config.engine_args, "ec_transfer_config", None)
-    if (
-        getattr(ec_config, "ec_connector", None)
-        == "DynamoMultimodalEmbeddingCacheConnector"
-    ):
-        engine_metric_prefixes.append(EMBEDDING_CACHE_METRIC_PREFIX)
+    engine_metric_prefixes = _get_engine_metric_prefixes(config)
 
     if config.engine_args.disable_log_stats is False:
         # Register the dedicated dynamo_component registry callback
@@ -315,22 +304,26 @@ def setup_metrics_collection(
                 multiproc_registry = CollectorRegistry()
                 multiprocess.MultiProcessCollector(multiproc_registry)
 
-                # Register both registries to collect all metrics
-                # Global REGISTRY has in-memory metrics (vllm)
+                # Keep in-process vLLM and external connector metrics in the
+                # global registry.
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=REGISTRY,
-                    metric_prefix_filters=["vllm:"],
+                    metric_prefix_filters=_get_in_process_metric_prefixes(config),
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
                     model_name=metrics_model_name,
                 )
-                # Multiproc registry has .db file metrics (lmcache, possibly vllm duplicates)
+                # The conflict may come from duplicate in-memory series rather
+                # than an existing MultiProcessCollector. Include vLLM so its
+                # .db-only metrics are not dropped, but exclude external
+                # connector prefixes because those are registered in-process.
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=multiproc_registry,
-                    metric_prefix_filters=engine_metric_prefixes,
+                    metric_prefix_filters=["vllm:"]
+                    + _get_multiprocess_only_metric_prefixes(config),
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
@@ -352,6 +345,46 @@ def setup_metrics_collection(
                 endpoint_name=config.endpoint,
                 model_name=metrics_model_name,
             )
+
+
+def _get_engine_metric_prefixes(config: "Config | OmniConfig") -> list[str]:
+    """Build the metric allowlist, including user-supplied connector prefixes."""
+    connector_prefixes = getattr(config, "connector_metric_prefixes", None) or []
+    return list(
+        dict.fromkeys(
+            ["vllm:"]
+            + _get_multiprocess_only_metric_prefixes(config)
+            + connector_prefixes
+        )
+    )
+
+
+def _get_in_process_metric_prefixes(config: "Config | OmniConfig") -> list[str]:
+    """Return vLLM and external connector prefixes from the global registry."""
+    prefixes = ["vllm:"]
+    prefixes.extend(getattr(config, "connector_metric_prefixes", None) or [])
+    return list(dict.fromkeys(prefixes))
+
+
+def _get_multiprocess_only_metric_prefixes(
+    config: "Config | OmniConfig",
+) -> list[str]:
+    """Return prefixes for integrations that publish only through .db files."""
+    prefixes = ["lmcache:"]
+
+    # The DynamoMultimodalEmbeddingCacheConnector (scheduler side, EngineCore
+    # process) publishes its cache metrics through the multiprocess .db files.
+    # Forward that family only when the connector is configured — the
+    # encode-routing path exposes the same metric names in-process via
+    # register_embedding_cache_metrics instead.
+    ec_config = getattr(config.engine_args, "ec_transfer_config", None)
+    if (
+        getattr(ec_config, "ec_connector", None)
+        == "DynamoMultimodalEmbeddingCacheConnector"
+    ):
+        prefixes.append(EMBEDDING_CACHE_METRIC_PREFIX)
+
+    return prefixes
 
 
 def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional[int]:

@@ -19,6 +19,7 @@ from dynamo.vllm.backend_args import (
     DynamoVllmArgGroup,
     DynamoVllmConfig,
     _reject_removed_multimodal_env_vars,
+    parse_connector_metric_prefixes,
 )
 
 pytestmark = [
@@ -155,6 +156,49 @@ def test_removed_multimodal_env_var_falsy_value_is_ignored(monkeypatch):
     monkeypatch.setenv("DYN_VLLM_MULTIMODAL_WORKER", "false")
 
     _reject_removed_multimodal_env_vars()
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("external_connector_", ["external_connector_"]),
+        (
+            "external_connector_, another_connector_ custom:",
+            ["external_connector_", "another_connector_", "custom:"],
+        ),
+        ("external_connector_,external_connector_", ["external_connector_"]),
+        ("  ", []),
+    ],
+)
+def test_parse_connector_metric_prefixes(value, expected):
+    assert parse_connector_metric_prefixes(value) == expected
+
+
+def test_connector_metric_prefixes_cli_appends_external_prefixes():
+    parser = argparse.ArgumentParser()
+    DynamoVllmArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        ["--connector-metric-prefixes", "external_connector_,custom:"]
+    )
+
+    assert args.connector_metric_prefixes == ["external_connector_", "custom:"]
+
+
+def test_connector_metric_prefixes_env_appends_external_prefixes(monkeypatch):
+    monkeypatch.setenv(
+        "DYN_VLLM_CONNECTOR_METRIC_PREFIXES",
+        "external_connector_ custom_connector_",
+    )
+    parser = argparse.ArgumentParser()
+    DynamoVllmArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    assert args.connector_metric_prefixes == [
+        "external_connector_",
+        "custom_connector_",
+    ]
 
 
 class TestResolveDisaggregationMode:
