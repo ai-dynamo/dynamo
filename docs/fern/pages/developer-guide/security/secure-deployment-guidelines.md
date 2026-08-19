@@ -28,8 +28,8 @@ at the end lists every security-related setting in one place.
 
 Dynamo separates client-facing traffic from internal coordination:
 
-- The **data plane** — the frontend's OpenAI-compatible HTTP endpoint, which
-  serves inference requests to clients.
+- The **external-facing inference API** — the frontend's OpenAI-compatible HTTP
+  endpoint, which serves inference requests to clients.
 - The **communication planes** — internal discovery, event, and request planes,
   plus infrastructure services (NATS, ModelExpress, and the NIXL/RDMA
   data-transfer fabric) that components use to find each other and coordinate.
@@ -45,7 +45,7 @@ The security posture rests on two assumptions:
 If both hold, the externally reachable surface is limited to the frontend's
 inference API. The sections below explain how to satisfy each assumption.
 
-## Securing the Data Plane
+## Securing the External-Facing Inference API
 
 Do not expose the Dynamo frontend directly to an untrusted network. Deploy it as
 a microservice behind a dedicated gateway or proxy that provides:
@@ -194,7 +194,7 @@ and run as a non-root user.
 The security-related settings, grouped by the part of the deployment they harden.
 Set restrictive values in your production manifests.
 
-**Frontend (data plane)**
+**Frontend (external-facing inference API)**
 
 | Setting | Purpose | Default |
 |---------|---------|---------|
