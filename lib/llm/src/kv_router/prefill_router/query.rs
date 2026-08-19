@@ -41,7 +41,7 @@ where
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
 
         match &binding.router {
-            InnerPrefillRouter::KvRouter(router) => {
+            InnerPrefillRouter::Kv(router) => {
                 let outcome = router
                     .kv_router()
                     .find_best_match_details(
@@ -73,9 +73,19 @@ where
                     }
                 }
             }
-            InnerPrefillRouter::SimpleRouter(router) => {
+            InnerPrefillRouter::Simple(router) => {
                 let worker_id = router
                     .peek_next_worker()
+                    .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+                Ok(PrefillQueryOutcome::Routed {
+                    worker_id,
+                    dp_rank: None,
+                })
+            }
+            InnerPrefillRouter::Builtin(router) => {
+                let worker_id = router
+                    .chooser
+                    .peek()
                     .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
                 Ok(PrefillQueryOutcome::Routed {
                     worker_id,
@@ -87,7 +97,7 @@ where
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         if let Some(binding) = self.binding.load_full()
-            && let InnerPrefillRouter::KvRouter(router) = &binding.router
+            && let InnerPrefillRouter::Kv(router) = &binding.router
         {
             router.kv_router().register_workers(worker_ids);
         }
@@ -308,7 +318,7 @@ mod tests {
                     component: component.to_string(),
                     name: endpoint_name.to_string(),
                 },
-                router: InnerPrefillRouter::SimpleRouter(shared.clone()),
+                router: InnerPrefillRouter::Simple(shared.clone()),
             },
         )));
         prefill.lifecycle.store(

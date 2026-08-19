@@ -14,7 +14,8 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{
-        EncoderRouter, KvRouter, PrefillRouter, RoutingHost, metrics::RouterRequestMetrics,
+        BuiltinRoutingHost, EncoderRouter, KvRouter, PrefillRouter, RoutingHost,
+        metrics::RouterRequestMetrics,
     },
     lora::LoraFilteredRouter,
     migration::Migration,
@@ -192,10 +193,14 @@ where
                     model_manager.lora_load_estimator_for(endpoint_id),
                     router_mode,
                 )),
+                None if affinity.is_none() => Arc::new(BuiltinRoutingHost::new_builtin(router)?),
                 None => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
                     router, affinity, false,
                 )),
             }
+        }
+        RouterMode::PowerOfTwoChoices if affinity.is_none() => {
+            Arc::new(BuiltinRoutingHost::new_builtin(router)?)
         }
         RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
@@ -303,9 +308,9 @@ where
     .await?;
 
     // Eagerly register router request metrics so they appear as zeros even in
-    // non-KV modes (Direct, Random, RoundRobin) where RoutingHost is never created.
-    // In KV mode, RoutingHost::new() also calls from_component() (idempotent via
-    // OnceLock), which covers the standalone router path as well.
+    // modes that still bypass RoutingHost (for example Direct and LoRA-filtered routing).
+    // RoutingHost also calls from_component() (idempotent via OnceLock), which covers
+    // the standalone router path as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {

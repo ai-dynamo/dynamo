@@ -1,24 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use super::{
     AdmissionKind, CandidateView, RouteCandidate, RouteContext, RouteDecision, RouteDevice,
-    RoutePolicy, RouteTarget,
+    RoutePolicy, RouteTarget, fast::FastPicker,
 };
 
 #[derive(Debug)]
 pub(crate) struct RoutePicker {
     policy: RoutePolicy,
-    round_robin_cursor: AtomicU64,
+    fast_picker: FastPicker,
 }
 
 impl RoutePicker {
     pub(crate) const fn new(policy: RoutePolicy) -> Self {
         Self {
             policy,
-            round_robin_cursor: AtomicU64::new(0),
+            fast_picker: FastPicker::new(),
         }
     }
 
@@ -33,9 +31,6 @@ impl RoutePicker {
         context: RouteContext,
         load: impl Fn(u64) -> u64,
     ) -> Option<RouteDecision> {
-        if self.policy == RoutePolicy::Random {
-            return random_decision(candidates);
-        }
         let mut samples = RandomSamples;
         self.choose_with_samples(candidates, context, &load, false, &mut samples)
     }
@@ -47,9 +42,6 @@ impl RoutePicker {
         context: RouteContext,
         load: impl Fn(u64) -> u64,
     ) -> Option<RouteDecision> {
-        if self.policy == RoutePolicy::Random {
-            return random_decision(candidates);
-        }
         let mut samples = RandomSamples;
         self.choose_with_samples(candidates, context, &load, true, &mut samples)
     }
@@ -68,43 +60,30 @@ impl RoutePicker {
         }
 
         match self.policy {
-            RoutePolicy::RoundRobin => {
-                let cursor = if commit {
-                    self.round_robin_cursor.fetch_add(1, Ordering::Relaxed)
-                } else {
-                    self.round_robin_cursor.load(Ordering::Relaxed)
-                };
-                Some(RouteDecision {
-                    target: candidates.target(cursor as usize % candidates.len()),
+            RoutePolicy::RoundRobin => self
+                .fast_picker
+                .round_robin_index(candidates.len(), commit)
+                .map(|index| RouteDecision {
+                    target: candidates.target(index),
                     admission: AdmissionKind::None,
-                })
+                }),
+            RoutePolicy::Random => {
+                FastPicker::random_index_by(candidates.len(), |upper| samples.index(upper)).map(
+                    |index| RouteDecision {
+                        target: candidates.target(index),
+                        admission: AdmissionKind::None,
+                    },
+                )
             }
-            RoutePolicy::Random => Some(RouteDecision {
-                target: candidates.target(samples.index(candidates.len())),
-                admission: AdmissionKind::None,
+            RoutePolicy::PowerOfTwoChoices => FastPicker::power_of_two_choices_index_by(
+                candidates.len(),
+                |upper| samples.index(upper),
+                |index| load(candidates.target(index).worker_id),
+            )
+            .map(|index| RouteDecision {
+                target: candidates.target(index),
+                admission: AdmissionKind::Occupancy,
             }),
-            RoutePolicy::PowerOfTwoChoices => {
-                let first = samples.index(candidates.len());
-                if candidates.len() == 1 {
-                    return Some(RouteDecision {
-                        target: candidates.target(first),
-                        admission: AdmissionKind::Occupancy,
-                    });
-                }
-                let second_offset = 1 + samples.index(candidates.len() - 1);
-                let second = (first + second_offset) % candidates.len();
-                let first_target = candidates.target(first);
-                let second_target = candidates.target(second);
-                let target = if load(first_target.worker_id) <= load(second_target.worker_id) {
-                    first_target
-                } else {
-                    second_target
-                };
-                Some(RouteDecision {
-                    target,
-                    admission: AdmissionKind::Occupancy,
-                })
-            }
             RoutePolicy::LeastLoaded => {
                 lowest_load(candidates, load, samples).map(|target| RouteDecision {
                     target,
@@ -132,23 +111,6 @@ impl SampleSource for RandomSamples {
     fn index(&mut self, upper: usize) -> usize {
         fastrand::usize(..upper)
     }
-}
-
-#[inline(always)]
-fn random_decision(candidates: CandidateView<'_>) -> Option<RouteDecision> {
-    let upper = candidates.len();
-    if upper == 0 {
-        return None;
-    }
-    let index = fastrand::usize(..upper);
-    let target = match candidates {
-        CandidateView::Workers(workers) => RouteTarget::worker(workers[index]),
-        CandidateView::DeviceAware(candidates) => candidates[index].target,
-    };
-    Some(RouteDecision {
-        target,
-        admission: AdmissionKind::None,
-    })
 }
 
 #[inline(always)]

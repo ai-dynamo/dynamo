@@ -17,7 +17,8 @@ use crate::component::{Endpoint, Instance};
 use crate::config::environment_names::runtime as env_runtime;
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
 use crate::routing_policy::{
-    AdmissionKind, CandidateView, RouteContext, RouteDecision, RoutePicker, RoutePolicy,
+    AdmissionKind, BuiltinWorkerPicker, CandidateView, RouteContext, RouteDecision, RoutePicker,
+    RoutePolicy,
 };
 use crate::traits::DistributedRuntimeProvider;
 
@@ -247,8 +248,13 @@ pub(crate) struct RoutingInstances {
     availability_initialized: bool,
 }
 
+/// Receives routing membership changes on the discovery/update path, outside request selection.
+pub(crate) trait RoutingInstancesObserver: Send + Sync {
+    fn update(&self, routing_instances: &RoutingInstances);
+}
+
 impl RoutingInstances {
-    fn new(discovered_ids: Vec<u64>) -> Self {
+    pub(crate) fn new(discovered_ids: Vec<u64>) -> Self {
         let availability_initialized = !discovered_ids.is_empty();
         Self::from_parts(
             discovered_ids.clone(),
@@ -413,6 +419,8 @@ impl RoutingInstances {
 struct RoutingInstancesState {
     snapshot: ArcSwap<RoutingInstances>,
     update_lock: StdMutex<()>,
+    observers: StdMutex<Vec<std::sync::Weak<dyn RoutingInstancesObserver>>>,
+    p2c_worker_picker: StdMutex<std::sync::Weak<BuiltinWorkerPicker>>,
     overload_reconciliation_needed: AtomicBool,
     instance_avail_tx: tokio::sync::watch::Sender<Vec<u64>>,
 }
@@ -426,6 +434,8 @@ impl RoutingInstancesState {
             Self {
                 snapshot: ArcSwap::from_pointee(snapshot),
                 update_lock: StdMutex::new(()),
+                observers: StdMutex::new(Vec::new()),
+                p2c_worker_picker: StdMutex::new(std::sync::Weak::new()),
                 overload_reconciliation_needed: AtomicBool::new(false),
                 instance_avail_tx,
             },
@@ -446,10 +456,30 @@ impl RoutingInstancesState {
         let current = self.snapshot.load();
         let next = Arc::new(update(&current));
         self.snapshot.store(next.clone());
+        self.notify_observers(&next);
         if publish_routable_ids {
             self.publish_routable_ids(&next);
         }
         next
+    }
+
+    fn notify_observers(&self, routing_instances: &RoutingInstances) {
+        self.observers.lock().unwrap().retain(|observer| {
+            let Some(observer) = observer.upgrade() else {
+                return false;
+            };
+            observer.update(routing_instances);
+            true
+        });
+    }
+
+    fn add_observer(&self, observer: Arc<dyn RoutingInstancesObserver>) {
+        let _guard = self.update_lock.lock().unwrap();
+        observer.update(&self.snapshot.load());
+        self.observers
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&observer));
     }
 
     fn publish_routable_ids(&self, routing_instances: &RoutingInstances) {
@@ -496,7 +526,8 @@ impl RoutingInstancesState {
         }
 
         let next = Arc::new(current.set_overloaded(overloaded_ids));
-        self.snapshot.store(next);
+        self.snapshot.store(next.clone());
+        self.notify_observers(&next);
         true
     }
 
@@ -504,7 +535,8 @@ impl RoutingInstancesState {
         let _guard = self.update_lock.lock().unwrap();
         let current = self.snapshot.load();
         let next = Arc::new(current.mark_overloaded(instance_id));
-        self.snapshot.store(next);
+        self.snapshot.store(next.clone());
+        self.notify_observers(&next);
         self.overload_reconciliation_needed
             .store(true, Ordering::Release);
     }
@@ -557,6 +589,23 @@ pub struct Client {
 }
 
 impl Client {
+    pub(crate) fn get_or_create_p2c_worker_picker(
+        &self,
+        create: impl FnOnce() -> Arc<BuiltinWorkerPicker>,
+    ) -> Arc<BuiltinWorkerPicker> {
+        let mut picker = self.routing_instances.p2c_worker_picker.lock().unwrap();
+        if let Some(picker) = picker.upgrade() {
+            return picker;
+        }
+        let created = create();
+        *picker = Arc::downgrade(&created);
+        created
+    }
+
+    pub(crate) fn observe_routing_instances(&self, observer: Arc<dyn RoutingInstancesObserver>) {
+        self.routing_instances.add_observer(observer);
+    }
+
     // Client with auto-discover instances using key-value store
     pub(crate) async fn new(endpoint: Endpoint) -> Result<Self> {
         Self::with_reconcile_interval(endpoint, *INHIBITED_DURATION).await
