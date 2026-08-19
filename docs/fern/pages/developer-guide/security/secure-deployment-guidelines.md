@@ -15,8 +15,7 @@ Dynamo assumes it runs inside a trusted network boundary: untrusted clients reac
 only the frontend, through an authenticating gateway, while the internal
 communication planes and infrastructure run on a network the operator isolates.
 The sections below explain that boundary and how to harden each component and
-plane. The [Security Configuration Reference](#security-configuration-reference)
-at the end lists every security-related setting in one place.
+plane.
 
 > [!IMPORTANT]
 > The `docker compose` files and example manifests in this repository are
@@ -44,6 +43,35 @@ The security posture rests on two assumptions:
 
 If both hold, the externally reachable surface is limited to the frontend's
 inference API. The sections below explain how to satisfy each assumption.
+
+```mermaid
+flowchart LR
+    client["Untrusted clients"]
+    gateway["Gateway / ingress<br/>authentication · TLS · rate limiting"]
+
+    subgraph cluster["Trusted cluster — isolate all internal traffic from untrusted networks"]
+        direction TB
+        fe["Frontend<br/>(external-facing inference API)"]
+        subgraph planes["Internal communication planes"]
+            disc["Discovery<br/>K8s RBAC / authenticated etcd"]
+            evt["Event<br/>NATS auth+TLS / isolated ZMQ"]
+            req["Request<br/>mTLS · NIXL/RDMA"]
+        end
+        workers["Backend workers"]
+        infra["Infrastructure<br/>NATS · etcd · ModelExpress"]
+        fe --> planes
+        planes --> workers
+        workers --- infra
+    end
+
+    client -->|HTTPS| gateway
+    gateway -->|only entry point| fe
+```
+
+Only the gateway-to-frontend path crosses into the cluster; everything inside —
+the frontend, the internal communication planes, the workers, and the
+infrastructure services — runs on the trusted network and must be protected from
+any untrusted peer.
 
 ## Securing the External-Facing Inference API
 
@@ -201,41 +229,6 @@ privileges.
 Apply standard Docker hardening: restrict container network access to the trusted
 segment, set CPU/memory limits, avoid `--privileged`, drop unneeded capabilities,
 and run as a non-root user.
-
-## Security Configuration Reference
-
-The security-related settings, grouped by the part of the deployment they harden.
-Set restrictive values in your production manifests.
-
-**Frontend (external-facing inference API)**
-
-| Setting | Purpose | Default |
-|---------|---------|---------|
-| `DYN_DISABLE_FRONTEND_NVEXT=1` | Strip `nvext` client-controlled routing and override headers | off (`nvext` enabled) |
-| `DYN_DISABLE_FRONTEND_ADMIN_API=1` | Disable the `/busy_threshold` admin API | off (admin enabled) |
-
-**Discovery plane**
-
-| Setting | Purpose | Default |
-|---------|---------|---------|
-| `DYN_DISCOVERY_BACKEND=kubernetes` | RBAC-gated custom-resource discovery (no external store) | — |
-| `ETCD_AUTH_USERNAME` / `ETCD_AUTH_PASSWORD` | etcd username/password authentication | unset |
-| `ETCD_AUTH_CA` / `ETCD_AUTH_CLIENT_CERT` / `ETCD_AUTH_CLIENT_KEY` | etcd mutual TLS | unset |
-
-**Event plane**
-
-| Setting | Purpose | Default |
-|---------|---------|---------|
-| `DYN_EVENT_PLANE=nats` | Use NATS (which can be authenticated and TLS-encrypted) as the event transport | auto (NATS with etcd/Kubernetes discovery) |
-| `ZMQ_BROKER_XSUB_BIND` / `ZMQ_BROKER_XPUB_BIND` | ZMQ event-broker bind addresses — keep cluster-internal (ZMQ has no auth/encryption) | — |
-
-**Request plane** — *available once transport mTLS support lands*
-
-| Setting | Purpose | Default |
-|---------|---------|---------|
-| `DYN_TCP_TLS_CLIENT_CA_CERT_PATH` | Require and verify client mTLS on the request plane | unset |
-| `DYN_TCP_TLS_CLIENT_CERT_PATH` / `_KEY_PATH` | Client identity for request-plane mTLS | unset |
-| `NATS_TLS_CLIENT_CERT_PATH` / `_KEY_PATH` | Client identity for NATS mTLS | unset |
 
 ## Reporting a Vulnerability
 
