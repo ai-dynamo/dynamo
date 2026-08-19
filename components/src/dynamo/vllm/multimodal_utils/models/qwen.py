@@ -23,6 +23,7 @@ class QwenGridParams:
     min_pixels: int
     max_pixels: int
     vision_hidden_dim: int
+    image_token_id: int | None = None
 
 
 def load_qwen_grid_params(
@@ -39,9 +40,10 @@ def load_qwen_grid_params(
         processor = AutoImageProcessor.from_pretrained(
             model_name, trust_remote_code=trust_remote_code
         )
-        vision_config = AutoConfig.from_pretrained(
+        model_config = AutoConfig.from_pretrained(
             model_name, trust_remote_code=trust_remote_code
-        ).vision_config
+        )
+        vision_config = model_config.vision_config
 
         patch_size: int = processor.patch_size
         merge_size: int = processor.merge_size
@@ -65,6 +67,9 @@ def load_qwen_grid_params(
         vision_hidden_dim: int = getattr(
             vision_config, "out_hidden_size", vision_config.hidden_size
         )
+        image_token_id = getattr(
+            model_config, "image_token_id", getattr(processor, "image_token_id", None)
+        )
 
         return QwenGridParams(
             patch_size=patch_size,
@@ -73,6 +78,7 @@ def load_qwen_grid_params(
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             vision_hidden_dim=vision_hidden_dim,
+            image_token_id=image_token_id,
         )
     except (OSError, ValueError) as exc:
         logger.warning(
@@ -141,6 +147,7 @@ def build_qwen_embedding_params(
     multi_modal_data: Dict[str, Any],
     grid_params: QwenGridParams | None,
     mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+    prompt_token_ids: Optional[list[int]] = None,
 ) -> Dict[str, Any] | None:
     """Build embedding parameters for Qwen VL decode.
 
@@ -167,10 +174,14 @@ def build_qwen_embedding_params(
         mm_processor_kwargs: Per-request image processor overrides. The
             ``min_pixels`` and ``max_pixels`` values must match the prefill
             processor so decode reconstructs the same grid.
+        prompt_token_ids: Expanded prefill tokens used to locate image-token
+            runs. When they exactly match the computed grids, the handoff
+            carries the prompt without those runs plus insertion metadata.
 
     Returns:
-        Dict with ``image_grid_thw`` and ``embeddings_shape``, or None if
-        no image data or parameters are unavailable.
+        Dict with ``image_grid_thw`` and ``embeddings_shape`` and, when safe,
+        compact prompt reconstruction metadata; or None if no image data or
+        parameters are unavailable.
     """
     embedding_params: Dict[str, Any] = {}
     image_data = multi_modal_data.get("image")
@@ -206,5 +217,41 @@ def build_qwen_embedding_params(
         if grid_thw is not None:
             embedding_params["image_grid_thw"] = grid_thw
             embedding_params["embeddings_shape"] = embeddings_shape
+            if prompt_token_ids is not None and grid_params.image_token_id is not None:
+                expected_lengths = [
+                    (int(t) * int(h) * int(w)) // (grid_params.merge_size**2)
+                    for t, h, w in grid_thw
+                ]
+                placeholders: list[list[int]] = []
+                cursor = 0
+                for expected_length in expected_lengths:
+                    try:
+                        offset = prompt_token_ids.index(
+                            grid_params.image_token_id, cursor
+                        )
+                    except ValueError:
+                        placeholders = []
+                        break
+                    end = offset
+                    while (
+                        end < len(prompt_token_ids)
+                        and prompt_token_ids[end] == grid_params.image_token_id
+                    ):
+                        end += 1
+                    if end - offset != expected_length:
+                        placeholders = []
+                        break
+                    placeholders.append([offset, expected_length])
+                    cursor = end
+
+                if len(placeholders) == len(grid_thw):
+                    prompt_token_ids_without_images = list(prompt_token_ids)
+                    for offset, length in reversed(placeholders):
+                        del prompt_token_ids_without_images[offset : offset + length]
+                    embedding_params["prompt_token_ids_without_images"] = (
+                        prompt_token_ids_without_images
+                    )
+                    embedding_params["image_token_id"] = grid_params.image_token_id
+                    embedding_params["image_placeholders"] = placeholders
     # TODO(DIS-1679): handle np.ndarray from --frontend-decoding NIXL path
     return embedding_params if embedding_params else None
