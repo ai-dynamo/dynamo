@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{sync::Arc, time::Duration};
+use std::{marker::PhantomData, sync::Arc, time::Duration};
 
 use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerWithDpRank},
@@ -11,8 +11,8 @@ use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
-        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, BuiltinWorkerPicker, Error,
+        ManyOut, PushRouter, ResponseStream, SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
 };
@@ -29,7 +29,9 @@ use crate::{
     protocols::common::{
         FinishReason,
         llm_backend::LLMEngineOutput,
-        timing::{RequestPhase, RoutingData},
+        timing::{
+            RequestPhase, RequestTracker, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL,
+        },
     },
     session_affinity::{
         AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
@@ -117,21 +119,21 @@ where
 
 /// Owns request routing from worker selection through response cleanup.
 ///
-/// The current data plane is [`KvRouter`]. The host boundary lets cache-free
-/// selection reuse affinity, dispatch, and lifecycle handling without moving
-/// those concerns into `dynamo-runtime`.
+/// The host coordinates either KV-aware or cache-free builtin selection with
+/// request dispatch and lifecycle handling.
 ///
 /// [`PushRouter`] owns discovery, fault detection, and transport. [`KvRouter`]
 /// owns KV candidate selection and scheduler state. `RoutingHost` coordinates
 /// them and owns request state through response completion or cancellation.
-pub struct RoutingHost<Sel = DefaultWorkerSelector>
+pub struct RoutingHost<Sel = DefaultWorkerSelector, Plane = Arc<KvRouter<Sel>>>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    pub chooser: Arc<KvRouter<Sel>>,
+    pub chooser: Plane,
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
+    _selector: PhantomData<fn() -> Sel>,
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
@@ -139,8 +141,9 @@ where
 /// This alias remains supported through the Dynamo 1.x series. It may be
 /// removed only in a 2.0.0 (or later) breaking release.
 pub type KvPushRouter<Sel = DefaultWorkerSelector> = RoutingHost<Sel>;
+pub type BuiltinRoutingHost = RoutingHost<DefaultWorkerSelector, Arc<BuiltinWorkerPicker>>;
 
-impl<Sel> RoutingHost<Sel>
+impl<Sel> RoutingHost<Sel, Arc<KvRouter<Sel>>>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -172,6 +175,7 @@ where
             chooser: kv_router,
             request_metrics,
             affinity,
+            _selector: PhantomData,
         }
     }
 
@@ -552,7 +556,7 @@ where
 
 #[async_trait]
 impl<Sel> AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for RoutingHost<Sel>
+    for RoutingHost<Sel, Arc<KvRouter<Sel>>>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -659,6 +663,99 @@ where
             None => Ok(stream),
         }
     }
+}
+
+impl RoutingHost<DefaultWorkerSelector, Arc<BuiltinWorkerPicker>> {
+    pub(crate) fn new_builtin(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    ) -> Result<Self, Error> {
+        let chooser = inner
+            .builtin_picker()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("cache-free RoutingHost requires a builtin picker"))?;
+        let request_metrics =
+            RouterRequestMetrics::from_component(inner.client.endpoint.component());
+        Ok(Self {
+            inner,
+            chooser,
+            request_metrics,
+            affinity: None,
+            _selector: PhantomData,
+        })
+    }
+
+    async fn select_and_dispatch_builtin<M, F>(
+        &self,
+        mut request: SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        prepare: F,
+    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    where
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
+    {
+        let phase_label = phase.to_string();
+        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let requested = explicit_target(&request, phase)?;
+        let reservation = match requested {
+            Some(target) => self.chooser.reserve_exact(target.worker_id)?,
+            None => self.chooser.select()?,
+        };
+        let target = AffinityTarget {
+            worker_id: reservation.worker_id(),
+            dp_rank: requested.and_then(|target| target.dp_rank),
+        };
+        request.routing_mut().dp_rank = target.dp_rank;
+        let metadata = prepare(&mut request, target)?;
+        let tracker = request.tracker.take();
+        drop(route_guard);
+
+        let stream = self.inner.dispatch_exact(request, target.worker_id).await?;
+        record_builtin_target(tracker.as_deref(), target);
+        Ok((metadata, reservation.into_tracked_stream(stream)))
+    }
+
+    pub(crate) async fn select_and_dispatch_prefill<M, F>(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+        prepare: F,
+    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    where
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
+    {
+        self.select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
+            .await
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for RoutingHost<DefaultWorkerSelector, Arc<BuiltinWorkerPicker>>
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or(RequestPhase::Aggregated);
+        self.select_and_dispatch_builtin(request, phase, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+}
+
+fn record_builtin_target(tracker: Option<&RequestTracker>, target: AffinityTarget) {
+    let Some(tracker) = tracker else {
+        return;
+    };
+    let worker_type = if tracker.phase() == RequestPhase::Prefill {
+        WORKER_TYPE_PREFILL
+    } else {
+        WORKER_TYPE_DECODE
+    };
+    tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
 }
 
 fn affinity_worker(target: AffinityTarget) -> Option<WorkerWithDpRank> {
@@ -792,6 +889,42 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
 
         assert_send_sync::<RoutingHost<WorkerSelectionPolicy>>();
+        assert_send_sync::<BuiltinRoutingHost>();
+    }
+
+    #[tokio::test]
+    async fn builtin_host_owns_cache_free_picker_state() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("builtin-routing-host".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
+            .await
+            .unwrap();
+        let host = BuiltinRoutingHost::new_builtin(inner).unwrap();
+        let first = host.chooser.select().unwrap();
+        assert_eq!(first.load(), 1);
+        let second = host.chooser.select().unwrap();
+        assert_eq!(second.load(), 2);
+        drop(second);
+        drop(first);
+        let after_completion = host.chooser.select().unwrap();
+        assert_eq!(after_completion.load(), 1);
+
+        drop(after_completion);
+        drop(host);
+        runtime.shutdown();
     }
 
     #[tokio::test]
