@@ -17,13 +17,15 @@ individual flags. For the underlying engine settings, see the
 
 `python -m dynamo.replay` requires exactly one of: positional trace files, or all of
 `--input-tokens`, `--output-tokens`, and `--request-count`. The `dynamo` format accepts one or more
-trace shards. Every other trace format requires exactly one file.
+trace shards. The `weka` format accepts one local JSON file or a directory tree of JSON files. Every
+other trace format requires exactly one file.
 
 ## Workload input
 
 <ParamField path="trace_files" type="positional path(s)" default="null">
-  Input trace path. The `dynamo` format accepts one or more JSONL or JSONL.GZ shards. Other formats
-  accept one JSONL file. Mutually exclusive with the synthetic-workload flags below.
+  Input trace path. The `dynamo` format accepts one or more JSONL or JSONL.GZ shards. The `weka`
+  format accepts one JSON file or one directory. Other formats accept one JSONL file. Mutually
+  exclusive with the synthetic-workload flags below.
 </ParamField>
 
 <ParamField path="--input-tokens" type="integer" default="null">
@@ -43,7 +45,7 @@ trace shards. Every other trace format requires exactly one file.
 <ParamField path="--trace-format" type="string" default="mooncake">
   Trace parser.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>mooncake</Badge> <Badge intent="note" minimal>mooncake-delta</Badge> <Badge intent="note" minimal>agentic_mooncake</Badge> <Badge intent="note" minimal>applied_compute_agentic</Badge> <Badge intent="note" minimal>dynamo</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>mooncake</Badge> <Badge intent="note" minimal>mooncake-delta</Badge> <Badge intent="note" minimal>agentic_mooncake</Badge> <Badge intent="note" minimal>weka</Badge> <Badge intent="note" minimal>applied_compute_agentic</Badge> <Badge intent="note" minimal>dynamo</Badge></span>
 </ParamField>
 
 <ParamField path="--trace-block-size" type="integer" default="512">
@@ -119,22 +121,76 @@ then applies `delay`, `delay_ms`, or the timestamp delta between consecutive row
 
 ### Agentic Mooncake traces
 
-Set `--trace-format agentic_mooncake` to model request-level dependencies. Each row requires a stable
-`request_id` and can include:
+**Experimental.** Set `--trace-format agentic_mooncake` to model request-level causal dependencies.
+Agentic Mooncake v2 is a breaking schema transition: replay rejects legacy, headerless, mixed-version,
+and unknown-version files.
+
+The first JSONL record is a header:
+
+```json
+{"schema":"dynamo.agentic_mooncake","version":2,"block_size":64,"hash_id_scope":"local","source":{"format":"weka","digest":"<corpus-digest>"}}
+```
+
+Each following row requires:
 
 | Field | Description |
 |---|---|
-| `wait_for` | Request IDs that must complete before this request starts |
-| `branches` | Child request IDs spawned by this request |
-| `prefix_reset` | Marks the first row in a session |
-| `delay` | Additional delay after dependencies complete |
-| `tool_wait_ms` | Simulated tool-execution delay |
+| `request_id` | Globally unique authored request ID |
+| `play_id` | Nonempty trajectory or play ID |
+| `session_id` | Request stream ID within the play |
+| `model` | Nonempty model identity |
+| `input_length` | Exact prompt token count |
+| `output_length` | Requested output token count |
+| `hash_ids` | Exactly `ceil(input_length / block_size)` local block IDs |
+| `not_before_ms` | Earliest request eligibility relative to the play clock |
+| `dependencies` | Typed incoming dependency records |
 
-Rows without `wait_for` use their timestamp as the start time. Rows with dependencies wait for all
-listed requests and then apply `delay + tool_wait_ms`.
+Each dependency contains a predecessor `request_id`, a `trigger` of `dispatch` or `completion`, a
+nonnegative `delay_ms`, and a `relation` of `sequence`, `spawn`, `join`, or `replay_barrier`.
+Readiness is the maximum of `not_before_ms` and every incoming trigger time plus delay. A successful
+logical completion fires completion edges. A rejected, canceled, or failed request makes its play
+incomplete and skips descendants that have not been emitted.
 
-Agentic Mooncake is an input format for externally authored Mooncake-compatible traces. It is not an
-intermediate representation for Dynamo request traces.
+Agentic Mooncake is a wire format. Replay validates it into an internal graph before execution. The
+report records source provenance and the canonical graph digest separately.
+
+### Weka traces
+
+**Experimental.** Set `--trace-format weka` to import one local Weka file or a recursively traversed
+directory. The importer sorts normalized relative paths, computes a corpus digest, namespaces local
+request/play/hash identity by source path, and rejects symlinks, mixed block sizes, mixed request
+models, ambiguous explicit-subagent ownership, unsupported subagent states, and blocking subagents
+with no replayable requests.
+
+The importer maps sequential turns to completion edges. It maps an overlapping subagent to a parent
+dispatch edge and a post-completion subagent to a parent completion edge. Blocking results join only
+the owning parent stream; `async_launched` work remains background. Timestamp-inferred cross-stream
+ordering uses `replay_barrier`, not a causal join.
+
+Replay Weka directly:
+
+```bash
+.venv/bin/python -m dynamo.replay traces/weka-agentx \
+  --trace-format weka \
+  --agentic-lanes 12 \
+  --replay-mode offline \
+  --router-mode kv_router \
+  --num-workers 4 \
+  --extra-engine-args '{"block_size":64}'
+```
+
+To persist the validated wire representation, build the feature-gated converter:
+
+```bash
+cargo run -p dynamo-bench \
+  --features weka-to-agentic-mooncake \
+  --bin weka_to_agentic_mooncake -- \
+  --input traces/weka-agentx \
+  --output /tmp/agentic-mooncake-v2.jsonl
+```
+
+The converter fails unless direct Weka ingestion and reparsed v2 produce the same canonical graph.
+Weka remains an input format; Dynamo does not integrate with the AIPerf runtime or export Weka.
 
 ### Dynamo request traces
 
@@ -179,7 +235,14 @@ the simulated engine `block_size`.
 
 <ParamField path="--replay-concurrency" type="integer" default="null">
   Closed-loop concurrency cap. Ignores first-turn trace arrival timing and keeps a fixed number of
-  requests in flight. Works with both trace-file and synthetic workloads.
+  requests in flight. Works with non-agentic trace-file and synthetic workloads. Agentic traces use
+  `--agentic-lanes` and reject this flag.
+</ParamField>
+
+<ParamField path="--agentic-lanes" type="integer" default="null">
+  Positive fixed-lane count for `agentic_mooncake`, `weka`, or fully agentic `dynamo` traces. Replay
+  stable-sorts plays, assigns them to lanes by stride, starts the first play in each lane at zero,
+  and starts the next play only after the previous play is quiescent. Lanes do not steal work.
 </ParamField>
 
 <ParamField path="--arrival-speedup-ratio" type="float" default="1.0">
@@ -331,10 +394,14 @@ Additional offline constraints:
 - aggregated offline mode uses the shared event loop for one or more workers and supports
   flat request runs and workload-driven multi-turn runs for `vllm`, `sglang`, and `trtllm`
 - offline disaggregated simulation is a separate two-stage runtime with prefill and decode worker pools
+- `agentic_mooncake`, `weka`, and fully agentic `dynamo` traces support aggregated and disaggregated
+  offline replay
+- agentic planner/scaling replay and `replay_concurrency` are unsupported
 
 Additional online constraints:
 
-- the current live simulation path is also limited to aggregated workers
+- agentic online mock replay supports aggregated workers only
+- online P/D and standalone AISimulate Weka ingestion are unsupported
 
 ## Report schema
 
@@ -348,6 +415,8 @@ The report — and the equivalent Python APIs `dynamo.replay.run_trace_replay(..
 - prefix cache reuse ratio
 - TTFT, TTST, TPOT, ITL, and end-to-end latency summaries
 - output-token-throughput-per-user summaries
+- trajectory total, completed, and incomplete counts
+- trajectory end-to-end latency mean, p50, p90, p95, p99, and maximum
 
 ## Related pages
 
