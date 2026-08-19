@@ -432,9 +432,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&  \
-    git checkout $NIXL_UCX_REF &&	 \
+    git clone --depth 1 --branch "${NIXL_UCX_REF}" https://github.com/openucx/ucx.git && \
+    cd ucx && \
     # The intel/llm-scaler xe-GDR patch (ucx-v1.12.0.patch) is upstream since
     # UCX v1.21.0 (ib_md.c xe srcversion check, ze_copy_md.c HOST bit); restore
     # the fetch + git apply for DEVICE=xpu if this ref ever drops below v1.21.0.
@@ -500,9 +499,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone "${NIXL_LIBFABRIC_REPO}" && \
+    git clone --depth 1 --branch "${NIXL_LIBFABRIC_REF}" "${NIXL_LIBFABRIC_REPO}" && \
     cd libfabric && \
-    git checkout $NIXL_LIBFABRIC_REF && \
     ./autogen.sh && \
     ./configure --prefix="/usr/local/libfabric" \
                 --disable-verbs \
@@ -534,7 +532,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env cmake); \
     fi && \
-    git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
+    git clone --recurse-submodules --shallow-submodules --depth 1 --branch "${AWS_SDK_CPP_VERSION}" \
         https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
     mkdir -p /tmp/aws-sdk-cpp/build && \
     cd /tmp/aws-sdk-cpp/build && \
@@ -736,9 +734,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone "https://github.com/ai-dynamo/nixl.git" && \
+    git clone --depth 1 --branch "${NIXL_REF}" \
+        https://github.com/ai-dynamo/nixl.git nixl && \
     cd nixl && \
-    git checkout ${NIXL_REF} && \
     if [ "$DEVICE" = "cuda" ]; then \
         PKG_NAME="nixl-cu${CUDA_MAJOR}"; \
     else \
