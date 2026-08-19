@@ -391,7 +391,8 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # No `import PyNvVideoCodec` smoke test here, deliberately. Unlike nvidia.dali it
 # dlopens libnvcuvid and needs NVIDIA_DRIVER_CAPABILITIES to include "video",
 # which the builder does not have, so an import check would fail every build.
-RUN set -eu; \
+RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
+    set -eu; \
     before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none); \
     echo "PyNvVideoCodec in base image: $before"; \
     if [ "$before" = "none" ]; then \
@@ -429,11 +430,17 @@ RUN set -eu; \
     [ "$examined" -gt 0 ] \
         || { echo "ERROR: found no FFmpeg libraries under PyNvVideoCodec to examine;" >&2; \
              echo "       the package layout changed and this check went blind." >&2; exit 1; }; \
-    vv=$(/opt/dynamo/venv/bin/python -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none); \
-    echo "PyNvVideoCodec in /opt/dynamo/venv: $vv"; \
-    [ "$vv" != none ] \
-        || { echo "ERROR: no PyNvVideoCodec in /opt/dynamo/venv; requirements.trtllm.txt" >&2; \
-             echo "       should have installed one." >&2; exit 1; }; \
+    vvd=$(find /opt/dynamo/venv/lib/python3*/site-packages -maxdepth 1 \
+            -name 'pynvvideocodec-*.dist-info' 2>/dev/null | head -1); \
+    vv=$(basename "${vvd:-}" .dist-info); vv=${vv#pynvvideocodec-}; \
+    echo "PyNvVideoCodec in /opt/dynamo/venv: ${vv:-none}"; \
+    [ -n "$vv" ] \
+        || { echo "ERROR: no venv-local PyNvVideoCodec under /opt/dynamo/venv;" >&2; \
+             echo "       requirements.trtllm.txt should have installed one. Read the" >&2; \
+             echo "       dist-info directly, not via the venv interpreter: the venv is" >&2; \
+             echo "       --system-site-packages, so the interpreter would resolve the" >&2; \
+             echo "       system copy this stage just upgraded and always look correct." >&2; \
+             exit 1; }; \
     [ "$(printf '%s\n2.2.0\n' "$vv" | sort -V | head -1)" = "2.2.0" ] \
         || { echo "ERROR: venv PyNvVideoCodec $vv is below the 2.2.0 floor while the" >&2; \
              echo "       system copy is $v -- the two specifiers have drifted apart." >&2; \
