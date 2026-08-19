@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo, hash_mm_identifier};
 
 use super::types::ExtraKeyItem;
 
@@ -60,7 +60,9 @@ pub fn extra_keys_to_cache_namespace(
 /// - None => no MM content in that block
 /// - ["hash1", "hash2", ...] => one or more MM objects in that block
 /// - [[hash, start_offset], ...] => one or more MM objects with block-relative
-///   start offsets (vLLM 0.19+)
+///   start offsets (vLLM 0.19+). Offset-bearing keys are unambiguously MM, so
+///   they may use opaque renderer identifiers; bare strings remain restricted
+///   to canonical vLLM digests because they can also be LoRA/cache metadata.
 pub fn extra_keys_to_block_mm_infos(
     extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>>,
 ) -> Option<Vec<Option<BlockExtraInfo>>> {
@@ -76,11 +78,9 @@ pub fn extra_keys_to_block_mm_infos(
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|key| match key {
-                    ExtraKeyItem::Hash(hash)
-                    | ExtraKeyItem::HashWithSignedOffset((hash, _))
-                    | ExtraKeyItem::HashWithUnsignedOffset((hash, _)) => {
-                        parse_mm_hash_from_extra_key(hash)
-                    }
+                    ExtraKeyItem::Hash(hash) => parse_mm_hash_from_extra_key(hash),
+                    ExtraKeyItem::HashWithSignedOffset((hash, _))
+                    | ExtraKeyItem::HashWithUnsignedOffset((hash, _)) => hash_mm_identifier(hash),
                     ExtraKeyItem::Bytes(_)
                     | ExtraKeyItem::Signed(_)
                     | ExtraKeyItem::Unsigned(_)
