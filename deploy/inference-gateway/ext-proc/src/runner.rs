@@ -18,6 +18,7 @@ use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_
 use dynamo_kv_router::services::selection::{SelectionService, WorkerSelectionPolicyRegistry};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 
 use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, Selector, metrics};
 
@@ -28,6 +29,12 @@ const HEALTH_SERVICE_NAME: &str = "inference-extension";
 /// connection flood from exhausting fds / memory. Tuned for an inference EPP
 /// where a single Envoy upstream typically holds <100 concurrent streams.
 const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+/// Grace period after a shutdown signal before the server stops accepting new
+/// connections, so in-flight ext_proc streams can drain (the gateway stops
+/// routing to this EPP as soon as health flips to NOT_SERVING). Configurable
+/// via `DYN_EPP_SHUTDOWN_GRACE_MS`.
+const DEFAULT_SHUTDOWN_GRACE_MS: u64 = 5_000;
+const SHUTDOWN_GRACE_ENV: &str = "DYN_EPP_SHUTDOWN_GRACE_MS";
 /// Max time to wait for the TLS handshake to complete before dropping the
 /// connection. Without this, a client that finishes the TCP connect but
 /// stalls the TLS handshake holds a connection-limit permit indefinitely;
@@ -219,6 +226,23 @@ fn init_tracing() {
         .try_init();
 }
 
+/// Wait for SIGTERM (kubelet pod termination) or SIGINT (Ctrl-C).
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 async fn run_inner(
     mode: EppMode,
     standalone_selection_service: StandaloneSelectionService,
@@ -263,6 +287,29 @@ async fn run_inner(
         });
     }
 
+    // Graceful shutdown: on SIGTERM/SIGINT, flip health to NOT_SERVING (the
+    // gateway stops routing new requests to this EPP), let in-flight ext_proc
+    // streams drain for a bounded grace period, then stop accepting and let
+    // the process exit cleanly (destructors stop the peer discovery, ZMQ
+    // listeners, and replica-sync tasks).
+    let shutdown = CancellationToken::new();
+    {
+        let health_reporter = health_reporter.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            wait_for_shutdown_signal().await;
+            tracing::info!("Shutdown signal received; draining in-flight requests");
+            health_reporter
+                .set_service_status(HEALTH_SERVICE_NAME, tonic_health::ServingStatus::NotServing)
+                .await;
+            let grace_ms = parse_env(SHUTDOWN_GRACE_ENV, DEFAULT_SHUTDOWN_GRACE_MS);
+            tracing::info!(grace_ms, "EPP health set to NOT_SERVING; draining");
+            tokio::time::sleep(std::time::Duration::from_millis(grace_ms)).await;
+            shutdown.cancel();
+            tracing::info!("EPP graceful shutdown complete");
+        });
+    }
+
     if standalone {
         let selector_cfg = EppStandaloneConfig::from_env()?;
         tracing::info!(
@@ -294,7 +341,13 @@ async fn run_inner(
             }
         });
         let ready_router = router.clone();
-        serve(router, move || ready_router.is_ready(), health_reporter).await
+        serve(
+            router,
+            move || ready_router.is_ready(),
+            health_reporter,
+            shutdown,
+        )
+        .await
     } else {
         tracing::info!("Initializing KV-aware router from discovery...");
         let router = Router::from_discovery(&config.namespace, &config.component).await?;
@@ -304,6 +357,7 @@ async fn run_inner(
             Arc::new(router),
             move || ready.load(std::sync::atomic::Ordering::Acquire),
             health_reporter,
+            shutdown,
         )
         .await
     }
@@ -315,6 +369,7 @@ async fn serve<P: crate::EndpointPicker>(
     picker: Arc<P>,
     is_ready: impl Fn() -> bool + Send + 'static,
     health_reporter: tonic_health::server::HealthReporter,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     // Continuously mirror readiness onto the health status. `is_ready()` is a
     // *live* signal that can flip both ways — standalone discovery clears it when
@@ -368,9 +423,16 @@ async fn serve<P: crate::EndpointPicker>(
 
         loop {
             // Acquire permit before accept() so we backpressure the listener
-            // instead of accepting and immediately dropping connections.
-            let permit = conn_semaphore.clone().acquire_owned().await?;
-            let (tcp_stream, remote_addr) = listener.accept().await?;
+            // instead of accepting and immediately dropping connections. Stop
+            // accepting once the shutdown grace period has elapsed.
+            let permit = tokio::select! {
+                _ = shutdown.cancelled() => break,
+                permit = conn_semaphore.clone().acquire_owned() => permit?,
+            };
+            let (tcp_stream, remote_addr) = tokio::select! {
+                _ = shutdown.cancelled() => break,
+                accepted = listener.accept() => accepted?,
+            };
             let tls_acceptor = tls_acceptor.clone();
             let svc = svc.clone();
 
@@ -409,11 +471,12 @@ async fn serve<P: crate::EndpointPicker>(
                 }
             });
         }
+        Ok(())
     } else {
         tracing::info!(%addr, "Listening for ext_proc connections (plaintext h2)");
         tonic::transport::Server::builder()
             .add_service(server.into_service())
-            .serve(addr)
+            .serve_with_shutdown(addr, shutdown.cancelled_owned())
             .await?;
         Ok(())
     }
