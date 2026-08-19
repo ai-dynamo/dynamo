@@ -108,6 +108,11 @@ reference.
 Requests and KV-cache data move between components over the request plane (TCP,
 and the NIXL/RDMA fabric for data transfer).
 
+> [!NOTE]
+> Mutual TLS for the TCP request plane and NATS is available once transport mTLS
+> support lands; the settings below apply from that release onward. Until then,
+> keep the request plane on the trusted network.
+
 - Enable **mutual TLS (mTLS)** on the TCP request plane and NATS so both ends of
   every connection authenticate. A server configured with a client CA
   (`DYN_TCP_TLS_CLIENT_CA_CERT_PATH`) rejects any client that does not present a
@@ -204,7 +209,7 @@ Set restrictive values in your production manifests.
 | `ETCD_AUTH_USERNAME` / `ETCD_AUTH_PASSWORD` | etcd username/password authentication | unset |
 | `ETCD_AUTH_CA` / `ETCD_AUTH_CLIENT_CERT` / `ETCD_AUTH_CLIENT_KEY` | etcd mutual TLS | unset |
 
-**Event and request planes**
+**Event and request planes** — *available once transport mTLS support lands*
 
 | Setting | Purpose | Default |
 |---------|---------|---------|
