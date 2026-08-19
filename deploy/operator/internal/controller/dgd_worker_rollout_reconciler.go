@@ -369,7 +369,7 @@ func activeWorkerHashCandidates(
 	candidates := make([]string, 0, 2)
 	generated := workerHashForDCDGeneration(current, desired)
 
-	// Restart an active v1-only rollout under its canonical v2 generation.
+	// Retarget an active v1-only rollout to its canonical v2 generation.
 	if current.v1Only() && isRollingUpdateInProgress(&dgd.Status) {
 		generated = desired.v2
 	}
