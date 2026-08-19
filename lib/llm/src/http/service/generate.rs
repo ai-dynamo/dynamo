@@ -369,6 +369,41 @@ fn generate_mm_routing_info(
         }
     }
 
+    // The worker discovers multimodal runs by scanning for its resolved image
+    // token. Infer that token from the declared embed positions and require the
+    // declarations to cover every occurrence. Otherwise an undeclared image
+    // token can shift the worker's run-to-object alignment away from the
+    // request-side projection.
+    let mut image_token_id = None;
+    let mut declared_image_tokens = 0;
+    for (offset, end, _, is_embed) in &ranges {
+        for position in *offset..*end {
+            let should_embed = is_embed
+                .as_ref()
+                .is_none_or(|mask| mask[position - *offset]);
+            if !should_embed {
+                continue;
+            }
+
+            let token_id = request.token_ids[position];
+            if image_token_id.is_some_and(|expected| expected != token_id) {
+                return Err("multimodal embed positions must share an image token");
+            }
+            image_token_id = Some(token_id);
+            declared_image_tokens += 1;
+        }
+    }
+    if let Some(image_token_id) = image_token_id
+        && request
+            .token_ids
+            .iter()
+            .filter(|token_id| **token_id == image_token_id)
+            .count()
+            != declared_image_tokens
+    {
+        return Err("image tokens must be covered by multimodal placeholder ranges");
+    }
+
     // vLLM's current event normalizer associates MM objects with contiguous
     // image-token runs by order, clamping excess runs to the last object in a
     // block. A sparse mask can split one object into multiple runs, so verify
@@ -477,7 +512,6 @@ fn preprocessed_from_generate(
     data_parallel_rank: Option<u32>,
     request_id: &str,
     kv_cache_block_size: u32,
-    supports_exact_mm_routing: bool,
     lora_name: Option<String>,
 ) -> anyhow::Result<PreprocessedRequest> {
     let sampling = &request.sampling_params;
@@ -489,22 +523,18 @@ fn preprocessed_from_generate(
     // and connector stay on base weights, so MM identifiers are adapter-invariant.
     // `lora_name` separately salts the LM KV hashes below, allowing exact MM+LoRA
     // routing. If tower/connector LoRA is enabled, vLLM scopes MM identifiers by
-    // adapter; that worker capability is not advertised here, so this projection
-    // can miss the correct MM cache owner (suboptimal routing, not unsafe reuse).
-    let mm_routing_info = if supports_exact_mm_routing {
-        match generate_mm_routing_info(&request, kv_cache_block_size) {
-            Ok(info) => info,
-            Err(reason) => {
-                tracing::debug!(
-                    target: "mm_routing",
-                    reason,
-                    "invalid /generate multimodal routing metadata; using token-only routing"
-                );
-                None
-            }
+    // adapter; without a worker capability handshake, this projection can miss
+    // the correct MM cache owner (suboptimal routing, not unsafe reuse).
+    let mm_routing_info = match generate_mm_routing_info(&request, kv_cache_block_size) {
+        Ok(info) => info,
+        Err(reason) => {
+            tracing::debug!(
+                target: "mm_routing",
+                reason,
+                "invalid /generate multimodal routing metadata; using token-only routing"
+            );
+            None
         }
-    } else {
-        None
     };
     let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
     let GenerateRequest {
@@ -606,7 +636,6 @@ async fn handler_generate(
         engine,
         kv_cache_block_size,
         lora_name,
-        supports_exact_mm_routing,
     } = match state
         .manager()
         .get_generate_engine_for_capability_with_routing(
@@ -632,7 +661,6 @@ async fn handler_generate(
         request_context.data_parallel_rank,
         &request_context.request_id,
         kv_cache_block_size,
-        supports_exact_mm_routing,
         lora_name,
     ) {
         Ok(preprocessed) => preprocessed,
@@ -1148,16 +1176,9 @@ mod tests {
         let request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize request");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            16,
-            false,
-            None,
-        )
-        .expect("build request");
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request", 16, None)
+                .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -1272,7 +1293,7 @@ mod tests {
         let hash_a = "a".repeat(64);
         let hash_b = "b".repeat(64);
         let raw = serde_json::json!({
-            "token_ids": [10, 11, 12, 12, 12, 15, 16, 17, 17, 19],
+            "token_ids": [10, 11, 12, 12, 12, 15, 16, 12, 12, 19],
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": [hash_a, hash_b]},
@@ -1286,16 +1307,9 @@ mod tests {
         let request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize request");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            4,
-            true,
-            None,
-        )
-        .expect("build request");
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request", 4, None)
+                .expect("build request");
 
         let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xaaaaaaaaaaaaaaaa);
         let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xbbbbbbbbbbbbbbbb);
@@ -1312,7 +1326,7 @@ mod tests {
 
         assert_eq!(
             preprocessed.token_ids,
-            vec![10, 11, 12, 12, 12, 15, 16, 17, 17, 19]
+            vec![10, 11, 12, 12, 12, 15, 16, 12, 12, 19]
         );
         let envelope = preprocessed
             .extra_args
@@ -1320,33 +1334,6 @@ mod tests {
             .and_then(|extra| extra.get("vllm_tito"))
             .expect("vllm_tito envelope");
         assert_eq!(envelope["features"], raw["features"]);
-    }
-
-    #[test]
-    fn multimodal_routing_requires_worker_capability() {
-        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-            "token_ids": [10, 99, 99, 20],
-            "sampling_params": {},
-            "features": {
-                "mm_hashes": {"image": ["opaque-image"]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
-            }
-        }))
-        .expect("deserialize request");
-
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            4,
-            false,
-            None,
-        )
-        .expect("unsupported workers must retain token-only routing");
-
-        assert!(preprocessed.mm_routing_info.is_none());
-        assert_eq!(preprocessed.token_ids, vec![10, 99, 99, 20]);
     }
 
     #[test]
@@ -1440,6 +1427,25 @@ mod tests {
     }
 
     #[test]
+    fn undeclared_image_token_disables_exact_routing() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [99, 10, 99, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-0"]},
+                "mm_placeholders": {"image": [{"offset": 2, "length": 2}]}
+            }
+        }))
+        .expect("deserialize request");
+
+        assert_eq!(
+            generate_mm_routing_info(&request, 5)
+                .expect_err("an undeclared image token must not shift worker run alignment"),
+            "image tokens must be covered by multimodal placeholder ranges"
+        );
+    }
+
+    #[test]
     fn sparse_multi_object_block_disables_inexact_projection() {
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [10, 99, 42, 99, 20, 99, 30],
@@ -1479,16 +1485,9 @@ mod tests {
         let request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize request");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            4,
-            true,
-            None,
-        )
-        .expect("malformed routing metadata must not reject execution");
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request", 4, None)
+                .expect("malformed routing metadata must not reject execution");
 
         assert!(preprocessed.mm_routing_info.is_none());
         assert_eq!(preprocessed.token_ids, vec![1, 2, 3, 4]);
@@ -1519,7 +1518,6 @@ mod tests {
             None,
             "resolved-request",
             4,
-            true,
             Some("adapter-a".to_string()),
         )
         .expect("build request");
@@ -1661,16 +1659,9 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            16,
-            false,
-            None,
-        )
-        .expect("build request");
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request", 16, None)
+                .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, None);
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -1691,16 +1682,9 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            16,
-            false,
-            None,
-        )
-        .expect("build request");
+        let preprocessed =
+            preprocessed_from_generate(request, "test-model", None, "resolved-request", 16, None)
+                .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
     }
 
@@ -1911,7 +1895,6 @@ mod tests {
             Some(3),
             "resolved-request",
             16,
-            false,
             None,
         )
         .expect("build request");
