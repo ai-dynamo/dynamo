@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerWithDpRank},
@@ -25,6 +25,7 @@ use crate::{
         to_worker_selection_session_context,
     },
     local_model::runtime_config::ModelRuntimeConfig,
+    lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
@@ -43,7 +44,7 @@ mod selection;
 
 use cancellation::cancel_on_stop;
 pub(crate) use load::RoutingLoadState;
-use request_guard::RequestGuard;
+use request_guard::{LoraLoadGuard, RequestGuard};
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
@@ -136,27 +137,33 @@ where
 /// First-party policies selected without a KV-cache index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuiltinRoutingPolicy {
+    Direct,
     RoundRobin,
     Random,
     PowerOfTwoChoices,
     LeastLoaded,
+    DeviceAwareWeighted,
 }
 
 impl BuiltinRoutingPolicy {
     pub fn from_router_mode(mode: RouterMode) -> Option<Self> {
         match mode {
+            RouterMode::Direct => Some(Self::Direct),
             RouterMode::RoundRobin => Some(Self::RoundRobin),
             RouterMode::Random => Some(Self::Random),
             RouterMode::PowerOfTwoChoices => Some(Self::PowerOfTwoChoices),
             RouterMode::LeastLoaded => Some(Self::LeastLoaded),
-            _ => None,
+            RouterMode::DeviceAwareWeighted => Some(Self::DeviceAwareWeighted),
+            RouterMode::KV => None,
         }
     }
 
     pub const fn required_worker_inputs(self) -> WorkerInputs {
         match self {
-            Self::RoundRobin | Self::Random => WorkerInputs::NONE,
-            Self::PowerOfTwoChoices | Self::LeastLoaded => WorkerInputs::LOAD,
+            Self::Direct | Self::RoundRobin | Self::Random => WorkerInputs::NONE,
+            Self::PowerOfTwoChoices | Self::LeastLoaded | Self::DeviceAwareWeighted => {
+                WorkerInputs::LOAD
+            }
         }
     }
 }
@@ -167,6 +174,17 @@ where
 {
     Kv(Arc<KvRouter<Sel>>),
     Builtin(BuiltinRoutingPolicy),
+}
+
+struct LoraRouting {
+    filter: Arc<LoraFilter>,
+    load_estimator: Arc<LoadEstimator>,
+}
+
+struct LoraSelection {
+    target: u64,
+    allowed_fallback: HashSet<u64>,
+    load_guard: LoraLoadGuard,
 }
 
 /// Owns request routing from worker selection through response cleanup.
@@ -183,6 +201,7 @@ where
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
     load_state: Option<Arc<RoutingLoadState>>,
+    lora: Option<LoraRouting>,
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
@@ -221,13 +240,27 @@ where
             request_metrics,
             affinity,
             load_state: None,
+            lora: None,
         }
     }
 
-    pub(crate) fn new_builtin_with_load(
+    pub(crate) fn new_builtin_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         load_state: Option<Arc<RoutingLoadState>>,
+        affinity: Option<AffinityCoordinator>,
     ) -> Result<Self, Error> {
+        Self::new_builtin_with_capabilities(inner, load_state, affinity, None)
+    }
+
+    pub(crate) fn new_builtin_with_capabilities(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        load_state: Option<Arc<RoutingLoadState>>,
+        affinity: Option<AffinityCoordinator>,
+        lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
+    ) -> Result<Self, Error> {
+        if affinity.is_some() && lora.is_some() {
+            anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");
+        }
         let policy =
             BuiltinRoutingPolicy::from_router_mode(inner.router_mode()).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -240,14 +273,26 @@ where
             needs_load == load_state.is_some(),
             "{policy:?} routing requires LOAD capability: {needs_load}"
         );
+        if lora.is_some()
+            && !matches!(
+                policy,
+                BuiltinRoutingPolicy::RoundRobin | BuiltinRoutingPolicy::Random
+            )
+        {
+            anyhow::bail!("LoRA filtering is unsupported with {policy:?} routing");
+        }
         let request_metrics =
             RouterRequestMetrics::from_component(inner.client.endpoint.component());
         Ok(Self {
             inner,
             plane: RoutingPlane::Builtin(policy),
             request_metrics,
-            affinity: None,
+            affinity,
             load_state,
+            lora: lora.map(|(filter, load_estimator)| LoraRouting {
+                filter,
+                load_estimator,
+            }),
         })
     }
 
@@ -590,6 +635,105 @@ where
         );
     }
 
+    fn select_lora_target(
+        &self,
+        request: &PreprocessedRequest,
+    ) -> Result<Option<LoraSelection>, Error> {
+        let Some(lora) = self.lora.as_ref() else {
+            return Ok(None);
+        };
+        let Some(lora_name) = request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.lora_name.clone())
+        else {
+            return Ok(None);
+        };
+        let load_guard = LoraLoadGuard::new(Arc::clone(&lora.load_estimator), lora_name.clone());
+        let routable = self.inner.client.instance_ids_avail();
+        let candidates = lora
+            .filter
+            .filter_worker_ids_for_lora(Some(&lora_name), &routable);
+        if candidates.is_empty() {
+            anyhow::bail!("No workers available after LoRA filtering (lora={lora_name})");
+        }
+
+        let free = self
+            .inner
+            .client
+            .instance_ids_free()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let candidates = candidates
+            .into_iter()
+            .filter(|worker_id| free.contains(worker_id))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message(format!(
+                        "All eligible LoRA workers are overloaded (lora={lora_name})"
+                    ))
+                    .build()
+            ));
+        }
+        let target = self.inner.select_from_candidates(&candidates)?;
+        tracing::debug!(
+            lora = %lora_name,
+            worker_id = target,
+            candidates = candidates.len(),
+            routable = routable.len(),
+            free = free.len(),
+            "LoRA-filtered router selected worker"
+        );
+        Ok(Some(LoraSelection {
+            target,
+            allowed_fallback: candidates.into_iter().collect(),
+            load_guard,
+        }))
+    }
+
+    async fn builtin_affinity_target(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        explicit: Option<AffinityTarget>,
+        is_query_only: bool,
+    ) -> Result<(Option<AffinityTarget>, Option<AffinityAcquire>), Error> {
+        let Some(affinity) = self.affinity.as_ref() else {
+            return Ok((explicit, None));
+        };
+        let Some(session_id) = affinity_id(request)? else {
+            return Ok((explicit, None));
+        };
+        if is_query_only {
+            let target = affinity.query_target(&session_id, explicit)?.or(explicit);
+            return Ok((target, None));
+        }
+
+        let request_context = request.context();
+        let operation = affinity
+            .acquire_with_context(&session_id, explicit, request_context.as_ref())
+            .await?;
+        let Some(target) = operation.target() else {
+            return Ok((explicit, Some(operation)));
+        };
+        if self
+            .inner
+            .client
+            .instance_ids_avail()
+            .contains(&target.worker_id)
+        {
+            return Ok((Some(target), Some(operation)));
+        }
+
+        operation.invalidate();
+        let retry = affinity
+            .acquire_with_context(&session_id, explicit, request_context.as_ref())
+            .await?;
+        Ok((retry.target().or(explicit), Some(retry)))
+    }
+
     async fn select_and_dispatch_builtin<M, F>(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
@@ -608,7 +752,30 @@ where
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(&request, phase)?;
-        let (initial_worker, load_reservation) = if required_inputs.contains(WorkerInputs::LOAD) {
+        if policy == BuiltinRoutingPolicy::Direct && explicit.is_none() {
+            anyhow::bail!("worker ID required for {phase} request in Direct routing mode");
+        }
+        let lora_selection = self.select_lora_target(request.content())?;
+        let affinity_explicit = if lora_selection.is_some() {
+            None
+        } else {
+            explicit
+        };
+        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+        let (pinned_target, mut operation) = self
+            .builtin_affinity_target(&request, affinity_explicit, is_query_only)
+            .await?;
+        let (lora_target, lora_fallback, lora_load) = match lora_selection {
+            Some(selection) => (
+                Some(selection.target),
+                Some(selection.allowed_fallback),
+                Some(selection.load_guard),
+            ),
+            None => (None, None, None),
+        };
+        let (initial_worker, load_reservation) = if let Some(target) = lora_target {
+            (target, None)
+        } else if required_inputs.contains(WorkerInputs::LOAD) {
             let load_state = self
                 .load_state
                 .as_ref()
@@ -617,22 +784,33 @@ where
                 &self.inner,
                 request.context().id(),
                 request.content(),
-                explicit.map(|target| (target.worker_id, target.dp_rank)),
-            )?;
-            (reservation.worker().worker_id, Some(reservation))
+                pinned_target.map(|target| (target.worker_id, target.dp_rank)),
+            );
+            match reservation {
+                Ok(reservation) => (reservation.worker().worker_id, Some(reservation)),
+                Err(error) => {
+                    invalidate_on_non_cancellation(&mut operation, &error);
+                    return Err(error);
+                }
+            }
         } else {
-            let worker_id = match explicit {
-                Some(target) => target.worker_id,
-                None => self.inner.select_next_worker().ok_or_else(|| {
-                    anyhow::anyhow!("no eligible worker available for {policy:?} routing")
-                })?,
-            };
-            (worker_id, None)
+            let selection = self
+                .inner
+                .select_policy_target(pinned_target.map(|target| target.worker_id))
+                .map(|target| (target, None));
+            match selection {
+                Ok(selection) => selection,
+                Err(error) => {
+                    invalidate_on_non_cancellation(&mut operation, &error);
+                    return Err(error);
+                }
+            }
         };
         let mut guard: RequestGuard<Sel> = RequestGuard::new_builtin(
             self.request_metrics.clone(),
             initial_worker,
             load_reservation,
+            lora_load,
             &request,
         );
         let tracker = request.tracker.clone();
@@ -644,12 +822,31 @@ where
 
         guard.start_dispatch(&phase_label);
         guard.record_prefill_start();
-        let dispatch_result = if let Some(target) = explicit {
+        let dispatch_result = if let Some(allowed_fallback) = lora_fallback.as_ref() {
+            cancel_on_stop(
+                request_context.as_ref(),
+                self.inner.direct_within_prepared(
+                    request,
+                    initial_worker,
+                    Some(allowed_fallback),
+                    |request, worker_id| {
+                        guard.retarget_worker(worker_id)?;
+                        let target = AffinityTarget::new(worker_id, None);
+                        request.routing_mut().dp_rank = None;
+                        prepare(request, target).map(|metadata| (metadata, target))
+                    },
+                ),
+            )
+            .await
+            .and_then(|result| result)
+            .map(|((metadata, target), stream)| (metadata, target, stream))
+        } else if let Some(target) = pinned_target {
             request.routing_mut().dp_rank = target.dp_rank;
             let metadata = match prepare(&mut request, target) {
                 Ok(metadata) => metadata,
                 Err(error) => {
                     guard.abort().await;
+                    invalidate_on_non_cancellation(&mut operation, &error);
                     return Err(error);
                 }
             };
@@ -687,6 +884,7 @@ where
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
                 guard.record_migration_failure(typed_error);
                 guard.abort().await;
+                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -700,7 +898,11 @@ where
             tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
         }
         guard.mark_dispatched();
-        Ok((metadata, into_monitored_response(response_stream, guard)))
+        let stream = into_monitored_response(response_stream, guard);
+        let Some(operation) = operation else {
+            return Ok((metadata, stream));
+        };
+        Ok((metadata, operation.into_stream(target, stream)?))
     }
 
     async fn select_and_dispatch_kv_prefill<M, F>(
@@ -966,7 +1168,7 @@ mod tests {
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
         },
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use dynamo_kv_router::{
@@ -991,6 +1193,7 @@ mod tests {
     use crate::{
         http::service::metrics::Metrics,
         local_model::runtime_config::ModelRuntimeConfig,
+        lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
         migration::Migration,
         protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
     };
@@ -1046,6 +1249,14 @@ mod tests {
             BuiltinRoutingPolicy::Random.required_worker_inputs(),
             WorkerInputs::NONE
         );
+        assert_eq!(
+            BuiltinRoutingPolicy::Direct.required_worker_inputs(),
+            WorkerInputs::NONE
+        );
+        assert_eq!(
+            BuiltinRoutingPolicy::DeviceAwareWeighted.required_worker_inputs(),
+            WorkerInputs::LOAD
+        );
     }
 
     #[tokio::test]
@@ -1066,7 +1277,8 @@ mod tests {
             .await
             .unwrap();
         let host =
-            RoutingHost::<DefaultWorkerSelector>::new_builtin_with_load(inner, None).unwrap();
+            RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, None, None)
+                .unwrap();
 
         assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
 
@@ -1089,9 +1301,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_load(
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
             inner,
             Some(load_state.clone()),
+            None,
         )
         .unwrap();
         assert_eq!(host.required_worker_inputs(), WorkerInputs::LOAD);
@@ -1114,12 +1327,283 @@ mod tests {
             Arc::clone(&host.request_metrics),
             worker.worker_id,
             Some(reservation),
+            None,
             &request,
         );
         guard.abort().await;
         assert_eq!(load_state.active_request_count_for_test(worker), 0);
 
         drop(host);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn builtin_lora_capability_filters_candidates_and_tracks_load() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("builtin-lora-capability".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        client.override_instance_avail(vec![worker_id.wrapping_add(1), worker_id]);
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let inner = PushRouter::from_client_with_dispatch(
+            client,
+            RouterMode::RoundRobin,
+            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        )
+        .await
+        .unwrap();
+        let routing_table = LoraRoutingTable::new();
+        routing_table.update_allocation(
+            "adapter".to_string(),
+            LoraReplicaConfig {
+                lora_name: "adapter".to_string(),
+                replica_factor: 1,
+                replica_set: vec![WorkerWithDpRank::new(worker_id, 0)],
+                updated_at: Instant::now(),
+                is_active: true,
+            },
+        );
+        let filter = Arc::new(LoraFilter::new(routing_table, LoraStateTracker::new()));
+        let estimator = Arc::new(LoadEstimator::new());
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_capabilities(
+            inner,
+            None,
+            None,
+            Some((filter, Arc::clone(&estimator))),
+        )
+        .unwrap();
+        let mut request = request();
+        request.routing_mut().lora_name = Some("adapter".to_string());
+
+        let mut stream = host.generate(Context::new(request)).await.unwrap();
+        assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
+        assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+        while stream.next().await.is_some() {}
+        assert!(!estimator.get_inflight_counts().contains_key("adapter"));
+
+        drop(host);
+        runtime.shutdown();
+    }
+
+    #[derive(Default)]
+    struct CompletedBuiltinDispatch {
+        worker_ids: Mutex<Vec<u64>>,
+    }
+
+    #[async_trait]
+    impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
+        for CompletedBuiltinDispatch
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let (addressed, context) = request.transfer(());
+            let (_, _, instance) = addressed.into_parts();
+            self.worker_ids
+                .lock()
+                .unwrap()
+                .push(instance.expect("selected worker instance").id());
+            let output = Annotated::from_data(LLMEngineOutput {
+                finish_reason: Some(FinishReason::Stop),
+                ..Default::default()
+            });
+            Ok(ResponseStream::new(
+                Box::pin(stream::once(async move { output })),
+                context.context(),
+            ))
+        }
+
+        async fn generate_bidirectional(
+            &self,
+            _instance: Instance,
+            _address: String,
+            _input: ManyIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            unreachable!("the routing host dispatches unary requests")
+        }
+    }
+
+    fn affinity_request(
+        session_id: &str,
+        explicit_worker: Option<u64>,
+    ) -> SingleIn<PreprocessedRequest> {
+        let mut content = request();
+        content.routing_mut().backend_instance_id = explicit_worker;
+        let mut request = Context::new(content);
+        request.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new(session_id),
+        );
+        request
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn builtin_affinity_uses_shared_dispatch_and_cleanup_lifecycle() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("builtin-affinity-lifecycle".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+
+        for (index, mode) in [
+            RouterMode::RoundRobin,
+            RouterMode::Random,
+            RouterMode::PowerOfTwoChoices,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+            RouterMode::Direct,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let endpoint = component.endpoint(format!("mode-{index}"));
+            let client = endpoint.client().await.unwrap();
+            endpoint.register_endpoint_instance().await.unwrap();
+            let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+            let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+            let inner = PushRouter::from_client_with_dispatch(
+                client,
+                mode,
+                Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+            )
+            .await
+            .unwrap();
+            let load_state = if BuiltinRoutingPolicy::from_router_mode(mode)
+                .is_some_and(|policy| policy.required_worker_inputs().contains(WorkerInputs::LOAD))
+            {
+                let (_workers_tx, workers) =
+                    watch::channel(HashMap::from([(worker_id, ModelRuntimeConfig::default())]));
+                Some(
+                    RoutingLoadState::start(
+                        endpoint,
+                        16,
+                        workers,
+                        KvRouterConfig::default(),
+                        WORKER_TYPE_DECODE,
+                    )
+                    .await
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
+            let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
+            let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+                inner,
+                load_state.clone(),
+                Some(affinity.clone()),
+            )
+            .unwrap();
+            let session_id = format!("session-{index}");
+            let affinity_id = SessionAffinityId::new(session_id.clone());
+            let expected_target = AffinityTarget::new(worker_id, None);
+            let explicit_worker = (mode == RouterMode::Direct).then_some(worker_id);
+
+            let mut first = host
+                .generate(affinity_request(&session_id, explicit_worker))
+                .await
+                .unwrap();
+            if let Some(load_state) = load_state.as_ref() {
+                assert_eq!(
+                    load_state.active_request_count_for_test(WorkerWithDpRank::new(worker_id, 0)),
+                    1
+                );
+            }
+            while first.next().await.is_some() {}
+            if let Some(load_state) = load_state.as_ref() {
+                assert_eq!(
+                    load_state.active_request_count_for_test(WorkerWithDpRank::new(worker_id, 0)),
+                    0
+                );
+            }
+            assert_eq!(
+                affinity.query_target(&affinity_id, None).unwrap(),
+                Some(expected_target)
+            );
+
+            let mut second = host
+                .generate(affinity_request(&session_id, explicit_worker))
+                .await
+                .unwrap();
+            while second.next().await.is_some() {}
+            if let Some(load_state) = load_state.as_ref() {
+                assert_eq!(
+                    load_state.active_request_count_for_test(WorkerWithDpRank::new(worker_id, 0)),
+                    0
+                );
+            }
+
+            if mode != RouterMode::Direct {
+                let stale_session = format!("stale-{index}");
+                let stale_affinity_id = SessionAffinityId::new(stale_session.clone());
+                let AffinityAcquire::Initialize(initializer) =
+                    affinity.acquire(&stale_affinity_id, None).await.unwrap()
+                else {
+                    panic!("new stale session must initialize");
+                };
+                drop(
+                    initializer
+                        .commit(AffinityTarget::new(worker_id.wrapping_add(1), None))
+                        .unwrap(),
+                );
+                let mut rebound = host
+                    .generate(affinity_request(&stale_session, None))
+                    .await
+                    .unwrap();
+                while rebound.next().await.is_some() {}
+                assert_eq!(
+                    affinity.query_target(&stale_affinity_id, None).unwrap(),
+                    Some(expected_target)
+                );
+            }
+
+            let controller = Controller::new(format!("cancelled-{index}"));
+            controller.stop();
+            let mut cancelled_content = request();
+            cancelled_content.routing_mut().backend_instance_id = explicit_worker;
+            let mut cancelled = Context::with_controller(cancelled_content, controller);
+            cancelled.insert(SESSION_AFFINITY_CONTEXT_KEY, affinity_id.clone());
+            let dispatches_before_cancellation = dispatch.worker_ids.lock().unwrap().len();
+            let mut cancelled_stream = host.generate(cancelled).await.unwrap();
+            assert!(cancelled_stream.next().await.is_none());
+            assert_eq!(
+                dispatch.worker_ids.lock().unwrap().len(),
+                dispatches_before_cancellation + 1
+            );
+            if let Some(load_state) = load_state.as_ref() {
+                assert_eq!(
+                    load_state.active_request_count_for_test(WorkerWithDpRank::new(worker_id, 0)),
+                    0
+                );
+            }
+            assert_eq!(
+                affinity.query_target(&affinity_id, None).unwrap(),
+                Some(expected_target)
+            );
+
+            let worker_ids = dispatch.worker_ids.lock().unwrap();
+            let expected_dispatches = if mode == RouterMode::Direct { 3 } else { 4 };
+            assert_eq!(worker_ids.as_slice(), vec![worker_id; expected_dispatches]);
+        }
+
         runtime.shutdown();
     }
 

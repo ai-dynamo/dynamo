@@ -1224,6 +1224,29 @@ where
         }
     }
 
+    /// Select from a caller-constrained candidate set with this router's
+    /// round-robin or random picker.
+    pub fn select_from_candidates(&self, candidates: &[u64]) -> anyhow::Result<u64> {
+        let picker = match self.router_mode {
+            RouterMode::RoundRobin => self.round_robin_picker.as_ref(),
+            RouterMode::Random => self.random_picker.as_ref(),
+            _ => {
+                anyhow::bail!(
+                    "{:?} routing does not support untracked candidate selection",
+                    self.router_mode
+                )
+            }
+        };
+        picker
+            .select(
+                CandidateView::Workers(candidates),
+                RouteContext::default(),
+                |_| 0,
+            )
+            .map(|decision| decision.target.worker_id)
+            .ok_or_else(|| anyhow::anyhow!("no eligible worker in constrained candidate set"))
+    }
+
     /// Peek the next worker according to the routing mode without incrementing the counter.
     /// Useful for checking if a worker is suitable before committing to it.
     ///
@@ -1320,12 +1343,15 @@ where
     /// The caller remains responsible for admission and request-lifecycle accounting.
     pub fn select_target_with_load(
         &self,
+        request: &T,
         pinned_worker: Option<u64>,
         load: impl Fn(u64) -> u64,
     ) -> anyhow::Result<u64> {
         if !matches!(
             self.router_mode,
-            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
         ) {
             anyhow::bail!("{:?} routing does not consume LOAD", self.router_mode);
         }
@@ -1341,14 +1367,55 @@ where
             return Ok(worker_id);
         }
 
-        self.picker()?
-            .select(
+        let decision = match self.router_mode {
+            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded => self.picker()?.select(
                 CandidateView::Workers(routing_instances.free_ids()),
                 RouteContext::default(),
                 load,
-            )
+            ),
+            RouterMode::DeviceAwareWeighted => {
+                let selection = self.device_aware_candidates(request, routing_instances.free_ids());
+                self.picker()?.select(
+                    CandidateView::DeviceAware(&selection.candidates),
+                    selection.context,
+                    load,
+                )
+            }
+            _ => unreachable!(),
+        };
+        decision
             .map(|decision| decision.target.worker_id)
             .ok_or_else(|| self.empty_free_pool_error(&routing_instances))
+    }
+
+    /// Select a stateless first-party policy target while leaving dispatch to the caller.
+    pub fn select_policy_target(&self, pinned_worker: Option<u64>) -> anyhow::Result<u64> {
+        if let Some(instance_id) = pinned_worker {
+            let routing_instances = self.client.routing_instances();
+            if !routing_instances.routable_ids().contains(&instance_id) {
+                anyhow::bail!(
+                    "instance_id={instance_id} not found for endpoint {}",
+                    self.client.endpoint.id()
+                );
+            }
+            return Ok(instance_id);
+        }
+
+        match self.router_mode {
+            RouterMode::RoundRobin => self
+                .select_untracked_worker(self.round_robin_picker.as_ref())
+                .map(|(instance_id, _)| instance_id),
+            RouterMode::Random => self
+                .select_untracked_worker(self.random_picker.as_ref())
+                .map(|(instance_id, _)| instance_id),
+            RouterMode::Direct => anyhow::bail!("Direct routing requires an exact target"),
+            RouterMode::PowerOfTwoChoices
+            | RouterMode::LeastLoaded
+            | RouterMode::DeviceAwareWeighted => {
+                anyhow::bail!("{:?} routing requires caller-owned LOAD", self.router_mode)
+            }
+            RouterMode::KV => anyhow::bail!("KV routing requires KV-aware selection"),
+        }
     }
 
     async fn select_exact_target(
@@ -1734,9 +1801,7 @@ where
                 anyhow::bail!("KV routing should not call generate on PushRouter");
             }
             RouterMode::Direct => {
-                anyhow::bail!(
-                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
-                );
+                anyhow::bail!("Direct routing requires a host-selected exact target");
             }
             RouterMode::LeastLoaded => self.least_loaded(request).await,
             RouterMode::DeviceAwareWeighted => self.device_aware_weighted(request).await,
@@ -1807,9 +1872,7 @@ where
                 anyhow::bail!("KV routing should not call generate on PushRouter");
             }
             RouterMode::Direct => {
-                anyhow::bail!(
-                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
-                );
+                anyhow::bail!("Direct routing requires a host-selected exact target");
             }
             // These modes drive `select_next_worker()` to `None` — they rely on
             // the occupancy/load-aware selection the bidirectional path does not
@@ -2386,7 +2449,7 @@ mod tests {
                 .unwrap();
         client.override_instance_avail(vec![1, 2, 3]);
         let selected = router
-            .select_target_with_load(None, |worker_id| match worker_id {
+            .select_target_with_load(&0, None, |worker_id| match worker_id {
                 1 => 8,
                 2 => 1,
                 3 => 4,
@@ -2396,7 +2459,10 @@ mod tests {
 
         assert_eq!(selected, 2);
         assert_eq!(router.occupancy_for_test(2), 0);
-        assert_eq!(router.select_target_with_load(Some(3), |_| 0).unwrap(), 3);
+        assert_eq!(
+            router.select_target_with_load(&0, Some(3), |_| 0).unwrap(),
+            3
+        );
         rt.shutdown();
     }
 

@@ -325,35 +325,30 @@ where
             .await?;
 
             let builtin_policy = BuiltinRoutingPolicy::from_router_mode(context.router_mode);
-            let router = if affinity.is_none() && builtin_policy.is_some() {
-                let load_state = if builtin_policy.is_some_and(|policy| {
-                    policy.required_worker_inputs().contains(WorkerInputs::LOAD)
-                }) {
-                    Some(
-                        RoutingLoadState::start(
-                            endpoint,
-                            kv_cache_block_size,
-                            workers,
-                            kv_router_config.unwrap_or_default(),
-                            WORKER_TYPE_PREFILL,
-                        )
-                        .await?,
+            debug_assert!(builtin_policy.is_some());
+            let load_state = if builtin_policy
+                .is_some_and(|policy| policy.required_worker_inputs().contains(WorkerInputs::LOAD))
+            {
+                Some(
+                    RoutingLoadState::start(
+                        endpoint,
+                        kv_cache_block_size,
+                        workers,
+                        kv_router_config.unwrap_or_default(),
+                        WORKER_TYPE_PREFILL,
                     )
-                } else {
-                    None
-                };
-                InnerPrefillRouter::RoutingHost(Arc::new(
-                    RoutingHost::<Sel>::new_builtin_with_load(push_router, load_state)?,
-                ))
+                    .await?,
+                )
             } else {
-                InnerPrefillRouter::SimpleRouter(Arc::new(
-                    crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
-                        push_router,
-                        affinity,
-                        context.router_mode.is_direct_routing(),
-                    ),
-                ))
+                None
             };
+            let router = InnerPrefillRouter::RoutingHost(Arc::new(
+                RoutingHost::<Sel>::new_builtin_with_coordinator(
+                    push_router,
+                    load_state,
+                    affinity,
+                )?,
+            ));
             (router, prefill_client)
         };
 

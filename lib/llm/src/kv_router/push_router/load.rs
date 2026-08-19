@@ -121,8 +121,10 @@ impl RoutingLoadState {
         // P2C decisions could all observe the same pre-admission load.
         let _selection = self.selection_gate.lock();
         let workers = self.workers.borrow();
-        let worker_id =
-            router.select_target_with_load(pinned_worker.map(|target| target.0), |worker_id| {
+        let worker_id = router.select_target_with_load(
+            request,
+            pinned_worker.map(|target| target.0),
+            |worker_id| {
                 workers.get(&worker_id).map_or(0, |config| {
                     self.slots.active_request_count_for_worker(
                         worker_id,
@@ -130,7 +132,8 @@ impl RoutingLoadState {
                         config.data_parallel_size(),
                     ) as u64
                 })
-            })?;
+            },
+        )?;
         let worker = match pinned_worker {
             Some((pinned_worker_id, Some(dp_rank))) => {
                 debug_assert_eq!(worker_id, pinned_worker_id);

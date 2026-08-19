@@ -17,16 +17,13 @@ use crate::{
         BuiltinRoutingPolicy, EncoderRouter, KvRouter, PrefillRouter, RoutingHost,
         metrics::RouterRequestMetrics, push_router::RoutingLoadState,
     },
-    lora::LoraFilteredRouter,
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
-    session_affinity::{
-        AffinityCoordinator, SessionAffinityPushRouter, create_affinity_coordinator,
-    },
+    session_affinity::{AffinityCoordinator, create_affinity_coordinator},
     types::{
         Annotated,
         openai::chat_completions::{
@@ -184,42 +181,19 @@ where
     )?;
 
     let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-            router, affinity, true,
-        )),
-        RouterMode::Random | RouterMode::RoundRobin => {
-            match model_manager.lora_filter_for(endpoint_id) {
-                Some(lora_filter) => Arc::new(LoraFilteredRouter::new(
-                    router,
-                    lora_filter,
-                    model_manager.lora_load_estimator_for(endpoint_id),
-                    router_mode,
-                )),
-                None if affinity.is_none() => Arc::new(RoutingHost::<Sel>::new_builtin_with_load(
-                    router, load_state,
-                )?),
-                None => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-                    router, affinity, false,
-                )),
-            }
-        }
-        RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded if affinity.is_none() => Arc::new(
-            RoutingHost::<Sel>::new_builtin_with_load(router, load_state)?,
-        ),
-        RouterMode::PowerOfTwoChoices
-        | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => {
-            Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-                router,
-                affinity,
-                router_mode.is_direct_routing(),
-            ))
-        }
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
             Arc::new(RoutingHost::new_with_coordinator(router, chooser, affinity))
+        }
+        _ => {
+            let lora = model_manager
+                .lora_filter_for(endpoint_id)
+                .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
+            Arc::new(RoutingHost::<Sel>::new_builtin_with_capabilities(
+                router, load_state, affinity, lora,
+            )?)
         }
     };
 
@@ -299,9 +273,8 @@ where
     )
     .await?;
 
-    let load_state = if affinity.is_none()
-        && BuiltinRoutingPolicy::from_router_mode(router_mode)
-            .is_some_and(|policy| policy.required_worker_inputs().contains(WorkerInputs::LOAD))
+    let load_state = if BuiltinRoutingPolicy::from_router_mode(router_mode)
+        .is_some_and(|policy| policy.required_worker_inputs().contains(WorkerInputs::LOAD))
     {
         let workers = model_manager
             .get_or_create_runtime_config_watcher(&router_client.endpoint)
@@ -344,10 +317,9 @@ where
     )
     .await?;
 
-    // Eagerly register router request metrics so they appear as zeros even in
-    // non-KV modes (Direct, Random, RoundRobin) where RoutingHost is never created.
-    // In KV mode, RoutingHost::new() also calls from_component() (idempotent via
-    // OnceLock), which covers the standalone router path as well.
+    // Eagerly register router request metrics so they appear as zeros before
+    // RoutingHost is constructed. The host repeats this idempotently so the
+    // standalone router path is covered as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
