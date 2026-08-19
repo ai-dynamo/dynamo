@@ -430,21 +430,29 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     [ "$examined" -gt 0 ] \
         || { echo "ERROR: found no FFmpeg libraries under PyNvVideoCodec to examine;" >&2; \
              echo "       the package layout changed and this check went blind." >&2; exit 1; }; \
-    vvd=$(find /opt/dynamo/venv/lib/python3*/site-packages -maxdepth 1 \
-            -name 'pynvvideocodec-*.dist-info' 2>/dev/null | head -1); \
-    vv=$(basename "${vvd:-}" .dist-info); vv=${vv#pynvvideocodec-}; \
-    echo "PyNvVideoCodec in /opt/dynamo/venv: ${vv:-none}"; \
-    [ -n "$vv" ] \
-        || { echo "ERROR: no venv-local PyNvVideoCodec under /opt/dynamo/venv;" >&2; \
-             echo "       requirements.trtllm.txt should have installed one. Read the" >&2; \
-             echo "       dist-info directly, not via the venv interpreter: the venv is" >&2; \
-             echo "       --system-site-packages, so the interpreter would resolve the" >&2; \
-             echo "       system copy this stage just upgraded and always look correct." >&2; \
-             exit 1; }; \
-    [ "$(printf '%s\n2.2.0\n' "$vv" | sort -V | head -1)" = "2.2.0" ] \
-        || { echo "ERROR: venv PyNvVideoCodec $vv is below the 2.2.0 floor while the" >&2; \
-             echo "       system copy is $v -- the two specifiers have drifted apart." >&2; \
-             echo "       requirements.trtllm.txt and this stage must stay in step." >&2; exit 1; }
+    if [ -d /opt/dynamo/venv ]; then \
+        vvd=$(find /opt/dynamo/venv/lib/python3*/site-packages -maxdepth 1 \
+                -name 'pynvvideocodec-*.dist-info' 2>/dev/null | head -1); \
+        vv=$(basename "${vvd:-}" .dist-info); vv=${vv#pynvvideocodec-}; \
+        echo "PyNvVideoCodec in /opt/dynamo/venv: ${vv:-none}"; \
+        [ -n "$vv" ] \
+            || { echo "ERROR: /opt/dynamo/venv exists but holds no PyNvVideoCodec;" >&2; \
+                 echo "       requirements.trtllm.txt should have installed one. Read the" >&2; \
+                 echo "       dist-info directly, not via the venv interpreter: the venv is" >&2; \
+                 echo "       --system-site-packages, so the interpreter would resolve the" >&2; \
+                 echo "       system copy this stage just upgraded and always look correct." >&2; \
+                 exit 1; }; \
+        [ "$(printf '%s\n2.2.0\n' "$vv" | sort -V | head -1)" = "2.2.0" ] \
+            || { echo "ERROR: venv PyNvVideoCodec $vv is below the 2.2.0 floor while the" >&2; \
+                 echo "       system copy is $v -- the two specifiers have drifted apart." >&2; \
+                 echo "       requirements.trtllm.txt and this stage must stay in step." >&2; exit 1; }; \
+    else \
+        echo "NOTE: no /opt/dynamo/venv in this stage yet, so the venv/system"; \
+        echo "      cross-check is skipped. Expected for the dev and local-dev"; \
+        echo "      targets, whose runtime_full does not build the venv -- they"; \
+        echo "      create it later, after this stage, with --system-site-packages"; \
+        echo "      over the system copy asserted above."; \
+    fi
 
 # Align the base image's aiohttp with the floor requirements.common.txt sets for
 # the other Dynamo images. The base ships an older release and the --no-deps
