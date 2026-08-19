@@ -48,9 +48,47 @@ pub struct NvCreateCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
 
+    /// When true, include the completion's token IDs on `choices[].token_ids`
+    /// in the response. Convenience alias for
+    /// `nvext.extra_fields = ["completion_token_ids"]`; folded into
+    /// `extra_fields` by [`Self::normalize_return_token_ids`] before
+    /// validation.
+    ///
+    /// Compatible with vLLM's OpenAI extension of the same name. Requires
+    /// `n == 1` (enforced by
+    /// [`crate::protocols::common::extensions::validate_completion_token_ids_single_choice`]),
+    /// because the streaming aggregator collects a single per-request token
+    /// list rather than per-choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_token_ids: Option<bool>,
+
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl NvCreateCompletionRequest {
+    /// Fold top-level `return_token_ids: true` into
+    /// `nvext.extra_fields = ["completion_token_ids"]`, then drop the
+    /// top-level field. Mirrors
+    /// [`super::chat_completions::NvCreateChatCompletionRequest::normalize_return_token_ids`];
+    /// see that method for the full rationale.
+    ///
+    /// Must run BEFORE `validate()`, which enforces the `n == 1` constraint by
+    /// inspecting `nvext.extra_fields`.
+    pub fn normalize_return_token_ids(&mut self) -> anyhow::Result<()> {
+        if self.return_token_ids != Some(true) {
+            self.return_token_ids = None;
+            return Ok(());
+        }
+        let nvext = self.nvext.get_or_insert_with(NvExt::default);
+        let fields = nvext.extra_fields.get_or_insert_with(Vec::new);
+        if !fields.iter().any(|f| f == "completion_token_ids") {
+            fields.push("completion_token_ids".to_string());
+        }
+        self.return_token_ids = None;
+        Ok(())
+    }
 }
 
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
@@ -837,6 +875,68 @@ mod tests {
             serde_json::from_value(request_json).expect("Failed to deserialize request");
 
         let err = ValidateRequest::validate(&request).expect_err("multi-choice token ids");
+        assert!(err.to_string().contains("completion_token_ids"));
+    }
+
+    // --- return_token_ids convenience alias ---
+    //
+    // Mirror of the chat_completions tests. See
+    // `NvCreateChatCompletionRequest::normalize_return_token_ids` for the
+    // rationale — the two endpoints share the same nvext-based response path.
+
+    #[test]
+    fn test_return_token_ids_field_deserializes() {
+        let request_json = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "return_token_ids": true
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(request_json).expect("return_token_ids at root parses");
+        assert_eq!(request.return_token_ids, Some(true));
+        assert!(!request.unsupported_fields.contains_key("return_token_ids"));
+    }
+
+    #[test]
+    fn test_normalize_return_token_ids_folds_into_nvext_extra_fields() {
+        let request_json = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "return_token_ids": true
+        });
+        let mut request: NvCreateCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        request
+            .normalize_return_token_ids()
+            .expect("normalize succeeds");
+
+        assert_eq!(request.return_token_ids, None);
+        let extras = request
+            .nvext
+            .as_ref()
+            .and_then(|n| n.extra_fields.as_ref())
+            .expect("extra_fields populated");
+        assert!(extras.iter().any(|f| f == "completion_token_ids"));
+        assert!(ValidateRequest::validate(&request).is_ok());
+    }
+
+    #[test]
+    fn test_return_token_ids_alias_rejected_for_multi_choice() {
+        let request_json = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "n": 2,
+            "return_token_ids": true
+        });
+        let mut request: NvCreateCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        request
+            .normalize_return_token_ids()
+            .expect("normalize succeeds — n=1 check is validate()'s job");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("n>1 with return_token_ids must be rejected");
         assert!(err.to_string().contains("completion_token_ids"));
     }
 

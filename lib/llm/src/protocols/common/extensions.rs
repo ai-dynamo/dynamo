@@ -558,6 +558,26 @@ pub struct NvExtResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_token_ids: Option<Vec<TokenIdType>>,
 
+    /// Prompt tokens as the engine actually saw them, echoed back on the
+    /// response so a trainer/aligner can verify its `input_ids` round-tripped
+    /// unchanged. Sourced from `LLMEngineOutput.engine_data["prompt_token_ids"]`
+    /// (already populated by the vLLM handler; other backends leave this
+    /// absent). Requested via the same `nvext.extra_fields=["completion_token_ids"]`
+    /// entry (or the `return_token_ids: true` alias) — the two prompt/completion
+    /// token lists are the pair a client typically needs together, so a single
+    /// gate covers both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_token_ids: Option<Vec<TokenIdType>>,
+
+    /// KV-transfer/disaggregation parameters returned by the backend engine —
+    /// e.g. vLLM's `kv_transfer_params` (holding `hidden_states_path` for the
+    /// extract_hidden_states KV connector). Passed through verbatim from
+    /// `LLMEngineOutput.disaggregated_params`. Requested via the same gate as
+    /// the token-id fields: RL trainers and hidden-state capture clients need
+    /// them together with `completion_token_ids` on the response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_params: Option<serde_json::Value>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_logprobs: Option<PromptLogprobs>,
 }
@@ -609,6 +629,8 @@ pub struct NvExtResponseFieldSelection {
     pub engine_data: bool,
     pub stop_reason: bool,
     pub completion_token_ids: bool,
+    pub prompt_token_ids: bool,
+    pub kv_transfer_params: bool,
     pub prompt_logprobs: bool,
 }
 
@@ -627,7 +649,16 @@ impl NvExtResponseFieldSelection {
                     "routed_experts" => selection.routed_experts = true,
                     "engine_data" => selection.engine_data = true,
                     "stop_reason" => selection.stop_reason = true,
-                    "completion_token_ids" => selection.completion_token_ids = true,
+                    "completion_token_ids" => {
+                        // `completion_token_ids` gates the trio a trainer /
+                        // capture client needs together: completion tokens,
+                        // prompt tokens, and disaggregated kv-transfer params.
+                        // Matches vLLM's `return_token_ids: true` semantics,
+                        // which surfaces prompt+completion IDs on the response.
+                        selection.completion_token_ids = true;
+                        selection.prompt_token_ids = true;
+                        selection.kv_transfer_params = true;
+                    }
                     "prompt_logprobs" => selection.prompt_logprobs = true,
                     _ => {}
                 }
@@ -648,6 +679,8 @@ impl NvExtResponseFieldSelection {
         engine_data_from_backend: Option<serde_json::Value>,
         stop_reason_from_backend: Option<StopReason>,
         completion_token_ids_from_backend: Option<&[TokenIdType]>,
+        prompt_token_ids_from_backend: Option<&[TokenIdType]>,
+        kv_transfer_params_from_backend: Option<serde_json::Value>,
         prompt_logprobs_from_backend: Option<PromptLogprobs>,
     ) -> Option<NvExtResponse> {
         let worker_id = if self.worker_id {
@@ -695,6 +728,23 @@ impl NvExtResponseFieldSelection {
             None
         };
 
+        // Prompt tokens are only emitted once the finish_reason is present:
+        // there is no meaningful streaming semantic for a per-delta prompt-id
+        // list, and the vLLM handler surfaces it once at completion. The trio
+        // (completion_token_ids/prompt_token_ids/kv_transfer_params) lands
+        // together on the final chunk that carries finish_reason.
+        let prompt_token_ids = if self.prompt_token_ids && finish_reason_present {
+            prompt_token_ids_from_backend.map(<[u32]>::to_vec)
+        } else {
+            None
+        };
+
+        let kv_transfer_params = if self.kv_transfer_params && finish_reason_present {
+            kv_transfer_params_from_backend
+        } else {
+            None
+        };
+
         let prompt_logprobs = if self.prompt_logprobs && finish_reason_present {
             prompt_logprobs_from_backend
         } else {
@@ -708,6 +758,8 @@ impl NvExtResponseFieldSelection {
             && engine_data.is_none()
             && stop_reason.is_none()
             && completion_token_ids.is_none()
+            && prompt_token_ids.is_none()
+            && kv_transfer_params.is_none()
             && prompt_logprobs.is_none()
         {
             return None;
@@ -721,6 +773,8 @@ impl NvExtResponseFieldSelection {
             engine_data,
             stop_reason,
             completion_token_ids,
+            prompt_token_ids,
+            kv_transfer_params,
             prompt_logprobs,
         })
     }
@@ -1480,7 +1534,7 @@ mod tests {
     fn build_response_nvext_all_false_returns_none() {
         assert!(
             NvExtResponseFieldSelection::default()
-                .build_response_nvext(None, false, None, None, None, None)
+                .build_response_nvext(None, false, None, None, None, None, None, None)
                 .is_none()
         );
     }
@@ -1494,7 +1548,7 @@ mod tests {
         let tracker = tracker_with_prefill_worker();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(Some(&tracker), false, None, None, None, None, None, None)
             .expect("worker_id should emit regardless of finish_reason");
 
         assert!(out.worker_id.is_some());
@@ -1512,7 +1566,7 @@ mod tests {
         let tracker = tracker_with_forwarded_worker_info();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(Some(&tracker), false, None, None, None, None, None, None)
             .expect("forwarded worker_id should surface in nvext");
 
         assert_eq!(
@@ -1536,12 +1590,12 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(Some(&tracker), false, None, None, None, None)
+                .build_response_nvext(Some(&tracker), false, None, None, None, None, None, None)
                 .is_none()
         );
 
         let out = selection
-            .build_response_nvext(Some(&tracker), true, None, None, None, None)
+            .build_response_nvext(Some(&tracker), true, None, None, None, None, None, None)
             .expect("timing should emit on finish");
         assert!(out.timing.is_some());
     }
@@ -1555,7 +1609,7 @@ mod tests {
         let tracker = tracker_with_query_token_ids();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(Some(&tracker), false, None, None, None, None, None, None)
             .expect("token_ids should emit when present");
 
         assert_eq!(out.token_ids, Some(vec![11u32, 22, 33]));
@@ -1570,7 +1624,7 @@ mod tests {
         let engine_data = serde_json::json!({ "routed_experts": {"layer_0": [1, 3]} });
 
         let out = selection
-            .build_response_nvext(None, false, Some(engine_data), None, None, None)
+            .build_response_nvext(None, false, Some(engine_data), None, None, None, None, None)
             .expect("routed_experts should emit when present");
 
         assert_eq!(
@@ -1587,11 +1641,136 @@ mod tests {
         };
 
         let out = selection
-            .build_response_nvext(None, false, None, None, Some(&[101u32, 102, 103]), None)
+            .build_response_nvext(
+                None,
+                false,
+                None,
+                None,
+                Some(&[101u32, 102, 103]),
+                None,
+                None,
+                None,
+            )
             .expect("completion_token_ids should emit when requested and present");
 
         assert_eq!(out.completion_token_ids, Some(vec![101u32, 102, 103]));
         assert!(out.prompt_logprobs.is_none());
+    }
+
+    #[test]
+    fn from_nvext_completion_token_ids_gates_the_return_token_ids_trio() {
+        let ext = NvExt {
+            extra_fields: Some(vec!["completion_token_ids".to_string()]),
+            ..NvExt::default()
+        };
+        let sel = NvExtResponseFieldSelection::from_nvext(Some(&ext));
+        assert!(sel.completion_token_ids);
+        assert!(sel.prompt_token_ids);
+        assert!(sel.kv_transfer_params);
+        // Independent selectors are not turned on incidentally.
+        assert!(!sel.timing);
+        assert!(!sel.engine_data);
+    }
+
+    #[test]
+    fn build_response_nvext_prompt_token_ids_final_chunk_only() {
+        let selection = NvExtResponseFieldSelection {
+            prompt_token_ids: true,
+            ..Default::default()
+        };
+        // Non-final: absent even when data is supplied.
+        assert!(
+            selection
+                .build_response_nvext(
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    Some(&[1u32, 2, 3]),
+                    None,
+                    None,
+                )
+                .is_none()
+        );
+        // Final chunk: emits.
+        let out = selection
+            .build_response_nvext(
+                None,
+                true,
+                None,
+                None,
+                None,
+                Some(&[1u32, 2, 3]),
+                None,
+                None,
+            )
+            .expect("prompt_token_ids should emit on the final chunk");
+        assert_eq!(out.prompt_token_ids, Some(vec![1u32, 2, 3]));
+    }
+
+    #[test]
+    fn build_response_nvext_kv_transfer_params_final_chunk_only() {
+        let selection = NvExtResponseFieldSelection {
+            kv_transfer_params: true,
+            ..Default::default()
+        };
+        let payload = serde_json::json!({"hidden_states_path": "/tmp/hs_0.safetensors"});
+        assert!(
+            selection
+                .build_response_nvext(
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(payload.clone()),
+                    None
+                )
+                .is_none()
+        );
+        let out = selection
+            .build_response_nvext(
+                None,
+                true,
+                None,
+                None,
+                None,
+                None,
+                Some(payload.clone()),
+                None,
+            )
+            .expect("kv_transfer_params should emit on the final chunk");
+        assert_eq!(out.kv_transfer_params, Some(payload));
+    }
+
+    #[test]
+    fn build_response_nvext_return_token_ids_trio_together() {
+        // Simulates the response for a request that asked for the trio via
+        // `return_token_ids: true` (which normalizes to
+        // `nvext.extra_fields=["completion_token_ids"]`).
+        let ext = NvExt {
+            extra_fields: Some(vec!["completion_token_ids".to_string()]),
+            ..NvExt::default()
+        };
+        let sel = NvExtResponseFieldSelection::from_nvext(Some(&ext));
+        let kv = serde_json::json!({"hidden_states_path": "/tmp/hs_0.safetensors"});
+        let out = sel
+            .build_response_nvext(
+                None,
+                true,
+                None,
+                None,
+                Some(&[100u32, 101, 102]),
+                Some(&[10u32, 20]),
+                Some(kv.clone()),
+                None,
+            )
+            .expect("trio should emit together on final chunk");
+        assert_eq!(out.completion_token_ids, Some(vec![100u32, 101, 102]));
+        assert_eq!(out.prompt_token_ids, Some(vec![10u32, 20]));
+        assert_eq!(out.kv_transfer_params, Some(kv));
     }
 
     #[test]
@@ -1613,12 +1792,21 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(None, false, None, None, None, Some(payload.clone()))
+                .build_response_nvext(
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(payload.clone())
+                )
                 .is_none()
         );
 
         let out = selection
-            .build_response_nvext(None, true, None, None, None, Some(payload))
+            .build_response_nvext(None, true, None, None, None, None, None, Some(payload))
             .expect("prompt_logprobs should emit on the final chunk");
         let got = out.prompt_logprobs.expect("prompt_logprobs payload");
         assert_eq!(got.len(), 2);

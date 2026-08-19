@@ -319,12 +319,39 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let prompt_logprobs_payload =
             common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
         let completion_token_ids_slice: &[u32] = &delta.token_ids;
+        // Prompt token ids: vLLM's Python handler puts them under
+        // `engine_data["prompt_token_ids"]`. Other backends leave the field
+        // absent, in which case we emit nothing.
+        let prompt_token_ids_vec = delta
+            .engine_data
+            .as_ref()
+            .and_then(|d| d.get("prompt_token_ids"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_u64().and_then(|u| u32::try_from(u).ok()))
+                    .collect::<Vec<u32>>()
+            });
+        // KV transfer params: prefer `BackendOutput.disaggregated_params`
+        // (the engine-owned canonical location; see doc comment on that
+        // field), fall back to `engine_data["kv_transfer_params"]` for
+        // backends that route through the opaque channel — mirroring the
+        // pattern in `generate.rs` for the native protocol.
+        let kv_transfer_params_value = delta.disaggregated_params.clone().or_else(|| {
+            delta
+                .engine_data
+                .as_ref()
+                .and_then(|d| d.get("kv_transfer_params"))
+                .cloned()
+        });
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             Some(&self.tracker),
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
             Some(completion_token_ids_slice),
+            prompt_token_ids_vec.as_deref(),
+            kv_transfer_params_value,
             prompt_logprobs_payload,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
@@ -411,6 +438,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -604,6 +632,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }

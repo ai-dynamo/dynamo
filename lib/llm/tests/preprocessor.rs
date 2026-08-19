@@ -264,6 +264,7 @@ impl Request {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -852,6 +853,7 @@ mod context_length_validation {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
