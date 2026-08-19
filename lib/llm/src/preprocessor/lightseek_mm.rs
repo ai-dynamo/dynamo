@@ -253,15 +253,29 @@ pub struct RoutingTokens {
     /// above. Equals `image_token_id` for most VLMs; Qwen2-VL / Qwen2.5-VL
     /// emit `<|image_pad|>` here while the per-patch id is `<|vision_pad|>`.
     pub chat_placeholder_token_id: Option<TokenIdType>,
-    /// Model-specific shape of the routing-side image prompt. This comes from
-    /// the same `ModelProcessorSpec` registry lookup as `image_token_id`, so a
-    /// K3 checkpoint cannot accidentally take K2.x's repeated-pad path.
+    /// Model-specific shape of the routing-side image prompt. Kimi-K3 is
+    /// identified conservatively from model metadata; other models with a
+    /// valid explicit placeholder retain the historical repeated-pad shape.
     pub image_prompt_kind: Option<ImagePromptKind>,
     /// `bos_token` string from `tokenizer_config.json` when
     /// `add_bos_token: true`. Caller encodes via its model tokenizer to
     /// produce the routing-side prepend id. `None` for models that don't
     /// prepend BOS.
     pub bos_token_string: Option<String>,
+}
+
+impl RoutingTokens {
+    /// Return the placeholder id only when every startup-time prerequisite for
+    /// exact MM routing is available. Keeping this gate next to the resolved
+    /// token bundle lets the Rust frontend and Python worker binding make the
+    /// same enablement decision.
+    pub fn exact_routing_image_token_id(
+        &self,
+        image_token_counter_available: bool,
+    ) -> Option<TokenIdType> {
+        self.chat_placeholder_token_id
+            .filter(|_| image_token_counter_available && self.image_prompt_kind.is_some())
+    }
 }
 
 /// Resolve all routing-side token info from a model directory in a single
@@ -282,7 +296,28 @@ pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens
         .as_ref()
         .and_then(extract_chat_placeholder_from_config)
         .or(image_token_id);
-    let image_prompt_kind = resolved.as_ref().map(|r| r.prompt_kind);
+    // Kimi-K3 is the only supported family whose routing-side replacement is
+    // not the historical repeated-pad shape. Keep its special classification
+    // conservative, but preserve repeated-pad routing for counter-supported
+    // models whose explicit config placeholder is valid even when the
+    // upstream ModelRegistry has not learned a model_type alias yet (for
+    // example qwen2_5_vl or qwen3_6 behind a generic local model path).
+    let normalized_model_id = model_id.to_ascii_lowercase();
+    let is_kimi_k3 = (normalized_model_id.contains("kimi") && normalized_model_id.contains("k3"))
+        || config
+            .as_ref()
+            .and_then(|c| c.get("model_type"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|model_type| model_type == "kimi_k3");
+    let image_prompt_kind = resolved.as_ref().map(|r| r.prompt_kind).or_else(|| {
+        chat_placeholder_token_id.map(|_| {
+            if is_kimi_k3 {
+                ImagePromptKind::KimiK3
+            } else {
+                ImagePromptKind::RepeatedPad
+            }
+        })
+    });
     let bos_token_string = tokenizer_config
         .as_ref()
         .and_then(extract_bos_token_from_tokenizer_config);
@@ -293,6 +328,20 @@ pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens
         image_prompt_kind,
         bos_token_string,
     }
+}
+
+/// Resolve the worker-side placeholder id using the same startup readiness
+/// requirements as the frontend. In particular, an explicit config token is
+/// not enough when the image-token counter or prompt layout is unavailable.
+pub fn resolve_exact_routing_image_token_id(
+    model_id: &str,
+    model_dir: &Path,
+) -> Option<TokenIdType> {
+    let config = read_json(model_dir, "config.json")?;
+    let model_type = config.get("model_type").and_then(serde_json::Value::as_str);
+    LightseekMmCounter::try_new(model_id, model_type, model_dir).ok()?;
+
+    resolve_routing_tokens(model_id, model_dir).exact_routing_image_token_id(true)
 }
 
 /// Read + parse a JSON file under `model_dir`. Warns on read or parse
@@ -452,6 +501,55 @@ mod tests {
         assert_eq!(
             resolved.image_prompt_kind,
             Some(ImagePromptKind::RepeatedPad)
+        );
+    }
+
+    #[test]
+    fn explicit_placeholder_keeps_repeated_pad_for_generic_qwen_aliases() {
+        for model_type in ["qwen2_5_vl", "qwen3_6"] {
+            let model_dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                model_dir.path().join("config.json"),
+                serde_json::json!({
+                    "model_type": model_type,
+                    "image_token_id": 151655
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+
+            let resolved = resolve_routing_tokens("/models/vision-model", model_dir.path());
+
+            assert_eq!(resolved.chat_placeholder_token_id, Some(151655));
+            assert_eq!(
+                resolved.image_prompt_kind,
+                Some(ImagePromptKind::RepeatedPad),
+                "{model_type} should retain exact routing through an explicit placeholder"
+            );
+            assert_eq!(
+                resolve_exact_routing_image_token_id("/models/vision-model", model_dir.path()),
+                Some(151655),
+                "{model_type} should be fully ready through the counter's model_type fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_worker_token_requires_counter_and_prompt_layout() {
+        let model_dir = tempfile::tempdir().unwrap();
+        write_model_config(model_dir.path(), "kimi_k3");
+
+        assert_eq!(
+            resolve_exact_routing_image_token_id("/models/internal-checkpoint", model_dir.path()),
+            None,
+            "a placeholder alone must not enable worker-side MM key rewriting"
+        );
+
+        std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+        assert_eq!(
+            resolve_exact_routing_image_token_id("/models/internal-checkpoint", model_dir.path()),
+            Some(163605)
         );
     }
 
