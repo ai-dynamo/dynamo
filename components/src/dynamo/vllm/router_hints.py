@@ -88,7 +88,7 @@ def _router_hint_source_control_endpoints(
     """Build source-control endpoints keyed by global DP rank.
 
     ``control_ports`` is local to this worker: entry 0 belongs to dp_start,
-    entry 1 belongs to dp_start + 1, and so on. vLLM/KVCC selects from the
+    entry 1 belongs to dp_start + 1, and so on. vLLM/KVCR selects from the
     same list with data_parallel_rank_local.
     """
     dp_start, dp_size = dp_range
