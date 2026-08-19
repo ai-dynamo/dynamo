@@ -52,6 +52,18 @@ static KV_PUB: OnceCell<KvEventPublisher> = OnceCell::new();
 /// reports `OK` over a canceled runtime and a stale publisher.
 static LIFECYCLE: Mutex<LifecycleState> = Mutex::new(LifecycleState::Uninitialized);
 
+/// Serializes the body of `dynamo_llm_init`, from just after argument parsing
+/// through the point where the resulting config is recorded in `LIFECYCLE`.
+///
+/// Without this, two threads calling `dynamo_llm_init` with different
+/// configurations can both observe `Uninitialized`, both build a runtime, and
+/// race on `KV_PUB.get_or_try_init`: whichever thread wins installs its
+/// publisher, but whichever thread re-acquires `LIFECYCLE` first records its
+/// own (possibly losing) config as the one in effect. `dynamo_llm_shutdown`
+/// never takes this mutex, so it stays responsive while an init call is stuck
+/// in the unbounded discovery wait.
+static INIT: Mutex<()> = Mutex::new(());
+
 /// The endpoint-scoped arguments a single `dynamo_llm_init` call installs.
 ///
 /// Held so that a repeated initialization can be compared field by field
@@ -99,6 +111,17 @@ fn lifecycle() -> MutexGuard<'static, LifecycleState> {
     LIFECYCLE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// `true` once `dynamo_llm_shutdown` has run.
+///
+/// `KV_PUB` is never cleared (see the comment on `LIFECYCLE` above), so
+/// `KV_PUB.get()` alone cannot tell a live publisher from one that a finished
+/// `dynamo_llm_shutdown` retired. The publish entrypoints check this first so
+/// they reject work against a canceled runtime instead of reporting `OK` while
+/// enqueuing to it.
+fn is_shut_down() -> bool {
+    matches!(&*lifecycle(), LifecycleState::ShutDown)
 }
 
 struct DiscoveredModelBootstrap {
@@ -191,7 +214,11 @@ unsafe fn parse_endpoint_config(
         return None;
     }
     let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
-        Ok(s) => s.to_string(),
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        Ok(_) => {
+            tracing::error!("Namespace must not be empty");
+            return None;
+        }
         Err(e) => {
             tracing::error!(error = ?e, "Failed to convert C string to Rust string (namespace)");
             return None;
@@ -258,6 +285,11 @@ pub unsafe extern "C" fn dynamo_llm_init(
         Some(config) => config,
         None => return DynamoLlmResult::ERR,
     };
+
+    // Held from here through the config being recorded in `LIFECYCLE` below,
+    // so only one `dynamo_llm_init` call at a time can reach `KV_PUB` and
+    // record its own configuration as the one that took effect.
+    let _init_guard = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     {
         let state = lifecycle();
@@ -340,9 +372,11 @@ pub unsafe extern "C" fn dynamo_llm_init(
         return DynamoLlmResult::ERR;
     }
 
-    // Re-check: another thread may have finished its own init, or shut the
-    // process down, while this call was waiting for discovery. The recorded
-    // config must describe the publisher that is actually installed.
+    // Re-check: `_init_guard` rules out a concurrent `dynamo_llm_init` racing
+    // to this point with a different config, but `dynamo_llm_shutdown` takes
+    // no lock here and may have run while this call was waiting for
+    // discovery. The recorded config must describe the publisher that is
+    // actually installed.
     let mut state = lifecycle();
     match &*state {
         LifecycleState::Uninitialized => {
@@ -351,10 +385,14 @@ pub unsafe extern "C" fn dynamo_llm_init(
         }
         LifecycleState::Initialized(previous) if *previous == config => DynamoLlmResult::OK,
         LifecycleState::Initialized(previous) => {
+            // `_init_guard` should make this unreachable: the initial check
+            // above already rejects a differing config before any runtime
+            // work starts, and no other code path writes `Initialized`. Kept
+            // as a safety net in case that invariant ever breaks.
             tracing::error!(
                 ?previous,
                 requested = ?config,
-                "a concurrent dynamo_llm_init installed a different endpoint; this call did not take effect"
+                "recorded config no longer matches this call after initialization; this call did not take effect"
             );
             DynamoLlmResult::ERR
         }
@@ -569,6 +607,12 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
         parent_hash,
         lora_name,
     };
+    if is_shut_down() {
+        tracing::error!(
+            "dynamo_llm_shutdown has already run; refusing to publish a stored KV event against the retired runtime"
+        );
+        return DynamoLlmResult::ERR;
+    }
     let publisher = match KV_PUB.get() {
         Some(publisher) => publisher,
         None => {
@@ -596,6 +640,12 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
     block_ids: *const u64,
     num_blocks: usize,
 ) -> DynamoLlmResult {
+    if is_shut_down() {
+        tracing::error!(
+            "dynamo_llm_shutdown has already run; refusing to publish a removed KV event against the retired runtime"
+        );
+        return DynamoLlmResult::ERR;
+    }
     let publisher = match KV_PUB.get() {
         Some(publisher) => publisher,
         None => {
