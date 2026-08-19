@@ -257,6 +257,8 @@ def _request_vllm_completion(
 
 
 @pytest.mark.vllm
+@pytest.mark.profiled_vram_gib(6.9)
+@pytest.mark.requested_vllm_kv_cache_bytes(331_801_000)
 @pytest.mark.timeout(600)
 def test_vllm_token_in_token_out(start_vllm_tito_services: int) -> None:
     frontend_port = start_vllm_tito_services
@@ -380,6 +382,8 @@ def _request_sglang_generation_events(*, frontend_port: int) -> list[dict[str, A
 
 
 @pytest.mark.sglang
+@pytest.mark.profiled_vram_gib(3.7)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(600)
 def test_sglang_token_in_token_out(start_sglang_tito_services: int) -> None:
     events = _request_sglang_generation_events(frontend_port=start_sglang_tito_services)
