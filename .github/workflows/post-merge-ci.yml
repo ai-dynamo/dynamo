@@ -462,7 +462,7 @@ jobs:
       dd_env: post-merge
       test_suite_name: vllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]'
@@ -583,7 +583,7 @@ jobs:
       dd_env: post-merge
       test_suite_name: trtllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]'
