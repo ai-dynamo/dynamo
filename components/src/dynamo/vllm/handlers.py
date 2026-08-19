@@ -90,7 +90,11 @@ from dynamo.vllm.router_hints import enable_router_hint_support
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import (
+    DYNAMO_CACHE_SALT_PREFIX,
+    DisaggregationMode,
+    EmbeddingTransferMode,
+)
 from .dp_topology import get_dp_range_for_worker
 from .engine_generate import build_prompt as _build_engine_generate_prompt
 from .engine_generate import (
@@ -3375,11 +3379,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 pre_rendered = None
             else:
                 try:
-                    prepared_input = await self._multimodal_request_processor.prepare_input(
-                        request,
-                        request_id,
-                        context,
-                        mode,
+                    prepared_input = (
+                        await self._multimodal_request_processor.prepare_input(
+                            request,
+                            request_id,
+                            context,
+                            mode,
+                        )
                     )
                 except MissingMultimodalHandoffError as exc:
                     logger.error("Request %s: %s", request_id, exc)
@@ -3776,7 +3782,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if is_engine_generate:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = _merge_kv_transfer_params(
+            sampling_params.extra_args[
+                "kv_transfer_params"
+            ] = _merge_kv_transfer_params(
                 sampling_params.extra_args.get("kv_transfer_params"),
                 kv_protocol.prefill_request_kv_transfer_params(),
             )

@@ -444,7 +444,7 @@ async def setup_kv_state_attachment_owner(
         config,
         generate_endpoint,
         vllm_config,
-        _resolve_image_token_id(config, vllm_config),
+        resolve_image_token_id(config.model, vllm_config),
     )
 
 
