@@ -1806,6 +1806,7 @@ mod tests {
             .unwrap()
             .endpoint("generate".to_string());
         let client = endpoint.client().await.unwrap();
+        let graph = test_graph(&client).await;
         endpoint.register_endpoint_instance().await.unwrap();
         let real_worker = client.wait_for_instances().await.unwrap()[0].id();
         let stale_worker = real_worker.wrapping_add(1);
@@ -1825,6 +1826,7 @@ mod tests {
         let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
         let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
             inner,
+            graph,
             None,
             Some(affinity.clone()),
         )
