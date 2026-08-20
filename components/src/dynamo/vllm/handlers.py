@@ -32,7 +32,7 @@ from typing import (
 
 import torch
 from vllm import PoolingParams
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -91,6 +91,7 @@ from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
+from .dp_topology import get_dp_range_for_worker
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
@@ -1051,34 +1052,23 @@ def apply_data_parallel_runtime_config(
     runtime_config.data_parallel_size = dp_range[1]
 
 
-def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
-    """
-    Get the global DP rank range that this worker is responsible for based on vLLM config.
-    Note that the 'vllm_config' is normalized so the load balancing flags are set properly.
-    The return value is in the format of (start_dp_rank, managed_dp_size)."""
-    if vllm_config.parallel_config.data_parallel_external_lb:
-        # external load balancing, each worker is responsible for exactly 1 rank
-        return (vllm_config.parallel_config.data_parallel_rank, 1)
-    elif vllm_config.parallel_config.data_parallel_hybrid_lb:
-        # hybrid load balancing, each worker is responsible for a subset of local ranks
-        return (
-            vllm_config.parallel_config.data_parallel_rank,
-            vllm_config.parallel_config.data_parallel_size_local,
-        )
-    else:
-        # internal load balancing, the worker is responsible for all DP ranks
-        logger.warning(
-            "vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment,"
-            " hybrid or external load balancing is recommended."
-        )
-        return (
-            vllm_config.parallel_config.data_parallel_rank,
-            vllm_config.parallel_config.data_parallel_size,
-        )
-
-
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
+
+
+async def _translate_vllm_client_errors(
+    generator: AsyncIterator[ResponseT],
+) -> AsyncIterator[ResponseT]:
+    """Keep request-side vLLM errors client-visible on worker endpoints."""
+    from vllm.exceptions import VLLMClientError
+
+    from .errors import vllm_client_error_to_http_error
+
+    try:
+        async for chunk in generator:
+            yield chunk
+    except VLLMClientError as exc:
+        raise vllm_client_error_to_http_error(exc) from exc
 
 
 def _as_exact_int(value: object) -> Optional[int]:
@@ -2763,15 +2753,23 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
         if self.model_config is None:
-            raise ValueError("ModelConfig is unavailable for prompt_embeds validation.")
+            raise RuntimeError(
+                "ModelConfig is unavailable for prompt_embeds validation."
+            )
 
         try:
             return safe_load_prompt_embeds(
                 self.model_config, prompt_embeds_base64.encode()
             )
+        except (MemoryError, torch.OutOfMemoryError):
+            # Resource failures are server-side faults. Preserve their type so
+            # the bindings return a retryable 5xx instead of a client 400.
+            raise
         except Exception as e:
             logger.error(f"Failed to decode prompt_embeds: {e}")
-            raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
+            raise ValueError(
+                f"Failed to decode prompt_embeds as PyTorch tensor: {e}"
+            ) from e
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str
@@ -2808,7 +2806,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
         mm_processor_kwargs: Dict[str, Any] | None = None,
-    ) -> tuple[TokensPrompt | EmbedsPrompt | None, Dict[str, Any] | None]:
+    ) -> TokensPrompt | EmbedsPrompt:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
 
@@ -2821,9 +2819,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 use_audio_in_video) forwarded to the vLLM engine.
 
         Returns:
-            Tuple of (prompt, error_dict) where:
-            - On success: (prompt, None)
-            - On failure: (None, error_dict to yield)
+            The vLLM prompt built from prompt embeddings or token IDs.
+
+        Raises:
+            InvalidArgument: Prompt embeddings are disabled.
+            ValueError: Prompt embeddings cannot be decoded or validated.
         """
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
@@ -2831,16 +2831,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "Set `--enable-prompt-embeds` to allow `prompt_embeds` in request."
                 )
                 logger.error(
-                    f"Rejected prompt_embeds for {log_prefix.lower().strip() or 'request'} "
-                    f"{request_id}: {msg}"
+                    "Rejected prompt_embeds for %s %s: %s",
+                    log_prefix.lower().strip() or "request",
+                    request_id,
+                    msg,
                 )
-                return (
-                    None,
-                    {
-                        "finish_reason": f"error: Invalid prompt_embeds: {msg}",
-                        "token_ids": [],
-                    },
-                )
+                raise InvalidArgument(f"Invalid prompt_embeds: {msg}")
             try:
                 prompt, tensor = self._create_prompt_from_embeddings(
                     request["prompt_embeds"]
@@ -2850,19 +2846,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"dtype={tensor.dtype}, sequence_length={tensor.shape[0]}, "
                     f"request_id={request_id}"
                 )
-                return prompt, None
-            except Exception as e:
+                return prompt
+            except Exception as exc:
                 logger.error(
-                    f"Failed to process prompt_embeds for {log_prefix.lower().strip() or 'request'} "
-                    f"{request_id}: {e}"
+                    "Failed to process prompt_embeds for %s %s: %s",
+                    log_prefix.lower().strip() or "request",
+                    request_id,
+                    exc,
                 )
-                return (
-                    None,
-                    {
-                        "finish_reason": f"error: Invalid prompt_embeds: {e}",
-                        "token_ids": [],
-                    },
-                )
+                raise
         # Text-only PD + encoder-worker path.
         # Normal path: use token IDs.
         # Prefer frontend-forwarded mm_hashes for hash consistency with the
@@ -2875,7 +2867,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             multi_modal_data,
             mm_processor_kwargs,
         )
-        return prompt, None
+        return prompt
 
     @staticmethod
     def _build_completion_usage(
@@ -3177,7 +3169,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Token-in-token-out mode: internal protocol format
                 generator = self._generate_token_mode(request, context, request_id)
 
-            async for chunk in generator:
+            async for chunk in _translate_vllm_client_errors(generator):
                 if first_token:
                     decode_timer.stop_interval()
                     first_token = False
@@ -3360,27 +3352,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
             if custom_prompt is not None:
                 prompt = custom_prompt
-                error = None
             elif pre_rendered is not None:
                 # pre_rendered is a MultiModalInput dict with "type": "multimodal".
                 # The engine's InputProcessor.process_inputs() will see the "type"
                 # key and skip the HF processor entirely.
                 prompt = pre_rendered
-                error = None
                 logger.debug(
                     "[mm-routing] Request %s: using pre-rendered MultiModalInput",
                     request_id,
                 )
             else:
-                prompt, error = self._build_prompt_from_request(
+                prompt = self._build_prompt_from_request(
                     request,
                     request_id,
                     multi_modal_data,
                     mm_processor_kwargs=mm_processor_kwargs,
                 )
-        if error is not None:
-            yield error
-            return
 
         _apply_nvext_cache_salt(request, prompt)
 
@@ -3659,7 +3646,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
-            async for chunk in self._generate_token_mode(request, context, request_id):
+            generator = self._generate_token_mode(request, context, request_id)
+            async for chunk in _translate_vllm_client_errors(generator):
                 yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
@@ -3675,18 +3663,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         mm_processor_kwargs = prepared_input.mm_processor_kwargs
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
-        prompt, error = self._build_prompt_from_request(
+        prompt = self._build_prompt_from_request(
             request,
             request_id,
             multi_modal_data,
             log_prefix="Prefill ",
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        if error is not None:
-            # Prefill errors need disaggregated_params field
-            error["disaggregated_params"] = None
-            yield error
-            return
 
         _apply_nvext_cache_salt(request, prompt)
 

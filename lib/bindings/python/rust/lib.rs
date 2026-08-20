@@ -197,11 +197,6 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
-    m.add(
-        "MOCKER_KVBM_OFFLOAD_ENABLED",
-        cfg!(feature = "mocker-kvbm-offload"),
-    )?;
-
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<Endpoint>()?;
@@ -252,6 +247,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
+    m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
+    m.add_class::<llm::kv_state_agent::KvStateAttachmentOwner>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;

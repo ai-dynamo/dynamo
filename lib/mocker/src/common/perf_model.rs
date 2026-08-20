@@ -3,9 +3,9 @@
 
 //! Performance model for timing simulations in the mocker.
 //!
-//! This module provides two timing models:
-//! 1. Polynomial: Hardcoded polynomial formulas (default, backward compatible)
-//! 2. Interpolated: Grid-based interpolation from profiler data (loaded from NPZ files)
+//! `Polynomial` remains a legacy configuration marker. Its implementation is
+//! owned by `aisimulate_core::engine`; this module only implements external NPZ and
+//! AI Configurator providers.
 
 use anyhow::{Context, Result};
 use ndarray::{Array1, Array2};
@@ -78,7 +78,7 @@ impl DecodeInterpolator for DecodeInterp2D {
 /// Performance model for predicting prefill and decode timing
 #[derive(Default)]
 pub enum PerfModel {
-    /// Default polynomial-based model using hardcoded formulas
+    /// Select the built-in AISimulate polynomial timing model.
     #[default]
     Polynomial,
     /// Interpolation-based model using profiler data
@@ -219,9 +219,9 @@ impl PerfModel {
 
     /// Predict prefill time in milliseconds.
     ///
-    /// Callers always pass all parameters; each variant uses what it needs:
-    /// - Polynomial/Interpolated: uses total new tokens across the batch
-    ///   (`batch_size * (isl - prefix)`), modeling GPU processing total tokens in parallel
+    /// Callers always pass all parameters; each external variant uses what it needs:
+    /// - Interpolated uses total new tokens across the batch
+    ///   (`batch_size * (isl - prefix)`).
     /// - Aiconfigurator: passes (batch_size, isl - prefix, prefix) to the AIC SDK
     pub fn predict_prefill_time(
         &self,
@@ -229,12 +229,15 @@ impl PerfModel {
         isl: usize,
         prefix: usize,
     ) -> Result<f64> {
+        if matches!(self, Self::Polynomial) {
+            anyhow::bail!("polynomial timing is implemented by the AISimulate engine");
+        }
         let new_tokens_per_req = isl.saturating_sub(prefix);
         if batch_size == 0 || new_tokens_per_req == 0 {
             return Ok(0.0);
         }
         let time = match self {
-            PerfModel::Polynomial => polynomial_prefill_time(batch_size, new_tokens_per_req),
+            PerfModel::Polynomial => unreachable!("polynomial handled above"),
             PerfModel::Interpolated { prefill_interp, .. } => {
                 let tokens = (batch_size * new_tokens_per_req) as f64;
                 prefill_interp.interp(tokens).unwrap_or(0.0)
@@ -252,8 +255,6 @@ impl PerfModel {
     /// batch, not the number of distinct physically resident tokens.
     ///
     /// Callers always pass all parameters; each variant uses what it needs:
-    /// - Polynomial: uses logical active KV tokens relative to total capacity,
-    ///   clamped to full utilization
     /// - Interpolated: uses (active_kv_tokens, context_length)
     /// - Aiconfigurator: uses (batch_size, context_length)
     pub fn predict_decode_time(
@@ -261,13 +262,16 @@ impl PerfModel {
         batch_size: usize,
         active_kv_tokens: usize,
         context_length: usize,
-        total_kv_tokens: usize,
+        _total_kv_tokens: usize,
     ) -> Result<f64> {
+        if matches!(self, Self::Polynomial) {
+            anyhow::bail!("polynomial timing is implemented by the AISimulate engine");
+        }
         if batch_size == 0 {
             return Ok(0.0);
         }
         let time = match self {
-            PerfModel::Polynomial => polynomial_decode_time(active_kv_tokens, total_kv_tokens),
+            PerfModel::Polynomial => unreachable!("polynomial handled above"),
             PerfModel::Interpolated { decode_interp, .. } => decode_interp
                 .interp(active_kv_tokens as f64, context_length as f64)
                 .unwrap_or(0.0),
@@ -282,22 +286,6 @@ impl PerfModel {
         );
         Ok(result)
     }
-}
-
-fn polynomial_prefill_time(batch_size: usize, new_tokens_per_request: usize) -> f64 {
-    // Total tokens across the batch — GPU processes them in parallel.
-    let tokens = (batch_size * new_tokens_per_request) as f64;
-    4.209989e-07 * tokens.powi(2) + 1.518344e-02 * tokens + 1.650142e+01
-}
-
-fn polynomial_decode_time(active_kv_tokens: usize, total_kv_tokens: usize) -> f64 {
-    let active_perc = if total_kv_tokens > 0 {
-        (active_kv_tokens as f64 / total_kv_tokens as f64).min(1.0)
-    } else {
-        tracing::warn!("Total KV tokens is 0, using 1.0 as capacity");
-        1.0
-    };
-    -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74
 }
 
 #[cfg(test)]
@@ -350,13 +338,11 @@ mod tests {
     }
 
     #[test]
-    fn fully_cached_prompt_skips_prefill() {
-        assert_eq!(
-            PerfModel::default()
-                .predict_prefill_time(1, 128, 128)
-                .unwrap(),
-            0.0
-        );
+    fn polynomial_is_only_a_builtin_engine_marker() {
+        let model = PerfModel::default();
+        assert!(matches!(model, PerfModel::Polynomial));
+        assert!(model.predict_prefill_time(1, 128, 0).is_err());
+        assert!(model.predict_decode_time(1, 128, 128, 1024).is_err());
     }
 
     #[test]

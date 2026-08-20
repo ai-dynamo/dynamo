@@ -64,6 +64,8 @@ class DynamoRuntimeConfig(ConfigBase):
     tcp_tls_insecure: bool = False
     tcp_tls_server_name: Optional[str] = None
     tcp_tls_handshake_timeout_secs: Optional[int] = None
+    nats_tls_ca_cert_path: Optional[str] = None
+    nats_tls_insecure: bool = False
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -119,6 +121,14 @@ class DynamoRuntimeConfig(ConfigBase):
             os.environ["DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS"] = str(
                 self.tcp_tls_handshake_timeout_secs
             )
+
+        # Propagate NATS TLS CLI flags.
+        if self.nats_tls_ca_cert_path:
+            os.environ["NATS_TLS_CA_CERT_PATH"] = self.nats_tls_ca_cert_path
+        if self.nats_tls_insecure:
+            os.environ["NATS_TLS_INSECURE"] = "1"
+        else:
+            os.environ.pop("NATS_TLS_INSECURE", None)
 
     def _validate_output_modalities(self) -> None:
         """Validate --output-modalities values."""
@@ -427,4 +437,20 @@ class DynamoRuntimeArgGroup(ArgGroup):
             arg_type=int,
             dest="tcp_tls_handshake_timeout_secs",
             help="TLS handshake timeout in seconds (default: 3).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-ca-cert-path",
+            env_var="NATS_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate for verifying the NATS server.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--nats-tls-insecure",
+            env_var="NATS_TLS_INSECURE",
+            default=False,
+            help="Disable NATS TLS certificate verification. For local development only.",
         )

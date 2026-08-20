@@ -55,7 +55,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
         let mut locality: Option<Option<Locality>> = None;
-        let mut source_kind: Option<Option<String>> = None;
+        let mut ownership: Option<Option<String>> = None;
         let mut metadata = KvCacheEventMetadata::default();
 
         while let Some(key) = map.next_key::<String>()? {
@@ -102,8 +102,8 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "locality" => {
                     locality = Some(map.next_value()?);
                 }
-                "source_kind" => {
-                    source_kind = Some(map.next_value()?);
+                "ownership" => {
+                    ownership = Some(map.next_value()?);
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -142,7 +142,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
                     locality: locality.unwrap_or(None),
-                    source_kind: source_kind.unwrap_or(None),
+                    ownership: ownership.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -156,11 +156,11 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
                     locality: locality.unwrap_or(None),
-                    source_kind: source_kind.unwrap_or(None),
+                    ownership: ownership.unwrap_or(None),
                 })
             }
             Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared {
-                source_kind: source_kind.unwrap_or(None),
+                ownership: ownership.unwrap_or(None),
             }),
             Some("Ignored") => Ok(RawKvEvent::Ignored),
             Some(other) => Err(de::Error::unknown_variant(
@@ -236,7 +236,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_kind: parsed.metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: parsed.metadata.kv_cache_spec_sliding_window,
                     locality: parsed.locality,
-                    source_kind: parsed.source_kind,
+                    ownership: parsed.ownership,
                 })
             }
             "BlockRemoved" => {
@@ -264,13 +264,13 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_kind: parsed.metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: parsed.metadata.kv_cache_spec_sliding_window,
                     locality: parsed.locality,
-                    source_kind: parsed.source_kind,
+                    ownership: parsed.ownership,
                 })
             }
             "AllBlocksCleared" => {
-                let source_kind: Option<String> = seq.next_element()?.unwrap_or(None);
+                let ownership: Option<String> = seq.next_element()?.unwrap_or(None);
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
-                Ok(RawKvEvent::AllBlocksCleared { source_kind })
+                Ok(RawKvEvent::AllBlocksCleared { ownership })
             }
             "Ignored" => {
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
@@ -287,14 +287,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 struct ParsedCommonTrailing {
     metadata: KvCacheEventMetadata,
     locality: Option<Locality>,
-    source_kind: Option<String>,
+    ownership: Option<String>,
 }
 
 struct ParsedBlockStoredTrailing {
     metadata: KvCacheEventMetadata,
     block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     locality: Option<Locality>,
-    source_kind: Option<String>,
+    ownership: Option<String>,
 }
 
 fn parse_block_stored_trailing<E>(
@@ -329,7 +329,7 @@ where
             metadata: parsed.metadata,
             block_mm_infos: None,
             locality: parsed.locality,
-            source_kind: parsed.source_kind,
+            ownership: parsed.ownership,
         });
     }
 
@@ -348,7 +348,7 @@ where
         metadata,
         block_mm_infos,
         locality: None,
-        source_kind: None,
+        ownership: None,
     })
 }
 
@@ -377,7 +377,7 @@ where
     Ok(ParsedCommonTrailing {
         metadata,
         locality: None,
-        source_kind: None,
+        ownership: None,
     })
 }
 
@@ -405,7 +405,7 @@ where
     E: de::Error,
 {
     // Current production order is group, cache kind, sliding window, locality,
-    // then source kind. New fields must remain append-only.
+    // then ownership. New fields must remain append-only.
     let mut fields = trailing.into_iter();
     let group_idx = parse_unsigned::<E>(fields.next().flatten(), "group_idx")?;
     let kv_cache_spec_kind = parse_text::<E>(fields.next().flatten(), "kv_cache_spec_kind")?
@@ -419,7 +419,7 @@ where
             _ => Locality::Unknown,
         }
     });
-    let source_kind = parse_text::<E>(fields.next().flatten(), "source_kind")?;
+    let ownership = parse_text::<E>(fields.next().flatten(), "ownership")?;
 
     Ok(ParsedCommonTrailing {
         metadata: KvCacheEventMetadata {
@@ -428,7 +428,7 @@ where
             kv_cache_spec_sliding_window,
         },
         locality,
-        source_kind,
+        ownership,
     })
 }
 
