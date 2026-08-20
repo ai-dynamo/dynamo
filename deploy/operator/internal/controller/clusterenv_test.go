@@ -8,6 +8,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	dynamotesting "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/clusterenv"
@@ -145,8 +147,15 @@ func TestClusterDynamoGraphDeploymentManifests(t *testing.T) {
 				return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
 			})
 
-			t.Log("Wait for the complete generated manifest contract")
-			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+			liveDGD := getOnlyClusterDGD(t, t.Context(), env.Client(), env.Namespace())
+			t.Log("Wait for the complete generated manifest contract with the live worker hash")
+			golden.EventuallyMatchManifestsWithVariables(
+				t,
+				env.Client(),
+				env.Namespace(),
+				filepath.Join(scenarioDir, "output.yaml"),
+				workerHashGoldenVariables(t, liveDGD),
+			)
 		})
 	}
 }
@@ -285,8 +294,33 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 				t.Fatal("DGDR has no selected profiling configuration")
 			}
 
-			t.Log("Wait for the generated DGD and its terminal workload manifests")
-			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+			var liveDGD nvidiacomv1beta1.DynamoGraphDeployment
+			require.NoError(t, env.Client().Get(ctx, client.ObjectKeyFromObject(&dgd), &liveDGD))
+			t.Log("Wait for the generated DGD and terminal workload manifests with the live worker hash")
+			golden.EventuallyMatchManifestsWithVariables(
+				t,
+				env.Client(),
+				env.Namespace(),
+				filepath.Join(scenarioDir, "output.yaml"),
+				workerHashGoldenVariables(t, &liveDGD),
+			)
 		})
 	}
+}
+
+func getOnlyClusterDGD(t *testing.T, ctx context.Context, c client.Client, namespace string) *nvidiacomv1beta1.DynamoGraphDeployment {
+	t.Helper()
+
+	var dgds nvidiacomv1beta1.DynamoGraphDeploymentList
+	require.NoError(t, c.List(ctx, &dgds, client.InNamespace(namespace)))
+	require.Len(t, dgds.Items, 1)
+	return &dgds.Items[0]
+}
+
+func workerHashGoldenVariables(t *testing.T, dgd *nvidiacomv1beta1.DynamoGraphDeployment) golden.Variables {
+	t.Helper()
+
+	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	return golden.Variables{"worker-hash": workerHash}
 }

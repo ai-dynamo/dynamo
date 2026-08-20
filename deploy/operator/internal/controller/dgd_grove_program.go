@@ -58,6 +58,7 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 		workloads: newGroveWorkloadsReconciler(
 			r.Client,
 			r.Recorder,
+			rollout,
 			r.Config,
 			r.RuntimeConfig,
 			r.DockerSecretRetriever,
@@ -106,9 +107,6 @@ func (p *groveProgram) Reconcile(
 	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
-	}
-	if err := p.rollout.ReconcileUnsupported(ctx, req.DGD, true); err != nil {
-		return programResult, err
 	}
 	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
 	if checkpoints.Statuses != nil {

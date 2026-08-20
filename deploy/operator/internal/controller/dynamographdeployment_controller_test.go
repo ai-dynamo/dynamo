@@ -1054,7 +1054,23 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
+			t.Log("Expect workers to withhold their runtime namespace until a PCS revision is accepted")
+			want := tt.wantReconcileResult
+			want.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus, len(tt.wantReconcileResult.ComponentStatus))
+			for componentName, componentStatus := range tt.wantReconcileResult.ComponentStatus {
+				want.ComponentStatus[componentName] = componentStatus
+			}
+			for i := range dgd.Spec.Components {
+				component := &dgd.Spec.Components[i]
+				if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+					continue
+				}
+				componentStatus := want.ComponentStatus[component.ComponentName]
+				componentStatus.RuntimeNamespace = ""
+				want.ComponentStatus[component.ComponentName] = componentStatus
+			}
+
+			g.Expect(result).To(gomega.Equal(want))
 		})
 	}
 }
@@ -1205,9 +1221,10 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 		nil,
 	)
 
-	generatedPCS, err := renderer.Render(ctx, dgd, nil, nil)
+	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	renderDGD := groveRenderDeployment(dgd, generatedPCS)
+	generatedPCS := renderedPCS.desired
+	renderDGD := renderedPCS.renderDeployment
 	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
 
 	prefill := renderDGD.GetComponentByName("VllmPrefillWorker")
@@ -1478,9 +1495,9 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	desired, err := renderer.Render(ctx, dgd, nil, nil)
+	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	renderDGD := groveRenderDeployment(dgd, desired)
+	renderDGD := renderedPCS.renderDeployment
 	prefill := renderDGD.GetComponentByName("prefill")
 	if prefill == nil {
 		t.Fatal("expected rendered prefill component")
@@ -3437,12 +3454,13 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 		return &grovev1alpha1.PodClique{
 			Spec: grovev1alpha1.PodCliqueSpec{Replicas: 3},
 			Status: grovev1alpha1.PodCliqueStatus{
-				Replicas:              3,
-				ReadyReplicas:         1,
-				UpdatedReplicas:       3,
-				ScheduledReplicas:     1,
-				ScheduleGatedReplicas: 0,
-				ObservedGeneration:    ptr.To(int64(1)),
+				Replicas:                          3,
+				ReadyReplicas:                     1,
+				UpdatedReplicas:                   3,
+				ScheduledReplicas:                 1,
+				ScheduleGatedReplicas:             0,
+				ObservedGeneration:                ptr.To(int64(1)),
+				CurrentPodCliqueSetGenerationHash: ptr.To("previous-revision"),
 			},
 		}
 	}
@@ -3495,6 +3513,21 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 			want:   true,
 		},
 		{
+			name: "current PCS revision change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) {
+				pc.Status.CurrentPodCliqueSetGenerationHash = ptr.To("target-revision")
+			},
+			want: true,
+		},
+		{
+			name: "update completion change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) {
+				updateEndedAt := metav1.Now()
+				pc.Status.UpdateProgress = &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &updateEndedAt}
+			},
+			want: true,
+		},
+		{
 			name:   "generation-only change is filtered",
 			mutate: func(pc *grovev1alpha1.PodClique) { pc.Generation = 2 },
 			want:   false,
@@ -3539,11 +3572,12 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 		return &grovev1alpha1.PodCliqueScalingGroup{
 			Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 3},
 			Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-				Replicas:           3,
-				AvailableReplicas:  1,
-				UpdatedReplicas:    3,
-				ScheduledReplicas:  1,
-				ObservedGeneration: ptr.To(int64(1)),
+				Replicas:                          3,
+				AvailableReplicas:                 1,
+				UpdatedReplicas:                   3,
+				ScheduledReplicas:                 1,
+				ObservedGeneration:                ptr.To(int64(1)),
+				CurrentPodCliqueSetGenerationHash: ptr.To("previous-revision"),
 			},
 		}
 	}
@@ -3587,6 +3621,21 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 			name:   "observedGeneration change is significant",
 			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.ObservedGeneration = ptr.To(int64(2)) },
 			want:   true,
+		},
+		{
+			name: "current PCS revision change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {
+				pcsg.Status.CurrentPodCliqueSetGenerationHash = ptr.To("target-revision")
+			},
+			want: true,
+		},
+		{
+			name: "update completion change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {
+				updateEndedAt := metav1.Now()
+				pcsg.Status.UpdateProgress = &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: &updateEndedAt}
+			},
+			want: true,
 		},
 		{
 			name:   "generation-only change is filtered",

@@ -37,6 +37,7 @@ import (
 // exposing no dependency on the top-level DGD controller.
 type groveWorkloadsReconciler struct {
 	syncer          dgdResourceSyncer
+	rollout         *dgdWorkerRolloutReconciler
 	reader          client.Reader
 	renderer        *groveWorkloadRenderer
 	scaler          *groveScaler
@@ -46,14 +47,16 @@ type groveWorkloadsReconciler struct {
 func newGroveWorkloadsReconciler(
 	kubeClient client.Client,
 	recorder events.EventRecorder,
+	rollout *dgdWorkerRolloutReconciler,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
 	dockerSecretRetriever DockerSecretRetriever,
 	scaleClient scale.ScalesGetter,
 ) *groveWorkloadsReconciler {
 	return &groveWorkloadsReconciler{
-		syncer: newDGDResourceSyncer(kubeClient, recorder),
-		reader: kubeClient,
+		syncer:  newDGDResourceSyncer(kubeClient, recorder),
+		rollout: rollout,
+		reader:  kubeClient,
 		renderer: newGroveWorkloadRenderer(
 			kubeClient,
 			config,
@@ -73,22 +76,33 @@ func (r *groveWorkloadsReconciler) Reconcile(
 ) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	desiredPodCliqueSet, err := r.renderer.Render(
+	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(dgd)
+	if err != nil {
+		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	renderedPodCliqueSet, err := r.renderer.Render(
 		ctx,
 		dgd,
 		restartState,
 		checkpointInfos,
+		workerHashTransition.workerGenerationChanged,
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
-	renderDeployment := groveRenderDeployment(dgd, desiredPodCliqueSet)
-
-	syncedPodCliqueSet, err := r.reconcilePodCliqueSet(ctx, dgd, desiredPodCliqueSet)
+	syncedPodCliqueSet, err := r.reconcilePodCliqueSet(ctx, dgd, renderedPodCliqueSet)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
+	}
+	// The PCS write is the transition's write barrier. A failed DGD update
+	// leaves its hash unchanged, so the next reconcile replans from live state.
+	if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, true); err != nil {
+		return ReconcileResult{}, failWorkloadProgram(
+			reasonRollingUpdateFailed,
+			fmt.Errorf("commit worker hash after Grove PodCliqueSet sync: %w", err),
+		)
 	}
 
 	if err := r.scaler.Reconcile(ctx, dgd, checkpointInfos); err != nil {
@@ -96,7 +110,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
-	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderDeployment)
+	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderedPodCliqueSet.renderDeployment)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
@@ -117,18 +131,17 @@ func (r *groveWorkloadsReconciler) Reconcile(
 func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	desired *grovev1alpha1.PodCliqueSet,
+	rendered *grovePodCliqueSetRender,
 ) (*grovev1alpha1.PodCliqueSet, error) {
-	_, synced, err := commoncontroller.SyncResource(
+	_, synced, err := commoncontroller.SyncObservedResource(
 		ctx,
 		&r.syncer,
 		dgd,
-		func(context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
-			return desired, false, nil
-		},
+		rendered.existing,
+		rendered.desired,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sync Grove PodCliqueSet: %w", err)
 	}
 	return synced, nil
 }
@@ -141,7 +154,7 @@ func (r *groveWorkloadsReconciler) observePodCliqueSetReadiness(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
 ) (*commoncontroller.Resource, dynamo.GroveReadiness, error) {
-	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, dgd)
+	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, dgd, podCliqueSet)
 	if err != nil {
 		return nil, dynamo.GroveReadiness{}, err
 	}
