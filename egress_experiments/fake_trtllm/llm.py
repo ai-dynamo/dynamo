@@ -84,6 +84,8 @@ class FakeLLM:
         self.loop_thread_name: Optional[str] = None
         #: submit() calls that reached the engine.
         self.submitted = 0
+        #: One event-loop wake for each native batch containing final requests.
+        self.native_completion_notify_calls = 0
         #: Arrival timestamp per IPC message, so the observed batch can be
         #: restricted to a steady-state window.
         self.ipc_times: List[int] = []
@@ -120,6 +122,10 @@ class FakeLLM:
         sampling_params: Any = None,
         *,
         streaming: bool = True,
+        response_processor: Any = None,
+        response_sender: Any = None,
+        prompt_tokens: int = 0,
+        calibrated_work_us: float = 0.0,
         **kwargs: Any,
     ) -> GenerationResult:
         """Submit and return immediately. Called ON the event loop.
@@ -144,7 +150,18 @@ class FakeLLM:
             streaming=streaming,
             costs=self.costs,
             loop=self._loop,
+            response_processor=response_processor,
         )
+        if response_processor is not None:
+            if response_sender is None:
+                raise ValueError("native response processing requires response_sender")
+            response_processor.register(
+                client_id,
+                int(prompt_tokens),
+                int(n),
+                response_sender,
+                float(calibrated_work_us),
+            )
         # Register BEFORE submitting: the dispatch thread drops responses for
         # unknown client ids (proxy.py:550), so a late registration would lose
         # the first iteration's response.
@@ -193,6 +210,8 @@ class FakeLLM:
         iteration = range_("_handle_responses", color="green")
         iteration.__enter__()
         async_queues: List[SyncQueue] = []
+        native_batches: Dict[int, tuple[Any, list[dict[str, Any]]]] = {}
+        native_completed: list[GenerationResult] = []
         event_loop: Optional[asyncio.AbstractEventLoop] = None
 
         def process_res(response: Response) -> None:
@@ -201,6 +220,27 @@ class FakeLLM:
                 result = self._results.get(response.client_id)
             if result is None:
                 # Late response for an already-finalised request (proxy.py:546).
+                return
+            if result.response_processor is not None:
+                payload = response.result
+                processor_key = id(result.response_processor)
+                _, native_batch = native_batches.setdefault(
+                    processor_key, (result.response_processor, [])
+                )
+                native_batch.append(
+                    {
+                        "client_id": response.client_id,
+                        "new_token_ids": (
+                            payload.new_token_ids if payload is not None else []
+                        ),
+                        "is_final": payload.is_final if payload is not None else True,
+                        "finish_reasons": (
+                            payload.finish_reasons if payload is not None else None
+                        ),
+                        "stop_reasons": None,
+                        "error_msg": response.error_msg,
+                    }
+                )
                 return
             queue = result.queue
             queue.put_nowait(response)  # deque append -- the loop is untouched
@@ -228,6 +268,26 @@ class FakeLLM:
         self.ipc_times.append(_perf())
         self.ipc_batch_sizes.append(len(batch))
 
+        for processor, native_batch in native_batches.values():
+            completed_client_ids = processor.process_mock_batch(native_batch)
+            for client_id in completed_client_ids:
+                with self._results_lock:
+                    completed = self._results.pop(client_id, None)
+                if completed is not None:
+                    self.completed_results.append(completed)
+                    native_completed.append(completed)
+                    event_loop = event_loop or completed.queue.loop
+
+        if native_completed and event_loop is not None:
+            if event_loop.is_running():
+                event_loop.call_soon_threadsafe(
+                    self._mark_native_done_many, tuple(native_completed)
+                )
+                self.native_completion_notify_calls += 1
+            else:
+                iteration.__exit__()
+                return False
+
         if async_queues:
             try:
                 SyncQueue.notify_many(event_loop, async_queues)
@@ -237,6 +297,11 @@ class FakeLLM:
                 return False
         iteration.__exit__()
         return True
+
+    @staticmethod
+    def _mark_native_done_many(results: tuple[GenerationResult, ...]) -> None:
+        for result in results:
+            result.mark_native_done()
 
     # -- reporting ---------------------------------------------------------
 

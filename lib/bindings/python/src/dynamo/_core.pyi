@@ -51,6 +51,35 @@ JsonLike = Any
 
 RequestHandler = Callable[..., AsyncIterator[JsonLike]]
 
+class ResponseSender:
+    """Per-request bounded response sink supplied by the Rust runtime."""
+
+    def send(self, response: JsonLike) -> None: ...
+    def close(self) -> None: ...
+    def close_with_error(self, message: str) -> None: ...
+
+class OwnedTokenEgress:
+    """Experimental off-GIL token-response processor."""
+
+    def register(
+        self,
+        client_id: int,
+        prompt_tokens: int,
+        num_choices: int,
+        response_sender: ResponseSender,
+        calibrated_work_us: float = 0.0,
+    ) -> None: ...
+    def process_mock_batch(self, responses: list[dict[str, Any]]) -> list[int]: ...
+    def cancel(self, client_id: int) -> bool: ...
+    @property
+    def active_requests(self) -> int: ...
+    @property
+    def responses_processed(self) -> int: ...
+    @property
+    def responses_dropped(self) -> int: ...
+    @property
+    def frames_sent(self) -> int: ...
+
 class DistributedRuntime:
     """
     The runtime object for dynamo applications

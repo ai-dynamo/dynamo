@@ -89,6 +89,7 @@ class GenerationResult:
         streaming: bool = True,
         costs: Optional[Costs] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        response_processor: Any = None,
     ) -> None:
         self.client_id = client_id
         self.request_id = client_id
@@ -106,6 +107,8 @@ class GenerationResult:
         self._done = False
         self._aborted = False
         self._error_msg: Optional[str] = None
+        self.response_processor = response_processor
+        self._native_done = asyncio.Event() if response_processor is not None else None
 
         #: Diagnostics for the tests: which thread ran _handle_response, and
         #: how many times. The diagram's claim is that this is the loop thread.
@@ -187,3 +190,13 @@ class GenerationResult:
         while not self._done:
             await self._aresult_step()
         return self
+
+    async def wait_native(self) -> None:
+        if self._native_done is None:
+            raise RuntimeError("wait_native requires a native response processor")
+        await self._native_done.wait()
+
+    def mark_native_done(self) -> None:
+        if self._native_done is None:
+            raise RuntimeError("mark_native_done requires a native response processor")
+        self._native_done.set()

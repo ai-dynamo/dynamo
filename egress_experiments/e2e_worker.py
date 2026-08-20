@@ -1,13 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Python GIL-path mock worker served by the real Dynamo runtime.
+"""Python and Rust response-path mock workers served by the real Dynamo runtime.
 
 The synthetic TRT-LLM engine remains a separate process. Its dispatch thread
 delivers one response batch per engine iteration into per-request queues, then
 wakes the worker's single asyncio loop once. The loop performs the calibrated
 ``handle_response`` and ``build_response`` work before the real Dynamo bridge
 egresses each chunk.
+
+The Rust arm converts each raw IPC batch once on the dispatch thread, releases
+the GIL, and performs response state updates, construction, and bounded runtime
+egress in Rust. Python is woken only when a request completes.
 """
 
 from __future__ import annotations
@@ -97,6 +101,54 @@ class RuntimeTrtllmWorkerHandler(TrtllmWorkerHandler):
             yield out
 
 
+class RuntimeRustEgressWorkerHandler:
+    """Keep request admission in Python and move each response batch to Rust."""
+
+    def __init__(self, llm: FakeLLM, processor: Any, costs: Costs | None = None) -> None:
+        self.llm = llm
+        self.processor = processor
+        self.costs = costs or Costs()
+        self._request_path = TrtllmWorkerHandler(llm, costs=self.costs)
+        self._request_ids = itertools.count(1)
+
+    @property
+    def completed_results(self):
+        return self.llm.completed_results
+
+    @property
+    def responses_yielded(self) -> int:
+        return int(self.processor.frames_sent)
+
+    async def generate(self, request, context=None, response_sender=None):
+        if response_sender is None:
+            raise RuntimeError("Rust response path requires response_sender")
+
+        adapted = adapt_runtime_request(
+            request,
+            request_id=f"runtime-{next(self._request_ids)}",
+            default_max_tokens=self.llm.engine_config.max_tokens,
+        )
+        prompt_tokens = len(adapted.get("token_ids") or [])
+        generation_result, _ = self._request_path._start_generation(
+            adapted,
+            response_processor=self.processor,
+            response_sender=response_sender,
+            prompt_tokens=prompt_tokens,
+            calibrated_work_us=(
+                self.costs.handle_response_us + self.costs.build_response_us
+            ),
+        )
+        try:
+            await generation_result.wait_native()
+        except (asyncio.CancelledError, GeneratorExit):
+            generation_result.abort()
+            self.processor.cancel(generation_result.client_id)
+            raise
+
+        if False:  # pragma: no cover - keep the handler an async generator
+            yield
+
+
 @dataclass
 class StatsSampler:
     """Convert cumulative worker counters into interval rates."""
@@ -146,7 +198,7 @@ class StatsSampler:
 
 async def _report_stats(
     llm: FakeLLM,
-    handler: RuntimeTrtllmWorkerHandler,
+    handler: Any,
     probe: LoopProbe,
     interval_s: float,
 ) -> None:
@@ -194,6 +246,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--endpoint", default="dynamo.backend.generate")
     parser.add_argument("--discovery-backend", default="etcd")
     parser.add_argument("--request-plane", default="tcp")
+    parser.add_argument(
+        "--response-path",
+        choices=("python", "rust"),
+        default="python",
+        help="run response handling on the Python loop or in owned Rust",
+    )
     parser.add_argument("--batch-total", type=_positive_int, default=200)
     parser.add_argument("--iteration-ms", type=_positive_float, default=52.1)
     parser.add_argument("--max-tokens", type=_positive_int, default=89)
@@ -233,8 +291,20 @@ def _validate_push_runtime() -> None:
         )
 
 
+def _validate_rust_runtime(core: Any) -> None:
+    if not hasattr(core, "OwnedTokenEgress"):
+        raise RuntimeError(
+            "--response-path rust requires bindings with OwnedTokenEgress; "
+            "rebuild lib/bindings/python from this checkout"
+        )
+
+
 async def serve(args: argparse.Namespace) -> None:
     _validate_push_runtime()
+    import dynamo._core as core
+
+    if args.response_path == "rust":
+        _validate_rust_runtime(core)
     loop = asyncio.get_running_loop()
     costs = response_path_costs(args.response_cost_scale)
     engine_config = EngineConfig(
@@ -254,7 +324,12 @@ async def serve(args: argparse.Namespace) -> None:
 
     try:
         llm.start(loop)
-        handler = RuntimeTrtllmWorkerHandler(llm, costs=costs)
+        if args.response_path == "rust":
+            handler = RuntimeRustEgressWorkerHandler(
+                llm, processor=core.OwnedTokenEgress(), costs=costs
+            )
+        else:
+            handler = RuntimeTrtllmWorkerHandler(llm, costs=costs)
         probe = LoopProbe(lag_ms=args.loop_lag_ms)
         probe.install(loop)
         reporter = loop.create_task(
@@ -286,14 +361,11 @@ async def serve(args: argparse.Namespace) -> None:
         demand = engine_config.responses_per_iteration / (
             args.iteration_ms / 1000.0
         )
-        loop_cost = (
-            costs.loop_us_per_response_push
-            if os.environ.get("DYN_TRTLLM_PUSH_EGRESS") == "1"
-            else costs.loop_us_per_response_pull
-        )
+        loop_cost = 0.0 if args.response_path == "rust" else costs.loop_us_per_response_push
         logger.info(
-            "GIL-path worker ready: %s; demand=%.1f responses/s, "
+            "%s response-path worker ready: %s; demand=%.1f responses/s, "
             "modelled_loop_cost=%.2f us/response, modelled_loop_load=%.1f%%",
+            args.response_path,
             engine_config.describe(),
             demand,
             loop_cost,

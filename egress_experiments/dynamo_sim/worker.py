@@ -102,45 +102,7 @@ class TrtllmWorkerHandler:
     async def _generate_locally_impl(
         self, request: dict, context: Any
     ) -> AsyncGenerator[dict, None]:
-        record = self.records.get(request["id"])
-        if record is not None and not record.admitted_ns:
-            # The loop has finally drained to this request. Everything between
-            # `accepted_ns` and here is time spent in the ONE asyncio deque --
-            # the quantity the diagram leaves blank and queue_probe measures.
-            record.admitted_ns = _perf()
-
-        # The four pre-submit stages, under the same NVTX names the real
-        # handler uses, so a capture of this run reads back identically.
-        for stage_name, stage_us in (
-            ("trtllm:normalize_request", self.costs.normalize_request_us),
-            ("trtllm:setup_disagg_params", self.costs.setup_disagg_params_us),
-            ("trtllm:prepare_input", self.costs.prepare_input_us),
-            ("trtllm:sampling_params", self.costs.sampling_params_us),
-        ):
-            with range_(stage_name, color="cyan"):
-                spin(self.costs.scaled(stage_us))
-
-        sampling_params = SamplingParams(
-            max_tokens=int(request.get("max_tokens", 64)),
-            n=int(request.get("n", 1)),
-        )
-
-        # ---- the mocked boundary -----------------------------------------
-        # The worker hands the request to the engine and gets a handle back.
-        # Nothing about the engine is visible from here; responses arrive
-        # asynchronously over the IPC lane.
-        generation_result = self.llm.generate_async(
-            inputs=request.get("token_ids"),
-            sampling_params=sampling_params,
-            disaggregated_params=None,
-            streaming=True,
-            trace_headers=None,
-            scheduling_params=None,
-            priority=0.5,
-            cache_salt=None,
-        )
-
-        num_input_tokens = len(request.get("token_ids") or [])
+        generation_result, num_input_tokens = self._start_generation(request)
         output_tokens_per_choice: Dict[int, int] = {}
 
         # `async for` -> GenerationResult.__anext__ -> _aresult_step ->
@@ -187,3 +149,47 @@ class TrtllmWorkerHandler:
                 self.responses_yielded += 1
                 yield out
                 output_tokens_per_choice[output_idx] = next_total_toks
+
+    def _start_generation(self, request: dict, **response_path: Any):
+        """Run the shared request path and submit before response handling forks."""
+        record = self.records.get(request["id"])
+        if record is not None and not record.admitted_ns:
+            # The loop has finally drained to this request. Everything between
+            # `accepted_ns` and here is time spent in the ONE asyncio deque --
+            # the quantity the diagram leaves blank and queue_probe measures.
+            record.admitted_ns = _perf()
+
+        # The four pre-submit stages, under the same NVTX names the real
+        # handler uses, so a capture of this run reads back identically.
+        for stage_name, stage_us in (
+            ("trtllm:normalize_request", self.costs.normalize_request_us),
+            ("trtllm:setup_disagg_params", self.costs.setup_disagg_params_us),
+            ("trtllm:prepare_input", self.costs.prepare_input_us),
+            ("trtllm:sampling_params", self.costs.sampling_params_us),
+        ):
+            with range_(stage_name, color="cyan"):
+                spin(self.costs.scaled(stage_us))
+
+        sampling_params = SamplingParams(
+            max_tokens=int(request.get("max_tokens", 64)),
+            n=int(request.get("n", 1)),
+        )
+
+        # ---- the mocked boundary -----------------------------------------
+        # The worker hands the request to the engine and gets a handle back.
+        # Nothing about the engine is visible from here; responses arrive
+        # asynchronously over the IPC lane.
+        generation_result = self.llm.generate_async(
+            inputs=request.get("token_ids"),
+            sampling_params=sampling_params,
+            disaggregated_params=None,
+            streaming=True,
+            trace_headers=None,
+            scheduling_params=None,
+            priority=0.5,
+            cache_salt=None,
+            **response_path,
+        )
+
+        num_input_tokens = len(request.get("token_ids") or [])
+        return generation_result, num_input_tokens
