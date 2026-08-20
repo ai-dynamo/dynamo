@@ -113,7 +113,7 @@ limitations under the License.
 
 ```bash
 # 拉取预构建容器（SGLang 示例）
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.1
 
 # 在容器内启动 frontend 和 worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &

@@ -47,6 +47,7 @@ from .health_check import (
 )
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
+from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
 
 logger = logging.getLogger(__name__)
@@ -613,6 +614,12 @@ class WorkerFactory:
             )
             return
 
+        if config.classify_worker:
+            await self._create_classify_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
+            return
+
         # NOTE: --benchmark-mode is only supported for prefill/decode workers.
         # The encode worker path does not wire benchmark waiting or
         # the get_perf_metrics endpoint.
@@ -791,6 +798,74 @@ class WorkerFactory:
             )
         except Exception as e:
             logger.error(f"Failed to serve embedding worker endpoint: {e}")
+            raise
+        finally:
+            handler.cleanup()
+
+    async def _create_classify_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+    ) -> None:
+        """Initialize an aggregated sequence-classification worker.
+
+        Like the embeddings worker, this uses a pooling ``AsyncLLM`` and skips
+        the generation-only KV-cache and scheduler machinery. The combined
+        model type advertises both pooling-family endpoints.
+        """
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        factory = StatLoggerFactory(
+            endpoint=generate_endpoint,
+            embedding_worker=True,
+        )
+        (
+            engine_client,
+            vllm_config,
+            _default_sampling_params,
+            _prometheus_temp_dir,
+            _component_gauges,
+        ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+
+        handler = ClassifyWorkerHandler(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            model_config=getattr(vllm_config, "model_config", None),
+            shutdown_event=shutdown_event,
+        )
+
+        classify_health_check_payload = VllmEmbeddingHealthCheckPayload(
+            model_name=config.served_model_name or config.model
+        ).to_dict()
+
+        logger.info("Starting to serve the classify worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=[("model", config.model)],
+                    health_check_payload=classify_health_check_payload,
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Classify | ModelType.Pooling,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to serve classify worker endpoint: {e}")
             raise
         finally:
             handler.cleanup()

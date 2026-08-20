@@ -16,7 +16,7 @@
 
 [project]
 name = "kvbm"
-version = "1.4.0"
+version = "1.4.1"
 description = "Dynamo KVBM"
 readme = "README.md"
 authors = [
