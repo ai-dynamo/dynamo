@@ -26,6 +26,7 @@ what ``queue_probe`` measured at ~132:1 on the real worker.
 from __future__ import annotations
 
 import asyncio
+import collections
 import itertools
 import threading
 import time
@@ -63,6 +64,12 @@ class FakeLLM:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._dispatch_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+
+        # Keep a bounded sample of completed results for structural checks.
+        # The objects are appended by the dispatch thread before their final
+        # response is consumed; their loop-side diagnostics are populated by
+        # the time the request generator finishes.
+        self.completed_results = collections.deque(maxlen=1024)
 
         # -- observability the tests assert on ------------------------------
         #: IPC messages received (== engine iterations).
@@ -204,7 +211,9 @@ class FakeLLM:
                 response.result is not None and response.result.is_final
             ):
                 with self._results_lock:
-                    self._results.pop(response.client_id, None)
+                    completed = self._results.pop(response.client_id, None)
+                if completed is not None:
+                    self.completed_results.append(completed)
 
         batch = res if isinstance(res, list) else [res]
         for item in batch:

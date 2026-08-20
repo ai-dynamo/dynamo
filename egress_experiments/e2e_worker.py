@@ -1,0 +1,341 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Python GIL-path mock worker served by the real Dynamo runtime.
+
+The synthetic TRT-LLM engine remains a separate process. Its dispatch thread
+delivers one response batch per engine iteration into per-request queues, then
+wakes the worker's single asyncio loop once. The loop performs the calibrated
+``handle_response`` and ``build_response`` work before the real Dynamo bridge
+egresses each chunk.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import itertools
+import json
+import logging
+import math
+import os
+import signal
+import statistics
+import time
+from dataclasses import dataclass, replace
+from typing import Any
+
+from egress_experiments.costs import Costs
+from egress_experiments.dynamo_sim.probes import LoopProbe
+from egress_experiments.dynamo_sim.worker import (
+    TrtllmWorkerHandler,
+    USING_REAL_PUSH_EGRESS,
+    push_egress_capable,
+)
+from egress_experiments.fake_trtllm.engine import (
+    BatchConfig,
+    ConstantIteration,
+    EngineConfig,
+)
+from egress_experiments.fake_trtllm.llm import FakeLLM
+
+logger = logging.getLogger(__name__)
+_perf = time.perf_counter_ns
+
+
+def adapt_runtime_request(
+    request: dict[str, Any], *, request_id: str, default_max_tokens: int = 64
+) -> dict[str, Any]:
+    """Map the real frontend request shape to the simulated TRT-LLM shape."""
+    stop_conditions = request.get("stop_conditions") or {}
+    sampling_options = request.get("sampling_options") or {}
+    max_tokens = (
+        stop_conditions.get("max_tokens")
+        or request.get("max_tokens")
+        or default_max_tokens
+    )
+    n = sampling_options.get("n") or request.get("n") or 1
+    return {
+        **request,
+        "id": request_id,
+        "max_tokens": int(max_tokens),
+        "n": int(n),
+    }
+
+
+def response_path_costs(scale: float) -> Costs:
+    """Scale only Python response work; keep request admission identical."""
+    baseline = Costs()
+    return replace(
+        baseline,
+        handle_response_us=baseline.handle_response_us * scale,
+        build_response_us=baseline.build_response_us * scale,
+    )
+
+
+class RuntimeTrtllmWorkerHandler(TrtllmWorkerHandler):
+    """Adapt real preprocessed requests without changing the measured path."""
+
+    def __init__(self, llm: FakeLLM, costs: Costs | None = None) -> None:
+        super().__init__(llm, costs=costs)
+        self._request_ids = itertools.count(1)
+
+    @property
+    def completed_results(self):
+        return self.llm.completed_results
+
+    # This decorator must remain outermost: the branch's Rust bridge detects
+    # the response_sender parameter on the registered callable.
+    @push_egress_capable
+    async def generate(self, request, context=None):
+        adapted = adapt_runtime_request(
+            request,
+            request_id=f"runtime-{next(self._request_ids)}",
+            default_max_tokens=self.llm.engine_config.max_tokens,
+        )
+        async for out in self.generate_locally(adapted, context):
+            yield out
+
+
+@dataclass
+class StatsSampler:
+    """Convert cumulative worker counters into interval rates."""
+
+    start_ns: int
+    _last_ns: int | None = None
+    _last_dispatched: int = 0
+    _last_yielded: int = 0
+    _last_notify: int = 0
+    _last_batch_index: int = 0
+
+    def sample(
+        self,
+        *,
+        now_ns: int,
+        responses_dispatched: int,
+        responses_yielded: int,
+        notify_many_calls: int,
+        ipc_batch_sizes: list[int],
+    ) -> dict[str, float | int]:
+        previous_ns = self.start_ns if self._last_ns is None else self._last_ns
+        elapsed_s = max((now_ns - previous_ns) / 1e9, 1e-9)
+        dispatched_delta = responses_dispatched - self._last_dispatched
+        yielded_delta = responses_yielded - self._last_yielded
+        notify_delta = notify_many_calls - self._last_notify
+        new_batches = ipc_batch_sizes[self._last_batch_index :]
+
+        result: dict[str, float | int] = {
+            "response_rate": dispatched_delta / elapsed_s,
+            "yield_rate": yielded_delta / elapsed_s,
+            "loop_backlog": responses_dispatched - responses_yielded,
+            "responses_per_notify": (
+                dispatched_delta / notify_delta if notify_delta else 0.0
+            ),
+            "mean_ipc_batch": statistics.fmean(new_batches) if new_batches else 0.0,
+            "responses_dispatched": responses_dispatched,
+            "responses_yielded_to_egress": responses_yielded,
+            "notify_many_calls": notify_many_calls,
+        }
+        self._last_ns = now_ns
+        self._last_dispatched = responses_dispatched
+        self._last_yielded = responses_yielded
+        self._last_notify = notify_many_calls
+        self._last_batch_index = len(ipc_batch_sizes)
+        return result
+
+
+async def _report_stats(
+    llm: FakeLLM,
+    handler: RuntimeTrtllmWorkerHandler,
+    probe: LoopProbe,
+    interval_s: float,
+) -> None:
+    sampler = StatsSampler(start_ns=_perf())
+    while True:
+        await asyncio.sleep(interval_s)
+        sample = sampler.sample(
+            now_ns=_perf(),
+            responses_dispatched=llm.responses_dispatched,
+            responses_yielded=handler.responses_yielded,
+            notify_many_calls=llm.notify_many_calls,
+            ipc_batch_sizes=list(llm.ipc_batch_sizes),
+        )
+        sample["loop"] = probe.report()
+        logger.info("GIL_PATH_STATS %s", json.dumps(sample, sort_keys=True))
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
+
+
+def _non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be finite and non-negative")
+    return parsed
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Serve the simulated TRT-LLM GIL response path through Dynamo"
+    )
+    parser.add_argument("--model-path", default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--model-name", default="gil-path-mocker")
+    parser.add_argument("--endpoint", default="dynamo.backend.generate")
+    parser.add_argument("--discovery-backend", default="etcd")
+    parser.add_argument("--request-plane", default="tcp")
+    parser.add_argument("--batch-total", type=_positive_int, default=200)
+    parser.add_argument("--iteration-ms", type=_positive_float, default=52.1)
+    parser.add_argument("--max-tokens", type=_positive_int, default=89)
+    parser.add_argument("--stream-interval", type=_positive_int, default=1)
+    parser.add_argument(
+        "--response-cost-scale",
+        "--cost-scale",
+        dest="response_cost_scale",
+        type=_non_negative_float,
+        default=1.0,
+        help="scale handle_response and build_response only",
+    )
+    parser.add_argument("--stats-interval", type=_positive_float, default=1.0)
+    parser.add_argument("--loop-lag-ms", type=_positive_float, default=5.0)
+    return parser.parse_args(argv)
+
+
+def _validate_push_runtime() -> None:
+    if os.environ.get("DYN_TRTLLM_PUSH_EGRESS") != "1":
+        raise RuntimeError(
+            "DYN_TRTLLM_PUSH_EGRESS must be 1 for the real-runtime "
+            "GIL-path reproduction"
+        )
+
+    if not USING_REAL_PUSH_EGRESS:
+        raise RuntimeError(
+            "the real push_egress_capable decorator was not loaded; set "
+            "DYN_TRTLLM_PUSH_EGRESS=1 before importing this module"
+        )
+
+    import dynamo._core as core
+
+    if not hasattr(core, "ResponseSender"):
+        raise RuntimeError(
+            "DYN_TRTLLM_PUSH_EGRESS=1 requires bindings built from this "
+            "worker-egress-experiments checkout; ResponseSender is missing"
+        )
+
+
+async def serve(args: argparse.Namespace) -> None:
+    _validate_push_runtime()
+    loop = asyncio.get_running_loop()
+    costs = response_path_costs(args.response_cost_scale)
+    engine_config = EngineConfig(
+        batch=BatchConfig(total=args.batch_total),
+        iteration=ConstantIteration(args.iteration_ms),
+        max_tokens=args.max_tokens,
+        stream_interval=args.stream_interval,
+    )
+
+    # Fork the synthetic engine before constructing DistributedRuntime and its
+    # Tokio threads. Forking a multithreaded runtime process is unsafe.
+    llm = FakeLLM(engine_config, costs=costs)
+    handler = None
+    probe = None
+    runtime = None
+    reporter = None
+
+    try:
+        llm.start(loop)
+        handler = RuntimeTrtllmWorkerHandler(llm, costs=costs)
+        probe = LoopProbe(lag_ms=args.loop_lag_ms)
+        probe.install(loop)
+        reporter = loop.create_task(
+            _report_stats(llm, handler, probe, args.stats_interval)
+        )
+        from dynamo.llm import (
+            ModelInput,
+            ModelType,
+            WorkerType,
+            register_model,
+        )
+        from dynamo.runtime import DistributedRuntime
+
+        runtime = DistributedRuntime(
+            loop, args.discovery_backend, args.request_plane
+        )
+        endpoint = runtime.endpoint(args.endpoint)
+        await register_model(
+            ModelInput.Tokens,
+            ModelType.Chat | ModelType.Completions,
+            endpoint,
+            args.model_path,
+            model_name=args.model_name,
+            kv_cache_block_size=64,
+            worker_type=WorkerType.Aggregated,
+            ignore_weights=True,
+        )
+
+        demand = engine_config.responses_per_iteration / (
+            args.iteration_ms / 1000.0
+        )
+        loop_cost = (
+            costs.loop_us_per_response_push
+            if os.environ.get("DYN_TRTLLM_PUSH_EGRESS") == "1"
+            else costs.loop_us_per_response_pull
+        )
+        logger.info(
+            "GIL-path worker ready: %s; demand=%.1f responses/s, "
+            "modelled_loop_cost=%.2f us/response, modelled_loop_load=%.1f%%",
+            engine_config.describe(),
+            demand,
+            loop_cost,
+            demand * loop_cost / 1e4,
+        )
+        await endpoint.serve_endpoint(handler.generate)
+    finally:
+        try:
+            if reporter is not None:
+                reporter.cancel()
+                await asyncio.gather(reporter, return_exceptions=True)
+        finally:
+            try:
+                if probe is not None:
+                    probe.uninstall()
+            finally:
+                try:
+                    if runtime is not None:
+                        runtime.shutdown()
+                finally:
+                    llm.shutdown()
+
+
+def _interrupt_for_shutdown(_signum: int, _frame: Any) -> None:
+    """Turn SIGTERM into normal async-runner cancellation and unwinding."""
+    raise KeyboardInterrupt
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    import uvloop
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _interrupt_for_shutdown)
+    try:
+        uvloop.run(serve(args))
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+
+if __name__ == "__main__":
+    main()

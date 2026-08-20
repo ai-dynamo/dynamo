@@ -10,8 +10,7 @@ IPC lane into `proxy_dispatch_result_thread`, through `handle_response`, onto th
 one asyncio loop. Everything *around* the engine is ported from the real sources,
 because that is what the loop actually pays for.
 
-Runs on a bare interpreter — stdlib + pytest, no torch, no `tensorrt_llm`, no
-`dynamo._core`.
+The standalone simulation runs on a bare interpreter — stdlib + pytest, no torch, no `tensorrt_llm`, no `dynamo._core`. The real-runtime reproduction below additionally requires the Dynamo Python package and bindings from this branch.
 
 **[`SIMULATED_PATH.md`](SIMULATED_PATH.md)** draws what this builds, in the same
 form as the original diagram — pull vs push where that one had serve vs dynamo.
@@ -21,6 +20,81 @@ python3 -m egress_experiments.run_experiment                  # pull vs push
 python3 -m egress_experiments.run_experiment --gil-noise 42   # 45-thread regime
 python3 -m pytest egress_experiments/tests -m unit
 ```
+
+## Real Dynamo runtime reproduction
+
+`e2e_worker.py` keeps the synthetic engine in a separate process but serves its responses through a real `DistributedRuntime`, real TCP request plane, real frontend, and the branch's real push-egress `ResponseSender`. The worker intentionally uses one Python event loop and one GIL. Do not launch multiple workers for this reproduction because that would shard the bottleneck across processes.
+
+```mermaid
+flowchart LR
+    A["AIPerf"] --> B["Real Dynamo frontend"]
+    B --> C["Real TCP request plane"]
+    C --> D["Endpoint.serve_endpoint"]
+    D --> E["One Python uvloop and one GIL"]
+    E --> F["Fake engine process"]
+    F --> G["IPC dispatch thread"]
+    G -->|"one notify_many per engine batch"| E
+    E --> H["handle_response"]
+    H --> I["build_response"]
+    I --> J["Real ResponseSender.send"]
+    J --> K["Runtime response stream and frontend SSE"]
+```
+
+The push-egress bindings must be built from this checkout. Activate the Dynamo virtual environment, start etcd on `localhost:2379`, then build the bindings once:
+
+```bash
+(cd lib/bindings/python && maturin develop --uv --release)
+export PYTHONPATH="$PWD/components/src:$PWD/lib/bindings/python/src:$PWD"
+```
+
+Start the calibrated worker in terminal 1. Use a new namespace for every arm and trial so an etcd lease from a stopped endpoint cannot contaminate the next run:
+
+```bash
+export GIL_E2E_NAMESPACE=gil-e2e-cost1-001
+export PYTHONPATH="$PWD/components/src:$PWD/lib/bindings/python/src:$PWD"
+DYN_SYSTEM_PORT=18081 DYN_TRTLLM_PUSH_EGRESS=1 \
+python -m egress_experiments.e2e_worker \
+  --endpoint "${GIL_E2E_NAMESPACE}.backend.generate" \
+  --batch-total 200 --iteration-ms 20 --max-tokens 64 \
+  --stream-interval 1 --response-cost-scale 1
+```
+
+Start the real frontend in terminal 2 with the same namespace:
+
+```bash
+export GIL_E2E_NAMESPACE=gil-e2e-cost1-001
+export PYTHONPATH="$PWD/components/src:$PWD/lib/bindings/python/src:$PWD"
+DYN_SYSTEM_PORT=18080 python -m dynamo.frontend \
+  --namespace "$GIL_E2E_NAMESPACE" \
+  --http-port 18000 --router-mode round-robin
+```
+
+Run AIPerf in terminal 3:
+
+```bash
+aiperf profile gil-path-mocker \
+  --url http://127.0.0.1:18000 --endpoint-type completions --streaming \
+  --concurrency 200 --request-count 1000 --warmup-request-count 200 \
+  --isl 8 --osl 64 --tokenizer Qwen/Qwen3-0.6B \
+  --use-legacy-max-tokens --output-artifact-dir /tmp/gil-e2e-cost1 \
+  --export-level records
+```
+
+Stop both processes, choose another namespace, and repeat with `--response-cost-scale 0` for the control. That control removes only the synthetic calibration padding for `handle_response` and `build_response`; their real code still executes, and the push-egress bridge and all request admission/setup work remain identical in both arms. At 10,000 responses/s, the modeled response-loop load is 10.7% for the control and 85.3% for the calibrated GIL path.
+
+The following results are medians from three independent process restarts per arm on 2026-08-20. Every arm completed 1,000 measured requests after 200 warmup requests with zero errors:
+
+| Metric | Response control | Calibrated GIL path | Delta |
+| --- | ---: | ---: | ---: |
+| Request throughput | 145.42 req/s | 143.04 req/s | -1.6% |
+| Output throughput | 9,588 tok/s | 9,431 tok/s | -1.6% |
+| Average TTFT | 53.20 ms | 73.92 ms | +20.72 ms / +39.0% |
+| p99 TTFT | 92.68 ms | 102.94 ms | +10.26 ms |
+| Average request latency | 1,361.89 ms | 1,380.49 ms | +18.60 ms |
+| Event-loop lag p99 | 4.99 ms | 17.26 ms | 3.46x |
+| Nonzero loop-backlog samples per run | 0 / 0 / 1 | 8 / 5 / 6 | repeated only with GIL work |
+
+This reproduces the original failure mode end to end: response production continues in another process while serialized Python response work starves the real Dynamo loop, raises TTFT, and leaves complete engine batches waiting to be yielded to the runtime bridge. `GIL_PATH_STATS` reports this loop-side backlog; AIPerf measures the complete runtime and frontend path. The run does not show a large throughput collapse because 85.3% modeled response load remains just below loop capacity and the 20 ms engine cadence still sets token throughput. Increase response demand above capacity to study collapse; use this matched pair to isolate the latency and backlog caused by the response path itself.
 
 ## Reproducing the capture
 

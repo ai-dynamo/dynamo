@@ -4,15 +4,21 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import threading
 
 import pytest
 
+import egress_experiments.e2e_worker as e2e_worker
 from egress_experiments.costs import Costs
 from egress_experiments.e2e_worker import (
     RuntimeTrtllmWorkerHandler,
     StatsSampler,
+    _interrupt_for_shutdown,
+    _validate_push_runtime,
     adapt_runtime_request,
+    parse_args,
+    response_path_costs,
 )
 from egress_experiments.fake_trtllm.engine import (
     BatchConfig,
@@ -51,6 +57,64 @@ def test_adapt_runtime_request_maps_frontend_fields_without_mutating_input():
     }
 
 
+def test_adapt_runtime_request_defaults_nullable_frontend_fields():
+    adapted = adapt_runtime_request(
+        {
+            "token_ids": [1],
+            "stop_conditions": {"max_tokens": None},
+            "sampling_options": {"n": None},
+        },
+        request_id="req-nullable",
+        default_max_tokens=19,
+    )
+
+    assert adapted["max_tokens"] == 19
+    assert adapted["n"] == 1
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "inf"])
+def test_parse_args_rejects_invalid_cost_scale(value):
+    with pytest.raises(SystemExit):
+        parse_args(["--response-cost-scale", value])
+
+
+@pytest.mark.parametrize("value", ["0", "nan", "inf"])
+def test_parse_args_rejects_invalid_positive_float(value):
+    with pytest.raises(SystemExit):
+        parse_args(["--iteration-ms", value])
+
+
+def test_response_path_costs_do_not_change_request_path_work():
+    baseline = Costs()
+    control = response_path_costs(0.0)
+
+    assert control.handle_response_us == 0.0
+    assert control.build_response_us == 0.0
+    assert control.push_send_us == baseline.push_send_us
+    assert control.prepare_request_us == baseline.prepare_request_us
+    assert control.engine_submit_us == baseline.engine_submit_us
+
+
+def test_validate_push_runtime_requires_push_mode(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_PUSH_EGRESS", raising=False)
+
+    with pytest.raises(RuntimeError, match="must be 1"):
+        _validate_push_runtime()
+
+
+def test_validate_push_runtime_requires_real_decorator(monkeypatch):
+    monkeypatch.setenv("DYN_TRTLLM_PUSH_EGRESS", "1")
+    monkeypatch.setattr(e2e_worker, "USING_REAL_PUSH_EGRESS", False)
+
+    with pytest.raises(RuntimeError, match="real push_egress_capable"):
+        _validate_push_runtime()
+
+
+def test_sigterm_interrupts_worker_for_graceful_cleanup():
+    with pytest.raises(KeyboardInterrupt):
+        _interrupt_for_shutdown(signal.SIGTERM, None)
+
+
 def test_stats_sampler_reports_rates_batching_and_backlog():
     sampler = StatsSampler(start_ns=1_000_000_000)
 
@@ -70,12 +134,12 @@ def test_stats_sampler_reports_rates_batching_and_backlog():
     )
 
     assert first["response_rate"] == pytest.approx(120.0)
-    assert first["egress_rate"] == pytest.approx(100.0)
-    assert first["backlog"] == 20
+    assert first["yield_rate"] == pytest.approx(100.0)
+    assert first["loop_backlog"] == 20
     assert first["responses_per_notify"] == pytest.approx(30.0)
     assert second["response_rate"] == pytest.approx(200.0)
-    assert second["egress_rate"] == pytest.approx(180.0)
-    assert second["backlog"] == 40
+    assert second["yield_rate"] == pytest.approx(180.0)
+    assert second["loop_backlog"] == 40
     assert second["mean_ipc_batch"] == pytest.approx(40.0)
 
 
