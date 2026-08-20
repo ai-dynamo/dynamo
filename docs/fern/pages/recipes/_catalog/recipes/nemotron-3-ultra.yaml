@@ -154,8 +154,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 50.89 tok/s/user, 637.41 tok/s/GPU, 526.23 ms TTFT, 19.649 ms ITL @ c94
+    available: false
 - id: refresh-b200-1m
   recommended: true
   hardware:
@@ -178,8 +177,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 52.00 tok/s/user, 255.95 tok/s/GPU, 179.64 ms TTFT, 19.230 ms ITL @ c46
+    available: false
 - id: refresh-gb200-256k
   recommended: true
   hardware:
@@ -203,8 +201,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 51.15 tok/s/user, 665.95 tok/s/GPU, 612.20 ms TTFT, 19.549 ms ITL @ c96
+    available: false
 - id: refresh-gb200-1m
   recommended: true
   hardware:
@@ -227,8 +224,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 51.21 tok/s/user, 269.55 tok/s/GPU, 274.05 ms TTFT, 19.527 ms ITL @ c48
+    available: false
 - id: refresh-h200-256k
   recommended: true
   hardware:
@@ -252,8 +248,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 51.94 tok/s/user, 203.58 tok/s/GPU, 564.70 ms TTFT, 19.253 ms ITL @ c64
+    available: false
 - id: refresh-h200-1m
   recommended: true
   hardware:
@@ -276,8 +271,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 53.02 tok/s/user, 81.50 tok/s/GPU, 215.34 ms TTFT, 18.862 ms ITL @ c32
+    available: false
 - id: refresh-disagg-b200-256k
   recommended: true
   hardware:
@@ -302,8 +296,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 52.08 tok/s/user, 510.82 tok/s/GPU, 3680.71 ms TTFT, 19.200 ms ITL @ c144
+    available: false
 - id: refresh-disagg-b200-1m
   recommended: true
   hardware:
@@ -328,8 +321,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 53.57 tok/s/user, 223.49 tok/s/GPU, 1293.55 ms TTFT, 18.668 ms ITL @ c38
+    available: false
 - id: refresh-disagg-gb200-256k
   recommended: true
   hardware:
@@ -354,8 +346,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 55.47 tok/s/user, 534.82 tok/s/GPU, 3342.87 ms TTFT, 18.026 ms ITL @ c140
+    available: false
 - id: refresh-disagg-gb200-1m
   recommended: true
   hardware:
@@ -380,8 +371,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 50.55 tok/s/user, 270.93 tok/s/GPU, 1696.20 ms TTFT, 19.783 ms ITL @ c48
+    available: false
 - id: refresh-disagg-h200-256k
   recommended: true
   hardware:
@@ -406,8 +396,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 50.75 tok/s/user, 124.94 tok/s/GPU, 422.92 ms TTFT, 19.703 ms ITL @ c42
+    available: false
 - id: refresh-disagg-h200-1m
   recommended: true
   hardware:
@@ -432,8 +421,7 @@ targets:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: true
-    summary: 60.71 tok/s/user, 88.13 tok/s/GPU, 4309.32 ms TTFT, 16.470 ms ITL @ c30
+    available: false
 related_benchmarks: []
 maintainer: null
 gaps:
