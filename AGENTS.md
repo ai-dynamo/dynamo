@@ -47,7 +47,8 @@ to it — edit only the canonical copy. Reach for the right group first:
 
 **For deploying and operating Dynamo:**
 
-- `synthesize-user-workload` — interview the user, capture their DGD, and create the canonical workload contract
+- `synthesize-user-workload` — interview the user, capture their confirmed baseline DGD, and create the canonical workload contract
+- `author-baseline-dgd` — draft a baseline DGD from interview requirements when no recipe matches, for the user's confirmation
 - `consult-perf-knowledge` — select one evidence-backed optimization proposal and write its reasoning record
 - `create-optimization-hypothesis` — materialize a performance consultation as a challenger-ready DGD draft
 - `perform-adversarial-review` — challenge a generated DGD candidate before it consumes GPU time
@@ -83,11 +84,13 @@ write and requires operator consent. Rules:
 
 When the first user message starts a new Dynamo recipe optimization run, dispatch `user_interviewer` before any other
 specialized role. It must invoke `synthesize-user-workload` and produce a validated
-`<EXP_ROOT>/user_workload.yaml` plus an immutable `<EXP_ROOT>/inputs/user_provided_dgd.yaml` copied from the DGD the
-user supplied. Do not dispatch `recipe_deployer`, `perf_analyzer`, `hypothesis_generator`, or
+`<EXP_ROOT>/user_workload.yaml` plus an immutable `<EXP_ROOT>/inputs/user_provided_dgd.yaml` copied from the baseline the
+user supplied or explicitly confirmed. Do not dispatch `recipe_deployer`, `perf_analyzer`, `hypothesis_generator`, or
 `hypothesis_challenger` until both exact paths and SHA256 values are available. Pass both inputs directly to
 `recipe_deployer`; pass the same immutable workload path and hash to every later role. Do not insert a recipe
-exploration or selection step before the baseline deployment.
+exploration or selection step after the interview: the baseline-source ladder
+(`agents/user-interviewer/AGENTS.md`) is the only place selection or authoring happens, always with the user's
+explicit confirmation, and always before the loop starts.
 
 ## Long-Running Runs And Harness Compatibility
 
