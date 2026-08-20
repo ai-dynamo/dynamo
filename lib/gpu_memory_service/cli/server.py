@@ -4,7 +4,8 @@
 """GMS server entry point.
 
 Launches one GMS server process per GPU serving every production GMS tag,
-then supervises them. V1 restore optionally adds one one-shot loader per GPU.
+then supervises them. V1 restore optionally adds one one-shot loader per
+visible GPU, or only ``--device`` when the loader remainder names one.
 Device discovery uses NVML without initializing the CUDA driver.
 """
 
@@ -18,6 +19,7 @@ import sys
 import time
 from contextlib import closing
 
+from gpu_memory_service.cli.snapshot import should_fan_out_v1
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.v1.client.session import _GMSClientSession
@@ -40,6 +42,19 @@ def _child_command(device: int, device_type: str, use_v1: bool = False) -> list[
     command.extend(["--device", str(device)])
     if not use_v1:
         command.extend(["--device-type", device_type])
+    return command
+
+
+def _loader_command(loader_args: list[str], device: int | None = None) -> list[str]:
+    """Command for one V1 loader; inject ``--device`` only when fanning out."""
+    command = [
+        sys.executable,
+        "-m",
+        "gpu_memory_service.v1.snapshot.loader",
+        *loader_args,
+    ]
+    if device is not None:
+        command.extend(["--device", str(device)])
     return command
 
 
@@ -110,12 +125,14 @@ def main(argv: list[str] | None = None) -> None:
         help="Attempt bounded RO admission on every V1 weights socket and exit.",
     )
     parser.add_argument(
-        "--restore-loader",
+        "--enable-loader",
         nargs=argparse.REMAINDER,
         metavar="ARG",
         help=(
-            "Run one V1 loader per device; all following arguments are passed "
-            "directly to the loader."
+            "Run one V1 loader per visible device after the servers start. "
+            "Pass --device in the following arguments to load only that GPU. "
+            "All following arguments are forwarded to the loader, including "
+            "--checkpoint-dir."
         ),
     )
     args = parser.parse_args(argv)
@@ -123,10 +140,10 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--use-v1 only supports --device-type=cuda")
     if args.probe_restore_ready and not args.use_v1:
         parser.error("--probe-restore-ready requires --use-v1")
-    if args.restore_loader is not None and not args.use_v1:
-        parser.error("--restore-loader requires --use-v1")
-    if args.probe_restore_ready and args.restore_loader is not None:
-        parser.error("--probe-restore-ready cannot start restore loaders")
+    if args.enable_loader is not None and not args.use_v1:
+        parser.error("--enable-loader requires --use-v1")
+    if args.probe_restore_ready and args.enable_loader is not None:
+        parser.error("--probe-restore-ready cannot be combined with --enable-loader")
 
     init_vmm(VMMDeviceType.from_str(args.device_type))
     vmm = get_vmm()
@@ -158,23 +175,21 @@ def main(argv: list[str] | None = None) -> None:
             )
             servers.append(server)
 
-        if args.restore_loader is not None:
-            for device in devices:
-                loader = subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-m",
-                        "gpu_memory_service.v1.snapshot.loader",
-                        *args.restore_loader,
-                        "--device",
-                        str(device),
-                    ]
-                )
-                logger.info(
-                    "Started GMS V1 loader device=%d pid=%d",
-                    device,
-                    loader.pid,
-                )
+        if args.enable_loader is not None:
+            if should_fan_out_v1(args.enable_loader):
+                for device in devices:
+                    loader = subprocess.Popen(
+                        _loader_command(args.enable_loader, device)
+                    )
+                    logger.info(
+                        "Started GMS V1 loader device=%d pid=%d",
+                        device,
+                        loader.pid,
+                    )
+                    loaders.append(loader)
+            else:
+                loader = subprocess.Popen(_loader_command(args.enable_loader))
+                logger.info("Started GMS V1 loader pid=%d", loader.pid)
                 loaders.append(loader)
 
         raise SystemExit(_supervise(servers, loaders))
