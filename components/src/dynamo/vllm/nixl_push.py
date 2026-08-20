@@ -22,6 +22,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
+from vllm import envs as vllm_envs
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -40,8 +42,6 @@ def _side_channel_endpoint(vllm_config: VllmConfig) -> Optional[tuple[str, int]]
     the connector is deliberate -- the connector is constructed inside the
     engine core process and is not reachable from registration.
     """
-    from vllm import envs as vllm_envs
-
     host = vllm_envs.VLLM_NIXL_SIDE_CHANNEL_HOST
     if not host:
         return None
