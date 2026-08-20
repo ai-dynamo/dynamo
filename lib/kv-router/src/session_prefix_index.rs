@@ -1,50 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session-aware logical prefix index.
+//! Session lineage retained independently of physical cache eviction.
 //!
-//! The physical indexers (`indexer::*`) answer "which worker holds this block
-//! right now". They are driven by engine cache events, so a block that the
-//! engine evicts disappears from them immediately. That is correct for routing
-//! but it destroys the only record of what a *session* has previously produced.
-//!
-//! This module keeps a separate, logical view: a forest of
-//! [`ExternalSequenceBlockHash`] nodes plus, per session, the set of nodes that
-//! are currently the deepest known point of that session's block chains. Nodes
-//! are never dropped because the engine evicted or cleared the underlying
-//! blocks; they are dropped only when the owning session goes, either through
-//! [`SessionPrefixIndexer::remove_session`] or through the capacity bound
-//! below. Eviction changes where a block lives, not whether the session ever
-//! produced it.
-//!
-//! Retention is bounded. The router calls [`SessionPrefixIndexer::remove_session`]
-//! when a request marks its session final, but that signal is optional and many
-//! clients never send it, so the index also caps how many sessions it tracks
-//! ([`DEFAULT_MAX_SESSIONS`], overridable via
-//! [`SessionPrefixIndexer::with_max_sessions`]). Passing the cap evicts the
-//! least recently touched session by exactly the path `remove_session` takes.
-//! Both halves are needed: the lifecycle signal reclaims promptly when it
-//! arrives, and the cap is what makes growth bounded when it never does.
-//!
-//! Structure follows the enhancement proposal:
-//!
-//! - `nodes`: a [`SlotMap`] arena of [`LogicalNode`], so a [`NodeId`] handed out
-//!   to a caller cannot silently alias a different node after a removal.
-//! - `hash_to_node`: reverse index from block hash to arena slot. Numeric key,
-//!   so [`FxHashMap`] per the crate guidance.
-//! - `sessions`: session id to frontier node set. The key is caller-supplied
-//!   text, so this uses [`std::collections::HashMap`] rather than `FxHashMap`,
-//!   again per the crate guidance.
-//!
-//! [`ExternalSequenceBlockHash`] is treated as opaque: this module compares and
-//! hashes it and never interprets, derives, or recomputes its value.
-//!
-//! Deviation from the proposal's literal signatures: the session parameters are
-//! taken as `&str` rather than an owned `SessionId`. The route-time caller only
-//! holds a borrow, and an owned parameter would force a `String` allocation on
-//! every routed request even when the session is already known. The owned
-//! [`SessionId`] alias is still what the map stores, and a clone happens only on
-//! first insert.
+//! Final-session removal and an LRU session cap bound retention.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -57,14 +16,7 @@ use crate::protocols::ExternalSequenceBlockHash;
 /// Logical session identity as owned by this index.
 pub type SessionId = String;
 
-/// Default ceiling on tracked sessions, past which the least recently touched
-/// session is evicted.
-///
-/// Sized so the common case never reaches it — a router serving far fewer
-/// concurrent sessions than this behaves exactly as if the index were
-/// unbounded — while a router that never receives an end-of-session signal
-/// still settles at a fixed footprint instead of growing for the life of the
-/// process.
+/// Default tracked-session ceiling before LRU eviction.
 pub const DEFAULT_MAX_SESSIONS: usize = 16_384;
 
 new_key_type! {
@@ -72,11 +24,7 @@ new_key_type! {
     pub struct NodeId;
 }
 
-/// One logical block in the session forest.
-///
-/// Holds its own hash, its parent link, and the liveness counters that decide
-/// when the node can be reclaimed: how many session frontier sets point at it,
-/// and how many children it still has.
+/// One block and its liveness links in the logical session forest.
 #[derive(Clone, Copy, Debug)]
 pub struct LogicalNode {
     block_hash: ExternalSequenceBlockHash,
@@ -86,22 +34,18 @@ pub struct LogicalNode {
 }
 
 impl LogicalNode {
-    /// The block hash this node stands for.
     pub fn block_hash(&self) -> ExternalSequenceBlockHash {
         self.block_hash
     }
 
-    /// The parent node, or `None` when this node is a root of the forest.
     pub fn parent(&self) -> Option<NodeId> {
         self.parent
     }
 
-    /// Number of sessions whose frontier set currently contains this node.
     pub fn frontier_refs(&self) -> u32 {
         self.frontier_refs
     }
 
-    /// Number of direct children currently attached to this node.
     pub fn child_count(&self) -> u32 {
         self.child_count
     }
@@ -110,50 +54,30 @@ impl LogicalNode {
 /// Errors surfaced by [`SessionPrefixIndexer`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SessionPrefixIndexError {
-    /// A lineage query named an anchor hash the index has never seen. Returning
-    /// an empty lineage here would be indistinguishable from "this session has
-    /// no blocks past the anchor", so it is reported as an error instead.
+    /// A lineage query named an unknown anchor hash.
     #[error("unknown anchor block hash {0:?}")]
     UnknownAnchor(ExternalSequenceBlockHash),
 
-    /// A stored-blocks update tried to attach a block under a parent other than
-    /// the one already recorded. Within one hash domain a unique block chain
-    /// maps to a unique external sequence-hash chain, so this is a producer,
-    /// configuration, or protocol error rather than a routing condition.
+    /// A block was attached beneath a conflicting parent.
     #[error("block {block:?} is already parented elsewhere")]
     ConflictingParent {
-        /// The block whose recorded parent disagrees with the update.
         block: ExternalSequenceBlockHash,
     },
 
-    /// A stored-blocks update tried to attach a block underneath a block that
-    /// the first one already sits at or above. Applying it would close a parent
-    /// cycle, and every walk of the forest follows parent links, so the cycle
-    /// would turn later reads into non-terminating loops holding the write
-    /// lock. Rejected before the arena is touched.
+    /// A graft would create a parent cycle.
     #[error("block {block:?} would become its own ancestor")]
     CyclicParent {
-        /// The block whose graft would close the cycle.
         block: ExternalSequenceBlockHash,
     },
 }
 
-/// Session-aware logical prefix index.
-///
-/// Cheap to share: all methods take `&self` and lock internally, so the router
-/// can hold this behind an `Arc` next to its physical indexer.
+/// Thread-safe session-aware logical prefix index.
 #[derive(Debug, Default)]
 pub struct SessionPrefixIndexer {
     state: RwLock<IndexState>,
 }
 
-/// One session's retained state: the deepest nodes it has reached, and when it
-/// was last touched, which is what the capacity bound evicts on.
-///
-/// `last_touch` is `None` only between the entry's creation and the
-/// [`IndexState::touch_session`] call that immediately follows it. Making that
-/// gap explicit matters: a numeric sentinel would alias whichever session
-/// legitimately holds that sequence number and evict it instead.
+// None distinguishes an untouched entry from touch sequence zero.
 #[derive(Debug, Default)]
 struct SessionEntry {
     frontiers: FxHashSet<NodeId>,
@@ -165,12 +89,8 @@ struct IndexState {
     nodes: SlotMap<NodeId, LogicalNode>,
     hash_to_node: FxHashMap<ExternalSequenceBlockHash, NodeId>,
     sessions: HashMap<SessionId, SessionEntry>,
-    /// Touch sequence to session id, so the least recently touched session is
-    /// the first entry. Kept in lockstep with [`SessionEntry::last_touch`]:
-    /// every session in `sessions` has exactly one entry here.
+    // Kept in lockstep with SessionEntry::last_touch.
     lru: BTreeMap<u64, SessionId>,
-    /// Monotonic touch counter. `u64` at one touch per routed request does not
-    /// wrap in any realistic process lifetime.
     next_touch: u64,
     max_sessions: usize,
 }
@@ -189,16 +109,11 @@ impl Default for IndexState {
 }
 
 impl SessionPrefixIndexer {
-    /// Create an empty index holding at most [`DEFAULT_MAX_SESSIONS`] sessions.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Create an empty index holding at most `max_sessions` sessions.
-    ///
-    /// A cap of zero is raised to one: an index that could retain nothing would
-    /// discard each session as it was recorded, which is not a useful state to
-    /// let a caller configure by accident.
+    /// Creates an index and clamps a zero session cap to one.
     pub fn with_max_sessions(max_sessions: usize) -> Self {
         Self {
             state: RwLock::new(IndexState {
@@ -208,24 +123,19 @@ impl SessionPrefixIndexer {
         }
     }
 
-    /// The ceiling on tracked sessions.
     pub fn max_sessions(&self) -> usize {
         self.state.read().max_sessions
     }
 
-    /// Resolve a block hash to its arena slot, if this index knows the block.
     pub fn get_node_from_hash(&self, block_hash: ExternalSequenceBlockHash) -> Option<NodeId> {
         self.state.read().hash_to_node.get(&block_hash).copied()
     }
 
-    /// Read a node by handle. Returns `None` for a stale handle.
     pub fn get_node(&self, node_id: NodeId) -> Option<LogicalNode> {
         self.state.read().nodes.get(node_id).copied()
     }
 
-    /// The deepest known nodes of every chain this session has touched.
-    ///
-    /// Empty for an unknown session. Order is unspecified.
+    /// Returns unordered frontier nodes, or an empty vector for an unknown session.
     pub fn get_session_frontiers(&self, session_id: &str) -> Vec<NodeId> {
         self.state
             .read()
@@ -235,13 +145,7 @@ impl SessionPrefixIndexer {
             .unwrap_or_default()
     }
 
-    /// Every block chain this session has touched, root first.
-    ///
-    /// One inner vector per frontier. With `anchor_hash` set, each chain is
-    /// truncated to start at the anchor and chains that do not pass through it
-    /// are omitted; an anchor the index has never seen is an error. An unknown
-    /// session yields an empty result, which is not an error: a session that has
-    /// not been routed yet legitimately has no lineage.
+    /// Returns root-first chains, optionally filtered and truncated at an anchor.
     pub fn get_session_block_lineage(
         &self,
         session_id: &str,
@@ -270,7 +174,6 @@ impl SessionPrefixIndexer {
             let start = match anchor_node {
                 Some(anchor) => match path.iter().position(|&node| node == anchor) {
                     Some(position) => position,
-                    // This frontier's chain does not pass through the anchor.
                     None => continue,
                 },
                 None => 0,
@@ -285,15 +188,7 @@ impl SessionPrefixIndexer {
         Ok(lineages)
     }
 
-    /// Record a route-time cache hit for `session_id` at `matched_hash`.
-    ///
-    /// Returns whether the session's frontier set moved. A hit on a block at or
-    /// above a frontier the session already holds is not an advance, so a
-    /// re-route of the same prefix leaves the index untouched. An unknown hash
-    /// is admitted as a new root: the router matched the block, so it exists,
-    /// even though a match alone carries no parent link. A later
-    /// [`Self::update_session_from_stored_blocks`] carrying that parent grafts
-    /// the chain onto this same node rather than creating a second root.
+    /// Records a route-time match and reports whether the frontier advanced.
     pub fn update_session_from_match(
         &self,
         session_id: &str,
@@ -304,16 +199,8 @@ impl SessionPrefixIndexer {
         Ok(state.advance_frontier(session_id, node))
     }
 
-    /// Record a chain of blocks stored under `parent_hash` for `session_id`.
-    ///
-    /// Blocks are applied in order and existing nodes are reused, so replaying
-    /// the same chain does not grow the arena. Returns whether the session's
-    /// frontier set moved.
-    ///
-    /// Not currently driven by the KV event stream: the cache event schema
-    /// carries no session identity, so there is no honest way to attribute a
-    /// stored-block event to a session yet. It is the ingest half of the
-    /// proposal's API and is exercised by this module's tests.
+    /// Records a stored block chain and reports whether the frontier advanced.
+    /// KV events do not yet supply the session identity required by this API.
     pub fn update_session_from_stored_blocks(
         &self,
         session_id: &str,
@@ -325,16 +212,14 @@ impl SessionPrefixIndexer {
         }
 
         let mut state = self.state.write();
-        // Validate the whole chain before touching the arena, so a rejected
-        // update leaves no half-applied nodes behind.
+        // Reject the whole update before mutating the arena.
         state.validate_chain(parent_hash, block_hashes)?;
 
         let mut parent = parent_hash.map(|hash| state.resolve_or_insert_root(hash));
         for &block_hash in block_hashes {
             let node = match state.hash_to_node.get(&block_hash).copied() {
                 Some(existing) => {
-                    // Known only as a root so far; graft it under the parent
-                    // this event supplies instead of leaving it detached.
+                    // Graft nodes previously known only as roots.
                     if let (None, Some(expected)) = (state.nodes[existing].parent, parent) {
                         state.nodes[existing].parent = Some(expected);
                         state.nodes[expected].child_count += 1;
@@ -350,21 +235,16 @@ impl SessionPrefixIndexer {
         Ok(state.advance_frontier(session_id, leaf))
     }
 
-    /// Drop a session and reclaim the nodes no other session still needs.
-    ///
-    /// Returns whether the session was known. This is the only path that
-    /// removes logical nodes; block eviction never does.
+    /// Removes a session and reclaims its unshared nodes.
     pub fn remove_session(&self, session_id: &str) -> bool {
         let mut state = self.state.write();
         state.drop_session(session_id)
     }
 
-    /// Number of logical nodes currently retained.
     pub fn node_count(&self) -> usize {
         self.state.read().nodes.len()
     }
 
-    /// Number of sessions currently tracked.
     pub fn session_count(&self) -> usize {
         self.state.read().sessions.len()
     }
@@ -389,17 +269,7 @@ impl IndexState {
         node
     }
 
-    /// Read-only check that no block in the chain is already parented somewhere
-    /// other than where this chain would put it, and that applying the chain
-    /// cannot close a parent cycle.
-    ///
-    /// The cycle half matters because a block already known only as a root has
-    /// `parent == None` and so passes the conflict check, after which the apply
-    /// loop would graft it under whatever parent this call supplies — including
-    /// one of its own descendants. `dominators` is every hash that will sit at
-    /// or above the chain once it is applied: the supplied parent, everything
-    /// already above that parent, and the chain's own earlier blocks. A block
-    /// that appears in that set is being asked to become its own ancestor.
+    // Reject conflicting parents and graft cycles before mutation.
     fn validate_chain(
         &self,
         parent_hash: Option<ExternalSequenceBlockHash>,
@@ -434,10 +304,7 @@ impl IndexState {
         Ok(())
     }
 
-    /// Remove a session and reclaim what no other session needs, returning
-    /// whether the session was known. Shared by the public
-    /// [`SessionPrefixIndexer::remove_session`] and by capacity eviction, so
-    /// both reclaim by exactly the same path.
+    // Public removal and capacity eviction share this reclamation path.
     fn drop_session(&mut self, session_id: &str) -> bool {
         let Some(entry) = self.sessions.remove(session_id) else {
             return false;
@@ -451,7 +318,6 @@ impl IndexState {
         true
     }
 
-    /// Mark `session_id` as the most recently used session.
     fn touch_session(&mut self, session_id: &str) {
         let seq = self.next_touch;
         let Some(entry) = self.sessions.get_mut(session_id) else {
@@ -465,17 +331,11 @@ impl IndexState {
         self.lru.insert(seq, session_id.to_string());
     }
 
-    /// Evict least recently touched sessions until the cap is respected.
-    ///
-    /// Called after a session is recorded rather than before, so the session
-    /// that just arrived is the most recently touched one and is never the
-    /// victim of its own insertion.
+    // Enforce the cap after touching the newly recorded session.
     fn enforce_session_cap(&mut self) {
         while self.sessions.len() > self.max_sessions {
             let Some((_, victim)) = self.lru.pop_first() else {
-                // `lru` and `sessions` are maintained together, so this is
-                // unreachable; breaking rather than looping keeps a bookkeeping
-                // bug from becoming a hang.
+                // Avoid a hang if LRU bookkeeping is ever inconsistent.
                 debug_assert!(false, "lru is empty while sessions is over capacity");
                 break;
             };
@@ -499,13 +359,7 @@ impl IndexState {
         }
     }
 
-    /// Walk parent links from `tail`, root first.
-    ///
-    /// Bounded by the arena size. An acyclic forest cannot yield a longer path,
-    /// so the bound never truncates a well-formed walk; it is a backstop that
-    /// makes a corrupted arena degrade into a short answer rather than spin
-    /// forever while holding the index lock. `validate_chain` is what actually
-    /// keeps the forest acyclic.
+    // Bound parent walks so corrupted cycles cannot hang while holding the lock.
     fn path_to_root(&self, tail: NodeId) -> Vec<NodeId> {
         let limit = self.nodes.len();
         let mut path = Vec::new();
@@ -523,9 +377,6 @@ impl IndexState {
         path
     }
 
-    /// Is `candidate` at or above `node` in the forest?
-    ///
-    /// Bounded on the same reasoning as [`Self::path_to_root`].
     fn is_ancestor_or_self(&self, candidate: NodeId, node: NodeId) -> bool {
         let limit = self.nodes.len();
         let mut current = Some(node);
@@ -545,9 +396,7 @@ impl IndexState {
         false
     }
 
-    /// Move `session_id`'s frontier set to include `node`, returning whether
-    /// anything changed. Frontiers that `node` now subsumes are dropped so a
-    /// session holds only the deepest point of each chain it has touched.
+    // Keep only the deepest frontier on each chain.
     fn advance_frontier(&mut self, session_id: &str, node: NodeId) -> bool {
         let already_reached = self.sessions.get(session_id).is_some_and(|entry| {
             entry
@@ -556,9 +405,7 @@ impl IndexState {
                 .any(|&frontier| self.is_ancestor_or_self(node, frontier))
         });
         if already_reached {
-            // The frontier does not move, but the session is demonstrably still
-            // being routed, so it must not drift towards eviction while a
-            // genuinely idle session outranks it.
+            // Repeated matches still refresh LRU order.
             self.touch_session(session_id);
             return false;
         }
@@ -592,9 +439,7 @@ impl IndexState {
         true
     }
 
-    /// Drop one frontier reference and reclaim the now-unreachable tail above
-    /// it. A node survives while any session still points at it or any child
-    /// still hangs off it, so shared prefixes outlive the first session to go.
+    // Reclaim ancestors until reaching a shared frontier or parent.
     fn release_frontier(&mut self, frontier: NodeId) {
         self.nodes[frontier].frontier_refs -= 1;
 
@@ -619,8 +464,6 @@ mod tests {
     use super::*;
     use crate::test_utils::make_blocks;
 
-    /// Block hashes as the engine publishes them, via the shared event builder
-    /// so these fixtures cannot drift from the real event shape.
     fn hashes(ids: Vec<u64>) -> Vec<ExternalSequenceBlockHash> {
         make_blocks(ids)
             .into_iter()
@@ -673,14 +516,12 @@ mod tests {
             .unwrap();
         assert_eq!(indexer.get_session_frontiers("s1").len(), 1);
 
-        // Re-route lands on the middle of the chain the session already owns.
         assert!(
             !indexer.update_session_from_match("s1", chain[1]).unwrap(),
             "a match above the current frontier must not move it"
         );
         assert_eq!(lineage_of(&indexer, "s1"), vec![chain.clone()]);
 
-        // A brand new session hitting the middle stops there.
         assert!(indexer.update_session_from_match("s2", chain[1]).unwrap());
         assert_eq!(lineage_of(&indexer, "s2"), vec![chain[..2].to_vec()]);
     }
@@ -718,12 +559,10 @@ mod tests {
         let chain = hashes(vec![1, 2]);
         let indexer = SessionPrefixIndexer::new();
 
-        // Route-time hit on the child arrives first, with no parent context.
         indexer.update_session_from_match("s1", chain[1]).unwrap();
         let child = indexer.get_node_from_hash(chain[1]).unwrap();
         assert_eq!(indexer.get_node(child).unwrap().parent(), None);
 
-        // The stored-block chain then supplies the missing parent link.
         indexer
             .update_session_from_stored_blocks("s1", Some(chain[0]), &chain[1..])
             .unwrap();
@@ -834,10 +673,6 @@ mod tests {
 
     #[test]
     fn eviction_shaped_replay_does_not_lose_lineage() {
-        // The physical indexers would have dropped these blocks on a Removed or
-        // Cleared event. This index has no such path: only remove_session drops
-        // nodes, so a session re-routed after eviction still reads back its
-        // full chain.
         let chain = hashes(vec![1, 2]);
         let indexer = SessionPrefixIndexer::new();
 
@@ -929,7 +764,6 @@ mod tests {
 
         indexer.update_session_from_match("s1", chain[0]).unwrap();
         indexer.update_session_from_match("s2", chain[1]).unwrap();
-        // Touch s1 so s2 becomes the least recently used of the two.
         indexer.update_session_from_match("s1", chain[1]).unwrap();
 
         indexer.update_session_from_match("s3", chain[2]).unwrap();
@@ -990,13 +824,10 @@ mod tests {
         let chain = hashes(vec![1, 2, 3]);
         let indexer = SessionPrefixIndexer::new();
 
-        // Build A -> B -> C.
         indexer
             .update_session_from_stored_blocks("s1", None, &chain)
             .unwrap();
 
-        // Now claim A is stored under C. Accepting that would make A its own
-        // ancestor and leave the parent walks looping forever.
         let err = indexer
             .update_session_from_stored_blocks("s1", Some(chain[2]), &chain[..1])
             .expect_err("grafting an ancestor under its own descendant must fail");
@@ -1008,7 +839,6 @@ mod tests {
             "expected CyclicParent for the offending block, got {err:?}"
         );
 
-        // The rejected update must leave the original forest intact.
         assert_eq!(
             lineage_of(&indexer, "s1"),
             vec![chain.clone()],
@@ -1021,8 +851,6 @@ mod tests {
         let chain = hashes(vec![1, 2]);
         let indexer = SessionPrefixIndexer::new();
 
-        // A -> B -> A within a single event: the cycle closes on a node this
-        // very chain created, so the check cannot rely on existing parents.
         let repeating = vec![chain[0], chain[1], chain[0]];
         let err = indexer
             .update_session_from_stored_blocks("s1", None, &repeating)
