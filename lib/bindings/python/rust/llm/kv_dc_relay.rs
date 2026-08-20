@@ -147,6 +147,14 @@ impl KvDcRelay {
             inner.shutdown().await.map_err(to_pyerr)
         })
     }
+
+    fn wait_for_shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.started()?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.wait_for_shutdown().await;
+            Ok(())
+        })
+    }
 }
 
 impl KvDcRelay {

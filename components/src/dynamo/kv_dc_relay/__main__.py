@@ -73,6 +73,10 @@ async def worker(runtime: DistributedRuntime) -> None:
         args.endpoint_prefix,
     )
     endpoint_tasks = []
+    # A terminal host failure only resolves wait_for_shutdown(); the diagnostics
+    # endpoints would otherwise keep the process alive and answering health checks
+    # for a relay that is no longer ingesting anything.
+    relay_shutdown = asyncio.ensure_future(relay.wait_for_shutdown())
     try:
         if hasattr(relay, "stats") and hasattr(relay, "snapshot"):
             endpoint_tasks.append(
@@ -114,11 +118,19 @@ async def worker(runtime: DistributedRuntime) -> None:
                 )
             )
         )
-        await asyncio.gather(*endpoint_tasks)
+        done, _pending = await asyncio.wait(
+            {relay_shutdown, *endpoint_tasks}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if relay_shutdown in done:
+            health = await relay.health()
+            logger.error("KV DC Relay host stopped: %s", health.get("host_last_error"))
+            raise SystemExit(1)
+        for task in done:
+            task.result()
     finally:
-        for task in endpoint_tasks:
+        for task in (relay_shutdown, *endpoint_tasks):
             task.cancel()
-        await asyncio.gather(*endpoint_tasks, return_exceptions=True)
+        await asyncio.gather(relay_shutdown, *endpoint_tasks, return_exceptions=True)
         await relay.shutdown()
         logger.info("KV DC Relay stopped")
 
