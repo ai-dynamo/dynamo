@@ -20,11 +20,10 @@ retained beyond the deployment ledger.
 ## Read-Only Preflight
 
 ```bash
-kubectl config current-context
-kubectl get namespace "${NAMESPACE}"
-kubectl get crd | grep -i dynamo
-kubectl get storageclass
-kubectl get nodes -o wide
+kubectl --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" get crd | grep -i dynamo || { echo "Dynamo CRDs missing"; exit 1; }
+kubectl --context "${KUBE_CONTEXT}" get storageclass
+kubectl --context "${KUBE_CONTEXT}" get nodes -o wide
 ```
 
 Check secrets only by name. Never print, decode, or persist secret values.
@@ -38,27 +37,28 @@ deployment directory and all shared PVCs, model-cache jobs, namespaces, and secr
 Apply model cache resources when the recipe requires them.
 
 ```bash
-kubectl apply -f "${DEPLOY_ROOT}/applied_manifests/model-cache.yaml" -n "${NAMESPACE}"
-kubectl get pvc -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-cache.yaml" -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" get pvc -n "${NAMESPACE}"
 ```
 
 Run model download and validation jobs when present. Read each Job name from its manifest's `metadata.name`; never infer
 the resource name from the filename.
 
 ```bash
-kubectl apply -f "${DEPLOY_ROOT}/applied_manifests/model-download.yaml" -n "${NAMESPACE}"
-kubectl wait --for=condition=Complete "job/${DOWNLOAD_JOB}" -n "${NAMESPACE}" --timeout=6000s
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-download.yaml" -n "${NAMESPACE}"
+# Poll the job true condition with a bounded loop (Complete -> proceed, Failed -> exit 1); a Failed job must
+# fail fast, not burn the timeout. Use the scripted poll block from deploy-dynamo-recipe SKILL.md.
 
-kubectl apply -f "${DEPLOY_ROOT}/applied_manifests/model-validate.yaml" -n "${NAMESPACE}"
-kubectl wait --for=condition=Complete "job/${VALIDATE_JOB}" -n "${NAMESPACE}" --timeout=3600s
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-validate.yaml" -n "${NAMESPACE}"
+# Same bounded Complete/Failed poll as the download job (60 min bound).
 ```
 
 Apply the selected DGD from its run-scoped copy:
 
 ```bash
-kubectl apply -f "${DEPLOY_ROOT}/applied_manifests/deploy.yaml" -n "${NAMESPACE}"
-kubectl get dynamographdeployment -n "${NAMESPACE}"
-kubectl get pods -n "${NAMESPACE}" -o wide
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/deploy.yaml" -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" get dynamographdeployment -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" get pods -n "${NAMESPACE}" -o wide
 kubectl get svc -n "${NAMESPACE}"
 ```
 
@@ -79,37 +79,14 @@ compatibility patch.
 Find the frontend service:
 
 ```bash
-kubectl get svc -n "${NAMESPACE}" | grep frontend
+kubectl --context "${KUBE_CONTEXT}" get svc -n "${NAMESPACE}" | grep frontend
 ```
 
-Port-forward:
-
-```bash
-kubectl port-forward svc/<frontend-service> 8000:8000 -n "${NAMESPACE}"
-```
-
-Capture HTTP status and response body separately; JSON parsing alone does not prove success. Verify the served model and
-one chat completion:
-
-```bash
-SERVED_MODEL="<served-model-name>"
-models_response="$(curl -sS --fail-with-body http://127.0.0.1:8000/v1/models)"
-jq -e --arg model "${SERVED_MODEL}" 'any(.data[]?; .id == $model)' <<<"${models_response}"
-api_request="$(jq -nc --arg model "${SERVED_MODEL}" '{
-  model: $model,
-  messages: [{role: "user", content: "Simply output the phrase: NVIDIA Dynamo"}],
-  max_tokens: 16,
-  temperature: 0
-}')"
-api_response="$(curl -sS --fail-with-body http://127.0.0.1:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d "${api_request}")"
-jq -e '.object == "chat.completion" and (.choices | type == "array" and length > 0) and (.error | not)' \
-  <<<"${api_response}"
-```
-
-The smoke test succeeds only when both endpoints return 2xx and pass these structural checks. Preserve the full chat
-response as `api_response`, including the full API error body on failure.
+Port-forward and smoke-test using the single gated script in `deploy-dynamo-recipe`'s SKILL.md ("Run the
+port-forward and the smoke test in ONE shell session"): it backgrounds the port-forward with a readiness poll and
+trap teardown, captures HTTP status codes separately from response bodies, stores the bodies under
+`${DEPLOY_ROOT}/smoke/`, and exits non-zero on any failed gate. Do not reconstruct the smoke test from memory;
+that script is the reference.
 
 ## Common Blockers
 

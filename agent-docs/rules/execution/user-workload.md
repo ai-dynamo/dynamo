@@ -69,6 +69,11 @@ resources:
   gpu_ceiling: null                # maximum total GPUs the user authorizes this run to hold at once
   pinned: []                       # configuration knobs the user forbids changing (e.g. ["mode", "precision"])
 
+budgets:
+  gpu_hours: null                  # user-granted total GPU-hour spend for the engagement; null = not stated
+  wall_clock_hours: null           # user-granted wall-clock bound for the engagement; null = not stated
+  max_failed_deploys: null         # user-granted failed-deploy limit; null = not stated
+
 objectives:
   ttft_ms_p95_max: null            # optional time to first token
   itl_ms_p95_max: null             # optional inter-token-latency
@@ -101,6 +106,10 @@ created_at: ""
   run's total concurrent GPU holdings and must be at least the assigned DGD's total request. When unset, the assigned
   DGD's own footprint is the bound. `hypothesis-challenger` must reject candidates that change a `pinned` knob or
   exceed `gpu_ceiling`; `deploy-dynamo-recipe` preflight must verify both before mutation.
+- `budgets` records the user's stated answers from the interview, verbatim; leave a limit `null` when the user
+  declined to state one. These fields are the "granted budget" that `optimize-loop.md` and the challenger's
+  stop-request check read; a `null` budget means those checks treat the corresponding limit as ungated and the
+  engagement's only hard stops are operator grant and lost access.
 - `storage_class` is optional when the required PVC already exists or a suitable cluster default is known. If the run
   must create a PVC and no suitable class can be determined safely, return a focused question to the user.
 - Token lengths are optional customer-provided traffic hints, not required benchmark keys. Prefer real traces or

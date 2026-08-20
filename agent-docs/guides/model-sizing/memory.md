@@ -23,7 +23,11 @@ Before choosing a TP value, **compute** the minimum TP following these steps exa
 3. **Ceiling:** `G = ceil(R)`
 4. **Round to power of 2:** `min_tp = next_power_of_2(G)`
 5. **Verify fit:** confirm `min_tp × per_gpu_memory_bytes > W`. If the total memory across `min_tp` GPUs exceeds the
-   weight size, the model **fits** at that TP. Never reject a TP value when total available memory exceeds weight size.
+   weight size, the weights **load** at that TP. Do not reject a TP value on weight size alone when total available
+   memory exceeds it — but weight fit is a floor, not serving fit: KV cache, activations, CUDA graphs, and framework
+   overhead are not in this test. Before proposing `min_tp` as the serving TP, compute `headroom_ratio` (Tight
+   Memory section below); when it is tight, raising TP above `min_tp` to restore per-GPU headroom is a legitimate
+   remedy alongside `gpu_memory_utilization` and `max_model_len`, traded against the replica count it costs.
 
 
 ### Worked examples
@@ -89,6 +93,10 @@ In tight-memory situations, adjust the config to help the runtime fit:
    for KV cache metadata.
 3. **Combine both strategies** — especially when the model barely fits (headroom_ratio < 0.30), raise memory utilization
    and lower sequence length together. Either alone may be insufficient.
+4. **Raise TP above `min_tp`** — when the remedies above still leave the workload's KV requirement unmet, a higher TP
+   splits the weights across more GPUs and restores per-GPU headroom. This trades replica count for headroom (see
+   `parallelism.md`); record the trade explicitly rather than shipping a configuration that only serves a trivially
+   small number of concurrent sequences.
 
 **Worked example — 70B BF16 on 1× B200-192GB:**
 

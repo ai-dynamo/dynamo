@@ -92,6 +92,12 @@ a proposal.
 
 ## Outputs
 
+When preparing a stop-request, also write the three Finalize artifacts BEFORE submission —
+`<EXP_ROOT>/final/recommended_config.md`, `reproduced_commands.sh`, and `known_limitations.md` — per
+`optimize-loop.md` sections 6-7 and `run-artifacts.md`. The `Correctness status:` line comes from the top-level
+loop agent's section-7 check: request it at preparation time and record its result, or `correctness: unverified`
+with the reason the check was impossible; never invent a status.
+
 Create a `next-candidate/` directory inside the current `DEPLOY_ROOT`:
 
 ```text

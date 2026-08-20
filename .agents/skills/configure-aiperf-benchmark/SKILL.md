@@ -63,7 +63,10 @@ Require:
    set a bounded execution timeout. Stop rather than silently truncate or weaken a workload that cannot fit.
 9. Do not enable repetitions only to obtain confidence intervals. Configure more than one run only when prior analysis
    documents why another run is necessary to resolve a consequential decision and why that value justifies the GPU
-   cost.
+   cost. Exception: the once-per-series noise-floor pilot (n=3) required by
+   `agent-docs/rules/benchmarking/comparison-uncertainty.md` is pre-authorized; it arrives as a `repeat_decision:
+   necessary` from `analyze-aiperf-results` whose rationale names the series pilot, and runs as repetitions of one
+   unchanged configuration. Plans stay immutable; no plan marker is involved.
 10. Pin the AIPerf runtime version or source commit. Write the immutable series plan and the run-scoped
     `<DEPLOY_ROOT>/benchmark/aiperf-config.yaml` and `<DEPLOY_ROOT>/benchmark/perf.yaml`.
 

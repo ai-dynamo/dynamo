@@ -32,8 +32,17 @@ exact active benchmark plan first.
   benchmark pod.
 - Confirm the AIPerf measurement is configured to finish in 30 minutes or less and uses one repetition by default.
 - For an additional valid-run repetition, require the prior analysis to record why the repeat is necessary and worth
-  its GPU cost. Do not repeat only to obtain confidence intervals.
+  its GPU cost. Do not repeat only to obtain confidence intervals. The once-per-series noise-floor pilot (n=3)
+  required by `comparison-uncertainty.md` is pre-authorized and arrives through the normal `repeat_decision:
+  necessary` path with a rationale naming the series pilot; it needs no further justification.
 - Confirm no other benchmark is targeting the same candidate.
+- Every kubectl invocation this skill drives pins `--context "${KUBE_CONTEXT}"` and `-n "${NAMESPACE}"`,
+  bounds every wait with an explicit timeout, distinguishes job `Failed` from timeout (poll the job's true
+  condition rather than waiting on `Complete` alone), and chains commands so a failure never flows into the next
+  step — the same discipline `deploy-dynamo-recipe`'s scripted blocks encode.
+- Record neighbour occupancy in `benchmark_execution.json` at run start and end (the pods scheduled on the serving
+  nodes, e.g. `kubectl --context "${KUBE_CONTEXT}" get pods -A -o wide` filtered to those nodes), so
+  `comparison-uncertainty.md`'s like-for-like and transition checks have a recorded condition to read.
 
 ## Execute And Monitor
 

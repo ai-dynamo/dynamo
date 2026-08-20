@@ -63,19 +63,22 @@ Do not:
 - current `<DEPLOY_ROOT>/deployment_ledger.json` and `<DEPLOY_ROOT>/applied_manifests/deploy.yaml`
 - current `<DEPLOY_ROOT>/benchmark/benchmark_audit.json`, `benchmark_summary.json`, and `performance_analysis.json`
 - exact `<DEPLOY_ROOT>/next-candidate/knowledge-consult.md` path
-- exact `<DEPLOY_ROOT>/next-candidate/deploy-draft.yaml` path
+- exact `<DEPLOY_ROOT>/next-candidate/deploy-draft.yaml` path (proposal reviews only; absent for a stop-request)
+- for a stop-request: `<EXP_ROOT>/final/recommended_config.md` (the draft recommendation under validation)
 - exact `<EXP_ROOT>/analysis/search-calibration.md` path (and, for a stop-request, the submitted ledger SHA256)
 - prior deployment, benchmark, hypothesis, and challenger-review history
 
-Review a materialized proposal or a stop-request. For a `no-proposal` or `blocked` consultation that carries no
+Review a materialized proposal or a stop-request (a stop-request rides only on a `no-proposal` consultation; a
+`blocked` consultation never carries one). For a `no-proposal` or `blocked` consultation that carries no
 stop-request, return without creating a candidate review. For a stop-request, first verify that the SHA256 cited
 in `knowledge-consult.md` matches the on-disk `<EXP_ROOT>/analysis/search-calibration.md` (reject on mismatch:
 the ledger moved after submission), then validate completeness and evidence class against the ledger — not the
-consult file, which carries only the delta: every lever family carries a terminal disposition, every `ruled-out` row cites a measurement, a sourced
+consult file, which carries only the delta: every lever family carries a terminal disposition per the ledger's own vocabulary (`tested`, `ruled-out`,
+`not-applicable`, or `deferred`; an answered ask resolves into one of these), every `ruled-out` row cites a measurement, a sourced
 hard constraint, a confirmed incompatibility, or an explicit operator decision, no family with medium-or-higher
 recorded expected upside remains merely `deferred` while more than half of any granted budget remains (reject the
-stop-request and return that family as the required follow-up), and the draft recommendation
-accompanying the stop-request carries its required `Correctness status:` line. Append the verdict to
+stop-request and return that family as the required follow-up), and the stop-request's draft recommendation at
+`<EXP_ROOT>/final/recommended_config.md` carries its required `Correctness status:` line. Append the verdict to
 `challenger-reviews.jsonl` as for any review, and state in it that this is procedural validation, not independent
 adversarial assurance.
 
@@ -93,6 +96,7 @@ Append one hash-bound review to:
 
 For `approve`, return the existing `next-candidate/deploy-draft.yaml` path, SHA256, review ID, performance question,
 and target operating region to the parent, together with the exact `EXP_ROOT`, source `DEPLOY_ROOT`, and candidate
-iteration. Send the deployment handoff to `recipe-deployer`; the parent carries the question and operating region into
+iteration. Send the deployment handoff to `recipe-deployer` (approved proposals only; a validated stop-request returns to
+the parent as `STOP_REQUESTED` for operator grant, never to the deployer); the parent carries the question and operating region into
 the later `perf-analyzer` assignment. For `revise` or `reject`, return the strongest objections and any minimal revised
 plan or required follow-up to `hypothesis-generator`. Never create the next deployment-iteration directory.

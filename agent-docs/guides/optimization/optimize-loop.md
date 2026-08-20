@@ -58,20 +58,22 @@ answers; do not advance the workflow meanwhile.
 
 ## 2. Validate The Baseline Handoff
 
-Require the exact `EXP_ROOT`, `user_workload.yaml` path and SHA256, `user_provided_dgd.yaml` path and SHA256 (or,
-for greenfield engagements, the contract's explicit no-user-DGD declaration), and zero-based iteration `0`. Confirm that the user-provided DGD's model, framework, hardware, precision, and topology do
+Require the exact `EXP_ROOT`, `user_workload.yaml` path and SHA256, `user_provided_dgd.yaml` path and SHA256, and
+zero-based iteration `0`. Confirm that the user-provided DGD's model, framework, hardware, precision, and topology do
 not contradict the user workload. Do not edit, replace, or select an alternative DGD.
 
 ## 3. Deploy The Candidate
 
 Give the exact assigned DGD path and SHA256, `user_workload.yaml` path and SHA256, iteration, and previous
 `DEPLOY_ROOT` when applicable to `recipe-deployer`. For iteration 0, the assigned DGD is the immutable
-`user_provided_dgd.yaml` when it can run on the target as provided. When it cannot — an adaptation engagement, where
-the user's DGD targets different hardware, checkpoints, or fabric — or when the contract declares a greenfield
-engagement with no user deployment at all, the deployer instead selects the closest viable
-recipe for the target as the iteration-0 base, records the selection evidence, and diffs it against the immutable
-user DGD so every inherited constraint and deviation is explicit. Do not carry hardware-bound topology, transport, or
-checkpoint choices from an incompatible source manifest into the baseline without evidence they fit the target.
+`user_provided_dgd.yaml`. No role selects or substitutes a baseline. When the user's DGD cannot run on the target as
+provided — it targets different hardware, checkpoints, or fabric — the deployer records the blocking
+incompatibilities in the deployment ledger and returns them; end the engagement with a report that states each
+incompatibility and its evidence, and invite the user to start a new engagement with a target-compatible DGD (a
+changed user DGD starts a new experiment, per `synthesize-user-workload`). Do not select a substitute, do not
+rewrite the captured baseline, and do not park the run waiting for a new manifest. Greenfield engagements — no user
+deployment at all — are likewise not supported by this workflow yet: say so at the interview, point the user at
+`recipes/README.md` to pick a starting recipe, and invite them to return with it as their baseline.
 Later iterations use the exact challenger-approved draft. The deployer creates:
 
 ```text
@@ -97,6 +99,12 @@ iterations, use the question approved with the candidate.
 - When a valid `performance_analysis.json` sets `repeat_decision` to `necessary`, pass its rationale and the decision it
   expects to resolve to `run-aiperf-benchmark`, run exactly one additional same-series repetition, and analyze the
   combined evidence again. Each further repetition requires a new `necessary` decision after reanalysis.
+- The once-per-series noise-floor pilot (n=3) required by `comparison-uncertainty.md` is pre-authorized: the first
+  time a series must adopt or retire a candidate on a small delta, `analyze-aiperf-results` returns
+  `repeat_decision: necessary` with a rationale naming the series pilot, the repeats run through the normal path,
+  and the analyzer records the measured noise floor and minimum detectable effect in that run's
+  `performance_analysis.json`; every later same-series analysis copies both values forward so consumers always find
+  them in the current `performance_analysis.json`.
 - Running benchmarks costs valuable GPU time. Rerun only when necessary.
 - Continue to hypothesis generation only when the audit is `valid` or `valid_with_recovery` and both
   `benchmark_summary.json` and `performance_analysis.json` exist.
@@ -145,7 +153,10 @@ or create a new one. Never claim a direct gain across series.
 
 The loop is always in exactly one state: `ACTIVE`, `PARKED_ON_ASKS`, `STOP_REQUESTED`, `STOP_GRANTED`, or
 `BUDGET_STOP`. A `no-proposal` consultation never ends the engagement; it obligates the generator to produce exactly
-one of:
+one of the outcomes below. A `blocked` consultation also never ends the engagement: it names invalid or
+inconsistent decision inputs; route it back to the step that owns the defective input (`perf-analyzer` for
+analysis artifacts, `recipe-deployer` for deployment artifacts), repair, and re-enter step 4. The generator's
+outcomes for `no-proposal` are exactly one of:
 
 - the next candidate;
 - an **ask**: a recorded question whose answer would unblock the highest-value deferred lever family. Asks are
@@ -154,11 +165,14 @@ one of:
   turn before any goal hook can evaluate and can hang an unattended run; asks go to the artifact and the loop
   continues. Deduplicate pending asks, surface only the highest-value few, and lead the next operator-facing response
   with them. Enter `PARKED_ON_ASKS` (a pause, not a stop) only when pending asks are the only remaining work, and
-  record how deployed resources are held and when they scale down;
+  record how deployed resources are held and when they scale down in `reasoning_transcript.md`;
 - a **stop-request**: the search-calibration ledger (`EXP_ROOT/analysis/search-calibration.md`) in a terminal
-  state, meaning every lever family is `tested`,
-  `asked` and answered, `ruled-out`, or `deferred`. Prepare the Finalize artifacts (section 7), including the
-  recommendation's `Correctness status:` line, BEFORE submitting the stop-request — the stop-request references the
+  state, meaning every lever family carries a
+  terminal disposition in the ledger's own vocabulary: `tested`, `ruled-out`, `not-applicable`, or `deferred`
+  (an answered ask resolves its family into one of these; `untested-promising` and `reopened-by-new-evidence` are
+  non-terminal). Prepare the Finalize artifacts (section 7) BEFORE submitting the stop-request: at this point the top-level loop
+  agent runs the section-7 correctness check and its status (or `correctness: unverified` with the reason the
+  check was impossible) is recorded in `recommended_config.md` — the stop-request references the
   draft recommendation, and operator grant closes the engagement rather than starting its write-up. A `ruled-out` row must cite a measurement, a sourced hard
   constraint, a confirmed incompatibility, or an explicit operator decision; the generator's own unsourced reasoning
   does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`. While
@@ -173,23 +187,33 @@ runs, cleanup, and any still-testable work; launch no new candidate families. If
 objections, re-enter `ACTIVE`.
 
 Stop only when the operator grants a validated stop-request (`STOP_GRANTED`), the authorized budget is exhausted
-(`BUDGET_STOP`), or access is lost and cannot be restored. Never stop because a report exists.
+(`BUDGET_STOP`), access is lost and cannot be restored, or iteration 0 ends with the section-3 incompatibility
+report (the baseline cannot run on the target; this is a valid engagement end, not a premature stop). Never stop because a report exists. Derive budget
+consumption from existing artifacts — wall clock from `manifest.yaml`'s session start; failed deploys from
+deployment ledgers marked failed; GPU-hours from summed `benchmark_execution.json` durations times the deployed
+GPU count — check the totals against the contract's `budgets:`
+at every iteration boundary, and cite them in every stop-request delta. A `null` budget leaves that limit
+ungated.
 
 ## 7. Finalize
 
-Before recommending, run a correctness regression check whenever the recommended configuration differs from the
+Before recommending, the top-level loop agent runs a correctness regression check whenever the recommended configuration differs from the
 user-provided baseline in an output-affecting dimension (parallelism or reduction order, speculative decoding,
 quantization, attention or MoE backend, KV dtype or reuse): replay 8-16 fixed representative prompts with frozen
 continuations through both configurations and compare teacher-forced per-token log-probabilities, calibrating the
 tolerance with a baseline-versus-baseline repeat; require zero request failures, malformed responses, non-finite
-scores, and no unexpected truncation. If no such check is possible, record an ask; report a waived check as
+scores, and no unexpected truncation. Run it against the currently deployed recommended configuration; run the
+baseline side only when the baseline is still live or can be redeployed within remaining budget. If no such check
+is possible, record an ask; report a waived check as
 `correctness: unverified`, never as a pass. Record the correctness status in `recommended_config.md`.
 
 When the recommended or baseline configuration has speculative decoding enabled, state in the recommendation that
 its acceptance behavior was measured on synthetic benchmark content and the measured magnitude may not transfer to
 production traffic; acceptance length is passively observable in production telemetry and should be confirmed there.
 
-Recommend the best valid candidate for the target objective, not automatically the most recent iteration. Write the
+Recommend the best valid candidate for the target objective, not automatically the most recent iteration. The
+`hypothesis-generator` holds the pen for the final/ artifacts (in the stop-request path it writes them before
+submission; the loop agent contributes only the correctness status). Write the
 final configuration to `EXP_ROOT/final/recommended_config.md`, reproduction commands to
 `EXP_ROOT/final/reproduced_commands.sh`, and limitations to `EXP_ROOT/final/known_limitations.md`. Include paths to the
 user workload, original user-provided DGD, applied manifests, deployment ledgers, applicable benchmark plans, audits,

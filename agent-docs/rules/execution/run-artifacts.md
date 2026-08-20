@@ -65,14 +65,20 @@ runs/<EXP_ID>/
 ## Artifact Types
 
 - `manifest.yaml`: session metadata, timestamps, repo commit, cluster context name, and agent versions when known.
+  Created by `user-interviewer` when it establishes `EXP_ROOT`; any role that changes cluster context updates it.
 - `user_workload.yaml`: canonical workload and target-cluster contract synthesized by `user-interviewer`, including
   the baseline DGD's canonical path and SHA256.
 - `reasoning_transcript.md`: time-stamped long-running document capturing the agent's reasoning, key decisions, actions, rationale, and status.
+  Created and maintained by the top-level loop agent (the session running `optimize-loop.md`) per
+  `agent-docs/rules/execution/logging.md`; specialized roles contribute through their own artifacts.
 - `user_provided_dgd.yaml`: immutable baseline DGD supplied by the user and captured by `user-interviewer`.
 - `benchmark-plans/<series-id>.json`: immutable performance question, workload, measurement semantics, objectives, and
   required references for one benchmark series.
 - `hypothesis-backlog.jsonl`: append-only record of generated optimization proposals and their source evidence.
-- `challenger-reviews.jsonl`: append-only, hash-bound adversarial reviews of materialized proposals.
+  Appended by `hypothesis-generator` (via `consult-perf-knowledge`) once per consultation, whatever the outcome, so
+  the challenger's redundancy check always runs against complete history.
+- `challenger-reviews.jsonl`: append-only, hash-bound adversarial reviews of materialized proposals and
+  stop-request validations (the latter bound to the submitted ledger SHA256).
 - `performance_findings.jsonl`: append-only performance findings produced from valid benchmark analyses.
 - `deployment_ledger.json`: assigned source DGD path and SHA256, manifests applied, readiness status, endpoint,
   smoke-test result, concise diagnostics, blockers, and cleanup commands.
@@ -94,7 +100,8 @@ runs/<EXP_ID>/
 - `knowledge-consult.md`: required consultation result for `proposed`, `no-proposal`, and `blocked` outcomes.
 - `deploy-draft.yaml`: candidate DGD created only for a materialized proposal; it remains here until challenger
   approval assigns it to the next deployment iteration.
-- `asks.jsonl` (under `EXP_ROOT/analysis/`): append-only operator-ask record with the question, blocked lever
+- `asks.jsonl` (under `EXP_ROOT/analysis/`): append-only operator-ask record, written by whichever role records
+  the ask (typically `hypothesis-generator` via `consult-perf-knowledge`), with the question, blocked lever
   family, expected upside, status (`pending` or `answered`), and the answer once received. Deduplicate before
   appending. A stop-request is not a separate file: it is the search-calibration ledger
   (`EXP_ROOT/analysis/search-calibration.md`) in a terminal state, plus its challenger validation. The ledger is
@@ -104,11 +111,14 @@ runs/<EXP_ID>/
 ## Deployment Directories
 
 - `user-interviewer` creates `EXP_ROOT`, `user_workload.yaml`, and `inputs/user_provided_dgd.yaml` once for the
-  optimization job.
+  optimization job. No role ever edits them afterward; a baseline that cannot run on the
+  target ends the engagement, and a changed user DGD starts a new experiment.
 - `recipe-deployer` creates one `DEPLOY_ROOT` for every newly assigned candidate DGD.
 - Benchmarking and analysis agents add their results to that candidate's existing `DEPLOY_ROOT`.
 - `hypothesis-generator` creates `HYPOTHESIS_ROOT` inside the current analyzed `DEPLOY_ROOT`; it does not create the
-  next deployment iteration.
+  next deployment iteration. When preparing a stop-request it also writes the three `final/` artifacts
+  (`recommended_config.md` with its `Correctness status:` line, `reproduced_commands.sh`, `known_limitations.md`)
+  BEFORE submission, per `optimize-loop.md` section 6.
 - `hypothesis-challenger` reviews the handoff in place. After approval, `recipe-deployer` creates the new
   `DEPLOY_ROOT`.
 - Use a zero-padded iteration, for example `deploy-iter-003`.

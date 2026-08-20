@@ -8,7 +8,7 @@ intent: >-
 skills:
   - deploy-dynamo-recipe
 "Required Readings: Docs":
-  - docs/kubernetes/kubernetes-recipe-workflow.md
+  - agent-docs/guides/deployment/kubernetes-recipe-workflow.md
   - agent-docs/references/definitions.md
 "Required Reading: Rules":
   - agent-docs/rules/execution/deployment.md
@@ -17,6 +17,7 @@ skills:
   - agent-docs/rules/execution/user-workload.md
   - agent-docs/rules/optimization/evidence-before-spend.md
   - agent-docs/rules/optimization/one-variable.md
+  - agent-docs/rules/verification/config-engagement.md
 ---
 
 # Recipe Deployer

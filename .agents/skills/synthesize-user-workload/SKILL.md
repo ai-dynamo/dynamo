@@ -75,6 +75,10 @@ Ask only for blocking facts that remain unknown or contradictory after reading a
   (for example, when architectural changes such as replica scaling or disaggregation are in scope and the ceiling
   determines what may be proposed). Candidates run serially under the current iteration model; parallel candidate
   execution is not supported.
+- If the user has not stated budgets, ask for them in the same interview batch — GPU-hours, wall clock, and
+  failed-deploy limit — proposing sensible defaults for this engagement's scope; record the answers verbatim in the
+  contract's `budgets` block, and `null` for any limit the user declines to state (a null budget leaves that
+  limit ungated).
 - When the user's production deployment shape differs from the unit under test (for example, fleet-level traffic
   numbers but a single-replica test deployment), derive the per-unit load explicitly and confirm it with the user
   before recording it.
@@ -93,7 +97,8 @@ stable, filesystem-safe `EXP_ID` derived from the UTC creation timestamp and wor
 overwrite an existing experiment directory.
 
 The user interviewer owns creation of `EXP_ROOT`; downstream roles must receive its exact path rather than infer it
-from directory order or modification time.
+from directory order or modification time. Create `<EXP_ROOT>/manifest.yaml` alongside it with the session
+metadata `run-artifacts.md` defines (timestamps, repo commit, cluster context name, agent versions when known).
 
 ## Capture The User-Provided DGD
 
@@ -109,6 +114,8 @@ Create the canonical baseline input:
   `DynamoGraphDeployment`.
 - Reject embedded secret values or Kubernetes `Secret` resources; references to pre-existing Secret names are allowed.
 - Reject a recipe directory, catalog choice, generated substitute, or inferred default in place of the user's DGD.
+  A specific manifest the user explicitly presents as their baseline is a user-provided DGD, whatever its origin;
+  the rejection targets substitutes the USER did not supply.
 - Do not patch cluster compatibility or performance settings during capture.
 - Compute the canonical copy's SHA256 before writing the workload contract.
 - If the DGD contradicts an explicit workload constraint, return the contradiction as a blocking question; do not
@@ -130,6 +137,8 @@ Before finalizing:
 
 1. Preserve all explicit user constraints without rounding or reinterpretation.
 2. Record the exact canonical DGD path and SHA256 under `deployment`.
+2a. Record the user's stated budgets (GPU-hours, wall clock, failed-deploy limit) under `budgets`, verbatim;
+    leave each `null` when the user declined to state one.
 3. Represent permitted unknowns as `null`, `""`, or `[]` according to the schema.
 4. Resolve supporting artifact paths beneath the expected filesystem and verify each existing local path.
 5. Parse the result as YAML and require exactly one mapping document.

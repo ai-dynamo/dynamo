@@ -79,17 +79,20 @@ the ledger blocked. Create `logs/` only when a targeted failure log must be reta
 Run read-only checks first:
 
 ```bash
-kubectl config current-context
-kubectl get namespace "${NAMESPACE}"
-kubectl get crd | grep -i dynamo
-kubectl get storageclass
-kubectl get nodes -o wide
+set -euo pipefail
+kubectl --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" get crd | grep -i dynamo || { echo "Dynamo CRDs missing"; exit 1; }
+kubectl --context "${KUBE_CONTEXT}" get storageclass
+kubectl --context "${KUBE_CONTEXT}" get nodes -o wide
 ```
+
+Every kubectl call in this skill pins `--context "${KUBE_CONTEXT}"` (the contract's `kube_context`); never rely on
+the ambient current-context.
 
 Validate the selected path without mutating the cluster:
 
 ```bash
-kubectl --context "${KUBE_CONTEXT}" apply --dry-run=client -n "${NAMESPACE}" \
+kubectl --context "${KUBE_CONTEXT}" apply --dry-run=server -n "${NAMESPACE}" \
   -f <assigned-dgd-yaml>
 ```
 
@@ -126,8 +129,12 @@ Wait for the DGD and its operator-owned workloads to terminate before applying t
 in the new deployment ledger.
 
 ```bash
+set -euo pipefail
 kubectl --context "${PREVIOUS_KUBE_CONTEXT}" delete dynamographdeployment "${PREVIOUS_DGD}" \
   -n "${PREVIOUS_NAMESPACE}" --wait=true --timeout=10m
+kubectl --context "${PREVIOUS_KUBE_CONTEXT}" wait --for=delete pod \
+  -l nvidia.com/dynamo-graph-deployment-name="${PREVIOUS_DGD}" \
+  -n "${PREVIOUS_NAMESPACE}" --timeout=10m
 ```
 
 Do not delete or modify the previous deployment directory or its successful YAML. Create new run-scoped copies in the
@@ -137,20 +144,41 @@ new iteration directory. Preserve shared PVCs, model-cache jobs, namespaces, and
 
 Follow user-provided deployment instructions when they give a specific sequence. Otherwise:
 
+If the effective cluster context differs from what `<EXP_ROOT>/manifest.yaml` records, update the manifest's
+cluster-context entry before mutating anything.
+
 Read each support manifest's `kind` and `metadata.name`; never infer a Kubernetes resource name from its filename. Set
 `DOWNLOAD_JOB` and `VALIDATE_JOB` from the corresponding Job manifests.
 
 ```bash
-kubectl apply -f "${DEPLOY_ROOT}/applied_manifests/model-cache.yaml" -n "${NAMESPACE}"
-kubectl apply -f "${DEPLOY_ROOT}/applied_manifests/model-download.yaml" -n "${NAMESPACE}"
-kubectl wait --for=condition=Complete "job/${DOWNLOAD_JOB}" -n "${NAMESPACE}" --timeout=6000s
+set -euo pipefail
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-cache.yaml" -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-download.yaml" -n "${NAMESPACE}"
+job_state=""
+for _ in $(seq 1 200); do  # 200 x 30s = 100 min bound
+  job_state="$(kubectl --context "${KUBE_CONTEXT}" get "job/${DOWNLOAD_JOB}" -n "${NAMESPACE}" \
+    -o jsonpath='{.status.conditions[?(@.status=="True")].type}')"
+  [ "${job_state}" = "Complete" ] && break
+  [ "${job_state}" = "Failed" ] && { echo "download job failed"; exit 1; }
+  sleep 30
+done
+[ "${job_state}" = "Complete" ] || { echo "download job timed out"; exit 1; }
 ```
 
 If a validation job exists, run it after download and before the DGD:
 
 ```bash
-kubectl apply -f "${DEPLOY_ROOT}/applied_manifests/model-validate.yaml" -n "${NAMESPACE}"
-kubectl wait --for=condition=Complete "job/${VALIDATE_JOB}" -n "${NAMESPACE}" --timeout=3600s
+set -euo pipefail
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-validate.yaml" -n "${NAMESPACE}"
+job_state=""
+for _ in $(seq 1 120); do  # 120 x 30s = 60 min bound
+  job_state="$(kubectl --context "${KUBE_CONTEXT}" get "job/${VALIDATE_JOB}" -n "${NAMESPACE}" \
+    -o jsonpath='{.status.conditions[?(@.status=="True")].type}')"
+  [ "${job_state}" = "Complete" ] && break
+  [ "${job_state}" = "Failed" ] && { echo "validate job failed"; exit 1; }
+  sleep 30
+done
+[ "${job_state}" = "Complete" ] || { echo "validate job timed out"; exit 1; }
 ```
 
 ### 5. Apply The Assigned DGD
@@ -158,10 +186,11 @@ kubectl wait --for=condition=Complete "job/${VALIDATE_JOB}" -n "${NAMESPACE}" --
 Apply only the run-scoped copy of the assigned manifest:
 
 ```bash
-kubectl apply -f "${DEPLOY_ROOT}/applied_manifests/deploy.yaml" -n "${NAMESPACE}"
-kubectl get dynamographdeployment -n "${NAMESPACE}"
-kubectl get pods -n "${NAMESPACE}" -o wide
-kubectl get svc -n "${NAMESPACE}"
+set -euo pipefail
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/deploy.yaml" -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" get dynamographdeployment -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" get pods -n "${NAMESPACE}" -o wide
+kubectl --context "${KUBE_CONTEXT}" get svc -n "${NAMESPACE}"
 ```
 
 Do not apply sibling variants. Do not change engine arguments, GPU counts, replica topology, routing, or other
@@ -186,20 +215,32 @@ diagnosis-backed patch remains, stop or hand off to troubleshooting; do not loop
 
 ### 7. Smoke Test
 
-Port-forward the frontend service:
+Run the port-forward and the smoke test in ONE shell session (the trap, `PF_PID`, and the captured bodies do not
+survive across separate command invocations). Capture HTTP status and response body separately; do not treat JSON
+parsing alone as success:
 
 ```bash
-kubectl port-forward svc/<frontend-service> 8000:8000 -n "${NAMESPACE}"
-```
-
-Capture HTTP status and response body separately. Do not treat JSON parsing alone as success. Check `/v1/models`, then
-send one chat completion:
-
-```bash
+set -euo pipefail
 SERVED_MODEL="<served-model-name>"
+SMOKE_DIR="${DEPLOY_ROOT}/smoke"
+mkdir -p "${SMOKE_DIR}"
 
-models_response="$(curl -sS --fail-with-body http://127.0.0.1:8000/v1/models)"
-jq -e --arg model "${SERVED_MODEL}" 'any(.data[]?; .id == $model)' <<<"${models_response}"
+kubectl --context "${KUBE_CONTEXT}" port-forward svc/<frontend-service> 8000:8000 -n "${NAMESPACE}" &
+PF_PID=$!
+trap 'kill "${PF_PID}" 2>/dev/null' EXIT
+
+ready=0
+for _ in $(seq 1 30); do
+  code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/v1/models || true)"
+  [ "${code}" -ge 100 ] && { ready=1; break; }  # any HTTP response = port forwards; smoke gates judge health
+  sleep 2
+done
+[ "${ready}" = "1" ] || { echo "port-forward never became reachable"; exit 1; }
+
+models_code="$(curl -sS -o "${SMOKE_DIR}/models_body.json" -w '%{http_code}' http://127.0.0.1:8000/v1/models)"
+[ "${models_code}" -ge 200 ] && [ "${models_code}" -lt 300 ] || { echo "models endpoint ${models_code}"; exit 1; }
+jq -e --arg model "${SERVED_MODEL}" 'any(.data[]?; .id == $model)' "${SMOKE_DIR}/models_body.json" >/dev/null \
+  || { echo "served model not listed"; exit 1; }
 
 api_request="$(jq -nc --arg model "${SERVED_MODEL}" '{
   model: $model,
@@ -207,14 +248,25 @@ api_request="$(jq -nc --arg model "${SERVED_MODEL}" '{
   max_tokens: 100,
   temperature: 0
 }')"
-api_response="$(curl -sS --fail-with-body http://127.0.0.1:8000/v1/chat/completions \
+api_code="$(curl -sS -o "${SMOKE_DIR}/api_body.json" -w '%{http_code}' http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d "${api_request}")"
+[ "${api_code}" -ge 200 ] && [ "${api_code}" -lt 300 ] || { echo "chat endpoint ${api_code}"; exit 1; }
 jq -e '.object == "chat.completion" and (.choices | type == "array" and length > 0) and (.error | not)' \
-  <<<"${api_response}"
+  "${SMOKE_DIR}/api_body.json" >/dev/null || { echo "chat response failed structural check"; exit 1; }
+
+echo "smoke_success=1 models_code=${models_code} api_code=${api_code}"
 ```
 
-Set `success` to `1` only when both endpoints return 2xx and pass the structural checks above. Preserve the full chat
+The script exits non-zero on ANY failed gate, so `success: 1` in `smoke_test_artifact.json` may be written only
+when it printed `smoke_success=1`. The response bodies live under `${DEPLOY_ROOT}/smoke/`, never a shared /tmp
+path, so a stale body from a previous run can never satisfy the checks.
+
+Set `success` to `1` only when both captured HTTP codes are 2xx AND both structural checks pass; record both codes in `smoke_test_artifact.json`.
+
+After a successful smoke test, record durable config-engagement evidence in `deployment_ledger.json` per
+`agent-docs/rules/verification/config-engagement.md`: the Kubernetes pod-spec fields or startup-log lines proving
+the candidate's changed knob is live (applied YAML plus a passing smoke request are not sufficient by themselves). Preserve the full chat
 response before validation and write it unchanged to `api_response`; on failure, preserve the full API error body.
 
 ## Required Output
@@ -248,5 +300,5 @@ diagnostics, blockers, and cleanup commands.
 
 ## References
 
-- `../../../docs/kubernetes/kubernetes-recipe-workflow.md`
+- `../../../agent-docs/guides/deployment/kubernetes-recipe-workflow.md`
 - `../../../agent-docs/rules/execution/run-artifacts.md`

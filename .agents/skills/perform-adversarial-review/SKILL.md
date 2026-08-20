@@ -33,12 +33,38 @@ Require:
 - current `DEPLOY_ROOT/benchmark/benchmark_summary.json`;
 - current `DEPLOY_ROOT/benchmark/performance_analysis.json`;
 - current `DEPLOY_ROOT/next-candidate/knowledge-consult.md`;
-- current `DEPLOY_ROOT/next-candidate/deploy-draft.yaml`;
-- prior deployment and benchmark artifacts; and
-- `EXP_ROOT/analysis/hypothesis-backlog.jsonl` and `EXP_ROOT/analysis/challenger-reviews.jsonl` when present.
+- current `DEPLOY_ROOT/next-candidate/deploy-draft.yaml` (proposal reviews only; a stop-request carries no draft
+  and its absence is not an objection);
+- prior deployment and benchmark artifacts;
+- `EXP_ROOT/analysis/search-calibration.md` (and, for a stop-request, the submitted ledger SHA256 cited in
+  `knowledge-consult.md`); and
+- `EXP_ROOT/analysis/hypothesis-backlog.jsonl` and `EXP_ROOT/analysis/challenger-reviews.jsonl` when present; and
+- `EXP_ROOT/manifest.yaml` (session start time, for stop-request budget arithmetic).
 
 Review only a consultation whose decision is `proposed` and whose draft materialization completed successfully. For
-`no-proposal` or `blocked`, return without writing a candidate verdict.
+`no-proposal` or `blocked` that carries no stop-request, return without writing a candidate verdict. For a
+stop-request (a `no-proposal` consultation whose delta cites the search-calibration ledger path and a
+submitted SHA256 — a `blocked` consultation never carries one), run the Stop-Request Validation below instead of
+returning.
+
+## Stop-Request Validation
+
+1. Verify the SHA256 cited in `knowledge-consult.md` matches the on-disk
+   `EXP_ROOT/analysis/search-calibration.md`. On mismatch, reject: the ledger moved after submission.
+2. Validate completeness and evidence class against the ledger, not the consult file (which carries only the
+   delta): every lever family carries a terminal disposition (`tested`, `ruled-out`, `not-applicable`, or `deferred` — an answered ask resolves its family into one of these; `untested-promising` and `reopened-by-new-evidence` are non-terminal); every `ruled-out` row cites a measurement, a sourced hard constraint, a confirmed incompatibility,
+   or an explicit operator decision; no family with medium-or-higher recorded expected upside remains merely
+   `deferred` while more than half of any granted budget remains (reject and return that family as the required
+   follow-up); and the stop-request's draft recommendation at `EXP_ROOT/final/recommended_config.md` carries its required
+   `Correctness status:` line (require that path as an input for stop-request validation).
+3. Verify the stop-request delta cites derived budget consumption (wall clock from `manifest.yaml` session start;
+   failed-deploy count from the deployment ledgers; GPU-hours from summed `benchmark_execution.json` durations
+   times deployed GPU count) and that the cited sources support the arithmetic, whenever any granted budget is
+   non-null.
+4. Append the verdict to `EXP_ROOT/analysis/challenger-reviews.jsonl` as for any review, binding it to the
+   submitted ledger SHA256, and state in it that this is procedural validation, not independent adversarial
+   assurance. A validated stop-request returns to the PARENT with state `STOP_REQUESTED` for operator grant; it is
+   never a deployment handoff, and `return_to` is the parent, not `recipe-deployer`.
 
 ## Read The Applicable Rules
 
@@ -53,6 +79,7 @@ Always read:
 - `agent-docs/rules/verification/implausible-speedup.md`;
 - `agent-docs/rules/verification/overlap.md`;
 - `agent-docs/rules/verification/stack-verdict.md`;
+- `agent-docs/rules/execution/user-workload.md` (the `resources.pinned` and `resources.gpu_ceiling` semantics);
 - `agent-docs/guides/knob-tuning/tuning-hierarchy.md`; and
 - the sources and repository guides cited for the proposal's central mechanism.
 
@@ -100,8 +127,11 @@ Attack the proposal from these directions:
 - **Evaluation**: Is the expected effect tied to the primary objective or failed SLO? Does the proposal state what the
   candidate should teach us without prescribing favorable benchmark settings or assuming the current series must be
   reused? Could another declared metric or target operating point regress enough to defeat the experiment's value?
-- **Feasibility**: Is the knob valid for the active Dynamo and engine versions? Check GPU and replica arithmetic,
-  memory headroom, startup and OOM risk, topology consistency, and whether engagement can be proven after deployment.
+- **Feasibility**: Is the knob valid for the active Dynamo and engine versions? Reject outright any candidate that
+  changes a knob listed in the contract's `resources.pinned` or whose deployment would exceed
+  `resources.gpu_ceiling`; these are blocking objections regardless of evidence quality. Check GPU and replica
+  arithmetic, memory headroom, startup and OOM risk, topology consistency, and whether engagement can be proven
+  after deployment.
 - **Correctness**: Does the draft preserve target-fixed model, framework, precision, hardware, and workload
   constraints? If the change can alter output behavior, is there a concrete correctness check and rollback criterion?
 - **Spend**: Is the expected information value worth the deployment and benchmark cost? Could a cheaper evidence
@@ -162,8 +192,12 @@ Use this contract:
 
 Order objections by severity and impact. Cite exact iteration IDs, paths, hashes, metrics, or source files. For
 `approve`, set `objections` to only non-blocking cautions or an empty list and identify the exact approved candidate
-path and hash. Set `return_to` to `recipe-deployer` only for `approve`; otherwise set it to `hypothesis-generator`.
+path and hash. Set `return_to` to `recipe-deployer` only for an approved PROPOSAL; for a validated stop-request set it to the
+parent (operator grant); otherwise set it to `hypothesis-generator`.
 For `revise`, make `revised_experiment_plan` concise. Do not turn a rejection into an unrelated replacement hypothesis.
+
+A stop-request validation returns `stop-validated` or `stop-rejected` instead of the proposal verdicts, and its
+review ID binds to the submitted ledger SHA256 prefix (`deploy-iter-<NNN>-stop-<ledger-sha256-prefix>`).
 
 Use a stable review ID bound to the draft hash. If that exact draft already has a review, return the existing record
 instead of appending a duplicate. A revised draft receives a new review ID and names the prior record in
@@ -171,8 +205,9 @@ instead of appending a duplicate. A revised draft receives a new review ID and n
 
 ## Return
 
-For `approve`, return the review ID, exact candidate path and SHA256, performance question, and target operating region
-to the parent and `recipe-deployer`. The parent must carry the question and operating region into the candidate's
+For `approve` (proposals only), return the review ID, exact candidate path and SHA256, performance question, and target operating region
+to the parent and `recipe-deployer`. For `stop-validated` or `stop-rejected`, return the verdict and review ID to
+the parent only (`STOP_REQUESTED` awaits operator grant; a rejection names the required follow-up families). The parent must carry the question and operating region into the candidate's
 `perf-analyzer` assignment. For `revise` or `reject`, return the verdict, strongest objections, and any minimal revision
 or required follow-up to `hypothesis-generator`. Do not create the next `DEPLOY_ROOT` for candidate iteration
 `<NNN + 1>`.

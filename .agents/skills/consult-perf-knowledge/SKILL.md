@@ -39,6 +39,10 @@ Require:
 Treat the current `deploy-iter-<NNN>` as the source iteration and `<NNN + 1>` as the candidate iteration. Never create
 the next deployment-iteration directory.
 
+After every consultation, whatever its outcome, append one record to `EXP_ROOT/analysis/hypothesis-backlog.jsonl`
+(the proposal or non-proposal and its source evidence), creating the file on first use. When recording an ask,
+append it to `EXP_ROOT/analysis/asks.jsonl` per `run-artifacts.md`, deduplicating against existing entries first.
+
 ## Read The Applicable Knowledge
 
 Always read:
@@ -134,7 +138,8 @@ Maintain one persistent search-calibration ledger for the engagement at
 `EXP_ROOT/analysis/search-calibration.md` instead of regenerating a scan for every
 hypothesis; each iteration's `knowledge-consult.md` records only the delta applied to it. The ledger is the
 authoritative family table. When submitting a stop-request, record in `knowledge-consult.md` the ledger path and
-the SHA256 of the ledger state being submitted; do not modify the ledger while that validation is pending. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
+the SHA256 of the ledger state being submitted, plus — whenever any granted budget is non-null — the derived
+budget consumption (wall clock from `manifest.yaml`'s session start; failed deploys from deployment ledgers marked failed; GPU-hours from summed `benchmark_execution.json` durations times the deployed GPU count); do not modify the ledger while that validation is pending. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
 (a topology adoption, new variance data, an answered ask). The ledger explicitly covers:
 
 1. deployment topology and fit, including model fit, parallelism, replication, aggregated versus disaggregated
@@ -145,7 +150,9 @@ the SHA256 of the ledger state being submitted; do not modify the ledger while t
 3. Local Planner only when its conditional lane applies.
 
 For each family, record its coverage as `tested`, `ruled-out`, `not-applicable`, `untested-promising`, `deferred`,
-or `reopened-by-new-evidence`, plus its expected upside and the evidence for that disposition. A `ruled-out` row must
+or `reopened-by-new-evidence`, plus its expected upside — recorded BOTH as a quantitative estimate and on the
+fixed ordinal scale the stop-request check reads: `low` (below ~2% on the primary objective), `medium` (~2-10%),
+`high` (above ~10%) — and the evidence for that disposition. A `ruled-out` row must
 cite a measurement, a sourced hard constraint, a confirmed incompatibility, or an explicit operator decision;
 expected upside below the minimum detectable effect is `deferred` (still visible, and stackable under a documented
 one-variable exception), never `ruled-out`. Compare all applicable families for potential benefit and information value before choosing one.
