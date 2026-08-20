@@ -558,6 +558,23 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn endpoint_instance(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        instance_id: u64,
+    ) -> DiscoveryInstance {
+        DiscoveryInstance::Endpoint(Instance {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            endpoint: endpoint.to_string(),
+            instance_id,
+            transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        })
+    }
+
     fn model_instance(
         namespace: &str,
         component: &str,
@@ -628,6 +645,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_worker_routes_rejects_invalid_admin_base_url() {
+        for value in [json!("   "), json!(42)] {
+            let err = parse_worker_routes(json!({
+                "routes": [],
+                "admin_base_url": value,
+            }))
+            .unwrap_err();
+            assert!(err.to_string().contains("admin_base_url"));
+        }
+    }
+
+    #[test]
     fn parse_worker_routes_propagates_worker_error_status() {
         let err = parse_worker_routes(json!({ "status": "error", "message": "engine is dead" }))
             .unwrap_err();
@@ -693,5 +722,17 @@ mod tests {
             Some("lora-1"),
         )]);
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn rl_endpoint_instances_do_not_require_model_metadata() {
+        let endpoints = rl_endpoint_instances(
+            vec![endpoint_instance("dynamo", "backend", "rl", 1)],
+            "rl",
+            None,
+        );
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].instance_id, 1);
     }
 }
