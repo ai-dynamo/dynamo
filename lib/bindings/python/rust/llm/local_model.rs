@@ -8,8 +8,8 @@ use dynamo_kv_router::protocols::{
     KvTransferEnforcement as RsKvTransferEnforcement, RoutingConstraints as RsRoutingConstraints,
 };
 use dynamo_runtime::protocols::EndpointId;
-use llm_rs::local_model::runtime_config::NixlPushEndpoint as RsNixlPushEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
+use llm_rs::local_model::runtime_config::NixlPushEndpoint as RsNixlPushEndpoint;
 use llm_rs::local_model::runtime_config::StructuralTagMode as RsStructuralTagMode;
 use llm_rs::local_model::runtime_config::StructuralTagSchemaMode as RsStructuralTagSchemaMode;
 use llm_rs::local_model::runtime_config::StructuralTagScope as RsStructuralTagScope;
