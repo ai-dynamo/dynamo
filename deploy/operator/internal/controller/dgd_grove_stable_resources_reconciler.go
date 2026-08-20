@@ -151,7 +151,6 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		logger.Error(err, "failed to generate the main component service")
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
 	}
-
 	_, syncedService, err := commoncontroller.SyncResource(
 		ctx,
 		r,

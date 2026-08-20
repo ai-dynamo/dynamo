@@ -26,15 +26,18 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 )
 
 func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
@@ -110,4 +113,36 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)
 	assert.Equal(t, 1, podCliqueReads)
+}
+
+func TestGroveServiceDoesNotPreserveDisaggregatedSetSelector(t *testing.T) {
+	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {ComponentType: consts.ComponentTypeFrontend},
+			},
+		},
+	})
+	component := &dgd.Spec.Components[0]
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name:      dynamo.GetDCDResourceName(dgd, component.ComponentName, ""),
+		Namespace: dgd.Namespace,
+	}}
+	setDisaggregatedSetServiceSelector(service, "graph", "frontend", "old12345")
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd, service).
+		Build()
+	reconciler := newGroveStableResourcesReconciler(
+		kubeClient,
+		events.NewFakeRecorder(10),
+		&configv1alpha1.OperatorConfiguration{},
+	)
+
+	_, err := reconciler.reconcileComponentService(t.Context(), dgd, dgd, component, false)
+	require.NoError(t, err)
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(service), service))
+	require.NotContains(t, service.Spec.Selector, disaggregatedsetv1.SetNameLabelKey)
 }
