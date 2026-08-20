@@ -1,6 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Peer KV-index recovery over each peer's `/dump` endpoint.
+//!
+//! Two dump protocols coexist on purpose:
+//!
+//! - [`recover_from_peers`] consumes the legacy single-JSON-object format. It is
+//!   shared by standalone indexer / selection / python P2P recovery, which talk
+//!   to those processes' own `/dump` endpoints — pre-existing and untouched.
+//! - [`recover_from_peers_streaming`] consumes the NDJSON format served by the
+//!   EPP's peer `/dump` (one `StreamDumpRecord` per line, applied as it
+//!   arrives). This is the EPP peer-recovery protocol introduced alongside it.
+//!
+//! Both are intentionally kept: changing the shared JSON path would ripple into
+//! the standalone deployments, and the EPP path needs streaming to avoid
+//! buffering a whole snapshot. Keep idempotency and retry semantics in sync
+//! when touching either; a future convergence is possible but not required.
+
 use std::collections::HashMap;
 use std::time::Duration;
 
