@@ -685,13 +685,13 @@ where
             .await
             .and_then(|result| result)
             .map(|stream| (metadata, target, stream))
-        } else if uses_load {
+        } else if let Some(load_state) = self.load_state.as_ref() {
             cancel_on_stop(
                 request_context.as_ref(),
-                self.inner.direct_within_prepared(
+                self.inner.direct_matching_prepared(
                     request,
                     initial_worker,
-                    None,
+                    |worker_id| load_state.is_configured_worker(worker_id),
                     |request, worker_id| {
                         let worker = guard.retarget_worker(worker_id)?.ok_or_else(|| {
                             anyhow::anyhow!("load-aware builtin request lost its reservation")
