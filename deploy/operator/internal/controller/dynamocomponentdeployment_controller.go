@@ -566,6 +566,20 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 		},
 	}
 
+	// Scope new worker generations while preserving an existing workload's upgrade-compatible template.
+	if isHashVersionedWorkerTemplate(leaderPodTemplateSpec) || isHashVersionedWorkerTemplate(workerPodTemplateSpec) {
+		existing := &leaderworkersetv1.LeaderWorkerSet{}
+		getErr := r.Get(ctx, client.ObjectKey{Name: kubeName, Namespace: kubeNs}, existing)
+		switch {
+		case k8serrors.IsNotFound(getErr):
+			scopeWorkerTopologySpreadWorkload(leaderWorkerSet, leaderPodTemplateSpec, workerPodTemplateSpec)
+		case getErr != nil:
+			return nil, false, errors.Wrap(getErr, "get existing LeaderWorkerSet before topology spread rendering")
+		case existing.Annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped] == commonconsts.KubeLabelValueTrue:
+			scopeWorkerTopologySpreadWorkload(leaderWorkerSet, leaderPodTemplateSpec, workerPodTemplateSpec)
+		}
+	}
+
 	desiredReplicas := int32(1)
 	if opt.dynamoComponentDeployment.Spec.Replicas != nil {
 		desiredReplicas = *opt.dynamoComponentDeployment.Spec.Replicas
@@ -822,6 +836,21 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	podTemplateSpec, err := renderer.generatePodTemplateSpec(ctx, opt.dynamoComponentDeployment, dynamo.RoleMain, containerGPUs)
 	if err != nil {
 		return
+	}
+
+	// Scope new worker generations while preserving an existing workload's upgrade-compatible template.
+	if isHashVersionedWorkerTemplate(podTemplateSpec) {
+		existing := &appsv1.Deployment{}
+		getErr := r.Get(ctx, client.ObjectKey{Name: kubeName, Namespace: kubeNs}, existing)
+		switch {
+		case k8serrors.IsNotFound(getErr):
+			scopeWorkerTopologySpreadWorkload(kubeDeployment, podTemplateSpec)
+		case getErr != nil:
+			err = errors.Wrap(getErr, "get existing Deployment before topology spread rendering")
+			return
+		case existing.Annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped] == commonconsts.KubeLabelValueTrue:
+			scopeWorkerTopologySpreadWorkload(kubeDeployment, podTemplateSpec)
+		}
 	}
 
 	maxSurge, maxUnavailable := getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations)
