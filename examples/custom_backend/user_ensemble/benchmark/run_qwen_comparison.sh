@@ -15,6 +15,10 @@ OUTPUT_ROOT="${DYN_BENCH_OUTPUT_ROOT:?set DYN_BENCH_OUTPUT_ROOT to a new result 
 CONTAINER_IMAGE="${DYN_BENCH_CONTAINER_IMAGE:?set DYN_BENCH_CONTAINER_IMAGE}"
 AIPERF_BIN="${DYN_BENCH_AIPERF_BIN:-aiperf}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+KV_EVENT_PORT="${DYN_BENCH_KV_EVENT_PORT:-20080}"
+KV_EVENTS_CONFIG="$(printf \
+    '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:%s","enable_kv_cache_events":true}' \
+    "$KV_EVENT_PORT")"
 MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 MEASURED_INPUT="$WORKLOAD_ROOT/measured/image_custom_1000_textisl644.jsonl"
 WARMUP_INPUT="$WORKLOAD_ROOT/warmup/image_custom_20_textisl644.jsonl"
@@ -185,6 +189,7 @@ python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark 
     --torch-gpu-count "$TORCH_GPU_COUNT" \
     --load-mode "$LOAD_MODE" \
     --response-placement "$DYN_USER_ENSEMBLE_RESPONSE_PLACEMENT" \
+    --kv-event-port "$KV_EVENT_PORT" \
     "${metadata_load_args[@]}" \
     --aiperf-version "$AIPERF_VERSION"
 
@@ -221,7 +226,10 @@ launch_topology() {
     local topology="$1"
     local output_dir="$2"
     local launch_script
-    local launch_args=(--no-enable-prefix-caching)
+    local launch_args=(
+        --enable-prefix-caching
+        --kv-events-config "$KV_EVENTS_CONFIG"
+    )
 
     case "$topology" in
         direct)
@@ -229,7 +237,7 @@ launch_topology() {
             ;;
         workflow)
             launch_script="$LAUNCH_ROOT/examples/custom_backend/user_ensemble/remote/launch.sh"
-            launch_args=(--max-num-seqs 64 --no-enable-prefix-caching)
+            launch_args=(--max-num-seqs 64 "${launch_args[@]}")
             ;;
         *)
             echo >&2 "unknown topology: $topology"

@@ -47,6 +47,11 @@ _DISPATCH_RE = re.compile(
 _GRID_RE = re.compile(r"\bgrid=(?P<grid>\d+x\d+x\d+)\b")
 _CAPTURE_RE = re.compile(r"captured CUDA graph: grid=")
 _CAPTURE_COMPLETE_RE = re.compile(r"CUDA graph capture complete: .*?graphs=(\d+)")
+_KV_EVENTS_ENABLED_RE = re.compile(
+    r"Using kv_events_config for publishing vLLM kv events over zmq: .*"
+    r"\(use_kv_events=True\)"
+)
+_KV_EVENT_READER_RE = re.compile(r"Worker reading KV events for dp_rank=(\d+)")
 
 
 class BenchmarkAuditError(RuntimeError):
@@ -230,6 +235,22 @@ def audit_encoder_log(path: Path) -> dict[str, Any]:
     }
 
 
+def audit_kv_cache_log(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if _KV_EVENTS_ENABLED_RE.search(text) is None:
+        raise BenchmarkAuditError(
+            "vLLM prefix caching and KV-event publication were not enabled"
+        )
+    reader_ranks = sorted({int(rank) for rank in _KV_EVENT_READER_RE.findall(text)})
+    if not reader_ranks:
+        raise BenchmarkAuditError("Dynamo did not start a vLLM KV-event reader")
+    return {
+        "prefix_caching": True,
+        "kv_event_publishing": True,
+        "kv_event_reader_dp_ranks": reader_ranks,
+    }
+
+
 def _metric_average(profile: Mapping[str, Any], key: str) -> float:
     metric = profile.get(key)
     if not isinstance(metric, Mapping) or "avg" not in metric:
@@ -322,6 +343,7 @@ def validate_cell(
         "full_client_process_throughput_req_s": MEASURED_REQUESTS / wall_seconds,
         "aiperf": validate_profile(profile_path, expected_requests=MEASURED_REQUESTS),
         "encoder": audit_encoder_log(server_log),
+        "kv_cache": audit_kv_cache_log(server_log),
         "gpu": _parse_gpu_telemetry(gpu_telemetry),
     }
 
@@ -396,6 +418,10 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "concurrency": args.concurrency,
         "topologies": list(topologies),
         "response_placement": args.response_placement,
+        "prefix_caching": True,
+        "kv_event_publishing": True,
+        "kv_event_transport": "zmq",
+        "kv_event_port": args.kv_event_port,
         "streaming": False,
         "max_tokens": OUTPUT_TOKENS,
         "min_tokens": OUTPUT_TOKENS,
@@ -743,6 +769,7 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         f"- GPU: {metadata['gpu']}",
         f"- Workload SHA-256: `{workload['measured_sha256']}`",
         "- Raw text: 644 tokens plus one image; decoder ISL 773/976",
+        "- vLLM prefix caching and ZMQ KV-event publication enabled",
     ]
     if load_mode == "closed_loop":
         lines.append(
@@ -886,6 +913,7 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument(
         "--response-placement", choices=("inline", "remote"), default="inline"
     )
+    metadata.add_argument("--kv-event-port", type=int, required=True)
     metadata.add_argument("--aiperf-version", required=True)
 
     cell = subparsers.add_parser("validate-cell")

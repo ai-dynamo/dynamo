@@ -12,6 +12,7 @@ import pytest
 from examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark import (
     BenchmarkAuditError,
     audit_encoder_log,
+    audit_kv_cache_log,
     capture_metadata,
     summarize,
     validate_profile,
@@ -70,6 +71,26 @@ def test_encoder_log_rejects_eager_dispatch(tmp_path: Path) -> None:
         audit_encoder_log(server_log)
 
 
+def test_kv_cache_log_requires_event_publication_and_reader(tmp_path: Path) -> None:
+    server_log = tmp_path / "server.log"
+    server_log.write_text(
+        "Using kv_events_config for publishing vLLM kv events over zmq: "
+        "KVEventsConfig(endpoint='tcp://*:20080') (use_kv_events=True)\n"
+        "Worker reading KV events for dp_rank=0 from tcp://127.0.0.1:20080\n",
+        encoding="utf-8",
+    )
+
+    assert audit_kv_cache_log(server_log) == {
+        "prefix_caching": True,
+        "kv_event_publishing": True,
+        "kv_event_reader_dp_ranks": [0],
+    }
+
+    server_log.write_text("use_kv_events=False\n", encoding="utf-8")
+    with pytest.raises(BenchmarkAuditError, match="were not enabled"):
+        audit_kv_cache_log(server_log)
+
+
 def test_profile_validation_supports_warmup_and_measured_counts(
     tmp_path: Path,
 ) -> None:
@@ -122,6 +143,9 @@ def test_runner_waits_for_real_generation_without_touching_encoder_counts() -> N
     ]
     assert '--concurrency "$CONCURRENCY"' not in constant_load_args
     assert "--request-rate-mode constant" in runner
+    assert "--no-enable-prefix-caching" not in runner
+    assert "--enable-prefix-caching" in runner
+    assert "--kv-events-config" in runner
 
 
 def _metadata_args(
@@ -138,6 +162,7 @@ def _metadata_args(
         topology=topology,
         request_rate=request_rate,
         response_placement=response_placement,
+        kv_event_port=20080,
         source_commit="abc123",
         source_branch="test-branch",
         working_diff_sha256="clean",
@@ -156,6 +181,9 @@ def test_metadata_accepts_closed_loop_concurrency_64() -> None:
     assert result["benchmark"]["concurrency"] == 64
     assert "request_rates" not in result["benchmark"]
     assert "concurrency_cap" not in result["benchmark"]
+    assert result["benchmark"]["prefix_caching"] is True
+    assert result["benchmark"]["kv_event_publishing"] is True
+    assert result["benchmark"]["kv_event_port"] == 20080
 
 
 def test_metadata_rejects_other_closed_loop_concurrency() -> None:
