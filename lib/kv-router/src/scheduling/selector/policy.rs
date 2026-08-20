@@ -56,7 +56,9 @@ impl WorkerInputs {
     pub const CACHE: Self = Self(1 << 0);
     /// Request active-load inputs.
     pub const LOAD: Self = Self(1 << 1);
-    pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0);
+    /// Request preferred-taint routing metadata.
+    pub const PREFERRED_TAINT: Self = Self(1 << 2);
+    pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
     pub(super) const MIN_ACTIVE_PREFILL_TOKENS: Self = Self(1 << 3);
     pub(super) const DEFAULT_POLICY_CACHE: Self = Self(1 << 4);
 
@@ -216,10 +218,12 @@ impl WorkerCandidate {
             .then_some(&self.load)
     }
 
-    /// Return the optional cost multiplier from preferred routing constraints.
+    /// Return the optional cost multiplier from preferred routing constraints when the component
+    /// requested [`WorkerInputs::PREFERRED_TAINT`].
     ///
     /// Required routing constraints are enforced by host eligibility. This preferred value is
-    /// ordinary candidate metadata and is always available without declaring a capability.
+    /// ordinary candidate metadata and is only materialized for components that declare the
+    /// capability.
     pub fn preferred_taint_multiplier(&self) -> Option<f64> {
         self.preferred_taint_multiplier
     }
@@ -265,7 +269,8 @@ impl ScoredWorkerCandidate {
         self.cost
     }
 
-    /// Return the optional cost multiplier from preferred routing constraints.
+    /// Return the optional cost multiplier from preferred routing constraints when the picker
+    /// requested [`WorkerInputs::PREFERRED_TAINT`].
     pub fn preferred_taint_multiplier(&self) -> Option<f64> {
         self.preferred_taint_multiplier
     }
@@ -488,15 +493,16 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
     cache_inputs.clear();
     load_inputs.clear();
     if filters.is_empty() {
-        let pinned = eligibility.pinned_worker().is_some();
+        let materialize_preferred_taint = eligibility.pinned_worker().is_none()
+            && scorer_picker_inputs.contains(WorkerInputs::PREFERRED_TAINT);
         let mut error = None;
         eligibility.any_eligible_worker_rank(workers, |worker, config| {
-            let preferred_taint_multiplier = if pinned {
-                None
-            } else {
+            let preferred_taint_multiplier = if materialize_preferred_taint {
                 request
                     .routing_constraints
                     .preferred_taint_multiplier(config.taints())
+            } else {
+                None
             };
             let candidate = input.row(worker, preferred_taint_multiplier, *scorer_picker_inputs);
             if let Err(policy_error) = push_scored_candidate(
@@ -519,21 +525,25 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
         return Ok(!candidates.is_empty());
     }
 
-    let pinned = eligibility.pinned_worker().is_some();
+    let additional_inputs = scorer_picker_inputs.without(*filter_inputs);
+    let materialize_filter_preferred_taint = eligibility.pinned_worker().is_none()
+        && filter_inputs.contains(WorkerInputs::PREFERRED_TAINT);
+    let materialize_additional_preferred_taint = eligibility.pinned_worker().is_none()
+        && additional_inputs.contains(WorkerInputs::PREFERRED_TAINT);
     let mut has_eligible_worker = false;
     let mut error = None;
     debug_assert!(!needs_filtered_baseline || scorer_picker_inputs.contains(WorkerInputs::LOAD));
     let mut min_active_prefill_tokens = usize::MAX;
     eligibility.any_eligible_worker_rank(workers, |worker, config| {
         has_eligible_worker = true;
-        let preferred_taint_multiplier = if pinned {
-            None
-        } else {
+        let filter_preferred_taint_multiplier = if materialize_filter_preferred_taint {
             request
                 .routing_constraints
                 .preferred_taint_multiplier(config.taints())
+        } else {
+            None
         };
-        let filter_candidate = input.row(worker, preferred_taint_multiplier, *filter_inputs);
+        let filter_candidate = input.row(worker, filter_preferred_taint_multiplier, *filter_inputs);
         for filter in filters.iter_mut() {
             match filter.keep(&input.context, &filter_candidate) {
                 Ok(true) => {}
@@ -545,8 +555,18 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
             }
         }
 
-        let additional_inputs = scorer_picker_inputs.without(*filter_inputs);
-        let additional = input.row(worker, None, additional_inputs);
+        let additional_preferred_taint_multiplier = if materialize_additional_preferred_taint {
+            request
+                .routing_constraints
+                .preferred_taint_multiplier(config.taints())
+        } else {
+            None
+        };
+        let additional = input.row(
+            worker,
+            additional_preferred_taint_multiplier,
+            additional_inputs,
+        );
         let candidate = filter_candidate.with_inputs_from(&additional, *scorer_picker_inputs);
         if needs_filtered_baseline {
             min_active_prefill_tokens =
@@ -632,7 +652,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::{
+        cell::Cell,
+        collections::{HashMap, HashSet},
+    };
 
     use rustc_hash::FxHashMap;
 
@@ -729,10 +752,14 @@ mod tests {
     }
 
     #[test]
-    fn preferred_taints_are_always_candidate_metadata() {
+    fn preferred_taints_are_materialized_only_when_requested() {
         struct PreferenceScorer;
 
         impl WorkerScorer for PreferenceScorer {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::PREFERRED_TAINT
+            }
+
             fn score(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
@@ -746,6 +773,10 @@ mod tests {
         struct PreferencePicker;
 
         impl WorkerPicker for PreferencePicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::PREFERRED_TAINT
+            }
+
             fn pick(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
@@ -776,11 +807,79 @@ mod tests {
             <WorkerSelectionPolicy as WorkerSelector<TaintedWorkerConfig>>::required_worker_inputs(
                 &policy,
             ),
-            WorkerInputs::NONE
+            WorkerInputs::PREFERRED_TAINT
         );
         policy
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
+    }
+
+    #[test]
+    fn custom_policy_skips_undeclared_preferred_taints() {
+        struct CountingTaintConfig {
+            taints: HashSet<String>,
+            taint_reads: Cell<usize>,
+        }
+
+        impl WorkerConfigLike for CountingTaintConfig {
+            fn data_parallel_start_rank(&self) -> u32 {
+                0
+            }
+
+            fn data_parallel_size(&self) -> u32 {
+                1
+            }
+
+            fn max_num_batched_tokens(&self) -> Option<u64> {
+                None
+            }
+
+            fn total_kv_blocks(&self) -> Option<u64> {
+                None
+            }
+
+            fn taints(&self) -> &HashSet<String> {
+                self.taint_reads.set(self.taint_reads.get() + 1);
+                &self.taints
+            }
+        }
+
+        struct NoPreferencePicker;
+
+        impl WorkerPicker for NoPreferencePicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert!(input.candidates()[0].preferred_taint_multiplier().is_none());
+                Ok(0)
+            }
+        }
+
+        let workers = HashMap::from([(
+            0,
+            CountingTaintConfig {
+                taints: HashSet::from(["preferred".to_string()]),
+                taint_reads: Cell::new(0),
+            },
+        )]);
+        let mut request = base_request(16);
+        request.routing_constraints.preferred_taints =
+            HashMap::from([("preferred".to_string(), 0.5)]);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(NoPreferencePicker),
+        );
+
+        policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        // Eligibility checks required taints once. The preference multiplier must not perform a
+        // second lookup when no policy component declares it.
+        assert_eq!(workers[&0].taint_reads.get(), 1);
     }
 
     #[test]
