@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate this matrix's public overlays and template Components from the repository root:
+# Regenerate: scripts/kustomize-matrix.py unfold recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
+# Template source: recipes/kustomize/templates/gke-a4-dranet
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-cloud-provider
+spec:
+  services:
+    DecodeWorker:
+      resources:
+        limits:
+          gpu: null
+        requests:
+          gpu: null
+      extraPodSpec:
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-b200
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        resourceClaims:
+          - name: devices
+            resourceClaimTemplateName: q32b-1p1d-cloud-provider-decodeworker-a4-devices
+        mainContainer:
+          env:
+            # Require reliable-connected RoCE and CUDA memory support; do not fall back to TCP or CUDA IPC.
+            - name: UCX_TLS
+              value: rc_x,rc,cuda_copy
+            - name: UCX_IB_GPU_DIRECT_RDMA
+              value: "yes"
+            - name: UCX_MAX_RNDV_RAILS
+              value: "4"
+            - name: UCX_RNDV_SCHEME
+              value: get_zcopy
+            - name: UCX_PROTO_INFO
+              value: "y"
+            - name: UCX_LOG_LEVEL
+              value: info
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+          resources:
+            claims:
+              - name: devices
+          securityContext:
+            $patch: replace
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+    PrefillWorker:
+      resources:
+        limits:
+          gpu: null
+        requests:
+          gpu: null
+      extraPodSpec:
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-b200
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        resourceClaims:
+          - name: devices
+            resourceClaimTemplateName: q32b-1p1d-cloud-provider-prefillworker-a4-devices
+        mainContainer:
+          env:
+            # Require reliable-connected RoCE and CUDA memory support; do not fall back to TCP or CUDA IPC.
+            - name: UCX_TLS
+              value: rc_x,rc,cuda_copy
+            - name: UCX_IB_GPU_DIRECT_RDMA
+              value: "yes"
+            - name: UCX_MAX_RNDV_RAILS
+              value: "4"
+            - name: UCX_RNDV_SCHEME
+              value: get_zcopy
+            - name: UCX_PROTO_INFO
+              value: "y"
+            - name: UCX_LOG_LEVEL
+              value: info
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+          resources:
+            claims:
+              - name: devices
+          securityContext:
+            $patch: replace
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE

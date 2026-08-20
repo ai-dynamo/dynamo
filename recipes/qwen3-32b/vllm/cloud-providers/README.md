@@ -44,15 +44,39 @@ Neither path requires regeneration.
 |-------------------|-----------------|---------|
 | `deploy-aks-ib.yaml` | Azure AKS InfiniBand | `kustomize/overlays/aks-ib/` |
 | `deploy-aws-p5.48xlarge.yaml` | AWS EFA + libfabric on `p5.48xlarge`, derived from each worker's GPU count | `kustomize/overlays/aws-p5.48xlarge/` |
+| `deploy-gke-a4-dranet.yaml` | GKE A4 DRANET; GPU-aligned RDMA derived from each worker's GPU count | `kustomize/overlays/gke-a4-dranet/` |
 | `deploy-gke-roce.yaml` | GKE RoCE | `kustomize/overlays/gke-roce/` |
 | `deploy-nebius-ib.yaml` | Nebius InfiniBand | `kustomize/overlays/nebius-ib/` |
 | `deploy-nscale-ib.yaml` | Nscale InfiniBand | `kustomize/overlays/nscale-ib/` |
 
-For example, apply the GKE RoCE composition directly from its checked-in
+The `gke-a4-dranet` variant targets an `a4-highgpu-8g` node. It requires GKE
+Standard 1.34.1-gke.1829001 or later, Dataplane V2, and a node pool with
+[GKE managed Dynamic Resource Allocation for Networking
+(DRANET)](https://cloud.google.com/kubernetes-engine/docs/how-to/allocate-network-resources-dra)
+enabled. In this 4-GPU-per-worker recipe, each worker Pod creates a claim for
+four of the node's eight `gpu.nvidia.com` GPUs and four `mrdma.google.com` RDMA
+NICs. The shared A4 template derives both quantities and the claim name from
+each worker in the base deployment. It groups GPU and RDMA requests by
+`resource.kubernetes.io/pcieRoot` for GPUDirect RDMA locality. Its UCX transport
+allowlist omits TCP and CUDA IPC so a missing RDMA path fails instead of
+silently using a slower transport.
+
+Verify both DeviceClasses before applying the variant:
+
+```bash
+kubectl get deviceclass gpu.nvidia.com mrdma.google.com
+```
+
+When a custom scheduler binds the Pods, its binder must be authorized to update
+the `resourceclaims/binding` subresource. The default Kubernetes scheduler has
+this permission; custom scheduler installations might require an RBAC update.
+
+Apply the GKE A4 DRANET composition directly from its checked-in
 Kustomization:
 
 ```bash
-kubectl apply -k kustomize/overlays/gke-roce -n ${NAMESPACE}
+kubectl apply -k recipes/qwen3-32b/vllm/cloud-providers/kustomize/overlays/gke-a4-dranet \
+  -n ${NAMESPACE}
 ```
 
 To make a local, uncommitted composition, create your own `kustomization.yaml` in
