@@ -269,10 +269,10 @@ def collect_dpkg_sources(
     return fetched
 
 
-# First-party Rust crate prefixes. Crates whose name starts with any of
-# these are NVIDIA-authored — source lives on GitHub, not redistribution
-# of someone else's OSS, so we don't ship it in the OSRB sources archive.
-_FIRST_PARTY_RUST_PREFIXES = ("dynamo-", "kvbm-", "nixl-")
+# First-party Rust crate prefixes. Crates whose name starts with any of these
+# are NVIDIA-authored in this repository or another ai-dynamo release, so we
+# don't ship them in the third-party OSRB sources archive.
+_FIRST_PARTY_RUST_PREFIXES = ("aisimulate-", "dynamo-", "kvbm-", "nixl-")
 
 
 def _shipped_rust_crates(site_packages_dirs: list[Path]) -> set[tuple[str, str]]:
@@ -320,7 +320,7 @@ def collect_rust_sources(
     Walks installed wheels' embedded SBOMs to discover what shipped,
     then for each (name, version) copies vendor_full/<name>-<version>/
     to output_dir/vendor/<name>-<version>/ EXCEPT for first-party
-    crates (dynamo-*, kvbm-*, nixl-*), which are NVIDIA-authored.
+    crates (aisimulate-*, dynamo-*, kvbm-*, nixl-*), which are NVIDIA-authored.
 
     Cargo.toml + Cargo.lock from the workspace are copied alongside so a
     consumer can reconstruct a buildable vendor tree.
@@ -506,7 +506,7 @@ runtime this archive belongs to).
 | Directory | What's here |
 |---|---|
 | `dpkg/`    | `.dsc` + tarballs for Debian/Ubuntu packages we install on top of the baseline image. Scoped to the delta against the baseline SBOM. NVIDIA-proprietary packages (CUDA repos) have no public source repo and are not included; see "skipped packages" in the build log. |
-| `rust/`    | `cargo vendor` tree filtered to the third-party crates that appear in the installed wheels' embedded SBOMs. Excludes first-party crates (`dynamo-*`, `kvbm-*`, `nixl-*`) — those are NVIDIA-authored and source is public at github.com/ai-dynamo. Includes the workspace `Cargo.toml` + `Cargo.lock` for context. |
+| `rust/`    | `cargo vendor` tree filtered to the third-party crates that appear in the installed wheels' embedded SBOMs. Excludes first-party crates (`aisimulate-*`, `dynamo-*`, `kvbm-*`, `nixl-*`) owned by NVIDIA in this repository or separate ai-dynamo releases. Includes the workspace `Cargo.toml` + `Cargo.lock` for context. |
 | `go/`      | `go mod vendor` tree for the operator / snapshot / EPP binaries. Excludes first-party modules (`github.com/ai-dynamo/...`). |
 | `native/`  | Upstream source tarballs (or git clones) for from-source builds — CRIU, cuda-checkpoint, ucx, libfabric, gdrcopy, ffmpeg, NIXL where applicable. Excludes first-party native helpers (`cuda-checkpoint-helper`). |
 

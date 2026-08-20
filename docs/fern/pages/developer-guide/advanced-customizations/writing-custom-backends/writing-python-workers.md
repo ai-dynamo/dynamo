@@ -6,20 +6,12 @@ sidebar-title: Writing Python Workers
 subtitle: Create custom Python workers and engines for Dynamo
 ---
 
-> **Lower-level Python worker path.** This guide documents the
-> `@dynamo_worker()` + `register_model()` + `endpoint.serve_endpoint()`
-> entry point. For new engines, prefer Dynamo's
-> [unified backend path](writing-unified-backends.md) for Python or Rust — it puts the
-> framework in charge of lifecycle, signal handling, cancellation
-> monitoring, and model registration, and ships plumbing for Prometheus
-> metrics, KV event publishing, KV-aware routing, OpenTelemetry
-> tracing, health-check canaries, guided decoding, and custom Jinja
-> chat templates. Stay on this path for workloads that depend on
-> multimodal, LoRA, logprob extraction, engine routes (pause/resume,
-> profiling, weight updates), text-in-text-out, snapshot/CRIU, or
-> diffusion — features the unified backend does not yet cover. See
-> the [unified-path feature gaps](writing-unified-backends.md#python-feature-gaps)
-> for the current matrix.
+> [!NOTE]
+> This guide documents the lower-level `@dynamo_worker()`, `register_model()`,
+> and `endpoint.serve_endpoint()` path. For new token-in-token-out engines,
+> start with [Writing Unified Backends](writing-unified-backends.md). Use this
+> path when your integration must own model registration, endpoint serving,
+> request handling, or lifecycle behavior directly.
 
 This guide explains how to create your own Python worker in Dynamo.
 
@@ -87,9 +79,47 @@ The `model_type` can be:
 - `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name or the folder name.
 - `context_length`: Max model length in tokens. Defaults to the model's set max. Only set this if you need to reduce KV cache allocation to fit into VRAM.
 - `kv_cache_block_size`: Size of a KV block for the engine, in tokens. Defaults to 16.
+- `runtime_config`: Optional engine capabilities and runtime limits published to the frontend.
 - `user_data`: Optional dictionary containing custom metadata for worker behavior (e.g., LoRA configuration). Defaults to None.
 
 See `examples/backends` for full code examples.
+
+### Token Overflow Admission
+
+Generation backends can publish a `token_budget` capability through
+`ModelRuntimeConfig`. This lets the frontend reject known-invalid requests with
+HTTP 400 before it starts a streaming response:
+
+```python
+import json
+
+from dynamo.llm import ModelRuntimeConfig
+
+runtime_config = ModelRuntimeConfig()
+runtime_config.set_engine_specific(
+    "token_budget",
+    json.dumps(
+        {
+            "combined_limit": max_model_len,
+            "reject_prompt_overflow": True,
+            "reject_total_overflow": True,
+        }
+    ),
+)
+```
+
+Set `combined_limit` to the maximum accepted input and output token count after
+subtracting any tokens reserved by the engine. Set `reject_prompt_overflow` when
+the engine rejects a prompt that fills or exceeds that limit. Set
+`reject_total_overflow` when the engine rejects
+`input_tokens + max_output_tokens > combined_limit`.
+
+A `false` flag delegates that overflow case to the backend. The frontend does
+not clamp output or truncate prompts. If a backend omits `token_budget`, the
+frontend delegates both cases to the backend. It also ignores malformed
+`token_budget` metadata with a warning. This default keeps custom backends
+compatible, but an over-limit streaming request might begin with HTTP 200
+before the backend reports its error.
 
 ## Component Names
 

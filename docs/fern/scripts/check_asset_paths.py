@@ -71,8 +71,16 @@ ABSOLUTE_ASSET = re.compile(
 DEFAULT_GLOBS = (
     "components/**/*.tsx",
     "components/**/*.ts",
+    # components/README.md is the declared source of truth for component usage,
+    # so an example there is copy-pasted into pages verbatim. Without this glob
+    # the canonical example is the one file this check cannot see.
+    "components/**/*.md",
     "pages/**/*.mdx",
     "pages/**/*.md",
+    # Templates are copied into published pages, so validate their asset paths
+    # before a bad example propagates into the site.
+    "templates/**/*.mdx",
+    "templates/**/*.md",
     "translations/**/*.mdx",
     "translations/**/*.md",
     "main.css",

@@ -19,13 +19,40 @@ fn invalid_argument(message: impl Into<String>) -> DynamoError {
 }
 
 impl OpenAIPreprocessor {
+    /// Whether this request permits model output to be interpreted as tool calls.
+    ///
+    /// A configured parser describes the model's wire format; it does not grant
+    /// every request permission to return tool calls. Permission depends only on
+    /// whether the request supplies tools and whether `tool_choice` forbids them.
+    /// Assistant-output constraints apply to assistant content and do not revoke
+    /// an `auto` request's ability to choose a tool call.
+    pub(crate) fn tool_call_parsing_enabled(request: &NvCreateChatCompletionRequest) -> bool {
+        if request.inner.tools.as_ref().is_none_or(Vec::is_empty) {
+            return false;
+        }
+
+        match request
+            .inner
+            .tool_choice
+            .as_ref()
+            .unwrap_or(&ChatCompletionToolChoiceOption::Auto)
+        {
+            ChatCompletionToolChoiceOption::None => false,
+            ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_) => {
+                true
+            }
+            ChatCompletionToolChoiceOption::Auto => true,
+        }
+    }
+
     /// Apply guided decoding for OpenAI tool-choice requests.
     ///
     /// Structural tags are preferred when enabled and supported by the configured
-    /// tool-call parser. Named K3 requests always use their native XTML structural
-    /// tag because generic JSON cannot represent K3 tool calls. Other forced
-    /// tool-choice requests fall back to the legacy JSON-schema constraint when
-    /// structural tags are not applied.
+    /// tool-call parser. Supported K2 forced requests and named K3 requests
+    /// intrinsically use their native structural tags because generic JSON cannot
+    /// represent their tool calls. Other forced choices fall back to the legacy
+    /// JSON-schema constraint when structural tags are not applied, except K3
+    /// required requests, which stay on the prompt-level XTML path.
     pub(super) fn apply_tool_choice_guided_decoding(
         &self,
         request: &NvCreateChatCompletionRequest,
@@ -160,4 +187,119 @@ fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
             strict: tool.function.strict,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn request(extra: Value) -> NvCreateChatCompletionRequest {
+        let mut value = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "test"}]
+        });
+        value
+            .as_object_mut()
+            .expect("base request is an object")
+            .extend(extra.as_object().expect("extra is an object").clone());
+        serde_json::from_value(value).expect("request must deserialize")
+    }
+
+    fn tools() -> Value {
+        json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"]
+                }
+            }
+        }])
+    }
+
+    #[test]
+    fn tool_call_parsing_requires_tools() {
+        assert!(!OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+            json!({})
+        )));
+        assert!(!OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+            json!({"tool_choice": "required"})
+        )));
+    }
+
+    #[test]
+    fn tool_call_parsing_honors_each_tool_choice() {
+        for (tool_choice, expected) in [
+            (json!(null), true),
+            (json!("none"), false),
+            (json!("auto"), true),
+            (json!("required"), true),
+            (
+                json!({"type": "function", "function": {"name": "get_weather"}}),
+                true,
+            ),
+        ] {
+            let mut extra = json!({"tools": tools()});
+            if !tool_choice.is_null() {
+                extra["tool_choice"] = tool_choice;
+            }
+            assert_eq!(
+                OpenAIPreprocessor::tool_call_parsing_enabled(&request(extra)),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn assistant_constraints_do_not_revoke_auto_tool_permission() {
+        let constraints = [
+            json!({"response_format": {"type": "json_object"}}),
+            json!({
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "event",
+                        "schema": {"type": "object"}
+                    }
+                }
+            }),
+            json!({"guided_json": {"type": "object"}}),
+            json!({"guided_regex": "[a-z]+"}),
+            json!({"guided_choice": ["a", "b"]}),
+            json!({"guided_grammar": "root ::= 'a'"}),
+        ];
+
+        for constraint in constraints {
+            let mut auto = json!({"tools": tools(), "tool_choice": "auto"});
+            auto.as_object_mut()
+                .unwrap()
+                .extend(constraint.as_object().unwrap().clone());
+            assert!(OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+                auto
+            )));
+
+            let mut required = json!({"tools": tools(), "tool_choice": "required"});
+            required
+                .as_object_mut()
+                .unwrap()
+                .extend(constraint.as_object().unwrap().clone());
+            assert!(OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+                required
+            )));
+        }
+    }
+
+    #[test]
+    fn text_response_format_does_not_disable_auto_tool_parsing() {
+        assert!(OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+            json!({
+                "tools": tools(),
+                "tool_choice": "auto",
+                "response_format": {"type": "text"}
+            })
+        )));
+    }
 }

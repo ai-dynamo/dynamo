@@ -19,6 +19,7 @@ ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
+ARG TRANSFORMERS_VERSION
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -41,6 +42,10 @@ ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 {% if device == "xpu" %}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+# vLLM 0.27.1's XPU image installs the oneAPI runtime and SYCL headers in
+# /opt/venv through the intel-sycl-rt wheel. Do not set ONEAPI_ROOT to the
+# removed /opt/intel/oneapi tree: Triton gives that variable priority over its
+# wheel-metadata fallback and would search a nonexistent compiler include path.
 {% elif device == "cpu" %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
@@ -73,6 +78,28 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 
+{% if device == "cuda" %}
+# Bring base-image OS packages up to the current patch releases published in
+# the distro archives. --only-upgrade skips anything not already installed, so
+# no new packages are added; versions are left unpinned so a cache-busted
+# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl && \
+    rm -rf /var/lib/apt/lists/*
+{% endif %}
+
 # Create dynamo user with group 0 for OpenShift compatibility.
 # Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
 # UID 2000, so after freeing 1000 (ubuntu) useradd would otherwise auto-assign the
@@ -80,11 +107,21 @@ ENV PATH=/opt/uv/bin:${PATH}
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -u 1000 -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache /opt/dynamo \
+    && mkdir -p /home/dynamo/.cache/vllm /opt/dynamo \
     && ln -sf /usr/bin/python3 /usr/local/bin/python \
-    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
+    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /home/dynamo/.cache/vllm /opt/dynamo /workspace \
+    # Arbitrary OpenShift UIDs need to create the vLLM and Triton caches under $HOME.
+    && chmod g+rwx /home/dynamo /home/dynamo/.cache /home/dynamo/.cache/vllm \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh
+
+# FlashInfer creates package-local cubin symlinks at runtime. Grant group 0
+# write access so arbitrary OpenShift UIDs can initialize the cubin cache.
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    CUBINS_DIR="$SITE_PACKAGES/flashinfer_cubin/cubins" && \
+    if [ -d "$CUBINS_DIR" ]; then \
+        find "$CUBINS_DIR" -type d -exec chmod g+rwx {} + ; \
+    fi
 
 {% if device != "cuda" %}
 # Copy UCX and NIXL from wheel_builder for CPU/XPU devices
@@ -120,7 +157,15 @@ ADD --checksum=sha256:f60e802b6f41350393e34b24793db888a8be514054769bd17e7a6e9c0c
 # Install xpu-smi in the runtime stage so dev/local-dev inherit it, without
 # explicitly changing the Intel compute runtime stack.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends /tmp/xpu-smi.deb && \
+    if command -v xpu-smi >/dev/null 2>&1; then \
+        echo "xpu-smi already present in base image, skipping install"; \
+    else \
+        if apt-cache show intel-gsc >/dev/null 2>&1; then \
+            apt-get install -y --no-install-recommends /tmp/xpu-smi.deb; \
+        else \
+            echo "WARNING: intel-gsc is not available from configured apt sources; skipping xpu-smi install"; \
+        fi; \
+    fi && \
     rm -f /tmp/xpu-smi.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
@@ -130,6 +175,19 @@ COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
+{% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
+
+# The vLLM 0.27.1 CUDA and CPU release images resolve the unbounded
+# `transformers>=5.5.3` requirement to 5.15.0. That release changed Gemma 4 to
+# heterogeneous per-layer configs, but vLLM's corresponding support missed
+# 0.27.1 and the engine crashes during ModelConfig initialization. Install the
+# compatible version before layering vLLM-Omni so its dependency solve sees the
+# final Transformers invariant instead of resolving against 5.15.0 first.
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --no-deps \
+        "transformers==${TRANSFORMERS_VERSION}"
+
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
 # https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py
@@ -167,6 +225,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -n "$KVBM_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$KVBM_WHEEL"; fi; \
@@ -206,16 +265,33 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 # Reinstalling triton-xpu ensures the triton namespace is properly configured
 RUN uv pip uninstall triton && \
     uv pip install --force-reinstall --no-deps triton-xpu
+
+# Resolve the same include directories Triton's XPU driver will use for its
+# first-request JIT, and fail the image build if the SYCL development headers
+# are not discoverable there.
+RUN /opt/venv/bin/python <<'PY'
+from pathlib import Path
+
+from triton.backends.intel.driver import COMPILATION_HELPER
+
+roots = COMPILATION_HELPER.include_dir
+if not any((Path(root) / "sycl/sycl.hpp").is_file() for root in roots):
+    raise RuntimeError(f"SYCL headers not found in Triton include paths: {roots}")
+PY
 {% endif %}
 
 {% if context.vllm.enable_modelexpress == "true" %}
 # Install only the ModelExpress client package. --no-deps preserves the upstream
-# vLLM runtime dependency stack.
+# vLLM runtime dependency stack. google-crc32c is imported eagerly by the MX
+# vLLM plugin (>=0.5.0) and is not in the XPU base image, so install it
+# alongside; the plugin-load guard later in this stage fails the build on any
+# remaining --no-deps gap.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     uv pip install {{ pip_target }} --no-deps \
-        "modelexpress==${MODELEXPRESS_VERSION}"
+        "modelexpress==${MODELEXPRESS_VERSION}"; \
+    uv pip install {{ pip_target }} "google-crc32c>=1.5.0"
 {% endif %}
 
 {% endif %}
@@ -287,6 +363,20 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
+
+# Positive codec guard: the shipped ffmpeg MUST expose the VP9 encoder and MUST
+# NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
+# or a codec regression fails the build here rather than at runtime — closing the
+# gap where an image with no working encoder passed every PR gate.
+RUN set -eu; \
+    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
+    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
+      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
+    if "$ff" -hide_banner -encoders 2>/dev/null \
+         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
+        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
+        exit 1; \
+    fi
 {% endif %}
 
 # Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
@@ -294,16 +384,112 @@ ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 # with a source install that leaves no binary on disk. On cuda, IMAGEIO_FFMPEG_EXE
 # (set above) points imageio at the LGPL CLI copied from wheel_builder. The
 # --no-binary directive lives in the requirements file itself.
+{% if device == "cuda" %}
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} \
+        --reinstall-package imageio-ffmpeg --reinstall-package PyNvVideoCodec \
+        --no-deps --requirement /tmp/requirements.vllm.txt
+{% else %}
+# PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
+# non-NVIDIA device. Drop it from the shared requirements rather than ship an
+# unusable NVIDIA codec wheel in, for example, the Intel XPU image. The pattern
+# is anchored to the line start so it cannot match inside another requirement,
+# and the import check fails the build if the package arrives by another route
+# -- a filter that silently stopped matching would otherwise look like success.
+#
+# Whole-RUN branches, rather than a conditional inside one RUN: a `{% raw %}{% if %}{% endraw %}` in the
+# middle of a `\`-continued command emits a blank line that ends the command
+# early, and a `#` comment there is joined onto the previous line, commenting
+# out the rest. Both break the build in ways the template does not show.
+RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    grep -v '^PyNvVideoCodec' /tmp/requirements.vllm.txt > /tmp/requirements.vllm.nonvidia.txt && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
-        --requirement /tmp/requirements.vllm.txt
+        --requirement /tmp/requirements.vllm.nonvidia.txt && \
+    ! /opt/venv/bin/python -c "import PyNvVideoCodec" 2>/dev/null
+{% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
 # tool scripts referencing files not present in Dynamo's build context.
 RUN rm -rf /workspace/vllm
+
+{% if device == "cuda" %}
+# Transitional: this exists only until the base image stops shipping these.
+# The permanent statement of what may ship is
+# tests/dependencies/test_no_software_video_codecs.py -- when this purge
+# becomes redundant, delete it and keep those assertions.
+# Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
+# base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
+# PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
+# imports none of the removed wheels, so they are unused decode-side dead weight.
+# (PyNvVideoCodec is KEPT for NVDEC hardware decode -- see the note below.) The in-tree
+# LGPL ffmpeg + imageio-ffmpeg installed above are intentionally KEPT for the
+# omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —
+# no H.264 is built. Direct rm makes the removal robust regardless of how the
+# base image's pip is configured; the guards fail the build if any of them survive.
+RUN set -eux; \
+    python3 -m pip uninstall --yes \
+        av decord decord2 opencv-python opencv-python-headless torchcodec \
+        || true; \
+    SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    rm -rf \
+        "${SITE_PACKAGES}"/av "${SITE_PACKAGES}"/av-*.dist-info "${SITE_PACKAGES}"/av.libs \
+        "${SITE_PACKAGES}"/cv2 "${SITE_PACKAGES}"/opencv_python*.dist-info "${SITE_PACKAGES}"/opencv_python*.libs \
+        "${SITE_PACKAGES}"/decord "${SITE_PACKAGES}"/decord-*.dist-info "${SITE_PACKAGES}"/decord.libs \
+        "${SITE_PACKAGES}"/decord2 "${SITE_PACKAGES}"/decord2-*.dist-info "${SITE_PACKAGES}"/decord2.libs \
+        "${SITE_PACKAGES}"/torchcodec "${SITE_PACKAGES}"/torchcodec-*.dist-info \
+        /root/.cache/pip; \
+    # Guard EVERY purged wheel: the uninstall above is `|| true`, so a package
+    # that survived (rename, new bundling) would otherwise pass silently. decord2
+    # imports as `decord`, so both are covered by the one check.
+    ! python3 -c "import cv2" 2>/dev/null; \
+    ! python3 -c "import av" 2>/dev/null; \
+    ! python3 -c "import decord" 2>/dev/null; \
+    ! python3 -c "import torchcodec" 2>/dev/null
+
+# PyNvVideoCodec is KEPT (removed from the purge above) but UPGRADED to >=2.2.0 by
+# the requirements install: the base image's 2.0.4 bundles a full FFmpeg (incl.
+# libavcodec) that the codec gate rejects, while 2.2.0 bundles only libavutil +
+# libavformat (container demux, no software codec). It provides the built-in
+# H.264/H.265 video-input path (NVDEC hardware decode via libnvcuvid;
+# common/multimodal/nvdec_decoder.py) and requires the driver "video" capability
+# at runtime or it cannot import; set it in the image and ensure the K8s
+# pod/runtimeClass does not drop it.
+ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
+
+{% if target not in ("dev", "local-dev") and context.vllm.enable_modelexpress == "true" %}
+# Regression guard for the --no-deps ModelExpress install above: resolve and
+# invoke the vllm.general_plugins entry points exactly as vLLM does at every
+# startup, so a missing transitive dependency fails the build here instead of
+# at pod startup. Runs after every package/library install in this stage
+# (including the XPU apt step and the cuda codec purge above) so the check is
+# order-independent and sees the final image state.
+RUN python3 -c "from importlib.metadata import entry_points; \
+eps = [ep for ep in entry_points(group='vllm.general_plugins') if ep.name == 'modelexpress']; \
+assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
+[ep.load()() for ep in eps]"
+{% endif %}
+
+# vLLM-Omni is installed with the current Transformers version in its protected
+# constraints file, so an incompatible Omni requirement fails during dependency
+# resolution. Check the completed image as well so a later package layer cannot
+# silently replace the vLLM 0.27.1-compatible Transformers release. A global
+# `uv pip check` is not appropriate here: the upstream runtime and Dynamo's
+# deliberate --no-deps layers contain unrelated package-metadata conflicts.
+RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" <<'PY'
+import importlib.metadata as md
+import sys
+
+actual = md.version("transformers")
+expected = sys.argv[1]
+if actual != expected:
+    raise RuntimeError(f"expected transformers {expected}, found {actual}")
+PY
 
 USER dynamo
 

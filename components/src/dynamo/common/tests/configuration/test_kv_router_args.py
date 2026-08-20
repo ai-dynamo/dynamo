@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from dynamo.common.configuration.groups import kv_router_args
 from dynamo.common.configuration.groups.aic_perf_args import (
     AicPerfArgGroup,
     AicPerfConfigBase,
@@ -319,6 +320,32 @@ def test_policy_config_cli_overrides_environment(
     assert config.kv_router_kwargs()["router_policy_config"] == explicit_policy_path
 
 
+def test_stage_policy_cli_and_environment_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DYN_ROUTER_PREFILL_POLICY", "env-prefill")
+    monkeypatch.setenv("DYN_ROUTER_DECODE_POLICY", "env-decode")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--router-prefill-policy", "cli-prefill"])
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["router_prefill_policy"] == "cli-prefill"
+    assert kwargs["router_decode_policy"] == "env-decode"
+
+
+def test_stage_policy_help_describes_router_process_pool_roles() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    help_by_dest = {action.dest: action.help for action in parser._actions}
+
+    assert "Process-local" in help_by_dest["router_prefill_policy"]
+    assert "disaggregated prefill workers" in help_by_dest["router_prefill_policy"]
+    assert "Process-local" in help_by_dest["router_decode_policy"]
+    assert "this router process" in help_by_dest["router_decode_policy"]
+
+
 def test_load_aware_clears_predicted_ttl() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
@@ -362,6 +389,158 @@ def test_load_aware_frontend_implies_kv_router_mode() -> None:
     assert config.overlap_score_credit == 0.0
     assert config.use_kv_events is False
     assert config.router_assume_kv_reuse is False
+
+
+def test_frontend_reasoning_field_name_cli_and_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DYN_REASONING_FIELD_NAME", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    assert config.reasoning_field_name == "reasoning_content"
+
+    monkeypatch.setenv("DYN_REASONING_FIELD_NAME", "reasoning")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    assert config.reasoning_field_name == "reasoning"
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--reasoning-field-name", "reasoning_content"])
+    )
+    assert config.reasoning_field_name == "reasoning_content"
+
+
+def test_frontend_reasoning_field_name_rejects_invalid_choice() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--reasoning-field-name", "invalid"])
+
+
+def test_conditional_disagg_config_cli_lowers_to_router_kwargs() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "kv",
+                "--router-conditional-disagg",
+                "--router-conditional-disagg-config",
+                '{"policy":"isl_or_load","eff_isl_threshold":4096,'
+                '"eff_isl_ratio_threshold":0.8,"prefill_busy_threshold":16,'
+                '"decode_busy_threshold":0.9}',
+            ]
+        )
+    )
+    config.validate()
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["conditional_disagg_enabled"] is True
+    assert kwargs["conditional_disagg_policy"] == "isl_or_load"
+    assert kwargs["conditional_disagg_eff_isl_threshold"] == 4096
+    assert kwargs["conditional_disagg_eff_isl_ratio_threshold"] == 0.8
+    assert kwargs["conditional_disagg_prefill_busy_threshold"] == 16
+    assert kwargs["conditional_disagg_decode_busy_threshold"] == 0.9
+
+
+def test_conditional_disagg_requires_router_kv_events() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "kv",
+                "--router-conditional-disagg",
+                "--no-router-kv-events",
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="requires --router-kv-events"):
+        config.validate()
+
+
+def test_conditional_disagg_prefill_busy_threshold_defaults_to_queue_threshold(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "kv",
+                "--router-conditional-disagg",
+                "--router-conditional-disagg-config",
+                '{"policy":"prefill_load"}',
+                "--router-queue-threshold",
+                "16",
+            ]
+        )
+    )
+    config.validate()
+
+    assert config.conditional_disagg_prefill_busy_threshold == 16.0
+    assert (
+        "conditional_disagg prefill_busy_threshold defaults to "
+        "--router-queue-threshold=16.0"
+    ) in caplog.text
+
+
+def test_conditional_disagg_prefill_load_errors_without_busy_threshold() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "kv",
+                "--router-conditional-disagg",
+                "--router-conditional-disagg-config",
+                '{"policy":"prefill_load"}',
+            ]
+        )
+    )
+    with pytest.raises(ValueError, match="needs prefill_busy_threshold"):
+        config.validate()
+
+
+@pytest.mark.parametrize(
+    ("config_json", "message"),
+    [
+        ("not-json", "must be a JSON object"),
+        ("[]", "must be a JSON object"),
+        ('{"unknown":1}', "unknown field"),
+        ('{"policy":1}', "policy must be a string"),
+        ('{"eff_isl_threshold":"4096"}', "eff_isl_threshold must be an integer"),
+        (
+            '{"eff_isl_ratio_threshold":"0.8"}',
+            "eff_isl_ratio_threshold must be a number",
+        ),
+        (
+            '{"eff_isl_ratio_threshold":null}',
+            "eff_isl_ratio_threshold must be a number",
+        ),
+        ('{"prefill_busy_threshold":true}', "prefill_busy_threshold must be a number"),
+    ],
+)
+def test_conditional_disagg_config_rejects_invalid_json(
+    config_json: str, message: str
+) -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match=message):
+        kv_router_args._conditional_disagg_config_arg(config_json)
 
 
 def test_frontend_rejection_thresholds_default_to_none(

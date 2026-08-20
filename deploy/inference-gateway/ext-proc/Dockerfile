@@ -60,12 +60,11 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 COPY --from=dynamo .cargo/ .cargo/
 COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 
-# Copy all workspace member crates. The Cargo workspace declares every crate
-# under `members = [...]` and refuses to load if any are missing on disk, so
-# we must copy `lib/` in full. `cargo build -p dynamo-ext-proc` below still
-# only compiles the crates dynamo-ext-proc transitively depends on; the rest
-# are parsed but not built.
+# Copy all local workspace member crates. The build below only compiles the
+# crates dynamo-ext-proc transitively depends on; AISimulate resolves from
+# crates.io.
 COPY --from=dynamo lib/ lib/
+COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom-policy-example/
 
 # Copy the ext-proc crate itself
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/

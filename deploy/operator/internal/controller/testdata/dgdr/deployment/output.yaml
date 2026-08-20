@@ -12,7 +12,12 @@ spec:
       podTemplate:
         spec:
           containers:
-            - image: $ignore
+            - args:
+                - -m
+                - dynamo.frontend
+              command:
+                - python3
+              image: $ignore
               name: main
       replicas: 1
       runtimeVersionOverride: 1.4.0
@@ -28,10 +33,25 @@ spec:
                 - Qwen/Qwen3-0.6B
                 - --speedup-ratio
                 - "1.0"
-                - --planner-profile-data
-                - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
                 - --disaggregation-mode
                 - decode
+                - --aic-perf-model
+                - --aic-backend
+                - vllm
+                - --aic-backend-version
+                - 0.14.0
+                - --aic-system
+                - h100_sxm
+                - --aic-tp-size
+                - "1"
+                - --aic-moe-tp-size
+                - "1"
+                - --aic-moe-ep-size
+                - "1"
+                - --aic-attention-dp-size
+                - "1"
+                - --engine-type
+                - vllm
               command:
                 - python3
                 - -m
@@ -56,10 +76,25 @@ spec:
                 - Qwen/Qwen3-0.6B
                 - --speedup-ratio
                 - "1.0"
-                - --planner-profile-data
-                - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
                 - --disaggregation-mode
                 - prefill
+                - --aic-perf-model
+                - --aic-backend
+                - vllm
+                - --aic-backend-version
+                - 0.14.0
+                - --aic-system
+                - h100_sxm
+                - --aic-tp-size
+                - "1"
+                - --aic-moe-tp-size
+                - "1"
+                - --aic-moe-ep-size
+                - "1"
+                - --aic-attention-dp-size
+                - "1"
+                - --engine-type
+                - vllm
               command:
                 - python3
                 - -m
@@ -88,7 +123,7 @@ spec:
       annotations:
         nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
       labels:
-        nvidia.com/dynamo-worker-hash: "$pattern:[0-9a-f]{8}"
+        nvidia.com/dynamo-worker-hash: "$var:worker-hash"
     spec:
       containers:
         - args:
@@ -98,10 +133,25 @@ spec:
             - Qwen/Qwen3-0.6B
             - --speedup-ratio
             - "1.0"
-            - --planner-profile-data
-            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - decode
+            - --aic-perf-model
+            - --aic-backend
+            - vllm
+            - --aic-backend-version
+            - 0.14.0
+            - --aic-system
+            - h100_sxm
+            - --aic-tp-size
+            - "1"
+            - --aic-moe-tp-size
+            - "1"
+            - --aic-moe-ep-size
+            - "1"
+            - --aic-attention-dp-size
+            - "1"
+            - --engine-type
+            - vllm
           command:
             - python3
             - -m
@@ -145,7 +195,7 @@ spec:
         nvidia.com/dynamo-graph-deployment-name: aic-deployment-dgd
         nvidia.com/dynamo-namespace: $glob:clusterenv-*-aic-deployment-dgd
         nvidia.com/dynamo-sub-component-type: decode
-        nvidia.com/dynamo-worker-hash: "$pattern:[0-9a-f]{8}"
+        nvidia.com/dynamo-worker-hash: "$var:worker-hash"
         nvidia.com/metrics-enabled: "true"
         nvidia.com/selector: $glob:aic-deployment-dgd-decode-*
     spec:
@@ -157,10 +207,25 @@ spec:
             - Qwen/Qwen3-0.6B
             - --speedup-ratio
             - "1.0"
-            - --planner-profile-data
-            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - decode
+            - --aic-perf-model
+            - --aic-backend
+            - vllm
+            - --aic-backend-version
+            - 0.14.0
+            - --aic-system
+            - h100_sxm
+            - --aic-tp-size
+            - "1"
+            - --aic-moe-tp-size
+            - "1"
+            - --aic-moe-ep-size
+            - "1"
+            - --aic-attention-dp-size
+            - "1"
+            - --engine-type
+            - vllm
           command:
             - python3
             - -m
@@ -177,7 +242,7 @@ spec:
             - name: DYN_NAMESPACE
               value: $glob:clusterenv-*-aic-deployment-dgd
             - name: DYN_NAMESPACE_WORKER_SUFFIX
-              value: "$pattern:[0-9a-f]{8}"
+              value: "$var:worker-hash"
             - name: DYN_PARENT_DGD_K8S_NAME
               value: aic-deployment-dgd
             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -415,7 +480,7 @@ spec:
         nvidia.com/dynamo-graph-deployment-name: aic-deployment-dgd
         nvidia.com/dynamo-namespace: $glob:clusterenv-*-aic-deployment-dgd
         nvidia.com/dynamo-sub-component-type: prefill
-        nvidia.com/dynamo-worker-hash: "$pattern:[0-9a-f]{8}"
+        nvidia.com/dynamo-worker-hash: "$var:worker-hash"
         nvidia.com/metrics-enabled: "true"
         nvidia.com/selector: $glob:aic-deployment-dgd-prefill-*
     spec:
@@ -427,10 +492,25 @@ spec:
             - Qwen/Qwen3-0.6B
             - --speedup-ratio
             - "1.0"
-            - --planner-profile-data
-            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - prefill
+            - --aic-perf-model
+            - --aic-backend
+            - vllm
+            - --aic-backend-version
+            - 0.14.0
+            - --aic-system
+            - h100_sxm
+            - --aic-tp-size
+            - "1"
+            - --aic-moe-tp-size
+            - "1"
+            - --aic-moe-ep-size
+            - "1"
+            - --aic-attention-dp-size
+            - "1"
+            - --engine-type
+            - vllm
           command:
             - python3
             - -m
@@ -447,7 +527,7 @@ spec:
             - name: DYN_NAMESPACE
               value: $glob:clusterenv-*-aic-deployment-dgd
             - name: DYN_NAMESPACE_WORKER_SUFFIX
-              value: "$pattern:[0-9a-f]{8}"
+              value: "$var:worker-hash"
             - name: DYN_PARENT_DGD_K8S_NAME
               value: aic-deployment-dgd
             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -555,7 +635,12 @@ spec:
         nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
     spec:
       containers:
-        - image: $ignore
+        - args:
+            - -m
+            - dynamo.frontend
+          command:
+            - python3
+          image: $ignore
           name: main
   replicas: 1
   runtimeVersionOverride: 1.4.0
@@ -575,7 +660,7 @@ spec:
       annotations:
         nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
       labels:
-        nvidia.com/dynamo-worker-hash: "$pattern:[0-9a-f]{8}"
+        nvidia.com/dynamo-worker-hash: "$var:worker-hash"
     spec:
       containers:
         - args:
@@ -585,10 +670,25 @@ spec:
             - Qwen/Qwen3-0.6B
             - --speedup-ratio
             - "1.0"
-            - --planner-profile-data
-            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - prefill
+            - --aic-perf-model
+            - --aic-backend
+            - vllm
+            - --aic-backend-version
+            - 0.14.0
+            - --aic-system
+            - h100_sxm
+            - --aic-tp-size
+            - "1"
+            - --aic-moe-tp-size
+            - "1"
+            - --aic-moe-ep-size
+            - "1"
+            - --aic-attention-dp-size
+            - "1"
+            - --engine-type
+            - vllm
           command:
             - python3
             - -m

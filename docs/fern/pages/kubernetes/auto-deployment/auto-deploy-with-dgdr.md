@@ -403,7 +403,37 @@ cannot add a new worker, EPP, or other topology component.
 > `extraPodSpec.mainContainer.args` values append to the generated arguments. In `v1beta1`, map lists
 > such as components, containers, and environment variables merge by `name`, while atomic lists such
 > as graph-level `spec.env` and container `args` replace the generated list. Use `v1beta1` for new
-> overrides and include the complete desired argument list when overriding `args`.
+> overrides. Include the complete desired argument list for replacement, or use the append modifier
+> described below.
+
+For example, append KV routing flags to the generated frontend arguments:
+
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1beta1
+      kind: DynamoGraphDeployment
+      spec:
+        components:
+        - name: Frontend
+          podTemplate:
+            spec:
+              containers:
+              - name: main
+                $patch:
+                  args: append
+                args:
+                - --router-mode
+                - kv
+```
+
+To add flags to a container with explicit generated arguments, set `$patch.args` to `append` on that
+named container. The override helper combines the argument lists before returning the final DGD and
+removes the `$patch` directive. The append modifier supports only `args: append`, requires a
+non-empty argument list, and fails when the generated DGD does not contain the target container or
+the target does not define `args`. Without `$patch`, specifying `args` retains the standard
+replacement behavior and requires the complete desired argument list.
 
 For the complete merge, metadata, and validation rules, see
 [DGDR Reference — Generated DGD overrides](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides).
@@ -417,4 +447,4 @@ For the complete merge, metadata, and validation rules, see
 | Author the deployment by hand instead | [DGD Guide](../model-deployment/deploy-with-dgd.md) |
 | Profiling algorithms and modes | [Profiler Guide](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) |
 | Runtime autoscaling details | [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md) |
-| Full CRD reference | [API Reference](../../reference/kubernetes-api/additional-resources/api-reference-k8s.md) |
+| Full CRD reference | [API Reference](../../reference/kubernetes-api/full-api-reference.mdx) |
