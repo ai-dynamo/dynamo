@@ -32,7 +32,7 @@
 #     -t dynamo/dynamo-epp:dev .
 
 ARG RUST_IMAGE=rust:1.96.1
-ARG BUILDER_IMAGE=golang:1.26.3
+ARG BUILDER_IMAGE=golang:1.26.6
 ARG BASE_IMAGE=ubuntu:24.04
 
 # =============================================================================
@@ -110,13 +110,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
 # Stage 2: Build Go EPP binary
 # =============================================================================
 FROM ${BUILDER_IMAGE} AS go-builder
-
-# go.mod requires go >= 1.26.6, ahead of this image's shipped 1.26.3. The
-# official image sets GOTOOLCHAIN=local, so override it to auto so `go`
-# fetches the required toolchain over the module proxy at build time
-# instead of depending on the exact builder patch version being pre-cached
-# by the registry mirror. Same reasoning as deploy/operator/Dockerfile.
-ENV GOTOOLCHAIN=auto
 
 # Docker buildx provides these automatically for multi-platform builds
 ARG TARGETOS=linux
