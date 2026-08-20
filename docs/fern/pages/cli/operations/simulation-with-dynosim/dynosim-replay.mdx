@@ -25,8 +25,9 @@ Run the commands from the repository root. Use the project virtual environment a
 bindings if they are not already available:
 
 ```bash
-.venv/bin/maturin develop --release -m lib/bindings/python/Cargo.toml
+.venv/bin/maturin develop --release -m lib/bindings/python/Cargo.toml --features aic-forward-pass
 uv pip install -e .
+DYNOSIM_ENGINE_ARGS='{"block_size":512,"num_gpu_blocks":100000,"aic_backend":"vllm","aic_system":"h200_sxm","aic_backend_version":"0.19.0","aic_tp_size":1,"aic_model_path":"Qwen/Qwen3-32B"}'
 ```
 
 The release build is recommended because the simulation is CPU-bound.
@@ -43,7 +44,7 @@ Start with a small aggregated simulation:
   --replay-mode offline \
   --replay-concurrency 16 \
   --num-workers 2 \
-  --extra-engine-args '{"block_size":64}' \
+  --extra-engine-args "$DYNOSIM_ENGINE_ARGS" \
   --report-json /tmp/dynosim-synthetic.json
 ```
 
@@ -66,7 +67,7 @@ Run a second synthetic workload with shared prefixes and three turns per session
   --replay-mode offline \
   --replay-concurrency 32 \
   --num-workers 2 \
-  --extra-engine-args '{"block_size":64}' \
+  --extra-engine-args "$DYNOSIM_ENGINE_ARGS" \
   --report-json /tmp/dynosim-prefix.json
 ```
 
@@ -90,7 +91,7 @@ Replay it with the trace block size used by the dataset:
   --trace-block-size 512 \
   --replay-mode offline \
   --num-workers 4 \
-  --extra-engine-args '{"block_size":64}' \
+  --extra-engine-args "$DYNOSIM_ENGINE_ARGS" \
   --report-json /tmp/dynosim-trace.json
 ```
 
@@ -107,7 +108,7 @@ Run the same trace through the KV router. Change only the routing settings:
   --replay-mode offline \
   --router-mode kv_router \
   --num-workers 4 \
-  --extra-engine-args '{"block_size":64}' \
+  --extra-engine-args "$DYNOSIM_ENGINE_ARGS" \
   --router-config '{"router_queue_policy":"fcfs"}' \
   --report-json /tmp/dynosim-kv-router.json
 ```
@@ -127,8 +128,8 @@ Use separate prefill and decode worker pools and engine arguments:
   --router-mode kv_router \
   --num-prefill-workers 2 \
   --num-decode-workers 2 \
-  --prefill-engine-args '{"block_size":64,"worker_type":"prefill"}' \
-  --decode-engine-args '{"block_size":64,"worker_type":"decode"}' \
+  --prefill-engine-args '{"block_size":512,"num_gpu_blocks":100000,"aic_backend":"vllm","aic_system":"h200_sxm","aic_backend_version":"0.19.0","aic_tp_size":1,"aic_model_path":"Qwen/Qwen3-32B","worker_type":"prefill"}' \
+  --decode-engine-args '{"block_size":512,"num_gpu_blocks":100000,"aic_backend":"vllm","aic_system":"h200_sxm","aic_backend_version":"0.19.0","aic_tp_size":1,"aic_model_path":"Qwen/Qwen3-32B","worker_type":"decode"}' \
   --report-json /tmp/dynosim-disagg.json
 ```
 

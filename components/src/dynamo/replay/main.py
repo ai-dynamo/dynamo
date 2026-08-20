@@ -663,14 +663,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         replay_mode=base_config.replay_mode,
         router_mode=args.router_mode,
         router_config=router_config,
-        aic_perf_config=aic_perf_config,
         planner_config=args.planner_config,
-        model_name=args.model_name,
     ):
         warn_engine_only_replay(
             "python -m dynamo.replay",
-            "python -m aisimulate.replay with the same base arguments",
-            log=True,
+            "python -m aisimulate.replay",
         )
 
     if args.planner_config is not None:

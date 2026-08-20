@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Optional-dependency preflight must run before replay CLI imports.
+# ruff: noqa: E402
 
 """Deprecation contracts for Dynamo's engine-only replay compatibility path."""
 
@@ -8,10 +10,15 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip(
+    "aisimulate.replay",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
+
+from dynamo.replay import ReplayReport
 from dynamo.replay import api as replay_api
 from dynamo.replay import deprecation
 from dynamo.replay import main as replay_main
-from dynamo.replay import ReplayReport
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -76,10 +83,8 @@ def test_engine_only_cli_warns_once_at_the_caller(monkeypatch) -> None:
     warning = captured[0]
     assert warning.category is FutureWarning
     assert "`python -m dynamo.replay`" in str(warning.message)
-    assert "`python -m aisimulate.replay with the same base arguments`" in str(
-        warning.message
-    )
-    assert "Dynamo 1.6.0" in str(warning.message)
+    assert "`python -m aisimulate.replay`" in str(warning.message)
+    assert "planned for removal in Dynamo 1.6.0" in str(warning.message)
     assert "Dynamo 1.5.0 retains this compatibility path" in str(warning.message)
     assert warning.filename == __file__
 
@@ -128,15 +133,34 @@ def test_engine_only_trace_api_warns_with_sdk_replacement(monkeypatch) -> None:
     assert warning.filename == __file__
 
 
+def test_model_name_without_router_still_warns(monkeypatch) -> None:
+    monkeypatch.setattr(
+        replay_api,
+        "_run_mocker_synthetic_trace_replay",
+        lambda *args, **kwargs: _native_report(),
+    )
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        replay_api.run_synthetic_trace_replay(
+            8,
+            4,
+            1,
+            replay_concurrency=1,
+            model_name="ignored-without-router-config",
+        )
+
+    assert len(captured) == 1
+    assert "engine-only offline replay" in str(captured[0].message)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
         {"replay_mode": "online"},
         {"router_mode": "kv_router"},
         {"router_config": object()},
-        {"aic_perf_config": object()},
         {"planner_config": object()},
-        {"model_name": "test-model"},
     ],
 )
 def test_dynamo_owned_paths_do_not_warn(overrides) -> None:
@@ -144,9 +168,7 @@ def test_dynamo_owned_paths_do_not_warn(overrides) -> None:
         "replay_mode": "offline",
         "router_mode": "round_robin",
         "router_config": None,
-        "aic_perf_config": None,
         "planner_config": None,
-        "model_name": None,
         **overrides,
     }
 
