@@ -27,6 +27,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
@@ -34,7 +35,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1507,7 +1507,7 @@ func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
 			},
 		},
 	})
-	rollout.setCurrentWorkerHashes(dgd, workerGenerationHashes{v1: "oldhash"})
+	rollout.setCurrentWorkerHashes(dgd, workerGenerationHashes{v2: "oldhash"})
 
 	t.Log("Compute the desired and checkpoint worker hashes")
 	desired, err := desiredWorkerHashes(dgd)

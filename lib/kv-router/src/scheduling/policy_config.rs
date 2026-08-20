@@ -603,7 +603,7 @@ mod tests {
         let config = RouterPolicyConfig::from_yaml(
             r#"
 worker_selection:
-  default: example
+  aggregated: example
   instances:
     - name: example
       type: example-policy
@@ -614,7 +614,7 @@ worker_selection:
         .unwrap();
 
         let selection = config.worker_selection().unwrap();
-        assert_eq!(selection.default_instance(), Some("example"));
+        assert_eq!(selection.aggregated_instance(), Some("example"));
         let instance = selection.instance("example").unwrap();
         assert_eq!(instance.policy_type(), "example-policy");
         assert!(matches!(
@@ -631,6 +631,32 @@ worker_selection:
     }
 
     #[test]
+    fn worker_selection_accepts_every_worker_type() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  prefill: prefill-policy
+  decode: default
+  encode: encode-policy
+  instances:
+    - name: prefill-policy
+      type: cache-aware
+      parameters: {}
+    - name: encode-policy
+      type: media-aware
+      parameters: {}
+"#,
+        )
+        .unwrap();
+
+        let selection = config.worker_selection().unwrap();
+        assert_eq!(selection.aggregated_instance(), None);
+        assert_eq!(selection.prefill_instance(), Some("prefill-policy"));
+        assert_eq!(selection.decode_instance(), Some("default"));
+        assert_eq!(selection.encode_instance(), Some("encode-policy"));
+    }
+
+    #[test]
     fn rejects_invalid_worker_selection_config() {
         for yaml in [
             r#"
@@ -638,7 +664,35 @@ worker_selection: {}
 "#,
             r#"
 worker_selection:
-  default: missing
+  aggregated: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  prefill: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  decode: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  encode: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  default: present
   instances:
     - name: present
       type: alpha

@@ -16,7 +16,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::State,
-    http::{HeaderMap, Request, StatusCode},
+    http::{HeaderMap, Method, Request, StatusCode, Uri},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -68,13 +68,16 @@ use super::openai::{get_body_limit, get_or_create_request_id};
 // Router
 // ---------------------------------------------------------------------------
 
+/// Default route for the Anthropic Messages API when no override is configured.
+pub(crate) const DEFAULT_MESSAGES_PATH: &str = "/v1/messages";
+
 /// Creates the router for the `/v1/messages` and `/v1/messages/count_tokens` endpoints.
 pub fn anthropic_messages_router(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/v1/messages".to_string());
+    let path = path.unwrap_or_else(|| DEFAULT_MESSAGES_PATH.to_string());
     let count_tokens_path = format!("{}/count_tokens", &path);
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let count_doc = RouteDoc::new(axum::http::Method::POST, &count_tokens_path);
@@ -1130,6 +1133,16 @@ fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Respo
         }),
     )
         .into_response()
+}
+
+/// Returns an Anthropic-compatible JSON `404` error response for an unmatched route.
+/// Anthropic clients expect the nested `{"type": "error", "error": {...}}`
+pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> Response {
+    anthropic_error(
+        StatusCode::NOT_FOUND,
+        "not_found_error",
+        &format!("Route not found: {} {}", method, uri.path()),
+    )
 }
 
 #[cfg(test)]

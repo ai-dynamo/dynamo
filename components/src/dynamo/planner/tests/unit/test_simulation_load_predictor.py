@@ -19,6 +19,7 @@ from dynamo.planner.simulation.load_predictor import (
     Window,
     _entry_label,
     _internal_preset,
+    complete_predictor_preset,
     evaluate_preset,
     predictor_fields,
     sweep_load_predictor,
@@ -72,6 +73,10 @@ def test_predictor_search_values_decode_with_family_defaults() -> None:
         "family": "prophet",
         "log1p": True,
         "prophet_window_size": 20,
+        "q_level": 1.0,
+        "q_trend": 0.1,
+        "r": 10.0,
+        "min_points": 5,
     }
     internal = _internal_preset(
         {
@@ -87,6 +92,21 @@ def test_predictor_search_values_decode_with_family_defaults() -> None:
 
     with pytest.raises(ValueError, match="load_predictor must be one of"):
         _internal_preset({"load_predictor": "bogus"})
+
+
+def test_every_named_predictor_preset_covers_every_knob() -> None:
+    expected = {
+        "load_predictor",
+        "load_predictor_log1p",
+        "prophet_window_size",
+        "kalman_q_level",
+        "kalman_q_trend",
+        "kalman_r",
+        "kalman_min_points",
+    }
+
+    for name in load_predictor.LOAD_PREDICTOR_PRESETS:
+        assert set(complete_predictor_preset(name)) == expected
 
 
 def test_predictor_fields_emit_only_selected_family() -> None:

@@ -73,7 +73,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
 	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
 	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
-	// It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+	// It does not change the image. Setting or changing an override that resolves to version 1.5.0 or
+	// later may trigger a rollout. Keep it consistent with the image's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`

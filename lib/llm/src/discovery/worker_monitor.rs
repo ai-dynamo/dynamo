@@ -755,17 +755,18 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let endpoint = &self.client.endpoint;
         let cancellation_token = self.lifecycle.cancellation_token.child_token();
 
-        let decode_configs_rx = match runtime_config_watch(endpoint).await {
-            Ok(rx) => rx,
-            Err(error) => {
-                tracing::error!(
-                    endpoint = %endpoint.id(),
-                    %error,
-                    "KvWorkerMonitor: failed to watch endpoint runtime configs"
-                );
-                return Err(error);
-            }
-        };
+        let decode_configs_rx =
+            match runtime_config_watch(endpoint, cancellation_token.clone()).await {
+                Ok(rx) => rx,
+                Err(error) => {
+                    tracing::error!(
+                        endpoint = %endpoint.id(),
+                        %error,
+                        "KvWorkerMonitor: failed to watch endpoint runtime configs"
+                    );
+                    return Err(error);
+                }
+            };
 
         // Subscribe to KV metrics events using EventSubscriber (Msgpack payloads)
         // This is optional - if NATS isn't available, we skip KV metrics but still do TTFT/ITL cleanup
@@ -861,6 +862,33 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
                         tracing::debug!("Worker monitoring cancelled");
+                        // `select!` gives no ordering guarantee between this branch and
+                        // `config_change_future` below: a worker removal that discovery
+                        // already reported may still be sitting unprocessed in
+                        // `decode_configs_rx`/`prefill_configs_rx` if this branch wins
+                        // the race. Reconcile once more against the latest borrowed
+                        // snapshot (not `.changed()`, which only fires once) so that
+                        // worker's `cleanup_worker_metrics` still runs before this task
+                        // exits. Skipping it would leak that worker's gauges
+                        // indefinitely, since they are process-global and nothing else
+                        // ever cleans them up. This only clears workers discovery
+                        // already dropped, so it does not race a replacement generation
+                        // that reuses the same worker id under the next WorkerSet.
+                        let runtime_configs = merge_endpoint_runtime_configs(
+                            &decode_configs_rx,
+                            prefill_configs_rx.as_ref(),
+                        );
+                        for worker_id in known_worker_dp_ranks.keys() {
+                            if runtime_configs.contains_key(worker_id) {
+                                continue;
+                            }
+                            let dp_ranks: Vec<u32> = known_worker_dp_ranks[worker_id]
+                                .iter()
+                                .copied()
+                                .collect();
+                            cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_DECODE);
+                            cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_PREFILL);
+                        }
                         break;
                     }
 
@@ -1204,7 +1232,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             };
                             let config_result = tokio::select! {
                                 _ = cancellation_token.cancelled() => break,
-                                result = runtime_config_watch(&prefill_endpoint) => result,
+                                result = runtime_config_watch(&prefill_endpoint, cancellation_token.clone()) => result,
                             };
                             prefill_configs_rx = match config_result {
                                 Ok(rx) => Some(rx),

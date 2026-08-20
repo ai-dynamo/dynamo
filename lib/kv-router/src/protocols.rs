@@ -1326,7 +1326,10 @@ pub enum KvCacheEventError {
     #[error("Invalid block sequence")]
     InvalidBlockSequence,
 
-    /// A bounded, pre-commit index omission; this does not prove the backing table is full.
+    /// A bounded physical-index omission; this does not prove the backing table is full.
+    ///
+    /// An indexer may still commit exact source lineage and ownership so removal and later
+    /// re-admission remain correct.
     #[error("Indexer capacity exhausted")]
     CapacityExhausted,
 

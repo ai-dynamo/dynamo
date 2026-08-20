@@ -41,7 +41,7 @@ from codeowners_match import (  # noqa: E402
     parse_codeowners,
     resolve_owners,
 )
-from emit_codeowners import render_codeowners  # noqa: E402
+from emit_codeowners import _render_codeowners  # noqa: E402
 
 
 @dataclass
@@ -110,7 +110,7 @@ def ownership_contract_violations(
     model: ResolvedModel, tree: list[str]
 ) -> list[OwnershipContractViolation]:
     """Find declared owners removed by final last-match routing."""
-    lines, _ = render_codeowners(model, group=True, external=[])
+    lines, _ = _render_codeowners(model, group=True, external=[])
     rules = parse_codeowners("\n".join(lines))
     label_to_team = model.label_to_team()
     violations: list[OwnershipContractViolation] = []
@@ -157,7 +157,7 @@ def shared_additivity_violations(
     row exists to replace, so counting it would demand that each shared entry
     restate the catch-all team -- 22 paths under ``deploy/power-agent/`` alone.
     """
-    lines, _ = render_codeowners(model, group=True, external=[])
+    lines, _ = _render_codeowners(model, group=True, external=[])
     # ``model.catch_all`` is a team, not a pattern; the row it emits is "*".
     rules = [rule for rule in parse_codeowners("\n".join(lines)) if rule[0] != "*"]
     label_to_team = model.label_to_team()

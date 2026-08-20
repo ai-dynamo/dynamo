@@ -8,7 +8,7 @@ policy-only emission:
   - `minimal_cover(file_team, catch_all)` -- the recursive min-cost cover that
     turns a per-file owner map into the smallest set of last-match base rules
     for legacy callers (the emitter no longer uses it).
-  - `compute_resolution(spec)` + `render_codeowners(...)` -- pure policy
+  - `compute_resolution(spec)` + `_render_codeowners(...)` -- pure policy
     resolution, explicit precedence, and byte-identical output across trees.
 
 If either drifts, the tests catch it before the generated CODEOWNERS goes wrong.
@@ -50,9 +50,9 @@ from codeowners_match import (  # noqa: E402
 from emit_codeowners import (  # noqa: E402
     CONTRIBUTOR_LEVELS,
     _handle,
+    _render_codeowners,
     contributor_level,
     decorate_owners,
-    render_codeowners,
     render_contributors_md,
     team_externals_map,
 )
@@ -642,7 +642,7 @@ class TestEmissionIsTreeIndependent:
 
     def _render(self, spec: dict, tree: list[str] | None = None) -> str:
         model = compute_resolution(spec, tree)
-        lines, _ = render_codeowners(model, group=True, external=[])
+        lines, _ = _render_codeowners(model, group=True, external=[])
         return "\n".join(lines) + "\n"
 
     def test_add_file_under_owned_prefix_does_not_change_output(self) -> None:
@@ -730,7 +730,7 @@ class TestEmissionIsTreeIndependent:
         # the emitter's signature must not name a ``tree`` parameter.
         import inspect
 
-        sig = inspect.signature(render_codeowners)
+        sig = inspect.signature(_render_codeowners)
         assert "tree" not in sig.parameters
         sig_base = inspect.signature(compute_resolution)
         # tree is still accepted (backward-compat) but must default to None
@@ -752,11 +752,11 @@ class TestEmissionIsTreeIndependent:
             )
 
         monkeypatch.setattr(codeowners_match, "load_tree", _boom)
-        # compute_resolution + render_codeowners together are the whole
+        # compute_resolution + _render_codeowners together are the whole
         # emit path.
         spec = self._spec()
         model = compute_resolution(spec)
-        lines, _ = render_codeowners(model, group=True, external=[])
+        lines, _ = _render_codeowners(model, group=True, external=[])
         # sanity: we actually rendered something
         assert any(ln.startswith("/lib/") for ln in lines)
 
@@ -877,7 +877,7 @@ class TestOwnershipContracts:
             {"glob": "lib/", "owners": ["docs"]},
         ]
         model = compute_resolution(spec)
-        lines, _ = render_codeowners(model, group=True, external=[])
+        lines, _ = _render_codeowners(model, group=True, external=[])
         rules = parse_codeowners("\n".join(lines))
 
         assert resolve_owners(rules, "lib/a.rs") == ["@runtime"]
@@ -1492,7 +1492,7 @@ class TestContributorActionMatrix:
 
     def _routing(self, areas: Path, path: str) -> list[str]:
         model = compute_resolution(yaml.safe_load(areas.read_text()))
-        lines, _ = render_codeowners(model, group=True, external=[])
+        lines, _ = _render_codeowners(model, group=True, external=[])
         return resolve_owners(parse_codeowners("\n".join(lines)), path)
 
     def test_1_add_file_in_covered_folder_passes(self, tmp_path) -> None:
@@ -1612,7 +1612,7 @@ def real_policy_rules() -> tuple[list[tuple[str, list[str]]], dict[str, str]]:
     repo = Path(__file__).resolve().parents[2]
     spec = yaml.safe_load((repo / ".github/codeowners/areas.yaml").read_text())
     model = compute_resolution(spec)
-    lines, _ = render_codeowners(model, group=True, external=[])
+    lines, _ = _render_codeowners(model, group=True, external=[])
     return parse_codeowners("\n".join(lines)), model.label_to_team()
 
 
@@ -1850,14 +1850,14 @@ class TestRenderCodeownersWithExternals:
     def test_base_line_gets_handle(self) -> None:
         model = self._model()
         external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
-        lines, _ = render_codeowners(model, group=True, external=external)
+        lines, _ = _render_codeowners(model, group=True, external=external)
         body = "\n".join(lines)
         assert "@runtime @jane" in body
 
     def test_shared_line_gets_handle(self) -> None:
         model = self._model()
         external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
-        lines, _ = render_codeowners(model, group=True, external=external)
+        lines, _ = _render_codeowners(model, group=True, external=external)
         shared_line = next(ln for ln in lines if ln.startswith("/lib/llm/shared/"))
         assert "@runtime" in shared_line
         assert "@kvbm" in shared_line
@@ -1865,5 +1865,5 @@ class TestRenderCodeownersWithExternals:
 
     def test_no_externals_is_unchanged(self) -> None:
         model = self._model()
-        plain, _ = render_codeowners(model, group=True, external=[])
+        plain, _ = _render_codeowners(model, group=True, external=[])
         assert not any("@jane" in ln for ln in plain)
