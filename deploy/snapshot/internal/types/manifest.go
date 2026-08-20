@@ -128,12 +128,20 @@ func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *sp
 type CUDAManifest struct {
 	PIDs           []int    `yaml:"pids"`
 	SourceGPUUUIDs []string `yaml:"sourceGpuUuids"`
+	// VMMInterpose records whether the workload ran under the CUDA VMM
+	// interposer at capture time. Restore replays interpose state only when it
+	// was actually captured; a checkpoint taken without the interposer has none
+	// to replay, and attempting it fails on images that legitimately do not ship
+	// the coordinator binary. Absent in manifests written before this field
+	// existed, which correctly defaults to false.
+	VMMInterpose bool `yaml:"vmmInterpose,omitempty"`
 }
 
-func NewCUDAManifest(pids []int, sourceGPUUUIDs []string) CUDAManifest {
+func NewCUDAManifest(pids []int, sourceGPUUUIDs []string, vmmInterpose bool) CUDAManifest {
 	return CUDAManifest{
 		PIDs:           append([]int(nil), pids...),
 		SourceGPUUUIDs: append([]string(nil), sourceGPUUUIDs...),
+		VMMInterpose:   vmmInterpose,
 	}
 }
 

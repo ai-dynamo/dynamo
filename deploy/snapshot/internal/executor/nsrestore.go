@@ -231,13 +231,20 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		if err := cuda.UnlockProcessTree(ctx, restorePIDs, cudaHelperFdPath, log); err != nil {
 			return nil, 0, fmt.Errorf("CUDA unlock failed: %w", err)
 		}
-		if err := cuda.RestoreVMM(
-			ctx,
-			opts.CheckpointPath,
-			restorePIDs,
-			m.CUDA.PIDs,
-		); err != nil {
-			return nil, 0, fmt.Errorf("restore CUDA VMM interpose state: %w", err)
+		// Mirror of the capture-side gate: PrepareVMM only runs when
+		// DetectVMMInterpose found the interposer, so replaying on restore is
+		// only meaningful for checkpoints that recorded it. Unconditionally
+		// exec'ing the coordinator breaks workloads that never used the
+		// interposer, whose images have no reason to ship the binary.
+		if m.CUDA.VMMInterpose {
+			if err := cuda.RestoreVMM(
+				ctx,
+				opts.CheckpointPath,
+				restorePIDs,
+				m.CUDA.PIDs,
+			); err != nil {
+				return nil, 0, fmt.Errorf("restore CUDA VMM interpose state: %w", err)
+			}
 		}
 	}
 	timings.cudaDuration = time.Since(cudaStart)
