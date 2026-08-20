@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::collections::hash_map::RandomState;
 use std::future::Future;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::BuildHasher;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -189,6 +189,7 @@ fn named_tcp_port(slices: &[&EndpointSlice], port_name: &str) -> Result<u16> {
 ///
 /// This call does not return until initial KV-index recovery succeeds or the
 /// authoritative sibling set is empty. The dump server must already be bound.
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn(
     service: Arc<SelectionService>,
     namespace: &str,
@@ -489,11 +490,7 @@ fn recovery_peer_urls(store: &Store, self_ip: &str, port: u16) -> Vec<String> {
         .into_iter()
         .map(|ip| format!("http://{}", authority(&ip, port)))
         .collect();
-    urls.sort_by_cached_key(|url| {
-        let mut h = hasher.build_hasher();
-        url.hash(&mut h);
-        h.finish()
-    });
+    urls.sort_by_cached_key(|url| hasher.hash_one(url));
     urls
 }
 
