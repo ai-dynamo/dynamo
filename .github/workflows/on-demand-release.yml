@@ -12,7 +12,7 @@ name: On-Demand Release
 # fold any new knob into an existing input.
 on:
   # TEMPORARY(test): push events have no inputs, so the fallbacks below run the
-  # test flow as release_version 1.4.0 on the existing release/1.4.0 branch, rc12,
+  # test flow as release_version 1.4.1 on the existing release/1.4.1 branch, rc0,
   # all artifacts (containers/wheels/crates/helm=all). REVERT before merge.
   push:
     branches:
@@ -38,10 +38,10 @@ on:
         type: string
         default: ''
       rc_round:
-        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). Re-stages of the same version need a distinct value (immutable registries). NO GitHub tag is created. Default 12.'
+        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). Re-stages of the same version need a distinct value (immutable registries). NO GitHub tag is created. Default 0.'
         required: false
         type: string
-        default: '12'
+        default: '0'
       containers:
         description: 'Containers to release: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,snapshot.'
         required: false
@@ -102,10 +102,10 @@ jobs:
         env:
           # TEMPORARY(test): the || fallbacks cover inputless push events. REVERT
           # to bare inputs.* before merge.
-          RELEASE_VERSION: ${{ inputs.release_version || '1.4.0' }}
+          RELEASE_VERSION: ${{ inputs.release_version || '1.4.1' }}
           SOURCE_REF: ${{ inputs.source_ref || 'main' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.4.0' || '') }}
-          RC_ROUND: ${{ inputs.rc_round || '12' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.4.1' || '') }}
+          RC_ROUND: ${{ inputs.rc_round || '0' }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
@@ -263,8 +263,8 @@ jobs:
         id: bump
         env:
           # TEMPORARY(test): push fallbacks. REVERT to bare inputs.* before merge.
-          RELEASE_VERSION: ${{ inputs.release_version || '1.4.0' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.4.0' || '') }}
+          RELEASE_VERSION: ${{ inputs.release_version || '1.4.1' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.4.1' || '') }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CONTAINERS: ${{ steps.resolve.outputs.containers }}
@@ -357,7 +357,7 @@ jobs:
         # A dry run sets up the branch/bump only — don't consume an rc.
         if: ${{ !inputs.dry_run }}
         env:
-          RC_ROUND: ${{ inputs.rc_round || '12' }}
+          RC_ROUND: ${{ inputs.rc_round || '0' }}
         run: |
           set -euo pipefail
           # Internal staging registries (crates/helm/wheels) are immutable, so each
@@ -515,7 +515,7 @@ jobs:
       commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
       on_demand: true
       # TEMPORARY(test): || fallback for inputless push events. REVERT.
-      release_version: ${{ inputs.release_version || '1.4.0' }}
+      release_version: ${{ inputs.release_version || '1.4.1' }}
       # Operator-chosen internal-staging rc (immutable registries can't be overwritten).
       rc_number: ${{ needs.prepare-branch.outputs.rc_number }}
       # Normalized subsets from resolve-selection.
