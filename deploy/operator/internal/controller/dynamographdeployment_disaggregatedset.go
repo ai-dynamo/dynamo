@@ -960,9 +960,7 @@ func (r *disaggregatedSetWorkloadsReconciler) listOwnedSelectedDCDs(
 	selection disaggregatedSetSelection,
 ) ([]nvidiacomv1beta1.DynamoComponentDeployment, error) {
 	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
-	if err := r.List(ctx, dcdList, client.InNamespace(dgd.Namespace), client.MatchingLabels{
-		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-	}); err != nil {
+	if err := r.List(ctx, dcdList, client.InNamespace(dgd.Namespace)); err != nil {
 		return nil, fmt.Errorf("failed to list DynamoComponentDeployments for DisaggregatedSet cleanup: %w", err)
 	}
 	selectedDCDs := []nvidiacomv1beta1.DynamoComponentDeployment{}
