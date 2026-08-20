@@ -40,6 +40,25 @@
 # restores into the container.
 
 ARG BASE_IMAGE=placeholder-requires-base-image-arg
+ARG DOCKER_PROXY=
+
+# cuda-checkpoint is the one piece of tooling this image cannot receive from the
+# agent's bind-mounted bundle. When the target requests more than one GPU the
+# operator wraps the engine command as
+#   cuda-checkpoint --launch-job -- <original command>
+# (checkpoint_job.go: wrapLaunchJob := gpuCount > 1), so the binary must be
+# resolvable in $PATH at container start -- long before the agent mounts
+# anything. Without it multi-GPU capture dies in runc with
+#   exec: "cuda-checkpoint": executable file not found in $PATH
+# and the checkpoint fails as StartError before the engine ever runs.
+#
+# It must also be present on the restore side at the same path: the wrapper is
+# the engine's parent process, so CRIU dumps and restores it too, and restores
+# file-backed mappings by absolute path.
+FROM ${DOCKER_PROXY}library/ubuntu:24.04 AS cuda-ckpt
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone --depth 1 https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
 FROM ${BASE_IMAGE}
 
@@ -52,6 +71,8 @@ USER root
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
       echo "ERROR: Dynamo Snapshot requires x86_64" >&2; exit 1; \
     fi
+
+COPY --from=cuda-ckpt /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/bin/cuda-checkpoint
 
 # Checkpoint volume mount point. This is a storage concern -- no restore
 # tooling is provisioned here; see the file header above.
