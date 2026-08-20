@@ -89,13 +89,7 @@ impl AnthropicStreamConverter {
             text_block_index: 0,
             usage: AnthropicUsage {
                 input_tokens: estimated_input_tokens,
-                // Seed the cache-creation count explicitly instead of letting
-                // `Default` leave it `None`. A backend that never populates
-                // per-chunk `usage` (the `ModelInput::Text` / PushRouter path)
-                // never reaches `record_usage`, so this seed is what the client
-                // receives on every event. `skip_serializing_if` drops the key
-                // for a `None`, which would give such a backend a different set
-                // of usage keys than a reporting one.
+                // Keep the field present when the backend does not report usage.
                 cache_creation_input_tokens: Some(0),
                 ..Default::default()
             },
@@ -1089,10 +1083,6 @@ mod tests {
         }
     }
 
-    /// Streaming path: the final `message_delta` carries the same stable
-    /// cache-accounting shape as the non-streaming response, including an
-    /// explicit zero cache-creation count. Asserted on the emitted event rather
-    /// than on `conv.usage`, so this covers what a client actually receives.
     #[test]
     fn test_streaming_final_usage_emits_zero_cache_creation_tokens() {
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 19);
@@ -1119,8 +1109,6 @@ mod tests {
             other => panic!("expected MessageDelta, got {other:?}"),
         }
 
-        // `skip_serializing_if = "Option::is_none"` would drop the key for a
-        // `None`, so prove the zero reaches the serialized SSE payload.
         let serialized =
             serde_json::to_value(&message_delta.data).expect("message_delta serializes");
         assert_eq!(serialized["usage"]["input_tokens"], 7);
@@ -1129,19 +1117,12 @@ mod tests {
         assert_eq!(serialized["usage"]["output_tokens"], 3);
     }
 
-    /// A backend that never reports usage must still produce the same usage key
-    /// set as one that does. `record_usage` never runs on that path, so the
-    /// converter's seed is what the client receives on `message_start` (which
-    /// clones `self.usage`) and on every `content_block_delta` (which
-    /// `event_json_with_usage` stamps with the whole usage struct).
     #[test]
     fn test_seeded_usage_carries_cache_creation_key_without_backend_usage() {
         let conv = AnthropicStreamConverter::new("test-model".into(), 7);
         assert!(!conv.saw_backend_usage);
         assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
 
-        // message_start clones this seed, so serializing it proves the key
-        // survives `skip_serializing_if`.
         let start_usage = serde_json::to_value(&conv.usage).expect("usage serializes");
         assert_eq!(start_usage["input_tokens"], 7);
         assert_eq!(start_usage["cache_creation_input_tokens"], 0);

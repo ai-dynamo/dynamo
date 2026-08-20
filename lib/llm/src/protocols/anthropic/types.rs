@@ -543,11 +543,7 @@ pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> Anthropi
             .prompt_tokens
             .saturating_sub(cache_read_input_tokens.unwrap_or(0)),
         output_tokens: usage.completion_tokens,
-        // OpenAI-compatible backends do not report cache writes, so there is no
-        // count to carry here. Emit an explicit zero rather than `None`: the
-        // field is `Option<u32>` with `skip_serializing_if = "Option::is_none"`,
-        // so a `None` would drop the key from the response entirely. Anthropic
-        // clients read a fixed set of usage keys, so the shape must be stable.
+        // OpenAI-compatible usage has no cache-write count; keep the Anthropic key present.
         cache_creation_input_tokens: Some(0),
         cache_read_input_tokens,
     }
@@ -642,15 +638,7 @@ pub fn chat_completion_to_anthropic_response(
         });
     }
 
-    // Map usage through the same protocol conversion used by the streaming path.
-    //
-    // The fallback is reachable, not just defensive: the unary `/v1/messages`
-    // handler aggregates the backend stream, and the aggregator leaves `usage`
-    // as `None` unless some delta carried it. `AnthropicUsage::default()` would
-    // give `cache_creation_input_tokens: None`, which
-    // `skip_serializing_if = "Option::is_none"` drops from the response, so a
-    // no-usage backend would return a different set of usage keys than a
-    // reporting one. Construct the zero case explicitly to keep one shape.
+    // Keep the cache-creation key present when the backend omits usage entirely.
     let usage = chat_resp
         .inner
         .usage
@@ -1148,11 +1136,6 @@ mod tests {
         assert_eq!(usage.output_tokens, 5);
     }
 
-    /// Non-streaming path: the four cache-accounting fields Anthropic clients
-    /// read must all be present, including a zero cache-creation count when the
-    /// backend reports no cache writes. `cache_creation_input_tokens` is
-    /// `Option<u32>` with `skip_serializing_if = "Option::is_none"`, so a `None`
-    /// would silently drop the key from the JSON instead of emitting `0`.
     #[allow(deprecated)]
     #[test]
     fn test_anthropic_response_emits_zero_cache_creation_tokens() {
@@ -1186,8 +1169,6 @@ mod tests {
                     total_tokens: 15,
                     prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
                         audio_tokens: None,
-                        // No cache-creation count is available from an
-                        // OpenAI-compatible backend.
                         cached_tokens: Some(5),
                     }),
                     completion_tokens_details: None,
@@ -1202,9 +1183,6 @@ mod tests {
         assert_eq!(response.usage.cache_creation_input_tokens, Some(0));
         assert_eq!(response.usage.output_tokens, 3);
 
-        // The zero must survive serialization: `skip_serializing_if` drops the
-        // key for `None`, so asserting on the Rust struct alone would not prove
-        // a client actually receives it.
         let serialized = serde_json::to_value(&response.usage).expect("usage serializes");
         assert_eq!(serialized["input_tokens"], 7);
         assert_eq!(serialized["cache_read_input_tokens"], 5);
@@ -1212,14 +1190,6 @@ mod tests {
         assert_eq!(serialized["output_tokens"], 3);
     }
 
-    /// The no-usage fallback must emit the same usage keys as a backend that
-    /// does report usage. The unary `/v1/messages` handler aggregates the
-    /// backend stream, and the aggregator leaves `usage` as `None` unless some
-    /// delta carried it, so this branch is reached in normal operation rather
-    /// than only in tests. `AnthropicUsage::default()` would leave
-    /// `cache_creation_input_tokens` as `None`, which `skip_serializing_if`
-    /// drops — giving a client a different key set depending on whether the
-    /// backend happened to report.
     #[allow(deprecated)]
     #[test]
     fn test_anthropic_response_emits_zero_cache_creation_when_backend_reports_no_usage() {
@@ -1247,7 +1217,6 @@ mod tests {
                 service_tier: None,
                 system_fingerprint: None,
                 object: "chat.completion".to_string(),
-                // The aggregator never saw a usage-bearing delta.
                 usage: None,
             },
             nvext: None,
