@@ -1125,9 +1125,11 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
             .await
             .unwrap();
-        let mut config = ModelRuntimeConfig::default();
-        config.data_parallel_start_rank = 3;
-        config.data_parallel_size = 2;
+        let config = ModelRuntimeConfig {
+            data_parallel_start_rank: 3,
+            data_parallel_size: 2,
+            ..Default::default()
+        };
         let (_workers_tx, workers) =
             watch::channel(HashMap::from([(1, config.clone()), (2, config)]));
         let load_state = RoutingLoadState::start(
@@ -1197,8 +1199,10 @@ mod tests {
             .unwrap();
         client.override_discovered_instances(vec![1, 2]);
         client.override_instance_avail(vec![1, 2]);
-        let mut config = ModelRuntimeConfig::default();
-        config.data_parallel_start_rank = 3;
+        let config = ModelRuntimeConfig {
+            data_parallel_start_rank: 3,
+            ..Default::default()
+        };
         let (_workers_tx, workers) = watch::channel(HashMap::from([(2, config)]));
         let load_state = RoutingLoadState::start(
             endpoint,
