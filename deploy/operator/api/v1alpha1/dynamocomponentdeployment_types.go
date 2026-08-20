@@ -54,6 +54,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
+	// ProviderOverride configures the primary Grove unit representing this DGD
+	// component. With apiVersion `grove.io/v1alpha1`, target is
+	// `PodCliqueTemplateSpec` for a single-node component or
+	// `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
+	// only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+	// +optional
+	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
 	// Annotations to add to generated Kubernetes resources for this component
 	// (such as Pod, Service, and Ingress when applicable).
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -207,6 +215,14 @@ type MultinodeSpec struct {
 	// Must be greater than 1.
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
+
+	// Leader configures the generated multinode leader unit.
+	// +optional
+	Leader *MultinodeRoleSpec `json:"leader,omitempty"`
+
+	// Worker configures the generated multinode worker unit.
+	// +optional
+	Worker *MultinodeRoleSpec `json:"worker,omitempty"`
 }
 
 type IngressTLSSpec struct {

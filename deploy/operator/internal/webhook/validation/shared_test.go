@@ -29,6 +29,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -238,7 +239,13 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 	}
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 
-	errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, field.NewPath("spec", "components").Index(0), false, true)
+	errs := validation.validateDynamoComponentDeploymentSharedSpec(
+		spec,
+		field.NewPath("spec", "components").Index(0),
+		dynamoComponentDeploymentSharedSpecValidationOptions{
+			validateInferencePoolAvailability: true,
+		},
+	)
 	assertFieldPaths(t, errs, []string{
 		"spec.components[0].minAvailable",
 		"spec.components[0].sharedMemorySize",
@@ -249,6 +256,32 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 	})
 }
 
+func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
+	t.Log("Build an unpruned standalone DCD component with a provider override")
+	spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ProviderOverride: &nvidiacomv1beta1.ProviderOverride{
+			APIVersion: provideroverride.GroveAPIVersion,
+			Target:     provideroverride.TargetPodCliqueTemplateSpec,
+			Value:      apiextensionsv1.JSON{Raw: []byte(`{"topologyConstraint":{}}`)},
+		},
+	}
+	validation := &sharedValidation{
+		ctx:                  context.Background(),
+		runtimeVersionSource: runtimeVersionSourceDisabled,
+	}
+
+	t.Log("Validate the standalone component as defense in depth behind OpenAPI pruning")
+	errs := validation.validateDynamoComponentDeploymentSharedSpec(
+		spec,
+		field.NewPath("spec"),
+		dynamoComponentDeploymentSharedSpecValidationOptions{},
+	)
+	t.Log("Verify validation rejects the unsupported provider context")
+	if len(errs) != 1 || errs[0].Field != "spec.providerOverride" {
+		t.Fatalf("validation errors = %v, want one error for spec.providerOverride", errs)
+	}
+}
+
 func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T) {
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 	componentPath := field.NewPath("spec", "components").Index(0)
@@ -256,7 +289,14 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 	t.Run("requires pod template", func(t *testing.T) {
 		name := "frontend"
 		spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{RuntimeVersionOverride: "1.1.0", FrontendSidecar: &name}
-		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(
+			spec,
+			componentPath,
+			dynamoComponentDeploymentSharedSpecValidationOptions{
+				grovePathway:                      true,
+				validateInferencePoolAvailability: true,
+			},
+		)
 		assertFieldPaths(t, errs, []string{
 			"spec.components[0].podTemplate.spec.containers",
 			"spec.components[0].podTemplate.spec.containers",
@@ -270,7 +310,14 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 			FrontendSidecar:        &name,
 			RuntimeVersionOverride: "1.1.0",
 		}
-		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(
+			spec,
+			componentPath,
+			dynamoComponentDeploymentSharedSpecValidationOptions{
+				grovePathway:                      true,
+				validateInferencePoolAvailability: true,
+			},
+		)
 		assertFieldPaths(t, errs, []string{
 			"spec.components[0].frontendSidecar",
 		})
@@ -285,7 +332,14 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 			FrontendSidecar:        &name,
 			RuntimeVersionOverride: "1.1.0",
 		}
-		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(
+			spec,
+			componentPath,
+			dynamoComponentDeploymentSharedSpecValidationOptions{
+				grovePathway:                      true,
+				validateInferencePoolAvailability: true,
+			},
+		)
 		assertFieldPaths(t, errs, nil)
 	})
 }

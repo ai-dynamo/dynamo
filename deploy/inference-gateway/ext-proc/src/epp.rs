@@ -319,7 +319,10 @@ impl Router {
         })
         .to_string();
         let request: NvCreateCompletionRequest = serde_json::from_str(&completion_json)?;
-        let (tokens, _annotations) = self.preprocessor.gather_tokens(&request, None, None).await?;
+        let (tokens, _annotations) = self
+            .preprocessor
+            .gather_tokens(&request, None, None)
+            .await?;
         Ok(tokens)
     }
 

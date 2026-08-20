@@ -806,9 +806,10 @@ spec:
 						&controller_common.RuntimeConfig{},
 						nil,
 					)
-					pcs, err := renderer.Render(ctx, dgd, nil, nil)
+					renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 					require.NoError(t, err)
-					renderDGD := groveRenderDeployment(dgd, pcs)
+					pcs := renderedPCS.desired
+					renderDGD := renderedPCS.renderDeployment
 
 					t.Log("generate the decode service selector from the same prepared Grove component")
 					decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
@@ -931,9 +932,10 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	desired, err := renderer.Render(ctx, dgd, nil, nil)
+	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 	require.NoError(t, err)
-	renderDGD := groveRenderDeployment(dgd, desired)
+	desired := renderedPCS.desired
+	renderDGD := renderedPCS.renderDeployment
 
 	t.Log("assert the native prefill component stays prefill instead of legacy worker")
 	prefillComponent := renderDGD.GetComponentByName("prefill")

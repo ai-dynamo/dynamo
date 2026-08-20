@@ -119,6 +119,7 @@ jobs:
 
           docker build \
             --progress=plain \
+            --target test_image \
             --tag "${TEST_IMAGE_TAG}" \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.build.outputs.image_tag }} \

@@ -27,6 +27,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -1540,6 +1541,193 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Spec.Components[1].TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "zone"}
 			}),
 			wantWebhookErrs: []string{`spec.components[1].topologyConstraint.packDomain: Invalid value: "zone": must be equal to or narrower than the deployment-level domain "rack"`},
+		},
+
+		// Provider-native override rules.
+		{
+			name: "valid Grove root provider override is admitted and defaulted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					"",
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+		},
+		{
+			name: "v1alpha1 Grove root provider override converts and defaults",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = alphaGroveProviderOverride(
+					"",
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+		},
+		{
+			name:          "first provider override can be added without lifecycle history",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+		},
+		{
+			name: "provider override can be removed without lifecycle status",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			deployment: betaDGDForAdmission(nil),
+		},
+		{
+			name: "valid Grove component and multinode role overrides are admitted and defaulted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				frontend := dgd.GetComponentByName("frontend")
+				frontend.ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+				worker := betaWorkerComponent(dgd)
+				worker.ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}`,
+				)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
+					NodeCount: 2,
+					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
+						"",
+						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+					)},
+					Worker: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
+						"",
+						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+					)},
+				}
+			}),
+		},
+		{
+			name:               "provider override requires a materialized workload provider on legacy update",
+			seedWithoutWebhook: true,
+			oldBeforeUpdate: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+			}),
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride: Forbidden: requires controller-owned annotation "nvidia.com/workload-provider" to be materialized; wait for controller adoption and retry`},
+		},
+		{
+			name: "provider override target must match its DGD context",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueTemplateSpec,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.target: Invalid value: "PodCliqueTemplateSpec": must match the provider-context target "PodCliqueSet"`},
+		},
+		{
+			name: "provider override rejects Dynamo-owned fields",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"replicas":3,"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value.spec.replicas: Forbidden: is Dynamo-owned or not enabled for provider override`},
+		},
+		{
+			name: "malformed provider override field is invalid without echoing its value",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"pack":"rack"}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value: Invalid value: null: does not match the registered PodCliqueSet schema: json: cannot unmarshal string into Go struct field TopologyConstraint.spec.template.topologyConstraint.pack of type v1alpha1.TopologyPackConstraint`},
+		},
+		{
+			name: "typed and provider-native Grove topology cannot be combined",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{
+					ClusterTopologyName: "grove-topology",
+					PackDomain:          "rack",
+				}
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value: Forbidden: cannot be combined with spec.topologyConstraint or components[].topologyConstraint; use either the typed topology API or provider-native Grove topology overrides`},
+		},
+		{
+			name: "component workload provider rejects provider overrides",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride: Forbidden: requires workload provider "grove", but "component" is selected`},
+		},
+		{
+			name:               "legacy provider override schema identity is immutable during repair",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueTemplateSpec,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+				dgd.Spec.ProviderOverride.APIVersion = "grove.io/v2"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{
+				`spec.providerOverride.apiVersion: Invalid value: "grove.io/v1alpha1": ` + apivalidation.FieldImmutableErrorMsg,
+				`spec.providerOverride.target: Invalid value: "PodCliqueSet": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name:               "legacy multinode role provider identity is immutable during repair",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
+					NodeCount: 2,
+					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
+						provideroverride.TargetPodCliqueSet,
+						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+					)},
+				}
+				worker.Multinode.Leader.ProviderOverride.APIVersion = "grove.io/v2"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
+					NodeCount: 2,
+					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
+						provideroverride.TargetPodCliqueTemplateSpec,
+						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+					)},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].multinode.leader.providerOverride.apiVersion: Invalid value: "grove.io/v1alpha1": ` + apivalidation.FieldImmutableErrorMsg,
+				`spec.components[1].multinode.leader.providerOverride.target: Invalid value: "PodCliqueTemplateSpec": ` + apivalidation.FieldImmutableErrorMsg,
+			},
 		},
 
 		// Metadata annotation rules.

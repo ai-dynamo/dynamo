@@ -70,6 +70,14 @@ type DynamoComponentDeploymentSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 type DynamoComponentDeploymentSharedSpec struct {
+	// providerOverride configures the primary Grove unit representing this DGD
+	// component. With apiVersion `grove.io/v1alpha1`, target is
+	// `PodCliqueTemplateSpec` for a single-node component or
+	// `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
+	// only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+	// +optional
+	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
 	// name is the stable logical identifier for this component within its
 	// DynamoGraphDeployment. It must be unique within the parent's
 	// `spec.components` list.
