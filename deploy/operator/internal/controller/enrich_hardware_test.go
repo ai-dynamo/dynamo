@@ -586,3 +586,44 @@ func TestEnrichHardwareFromDiscovery_UnknownGPUReturnsActionableError(t *testing
 	require.ErrorContains(t, err, unknownProduct)
 	assert.Empty(t, dgdr.Spec.Hardware.GPUSKU)
 }
+
+// TestEnrichHardwareFromDiscovery_GPUSKUAloneDoesNotUnblockUnknownGPU verifies that setting
+// gpuSku alone does not recover an unrecognized GPU: the remaining required fields keep
+// discovery active, and filtering by gpuSku can't match a model discovery already failed to
+// classify, so reconciliation fails again with a different error.
+func TestEnrichHardwareFromDiscovery_GPUSKUAloneDoesNotUnblockUnknownGPU(t *testing.T) {
+	r := newFakeReconciler(gpuNode("gpu-node-1", "NVIDIA-RTX-PRO-6000-Blackwell-Server-Edition", 4, 98304))
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU: nvidiacomv1beta1.GPUSKUTypeH100SXM,
+			},
+		},
+	}
+
+	_, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.ErrorContains(t, err, "no nodes with NVIDIA GPU Feature Discovery labels matching SKU")
+}
+
+// TestEnrichHardwareFromDiscovery_AllRequiredFieldsBypassDiscoveryForUnknownGPU verifies that
+// supplying all four required hardware fields bypasses discovery, so an unrecognized GPU no
+// longer blocks reconciliation.
+func TestEnrichHardwareFromDiscovery_AllRequiredFieldsBypassDiscoveryForUnknownGPU(t *testing.T) {
+	r := newFakeReconciler(gpuNode("gpu-node-1", "NVIDIA-RTX-PRO-6000-Blackwell-Server-Edition", 8, 98304))
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+				VRAMMB:         ptr.To(float64(98304)),
+				NumGPUsPerNode: ptr.To(int32(8)),
+				TotalGPUs:      ptr.To(int32(8)),
+			},
+		},
+	}
+
+	_, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.NoError(t, err)
+	assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeH100SXM, dgdr.Spec.Hardware.GPUSKU)
+}
