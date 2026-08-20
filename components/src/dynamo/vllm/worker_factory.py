@@ -1186,9 +1186,6 @@ class WorkerFactory:
                 component_gauges=component_gauges,
             )
         else:
-            # Factory is created without component_gauges; setup_vllm_engine() will
-            # create the gauges after setup_multiprocess_prometheus() and set them
-            # on the factory before vLLM calls create_stat_logger().
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
             )
@@ -1498,9 +1495,6 @@ class WorkerFactory:
                 component_gauges=component_gauges,
             )
         else:
-            # Factory is created without component_gauges; setup_vllm_engine() will
-            # create the gauges after setup_multiprocess_prometheus() and set them
-            # on the factory before vLLM calls create_stat_logger().
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
             )
@@ -1513,9 +1507,6 @@ class WorkerFactory:
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
         await configure_kv_event_block_size(engine_client, vllm_config)
 
-        # Match decode-worker KV gauge behavior: seed samples immediately so
-        # Prometheus exports per-rank labels before the first scheduler record,
-        # then let vLLM stat logger updates publish live usage.
         _, dp_size = get_dp_range_for_worker(vllm_config)
         per_rank_num_gpu_blocks = per_rank_kv_blocks(
             vllm_config.cache_config.num_gpu_blocks,

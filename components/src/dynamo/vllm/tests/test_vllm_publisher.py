@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the vLLM stat-logger factory.
-
-These tests focus on the embedding-worker gating path: vLLM workers run
-either a chat/decode engine or a pooling (embedding) engine, and the
-chat-shaped Prometheus collectors are only meaningful on the former.
-The factory is the single seam where vLLM calls into dynamo per dp_rank,
-so it is also the seam where the embedding worker must short-circuit
-the chat-shaped pipeline.
-"""
+"""Unit tests for the vLLM stat-logger factory."""
 
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -33,17 +25,6 @@ pytestmark = [
 
 
 def test_factory_returns_noop_logger_for_embedding_worker(monkeypatch):
-    """``create_stat_logger`` returns a ``NoopStatLogger`` on the
-    embedding path -- no ``DynamoStatLoggerPublisher`` /
-    ``WorkerMetricsPublisher`` / NATS endpoint construction.
-
-    Why this matters: ``DynamoStatLoggerPublisher.__init__`` schedules a
-    ``create_endpoint`` task on the runtime and registers chat-shaped
-    publish callbacks. On a pooling engine there is no kv_cache_usage to
-    publish (vLLM never emits ``SchedulerStats``) and the endpoint is
-    never queried -- so the factory must not construct it at all.
-    """
-
     def _explode(*_a, **_kw):
         raise AssertionError(
             "embedding-worker path must not construct DynamoStatLoggerPublisher"
@@ -59,22 +40,12 @@ def test_factory_returns_noop_logger_for_embedding_worker(monkeypatch):
     logger = factory.create_stat_logger(dp_rank=0)
 
     assert isinstance(logger, NoopStatLogger)
-    # Embedding factory never tracks a created chat logger, so the
-    # downstream ``init_publish`` / ``set_num_gpu_blocks_all`` calls in
-    # the chat path are safe no-ops if anyone ever wires them on the
-    # embedding branch by mistake.
-    assert factory.created_logger is None
+    assert factory.created_loggers == []
 
 
 def test_noop_stat_logger_record_is_safe_with_none_stats():
-    """vLLM calls ``record`` every iteration even when the engine has
-    nothing useful to report. The chat-path publisher returns early on
-    ``scheduler_stats is None``; the embedding noop must accept the same
-    shape (and the variadic mm/engine_idx args vLLM passes) without
-    raising."""
     logger = NoopStatLogger()
 
-    # Mirrors the call shape from vllm/v1/metrics/loggers.py.
     logger.record(None, None)
     logger.record(None, None, None, 0)
     logger.record(
@@ -87,26 +58,17 @@ def test_noop_stat_logger_record_is_safe_with_none_stats():
 
 
 def test_factory_embedding_flag_skips_component_gauges_assert():
-    """On the chat path the factory asserts
-    ``component_gauges is not None`` because ``setup_vllm_engine`` is
-    responsible for setting it before vLLM invokes the factory. The
-    embedding path skips that step entirely (no chat-shaped gauges to
-    register), so the factory must not blow up when it stays None."""
     factory = StatLoggerFactory(
         endpoint=SimpleNamespace(),
         embedding_worker=True,
     )
     assert factory.component_gauges is None
 
-    # Would AssertionError on the chat path; must succeed here.
     logger = factory.create_stat_logger(dp_rank=0)
     assert isinstance(logger, NoopStatLogger)
 
 
 def test_factory_default_is_chat_path(monkeypatch):
-    """Sibling check: the default (``embedding_worker=False``) still
-    constructs ``DynamoStatLoggerPublisher`` so the gating doesn't
-    accidentally swallow the chat path."""
     constructed = []
 
     def _fake_publisher(*args, **kwargs):
@@ -125,3 +87,37 @@ def test_factory_default_is_chat_path(monkeypatch):
     assert constructed[0]["endpoint"] is endpoint
     assert constructed[0]["dp_rank"] == 3
     assert constructed[0]["component_gauges"] is component_gauges
+
+
+def test_factory_initializes_every_data_parallel_logger(monkeypatch):
+    loggers = [Mock(spec=DynamoStatLoggerPublisher) for _ in range(2)]
+    monkeypatch.setattr(
+        publisher_mod,
+        "DynamoStatLoggerPublisher",
+        Mock(side_effect=loggers),
+    )
+    factory = StatLoggerFactory(
+        endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    factory.create_stat_logger(dp_rank=0)
+    factory.create_stat_logger(dp_rank=1)
+    factory.set_num_gpu_blocks_all(9)
+    factory.init_publish()
+
+    for logger in loggers:
+        logger.set_num_gpu_block.assert_called_once_with(9)
+        logger.init_publish.assert_called_once_with()
+
+
+def test_initial_publish_uses_configured_gpu_block_count():
+    logger = DynamoStatLoggerPublisher.__new__(DynamoStatLoggerPublisher)
+    logger.inner = Mock()
+    logger.dp_rank = 1
+    logger.component_gauges = Mock()
+    logger.num_gpu_block = 9
+
+    logger.init_publish()
+
+    logger.component_gauges.set_total_blocks.assert_called_once_with("1", 9)
