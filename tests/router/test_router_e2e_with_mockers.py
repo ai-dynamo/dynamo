@@ -27,6 +27,7 @@ from tests.router.common import (
     _test_disagg_per_role_session_affinity,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
+    _test_least_loaded_token_aware,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
@@ -1815,3 +1816,46 @@ def test_update_model_taints_replaces_worker_routing_constraints(
             min_initial_workers=workers.num_workers,
         ):
             asyncio.run(run_test(workers))
+
+
+@pytest.mark.parametrize(
+    "token_aware",
+    [
+        pytest.param(True, id="token-aware"),
+        pytest.param(False, id="request-count"),
+    ],
+)
+@pytest.mark.timeout(120)
+def test_mocker_least_loaded_token_aware(
+    request,
+    predownload_tokenizers,
+    file_storage_backend,
+    token_aware,
+):
+    """`DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE` reorders least-loaded by prompt tokens.
+
+    The two parameterizations assert mutually exclusive outcomes from the same
+    scenario, so a pass on both is what shows the flag is doing the work.
+
+    Runs on file discovery plus the TCP request plane, so it deliberately does
+    not take `runtime_services_dynamic_ports`: no etcd or NATS is involved.
+    """
+    with MockerProcess(
+        request,
+        # Real-time simulation, unlike SPEEDUP_RATIO elsewhere in this file: the
+        # scenario needs its two setup requests to stay in flight while the
+        # probes are sent, and a 10x speedup retires them first.
+        mocker_args={"speedup_ratio": 1.0, "block_size": BLOCK_SIZE},
+        num_mockers=2,
+        store_backend="file",
+        request_plane="tcp",
+        model_name=MODEL_NAME,
+    ) as mockers:
+        (frontend_port,) = allocate_frontend_ports(request, 1)
+        _test_least_loaded_token_aware(
+            engine_workers=mockers,
+            request=request,
+            frontend_port=frontend_port,
+            token_aware=token_aware,
+            block_size=BLOCK_SIZE,
+        )
