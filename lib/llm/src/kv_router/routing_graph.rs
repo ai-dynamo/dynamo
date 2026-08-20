@@ -26,6 +26,7 @@ pub enum RouterLoadSource {
     Decode,
     Aggregated,
     Prefill,
+    Encode,
 }
 
 impl RouterLoadSource {
@@ -33,16 +34,21 @@ impl RouterLoadSource {
         match self {
             Self::Decode | Self::Aggregated => WORKER_TYPE_DECODE,
             Self::Prefill => WORKER_TYPE_PREFILL,
+            Self::Encode => WorkerType::Encode.as_str(),
         }
     }
 
-    pub fn from_worker_type(worker_type: WorkerType) -> anyhow::Result<Self> {
+    pub const fn from_worker_type(worker_type: WorkerType) -> Self {
         match worker_type {
-            WorkerType::Decode => Ok(Self::Decode),
-            WorkerType::Aggregated => Ok(Self::Aggregated),
-            WorkerType::Prefill => Ok(Self::Prefill),
-            WorkerType::Encode => anyhow::bail!("encode endpoints do not publish sequence load"),
+            WorkerType::Decode => Self::Decode,
+            WorkerType::Aggregated => Self::Aggregated,
+            WorkerType::Prefill => Self::Prefill,
+            WorkerType::Encode => Self::Encode,
         }
+    }
+
+    const fn monitors_sequence_load(self) -> bool {
+        !matches!(self, Self::Encode)
     }
 }
 
@@ -122,7 +128,7 @@ impl SchedulerLoadShared {
 /// Nonblocking scheduler-load publication handle owned by one typed routing graph.
 #[derive(Clone)]
 pub struct SchedulerLoadSender {
-    tx: mpsc::Sender<SchedulerLoadCommand>,
+    tx: Option<mpsc::Sender<SchedulerLoadCommand>>,
     shared: Arc<SchedulerLoadShared>,
     source: RouterLoadSource,
     cancellation_token: CancellationToken,
@@ -144,8 +150,15 @@ impl SchedulerLoadSender {
         self.try_publish(SchedulerLoadCommand::Batch(snapshots));
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.tx.is_some()
+    }
+
     fn try_publish(&self, command: SchedulerLoadCommand) {
-        match self.tx.try_send(command) {
+        let Some(tx) = &self.tx else {
+            return;
+        };
+        match tx.try_send(command) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(command)) => self.shared.coalesce(command),
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -203,7 +216,7 @@ fn scheduler_load_channel_with_capacity(
     let shared = Arc::new(SchedulerLoadShared::new());
     (
         SchedulerLoadSender {
-            tx,
+            tx: Some(tx),
             shared: shared.clone(),
             source,
             cancellation_token,
@@ -212,9 +225,22 @@ fn scheduler_load_channel_with_capacity(
     )
 }
 
+fn disabled_scheduler_load_sender(
+    source: RouterLoadSource,
+    cancellation_token: CancellationToken,
+) -> SchedulerLoadSender {
+    SchedulerLoadSender {
+        tx: None,
+        shared: Arc::new(SchedulerLoadShared::new()),
+        source,
+        cancellation_token,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     fn snapshot(worker_id: u64, active_decode_blocks: u64) -> SchedulerLoadSnapshot {
         SchedulerLoadSnapshot {
@@ -241,6 +267,44 @@ mod tests {
         sender.publish(snapshot(1, 0));
         assert_eq!(receiver.recv().await.unwrap(), vec![snapshot(1, 0)]);
     }
+
+    #[tokio::test]
+    async fn encode_graph_retains_client_with_sequence_load_monitoring_disabled() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("encode-routing-graph".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        let parent_token = distributed.child_token();
+
+        let graph = TypedRoutingGraph::start(
+            client.clone(),
+            RouterLoadSource::Encode,
+            LoadThresholdHandle::new(Default::default()),
+            &parent_token,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(graph.source(), RouterLoadSource::Encode);
+        assert_eq!(graph.client().endpoint.id(), client.endpoint.id());
+        assert!(graph.monitor().is_none());
+        assert!(!graph.scheduler_load_sender().is_enabled());
+        graph.scheduler_load_sender().publish(snapshot(1, 100));
+        assert_eq!(client.overloaded_instance_ids(), None);
+
+        drop(graph);
+        assert!(!parent_token.is_cancelled());
+        runtime.shutdown();
+    }
 }
 
 /// Owns the load lifecycle for one typed endpoint routing graph.
@@ -254,7 +318,8 @@ pub struct TypedRoutingGraph {
     scheduler_load: SchedulerLoadSender,
     thresholds: LoadThresholdHandle,
     cancellation_token: CancellationToken,
-    monitor: KvWorkerMonitor,
+    monitor: Option<KvWorkerMonitor>,
+    _task_guard: Option<EngineContextGuard>,
 }
 
 impl TypedRoutingGraph {
@@ -266,17 +331,25 @@ impl TypedRoutingGraph {
         task_guard: Option<EngineContextGuard>,
     ) -> anyhow::Result<Arc<Self>> {
         let cancellation_token = parent_token.child_token();
-        let (scheduler_load, scheduler_load_rx) =
-            scheduler_load_channel(source, cancellation_token.child_token());
-        let monitor = KvWorkerMonitor::new(
-            client.clone(),
-            source,
-            scheduler_load_rx,
-            thresholds.clone(),
-            cancellation_token.child_token(),
-            task_guard,
-        );
-        monitor.start_monitoring().await?;
+        let (scheduler_load, monitor) = if source.monitors_sequence_load() {
+            let (scheduler_load, scheduler_load_rx) =
+                scheduler_load_channel(source, cancellation_token.child_token());
+            let monitor = KvWorkerMonitor::new(
+                client.clone(),
+                source,
+                scheduler_load_rx,
+                thresholds.clone(),
+                cancellation_token.child_token(),
+                task_guard.clone(),
+            );
+            monitor.start_monitoring().await?;
+            (scheduler_load, Some(monitor))
+        } else {
+            (
+                disabled_scheduler_load_sender(source, cancellation_token.child_token()),
+                None,
+            )
+        };
 
         Ok(Arc::new(Self {
             client,
@@ -285,6 +358,7 @@ impl TypedRoutingGraph {
             thresholds,
             cancellation_token,
             monitor,
+            _task_guard: task_guard,
         }))
     }
 
@@ -308,8 +382,8 @@ impl TypedRoutingGraph {
         self.cancellation_token.child_token()
     }
 
-    pub fn monitor(&self) -> &KvWorkerMonitor {
-        &self.monitor
+    pub fn monitor(&self) -> Option<&KvWorkerMonitor> {
+        self.monitor.as_ref()
     }
 }
 

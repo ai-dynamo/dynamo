@@ -573,7 +573,7 @@ where
                 let source = RouterLoadSource::from_worker_type(effective_worker_type(
                     card.worker_type,
                     card.model_type,
-                ))?;
+                ));
                 Some(
                     TypedRoutingGraph::start(
                         client.clone(),
@@ -1483,6 +1483,88 @@ mod tests {
         assert!(model.has_chat_engine());
         assert!(model.has_classify_engine());
         assert!(model.has_pooling_engine());
+    }
+
+    #[tokio::test]
+    async fn surface_encode_worker_builds_kv_routing_graph_without_load_monitoring() {
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let router_config = RouterConfig {
+            router_mode: RouterMode::KV,
+            kv_router_config: dynamo_kv_router::config::KvRouterConfig {
+                skip_initial_worker_wait: true,
+                use_kv_events: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            router_config.clone(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new_with_prefix(Some(
+                "watcher_surface_encode_test".to_string(),
+            ))),
+        );
+        watcher.generate_engine_capabilities = vec![VLLM_INFERENCE_V1_GENERATE_CAPABILITY];
+
+        let mcid = ModelCardInstanceId {
+            namespace: "surface-encode-ns".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 1,
+            model_suffix: None,
+        };
+        let mut card = ModelDeploymentCard::with_name_only("surface-encode-model");
+        card.model_input = ModelInput::Tokens;
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Encode);
+        card.kv_cache_block_size = 16;
+        card.runtime_config
+            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
+            .unwrap();
+
+        let endpoint_id = model_card_endpoint_id(&mcid);
+        let key = GroupKey {
+            model_name: card.name().to_string(),
+            worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
+        };
+        let desired = DesiredInstance {
+            key: mcid.to_path(),
+            mcid,
+            endpoint_id,
+            fingerprint: materialization_fingerprint(&card, &router_config).unwrap(),
+            projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+            card,
+            group_key: key.clone(),
+        };
+        let spec = GroupSpec {
+            key,
+            fingerprint: desired.fingerprint.clone(),
+            generation: 1,
+            representative: desired,
+        };
+        let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
+
+        let prepared = watcher
+            .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(
+            prepared
+                .worker_set
+                .as_ref()
+                .is_some_and(WorkerSet::has_generate_engine)
+        );
+        runtime.shutdown();
     }
 
     #[tokio::test]
