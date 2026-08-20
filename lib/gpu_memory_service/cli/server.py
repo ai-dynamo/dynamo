@@ -19,10 +19,12 @@ import time
 from contextlib import closing
 
 from gpu_memory_service.cli.snapshot import start_per_device
+from gpu_memory_service.client.session import _GMSClientSession as _V0ClientSession
 from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.utils import get_socket_path as _v0_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
-from gpu_memory_service.v1.client.session import _GMSClientSession
-from gpu_memory_service.v1.device import get_socket_path
+from gpu_memory_service.v1.client.session import _GMSClientSession as _V1ClientSession
+from gpu_memory_service.v1.device import get_socket_path as _v1_socket_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,16 +46,23 @@ def _child_command(device: int, device_type: str, use_v1: bool = False) -> list[
     return command
 
 
-def _probe_v1_restore_ready(devices: list[int]) -> None:
+def _probe_restore_ready(devices: list[int], use_v1: bool) -> None:
+    timeout_ms = int(_PROBE_TIMEOUT_SECONDS * 1000)
     for device in devices:
-        with closing(
-            _GMSClientSession(
-                get_socket_path(device, "weights"),
+        if use_v1:
+            session = _V1ClientSession(
+                _v1_socket_path(device, "weights"),
                 RequestedLockType.RO,
                 connect_timeout=_PROBE_TIMEOUT_SECONDS,
                 admission_timeout=_PROBE_TIMEOUT_SECONDS,
             )
-        ):
+        else:
+            session = _V0ClientSession(
+                _v0_socket_path(device, "weights"),
+                RequestedLockType.RO,
+                timeout_ms,
+            )
+        with closing(session):
             pass
 
 
@@ -108,7 +117,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--probe-restore-ready",
         action="store_true",
-        help="Attempt bounded RO admission on every V1 weights socket and exit.",
+        help="Attempt bounded RO admission on every weights socket and exit.",
     )
     parser.add_argument(
         "--enable-loader",
@@ -122,8 +131,6 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.use_v1 and args.device_type != VMMDeviceType.CUDA.value:
         parser.error("--use-v1 only supports --device-type=cuda")
-    if args.probe_restore_ready and not args.use_v1:
-        parser.error("--probe-restore-ready requires --use-v1")
     if args.probe_restore_ready and args.enable_loader is not None:
         parser.error("--probe-restore-ready cannot be combined with --enable-loader")
 
@@ -131,7 +138,7 @@ def main(argv: list[str] | None = None) -> None:
     vmm = get_vmm()
     devices = vmm.list_devices()
     if args.probe_restore_ready:
-        _probe_v1_restore_ready(devices)
+        _probe_restore_ready(devices, use_v1=args.use_v1)
         return
 
     servers: list[subprocess.Popen] = []
