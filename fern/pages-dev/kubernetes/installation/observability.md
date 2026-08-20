@@ -73,12 +73,18 @@ When enabled, the chart creates these PodMonitors:
 
 | PodMonitor | Selects | Scrapes |
 |---|---|---|
-| `dynamo-frontend` | `component-type: frontend` | port `http` (`/metrics`) |
-| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics), ports `system-0` / `system-1` when present (GMS shadow-failover), port `http` when present (frontend sidecar), and port `nixl` when `dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry=true` |
+| `dynamo-frontend` | `component-type: frontend` | port `http` (`frontendPath`, default `/metrics`) |
+| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics), ports `system-0` / `system-1` when present (GMS shadow-failover), port `http` when present (frontend sidecar, also `frontendPath`), and port `nixl` when `dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry=true` |
 | `dynamo-planner` | `component-type: planner` | port `metrics` |
 | `dynamo-router` | `component-type: default` | port 9090 (`DYN_SYSTEM_PORT`), addressed by relabeling rather than a named container port |
 
 Each endpoint matches on a named container port, so a pod that does not declare that port produces no scrape target for it rather than a failing one.
+
+A frontend can move its own Prometheus endpoint by setting `DYN_HTTP_SVC_METRICS_PATH`. When it does, set `dynamo-operator.dynamo.metrics.podMonitors.frontendPath` to the same value. It defaults to `/metrics` and applies only to the two endpoints that scrape a frontend HTTP service: the `dynamo-frontend` monitor and the `dynamo-worker` sidecar endpoint on port `http`. The remaining endpoints scrape the system status server, which always serves `/metrics`.
+
+<Warning>
+A mismatch fails silently. Prometheus scrapes the old path, receives a 404, and every `dynamo_frontend_*` series disappears while the pods stay healthy and the targets still exist. The SLA planner reads TTFT and ITL from those series, so it reads zero and never scales up.
+</Warning>
 
 ### DCGM exporter (GPU metrics)
 
