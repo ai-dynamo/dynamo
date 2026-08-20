@@ -23,7 +23,7 @@ spec:
           name: main
     replicas: 1
     type: frontend
-  - name: decode
+  - name: worker
     podTemplate:
       spec:
         containers:

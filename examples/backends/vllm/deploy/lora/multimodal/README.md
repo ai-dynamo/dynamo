@@ -184,7 +184,7 @@ kubectl apply -f agg_qwen_lora_updated.yaml -n ${NAMESPACE}
 kubectl get pods -n ${NAMESPACE}
 
 # Watch worker logs
-kubectl logs -f deployment/agg-qwen-multimodal-lora-vllmworker -n ${NAMESPACE}
+kubectl logs -f deployment/agg-qwen-multimodal-lora-worker -n ${NAMESPACE}
 ```
 
 Wait for the worker to show "Application startup complete".
@@ -323,7 +323,7 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 1. **Check MinIO connectivity from worker**:
    ```bash
-   kubectl exec -it deployment/agg-qwen-multimodal-lora-vllmworker -n ${NAMESPACE} -- \
+   kubectl exec -it deployment/agg-qwen-multimodal-lora-worker -n ${NAMESPACE} -- \
      curl http://minio:9000/minio/health/live
    ```
 
@@ -335,7 +335,7 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 3. **Check worker logs**:
    ```bash
-   kubectl logs deployment/agg-qwen-multimodal-lora-vllmworker -n ${NAMESPACE}
+   kubectl logs deployment/agg-qwen-multimodal-lora-worker -n ${NAMESPACE}
    ```
 
 4. **Verify adapter compatibility**: Ensure the LoRA adapter was trained for the same base model architecture (Qwen3-VL-2B) and that `max-lora-rank` (default 64) is >= the adapter's rank.

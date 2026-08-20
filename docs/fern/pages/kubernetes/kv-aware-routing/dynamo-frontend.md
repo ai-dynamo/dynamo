@@ -43,7 +43,7 @@ That alone gives you cache-aware routing using load signals. To make routing dec
 For the router to track which blocks each worker holds, workers must publish KV cache events. On a vLLM worker, add `--kv-events-config`:
 
 ```yaml
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     podTemplate:
       spec:

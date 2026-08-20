@@ -68,7 +68,7 @@ NVLink works **within a pod** for parallelism strategies (TP, EP) where all GPUs
 
 ```yaml
 # Decode worker with TP=4 uses NVLink between its 4 GPUs
-VLLMDecodeWorker:
+decode:
   resources:
     limits:
       gpu: "4"   # All 4 GPUs visible to single process
@@ -318,7 +318,7 @@ GDRCopy v2.5.1 has a build failure on kernel 6.15+ due to a `vm_flags_set` redef
 EFA is designed for **cross-node** communication. Prefill and decode workers must be scheduled on **different nodes** to avoid EAGAIN errors during KV transfer.
 
 ```yaml
-VllmDecodeWorker:
+decode:
   extraPodSpec:
     affinity:
       podAntiAffinity:
@@ -328,7 +328,7 @@ VllmDecodeWorker:
                 - key: nvidia.com/dynamo-component
                   operator: In
                   values:
-                    - VllmPrefillWorker
+                    - prefill
             topologyKey: kubernetes.io/hostname
 ```
 
@@ -418,7 +418,7 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 spec:
   services:
-    VLLMPrefillWorker:
+    prefill:
       resources:
         limits:
           gpu: "2"
@@ -705,7 +705,7 @@ If both prefill and decode workers show the same NODE, this is the problem.
 **Solution**: Add pod anti-affinity rules to ensure workers are scheduled on different nodes:
 
 ```yaml
-VllmDecodeWorker:
+decode:
   extraPodSpec:
     affinity:
       podAntiAffinity:
@@ -715,7 +715,7 @@ VllmDecodeWorker:
                 - key: nvidia.com/dynamo-component
                   operator: In
                   values:
-                    - VllmPrefillWorker
+                    - prefill
             topologyKey: kubernetes.io/hostname
 ```
 

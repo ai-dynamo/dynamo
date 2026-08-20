@@ -46,7 +46,7 @@ Use a runtime image that includes the `modelexpress` Python package. For ModelSt
 
 ```yaml
 services:
-  VllmWorker:
+  worker:
     extraPodSpec:
       mainContainer:
         image: <vllm-runtime-image-with-modelexpress>
@@ -70,7 +70,7 @@ If the ModelExpress server cache is on a non-shared volume, workers cannot read 
 
 ```yaml
 services:
-  VllmWorker:
+  worker:
     extraPodSpec:
       mainContainer:
         env:
@@ -88,7 +88,7 @@ Set `MX_MODEL_URI` when the first worker should stream safetensors directly from
 
 ```yaml
 services:
-  VllmWorker:
+  worker:
     extraPodSpec:
       mainContainer:
         image: <vllm-runtime-image-with-modelexpress-and-modelstreamer>

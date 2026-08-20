@@ -179,7 +179,7 @@ test_fault_scenario[sglang-agg-tp-1-dp-1-frontend]
 │   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.metrics.log
 │   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.previous.log  # Pre-restart logs
 │   └── fault-tolerance-test-frontend-576bd784dc-jv68q.yaml
-├── decode/                                # Or VllmDecodeWorker for vLLM backend
+├── decode/                                # Or decode for vLLM backend
 │   └── [same structure as Frontend]
 └── test.log.txt
 ```
@@ -216,7 +216,7 @@ test_fault_scenario[sglang-agg-tp-1-dp-1-frontend]
 │   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.metrics.log
 │   ├── fault-tolerance-test-frontend-576bd784dc-jv68q.previous.log  # Pre-restart logs
 │   └── fault-tolerance-test-frontend-576bd784dc-jv68q.yaml
-├── decode/                                # Or VllmDecodeWorker for vLLM backend
+├── decode/                                # Or decode for vLLM backend
 │   └── [same structure as Frontend]
 └── test.log.txt
 ```
@@ -272,10 +272,10 @@ Verifies that the test scenario executed correctly by checking Kubernetes events
 ────────────────────────────────────────────────────────────────────────────────
 1.1 Verifying Specific Pod Deletion via K8s Events
 ────────────────────────────────────────────────────────────────────────────────
-Target pod(s) for deletion: ['fault-tolerance-test-0-vllmdecodeworker-abc123']
+Target pod(s) for deletion: ['fault-tolerance-test-0-decode-abc123']
 
 ✓ DELETION CONFIRMED: [Normal] Killing - Stopping container main
-✓ Pod fault-tolerance-test-0-vllmdecodeworker-abc123 deletion verified via K8s events
+✓ Pod fault-tolerance-test-0-decode-abc123 deletion verified via K8s events
 ✓ STAGE 1.1 PASSED: Pod deletion confirmed via K8s events
 ```
 

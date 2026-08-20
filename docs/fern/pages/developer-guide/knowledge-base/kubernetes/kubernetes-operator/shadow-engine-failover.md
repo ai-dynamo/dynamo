@@ -186,7 +186,7 @@ metadata:
     nvidia.com/dynamo-kube-discovery-mode: container
 spec:
   services:
-    VllmWorker:
+    worker:
       componentType: worker
       replicas: 1
       resources:
@@ -223,7 +223,7 @@ metadata:
   name: vllm-agg-gms
 spec:
   services:
-    VllmWorker:
+    worker:
       componentType: worker
       replicas: 1
       resources:

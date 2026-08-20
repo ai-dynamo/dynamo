@@ -25,10 +25,7 @@ import yaml
 
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
-from dynamo.planner.config.backend_components import (
-    MockerComponentName,
-    VllmComponentName,
-)
+from dynamo.planner.config.backend_components import MockerComponentName
 from dynamo.planner.config.parallelization import (
     PickedParallelConfig,
     picked_to_aic_model_config_kwargs,
@@ -202,69 +199,50 @@ def apply_runtime_version_override(dgdr, config_dict: dict) -> None:
             component["runtimeVersionOverride"] = override
 
 
-def _vllm_worker_roles() -> dict[str, str]:
-    """Canonical DGD component name → DYN_BENCHMARK_MODE role.
-
-    Sourced from :class:`VllmComponentName` so we stay in sync with the
-    rest of the planner/profiler if the k8s service names are ever
-    renamed.
-    """
-    return {
-        VllmComponentName.prefill_worker_k8s_name: "prefill",
-        VllmComponentName.decode_worker_k8s_name: "decode",
-        VllmComponentName.agg_worker_k8s_name: "agg",
-    }
+_VLLM_BENCHMARK_MODE_BY_COMPONENT_TYPE = {
+    "prefill": "prefill",
+    "decode": "decode",
+    "worker": "agg",
+}
 
 
 def enable_vllm_benchmark_mode(config_dict: dict) -> None:
-    """Set ``DYN_BENCHMARK_MODE`` on every vLLM worker in *config_dict*.
+    """Set ``DYN_BENCHMARK_MODE`` on every typed vLLM worker.
 
-    Mutates ``config_dict`` in place. Each recognised worker component
-    (``VllmPrefillWorker`` / ``VllmDecodeWorker`` / ``VllmWorker``) gets the
-    mode matching its role so its startup self-benchmark publishes
-    ForwardPassMetrics via the ``get_perf_metrics`` endpoint.
+    The caller invokes this only for vLLM deployments. Worker roles are resolved
+    from the v1beta1 ``spec.components[].type`` field, so custom and legacy
+    component names receive the same benchmark mode as canonical names.
 
-    Idempotent: if ``DYN_BENCHMARK_MODE`` is already set (e.g. via user
-    overrides) the existing entry is replaced with the role-correct value.
-
-    A single generic ``type: worker`` component is aggregate even when its
-    planner-facing name is ``VllmDecodeWorker``.
+    Mutates ``config_dict`` in place. The operation is idempotent: an existing
+    ``DYN_BENCHMARK_MODE`` entry is replaced with the role-correct value.
     """
-    worker_roles = _vllm_worker_roles()
     components = config_dict.get("spec", {}).get("components", [])
     if not isinstance(components, list):
-        components = []
-    generic_workers = [
-        component
-        for component in components
-        if isinstance(component, dict)
-        and component.get("type") == "worker"
-        and component.get("name") in worker_roles
-    ]
-    aggregate_worker_name = (
-        generic_workers[0].get("name") if len(generic_workers) == 1 else None
-    )
+        return
 
-    for component_name, canonical_mode in worker_roles.items():
-        component = get_component_dict(config_dict, component_name)
-        if component is None:
+    for component in components:
+        if not isinstance(component, dict):
             continue
-        mode = "agg" if component_name == aggregate_worker_name else canonical_mode
+        mode = _VLLM_BENCHMARK_MODE_BY_COMPONENT_TYPE.get(component.get("type"))
+        if mode is None:
+            continue
         main_container = get_main_container_dict(component)
         if main_container is None:
             continue
         env_list = main_container.get("env") or []
         main_container["env"] = env_list
-        # Strip any existing DYN_BENCHMARK_MODE; append canonical value.
+        # Strip any existing DYN_BENCHMARK_MODE; append the type-derived value.
         env_list[:] = [
-            e
-            for e in env_list
-            if not (isinstance(e, dict) and e.get("name") == "DYN_BENCHMARK_MODE")
+            entry
+            for entry in env_list
+            if not (
+                isinstance(entry, dict) and entry.get("name") == "DYN_BENCHMARK_MODE"
+            )
         ]
         env_list.append({"name": "DYN_BENCHMARK_MODE", "value": mode})
         logger.info(
             "Enabled vLLM self-benchmark on component %s (DYN_BENCHMARK_MODE=%s)",
-            component_name,
+            component.get("name", "<unnamed>"),
             mode,
         )
 

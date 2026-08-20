@@ -30,14 +30,14 @@ class TestPrometheusExpositionFormatInjection:
         # Get exposition format with label injection (using prometheus_names constants)
         labels_to_inject = {
             prometheus_names.labels.NAMESPACE: "prod",
-            prometheus_names.labels.COMPONENT: "vllm-worker",
+            prometheus_names.labels.COMPONENT: "worker",
             prometheus_names.labels.ENDPOINT: "generate",
         }
         expfmt = get_prometheus_expfmt(registry, inject_custom_labels=labels_to_inject)
 
         # Verify exposition format contains injected labels
         assert f'{prometheus_names.labels.NAMESPACE}="prod"' in expfmt
-        assert f'{prometheus_names.labels.COMPONENT}="vllm-worker"' in expfmt
+        assert f'{prometheus_names.labels.COMPONENT}="worker"' in expfmt
         assert f'{prometheus_names.labels.ENDPOINT}="generate"' in expfmt
 
         # Verify counter value is present
@@ -192,7 +192,7 @@ class TestPrometheusExpositionFormatInjection:
         # Get exposition format with label injection
         labels_to_inject = {
             prometheus_names.labels.NAMESPACE: "prod",
-            prometheus_names.labels.COMPONENT: "vllm-worker",
+            prometheus_names.labels.COMPONENT: "worker",
         }
         expfmt = get_prometheus_expfmt(registry, inject_custom_labels=labels_to_inject)
 
@@ -200,7 +200,7 @@ class TestPrometheusExpositionFormatInjection:
         assert 'status="success"' in expfmt
         assert 'method="GET"' in expfmt
         assert f'{prometheus_names.labels.NAMESPACE}="prod"' in expfmt
-        assert f'{prometheus_names.labels.COMPONENT}="vllm-worker"' in expfmt
+        assert f'{prometheus_names.labels.COMPONENT}="worker"' in expfmt
 
     def test_inject_multiple_labels(self):
         """Test injecting many labels at once"""
@@ -212,7 +212,7 @@ class TestPrometheusExpositionFormatInjection:
         # Get exposition format with many injected labels
         labels_to_inject = {
             prometheus_names.labels.NAMESPACE: "prod",
-            prometheus_names.labels.COMPONENT: "vllm-worker",
+            prometheus_names.labels.COMPONENT: "worker",
             prometheus_names.labels.ENDPOINT: "generate",
             prometheus_names.labels.MODEL: "llama-3-70b",
             "instance_id": "worker-0",
@@ -253,7 +253,7 @@ class TestPrometheusExpositionFormatInjection:
         # Inject labels that match Rust auto-labels
         labels_to_inject = {
             prometheus_names.labels.NAMESPACE: "prod-inference",
-            prometheus_names.labels.COMPONENT: "vllm-decode-worker",
+            prometheus_names.labels.COMPONENT: "decode",
             prometheus_names.labels.ENDPOINT: "generate",
         }
         expfmt = get_prometheus_expfmt(
@@ -264,7 +264,7 @@ class TestPrometheusExpositionFormatInjection:
 
         # Verify Rust-compatible labels are present
         assert f'{prometheus_names.labels.NAMESPACE}="prod-inference"' in expfmt
-        assert f'{prometheus_names.labels.COMPONENT}="vllm-decode-worker"' in expfmt
+        assert f'{prometheus_names.labels.COMPONENT}="decode"' in expfmt
         assert f'{prometheus_names.labels.ENDPOINT}="generate"' in expfmt
 
         # Verify metric is present

@@ -31,7 +31,7 @@ spec:
           name: main
     replicas: 1
     type: frontend
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
@@ -75,7 +75,7 @@ spec:
         #     - 991  # video group
     replicas: 1
     type: decode
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:

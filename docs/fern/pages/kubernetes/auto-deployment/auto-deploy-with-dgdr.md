@@ -394,8 +394,11 @@ spec:
 ```
 
 Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` to find the generated
-component names. An override can modify only components already present in that generated DGD; it
-cannot add a new worker, EPP, or other topology component.
+component names. Generated vLLM DGDs use `worker` for aggregated deployments and `prefill` and
+`decode` for disaggregated deployments. An override must use those exact names; an entry named
+`VllmWorker`, `VllmPrefillWorker`, or `VllmDecodeWorker` does not match a newly generated component.
+An override can modify only components already present in that generated DGD; it cannot add a new
+worker, EPP, or other topology component.
 
 > [!IMPORTANT]
 > Older overrides used the `nvidia.com/v1alpha1` DGD shape. They remain supported for compatibility,

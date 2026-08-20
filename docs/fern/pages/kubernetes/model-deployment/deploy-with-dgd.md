@@ -45,6 +45,12 @@ spec:
 - `type: worker` runs the inference engine (vLLM, SGLang, or TensorRT-LLM).
 - Per-component fields you will use most: `replicas`, `multinode`, `sharedMemorySize`, and `podTemplate` — a standard Kubernetes [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core). The operator injects its defaults into the container named `main` inside `podTemplate.spec.containers`, where you set the `image`, the `command`/`args` that launch the engine, `resources` (CPU/memory/GPU), `envFrom`, `env`, and `volumeMounts`.
 
+For vLLM deployments, use `worker` for an aggregated component and `prefill` and `decode` for
+disaggregated components. The component name becomes part of generated Kubernetes resource names and
+the `nvidia.com/dynamo-component` label. For example, a `worker` component in a DGD named
+`vllm-agg` produces resources named `vllm-agg-worker`; changing the component name also changes
+commands, selectors, and overrides that target those resources.
+
 The steps below fill in these fields, building one spec from a model to a running deployment.
 
 <Steps toc={true} tocDepth={2}>
@@ -89,7 +95,7 @@ spec:
         containers:
         - name: main
           image: ${RUNTIME_IMAGE}
-  - name: VllmWorker
+  - name: worker
     type: worker
     replicas: 1
     podTemplate:
@@ -276,7 +282,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
   components:
   - name: Frontend
     type: frontend
-  - name: VllmWorker
+  - name: worker
     type: worker
     podTemplate:
       spec:
@@ -295,7 +301,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
   components:
   - name: Frontend
     type: frontend
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     sharedMemorySize: 16Gi
     podTemplate:
@@ -310,7 +316,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
           - prefill
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     sharedMemorySize: 16Gi
     podTemplate:
@@ -382,7 +388,7 @@ To pick actual numbers, start from a **[recipe](https://github.com/ai-dynamo/dyn
 <Tab title="vLLM" language="vllm">
 
 ```yaml
-  - name: VllmWorker
+  - name: worker
     type: worker
     podTemplate:
       spec:
@@ -546,7 +552,7 @@ spec:
         containers:
         - name: main
           image: ${RUNTIME_IMAGE}             # export: vllm-runtime image + tag
-  - name: VllmWorker
+  - name: worker
     type: worker
     replicas: 8                               # substitute: scale out for throughput
     podTemplate:

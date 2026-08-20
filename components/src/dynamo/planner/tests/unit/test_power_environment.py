@@ -168,7 +168,7 @@ def test_init_populates_power_watts():
 def test_init_failure_raises_deployment_validation_error():
     controller = _controller()
     controller.get_component_power_configs.side_effect = PowerAnnotationInvalidError(
-        "VllmDecodeWorker", "0"
+        "decode", "0"
     )
     env = _env(controller)
     with pytest.raises(DeploymentValidationError):
@@ -395,8 +395,8 @@ async def test_initialize_caches_caps_from_settled_snapshot_not_lagging_get():
         include_planner=False,
         require_prefill=True,
         require_decode=True,
-        prefill_component_name="VllmPrefillWorker",
-        decode_component_name="VllmDecodeWorker",
+        prefill_component_name="prefill",
+        decode_component_name="decode",
     )
     assert seen["power_deployments"][0] is settled
     assert seen["gpu_deployments"][0] is settled

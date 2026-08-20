@@ -88,7 +88,7 @@ spec:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     replicas: 1
     sharedMemorySize: 40Gi
@@ -238,7 +238,7 @@ spec:
             mountPath: /model-cache
           - name: dshm
             mountPath: /dev/shm
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     replicas: 1
     sharedMemorySize: 40Gi

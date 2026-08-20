@@ -119,7 +119,7 @@ def test_parse_served_model_ids_matches_exact_ids() -> None:
 @pytest.mark.parametrize(
     ("backend", "worker_names"),
     [
-        ("vllm", {"VllmDecodeWorker", "VllmPrefillWorker"}),
+        ("vllm", {"decode", "prefill"}),
         (
             "sglang",
             {"decode", "prefill", "SglangDecodeWorker", "SglangPrefillWorker"},

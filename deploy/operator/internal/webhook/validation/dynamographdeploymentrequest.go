@@ -19,12 +19,17 @@ package validation
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -40,7 +45,24 @@ func NewDynamoGraphDeploymentRequestValidator() *DynamoGraphDeploymentRequestVal
 // dynamoGraphDeploymentRequestValidation carries DGDR-specific request state.
 // API values, paths, and accumulated errors remain explicit validator arguments.
 type dynamoGraphDeploymentRequestValidation struct {
-	ctx context.Context
+	ctx      context.Context
+	warnings admission.Warnings
+}
+
+func (v *dynamoGraphDeploymentRequestValidation) warn(message string) {
+	v.warnings = append(v.warnings, message)
+}
+
+var deprecatedDGDRDGDComponentNames = map[string]string{
+	"VllmWorker":          "worker",
+	"VllmPrefillWorker":   "prefill",
+	"VllmDecodeWorker":    "worker for aggregate deployments or decode for disaggregated deployments",
+	"TRTLLMPrefillWorker": "prefill",
+	"TRTLLMDecodeWorker":  "decode",
+	"SGLangPrefillWorker": "prefill",
+	"SGLangDecodeWorker":  "worker for aggregate deployments or decode for disaggregated deployments",
+	"SglangPrefillWorker": "prefill",
+	"SglangDecodeWorker":  "worker for aggregate deployments or decode for disaggregated deployments",
 }
 
 // Validate performs stateless validation on request. ctx and request must not be nil.
@@ -50,7 +72,7 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate(
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
-	return nil, invalidDynamoGraphDeploymentRequestError(request, allErrs)
+	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
 }
 
 // ValidateUpdate validates newRequest against oldRequest. ctx, oldRequest, and newRequest must not be nil.
@@ -61,7 +83,8 @@ func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
-	return nil, invalidDynamoGraphDeploymentRequestError(newRequest, allErrs)
+	validation.warnDeprecatedDGDOverrideComponentNames(&newRequest.Spec)
+	return validation.warnings, invalidDynamoGraphDeploymentRequestError(newRequest, allErrs)
 }
 
 // validateDynamoGraphDeploymentRequest validates request. request must not be nil.
@@ -101,7 +124,93 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		))
 	}
 
+	v.warnDeprecatedDGDOverrideComponentNames(spec)
+
 	return allErrs
+}
+
+func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedDGDOverrideComponentNames(
+	spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+) {
+	if spec.Overrides == nil || spec.Overrides.DGD == nil {
+		return
+	}
+
+	override, ok := rawExtensionToUnstructured(spec.Overrides.DGD)
+	if !ok {
+		return
+	}
+
+	type deprecatedName struct {
+		name string
+		path string
+	}
+	deprecated := make([]deprecatedName, 0)
+	switch override.GetAPIVersion() {
+	case nvidiacomv1alpha1.GroupVersion.String():
+		services, _, err := unstructured.NestedMap(override.Object, "spec", "services")
+		if err != nil {
+			return
+		}
+		for name := range services {
+			if _, found := deprecatedDGDRDGDComponentNames[name]; found {
+				deprecated = append(deprecated, deprecatedName{
+					name: name,
+					path: "spec.overrides.dgd.spec.services." + name,
+				})
+			}
+		}
+	case nvidiacomv1beta1.GroupVersion.String():
+		components, _, err := unstructured.NestedSlice(override.Object, "spec", "components")
+		if err != nil {
+			return
+		}
+		for _, value := range components {
+			component, ok := value.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			name, _ := component["name"].(string)
+			if _, found := deprecatedDGDRDGDComponentNames[name]; found {
+				deprecated = append(deprecated, deprecatedName{
+					name: name,
+					path: fmt.Sprintf("spec.overrides.dgd.spec.components[name=%s]", name),
+				})
+			}
+		}
+	default:
+		return
+	}
+
+	sort.Slice(deprecated, func(i, j int) bool {
+		return deprecated[i].path < deprecated[j].path
+	})
+	for _, item := range deprecated {
+		v.warn(fmt.Sprintf(
+			"%s: generated component name %q is deprecated; use %s",
+			item.path,
+			item.name,
+			deprecatedDGDRDGDComponentNames[item.name],
+		))
+	}
+}
+
+func rawExtensionToUnstructured(extension *k8sruntime.RawExtension) (*unstructured.Unstructured, bool) {
+	if len(extension.Raw) > 0 {
+		object := map[string]interface{}{}
+		if err := json.Unmarshal(extension.Raw, &object); err != nil {
+			return nil, false
+		}
+		return &unstructured.Unstructured{Object: object}, true
+	}
+	if extension.Object == nil {
+		return nil, false
+	}
+	object, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(extension.Object)
+	if err != nil {
+		return nil, false
+	}
+	return &unstructured.Unstructured{Object: object}, true
 }
 
 // validateDynamoGraphDeploymentRequestUpdate validates an update. newRequest and oldRequest must not be nil.
