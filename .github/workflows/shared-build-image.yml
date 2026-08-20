@@ -641,13 +641,24 @@ jobs:
           fi
           TEST_TARGET="test_image"
           if [ "${{ inputs.target }}" == "planner" ]; then
-            TEST_TARGET="test_distroless"
+            TEST_TARGET="test_planner"
+          fi
+
+          PYPI_SECRET_ARGS=()
+          if [ -n "${PIP_INDEX_URL:-}" ] \
+            && [ -n "${UV_DEFAULT_INDEX:-}" ] \
+            && [ -n "${NETRC:-}" ] \
+            && [ -f "${NETRC}" ]; then
+            PYPI_SECRET_ARGS+=(--secret id=pip-index-url,env=PIP_INDEX_URL)
+            PYPI_SECRET_ARGS+=(--secret id=uv-default-index,env=UV_DEFAULT_INDEX)
+            PYPI_SECRET_ARGS+=(--secret "id=pypi-netrc,src=${NETRC}")
           fi
 
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \
+            "${PYPI_SECRET_ARGS[@]}" \
             --platform ${{ inputs.platform }} \
             --target ${TEST_TARGET} \
             -f container/Dockerfile.test \

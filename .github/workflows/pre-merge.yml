@@ -36,7 +36,6 @@ jobs:
       api_docs: ${{ steps.changes.outputs.api_docs }}
       fern_components: ${{ steps.changes.outputs.fern_components }}
       operator: ${{ steps.changes.outputs.operator }}
-      snapshot: ${{ steps.changes.outputs.snapshot }}
       rust: ${{ steps.changes.outputs.rust }}
     steps:
       - name: Checkout code
@@ -50,7 +49,7 @@ jobs:
 
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, recipe-check, api-docs, fern-check, fern-broken-links, operator, snapshot, rust-tests, rust-clippy, docs-website-composition]
+    needs: [changed-files, pre-commit, recipe-check, api-docs, fern-check, fern-broken-links, operator, rust-tests, rust-clippy, docs-website-composition]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -315,21 +314,6 @@ jobs:
       working-directory: deploy/operator
       run: make envtest
 
-  snapshot:
-    needs: changed-files
-    if: needs.changed-files.outputs.snapshot == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
-    - name: Run snapshot agent checks
-      uses: ./.github/actions/check-deploy-component
-      with:
-        component: snapshot
-        platform: linux/amd64
-
   rust-tests:
     needs: changed-files
     if: needs.changed-files.outputs.rust == 'true'
@@ -389,9 +373,6 @@ jobs:
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
       run: |
-        cargo test --locked -p dynamo-mocker --features replay-bench --lib canonical_digest_tests
-        cargo test --locked -p dynamo-mocker --features replay-bench --lib pressure_readmission
-        cargo test --locked -p dynamo-mocker --features replay-bench --lib fresh_prefill_tracks_cache_owned_prefix_pages
         cargo test --locked -p dynamo-bench --features replay-bench \
           --bench offline_replay_bench -- \
           testdata/mooncake_trace_tiny.jsonl \
@@ -401,13 +382,6 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --features aic-forward-pass -- --nocapture
-    - name: Run KVBM offload Mooncake trace test
-      if: matrix.dir == '.'
-      working-directory: ${{ matrix.dir }}
-      run: |
-        cargo test --locked -p dynamo-mocker --features replay-bench,kvbm-offload replay_forces_g1_to_g2 -- --nocapture
-        cargo test --locked -p dynamo-mocker --features replay-bench,kvbm-offload aggregated_canonical_evidence -- --nocapture
-        cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload g2 -- --nocapture
     - name: Compile feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -484,10 +458,6 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
-    - name: Run KVBM offload Mooncake trace clippy
-      if: matrix.dir == '.'
-      working-directory: ${{ matrix.dir }}
-      run: cargo clippy --no-deps -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload -- -D warnings
     - name: Lint feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

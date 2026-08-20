@@ -817,45 +817,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_nvext_builder_default() {
-        let nv_ext = NvExt::builder().build().unwrap();
-        assert_eq!(nv_ext.greed_sampling, None);
-        assert_eq!(nv_ext.use_raw_prompt, None);
-        assert_eq!(nv_ext.annotations, None);
-        assert_eq!(nv_ext.backend_instance_id, None);
-        assert_eq!(nv_ext.token_data, None);
-        assert_eq!(nv_ext.max_thinking_tokens, None);
-        assert_eq!(nv_ext.cache_salt, None);
-        assert_eq!(nv_ext.extra_fields, None);
-        assert_eq!(nv_ext.metadata_upload, None);
-        assert_eq!(nv_ext.prefill_worker_id, None);
-        assert_eq!(nv_ext.decode_worker_id, None);
-        assert_eq!(nv_ext.agent_hints, None);
-        assert_eq!(nv_ext.request_timestamp_ms, None);
-        assert_eq!(nv_ext.routing_constraints, None);
-    }
-
-    #[test]
-    fn shared_nvext_builder_custom() {
-        let nv_ext = NvExt::builder()
-            .greed_sampling(true)
-            .use_raw_prompt(true)
-            .backend_instance_id(42)
-            .token_data(vec![1, 2, 3, 4])
-            .max_thinking_tokens(1024)
-            .extra_fields(vec!["worker_id".to_string()])
-            .build()
-            .unwrap();
-
-        assert_eq!(nv_ext.greed_sampling, Some(true));
-        assert_eq!(nv_ext.use_raw_prompt, Some(true));
-        assert_eq!(nv_ext.backend_instance_id, Some(42));
-        assert_eq!(nv_ext.token_data, Some(vec![1, 2, 3, 4]));
-        assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
-        assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
-    }
-
-    #[test]
     fn parse_nvext_rejects_unknown_fields_in_llm_layer() {
         let err = parse_nvext(Some(serde_json::json!({
             "unsupported_future_field": true
@@ -876,18 +837,6 @@ mod tests {
         );
 
         assert!(serde_json::from_str::<AgentHints>(r#"{"strict_priority":-1}"#).is_err());
-    }
-
-    #[test]
-    fn shared_nvext_disagg_worker_ids() {
-        let nv_ext = NvExt::builder()
-            .prefill_worker_id(100)
-            .decode_worker_id(200)
-            .build()
-            .unwrap();
-
-        assert_eq!(nv_ext.prefill_worker_id, Some(100));
-        assert_eq!(nv_ext.decode_worker_id, Some(200));
     }
 
     #[test]

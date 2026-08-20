@@ -150,6 +150,7 @@ Kubernetes: `>=1.30.0-0`
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.12-rc1 |
+| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.1.0-alpha.1 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
 
 ## Values
@@ -163,6 +164,7 @@ Kubernetes: `>=1.30.0-0`
 | global.volcano-scheduler.enabled | bool | `false` | EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets. Set to true when Volcano is available in the cluster and Grove is configured with Volcano scheduler support. The operator uses this to inject schedulerName and map nvidia.com/volcano-queue to Grove's Volcano queue annotation. |
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
+| global.snapshot.install | bool | `false` | Whether this chart should install the bundled Snapshot subchart (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs. NOTE: For production environments, it is recommended to install Snapshot separately. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |

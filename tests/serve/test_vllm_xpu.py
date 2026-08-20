@@ -538,7 +538,9 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
+            # vLLM 0.27 warms more MRV2 scheduler/kernel specializations before
+            # serving; XPU CI measured 92-105s of startup warmup.
+            pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",

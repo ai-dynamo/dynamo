@@ -465,7 +465,7 @@ navigation:
           - page: Kimi-K2.6
             path: pages/recipes/model-recipes/kimi-k2-6.mdx
             slug: kimi-k2-6
-          - page: Nemotron-3.5-Lightning
+          - page: Nemotron 3.5 Lightning
             path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
             slug: nemotron-3-5-lightning
           - page: Nemotron 3 Ultra
@@ -958,14 +958,19 @@ navigation:
   - tab: reference
     layout:
       - page: Compatibility
+        icon: shield-halved
         path: pages/reference/general/compatibility.mdx
         slug: compatibility
 
       - section: Releases
+        icon: tag
         slug: releases
         path: pages/reference/general/releases/release-history.mdx
         collapsed: true
         contents:
+          - page: Dynamo v1.4.0
+            path: pages/reference/general/releases/dynamo-v1-4-0.mdx
+            slug: v1-4-0
           - page: Dynamo v1.3.0
             path: pages/reference/general/releases/dynamo-v1-3-0.mdx
             slug: v1-3-0
@@ -986,23 +991,28 @@ navigation:
       # Machine-readable mirror of releases.data.ts for agents; reachable
       # by URL and llms indexes, not the sidebar.
       - page: Releases (machine-readable)
+        icon: database
         path: pages/reference/general/releases-machine-readable.mdx
         slug: releases-data
         hidden: true
 
       - page: Release Artifacts
+        icon: download
         path: pages/reference/general/release-artifacts.mdx
         slug: release-artifacts
 
       - page: Nightly Releases
+        icon: moon
         path: pages/reference/general/nightly-releases.md
         slug: nightly-releases
 
       - page: Model Early Access Builds
+        icon: microchip
         path: pages/reference/general/model-early-access-builds.mdx
         slug: model-early-access-builds
 
       - page: Examples
+        icon: file-code
         path: pages/reference/general/examples.md
         slug: examples
 
@@ -1021,6 +1031,7 @@ navigation:
       # the twenty anchored redirects in docs.yml that carry the retired
       # NIXL Connect class pages -- would otherwise move.
       - page: API Reference
+        icon: code
         path: pages/reference/api/README.mdx
         slug: api
 
@@ -1171,6 +1182,7 @@ navigation:
             path: pages/reference/nixl-connect/overview.mdx
 
       - page: Glossary
+        icon: book-open
         path: pages/reference/general/glossary.md
         slug: glossary
 
@@ -1220,6 +1232,7 @@ navigation:
   - tab: community
     layout:
       - page: Community
+        icon: users
         path: pages/community/community.mdx
       - section: Contributing
         icon: code-pull-request

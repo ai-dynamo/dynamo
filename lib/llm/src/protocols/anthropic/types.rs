@@ -1009,6 +1009,55 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_tool_choice_conversion_preserves_request_level_parser_policy() {
+        for (label, tool_choice, parsing_enabled) in [
+            ("auto", serde_json::json!({"type": "auto"}), true),
+            ("any", serde_json::json!({"type": "any"}), true),
+            (
+                "named",
+                serde_json::json!({"type": "tool", "name": "get_weather"}),
+                true,
+            ),
+            ("none", serde_json::json!({"type": "none"}), false),
+        ] {
+            let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "tools": [{
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "input_schema": {"type": "object"}
+                }],
+                "tool_choice": tool_choice
+            }))
+            .unwrap();
+
+            let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+            assert_eq!(
+                chat_req.inner.tools.as_ref().map(Vec::len),
+                Some(1),
+                "{label} must preserve tools"
+            );
+            assert_eq!(
+                crate::preprocessor::OpenAIPreprocessor::tool_call_parsing_enabled(&chat_req),
+                parsing_enabled,
+                "unexpected parser policy for Anthropic {label}"
+            );
+
+            match (label, chat_req.inner.tool_choice.as_ref()) {
+                ("auto", Some(ChatCompletionToolChoiceOption::Auto))
+                | ("any", Some(ChatCompletionToolChoiceOption::Required))
+                | ("none", Some(ChatCompletionToolChoiceOption::None)) => {}
+                ("named", Some(ChatCompletionToolChoiceOption::Named(named))) => {
+                    assert_eq!(named.function.name, "get_weather");
+                }
+                (_, actual) => panic!("unexpected converted tool choice for {label}: {actual:?}"),
+            }
+        }
+    }
+
     #[allow(deprecated)]
     #[test]
     fn test_chat_completion_to_anthropic_response() {
