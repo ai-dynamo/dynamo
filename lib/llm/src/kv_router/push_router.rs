@@ -248,6 +248,7 @@ where
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
             Err(_) if operation.target().is_some() && explicit.is_none() => {
+                operation.trace_bound_target_fallback_rebind();
                 operation.invalidate();
                 let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
@@ -526,7 +527,10 @@ where
         let Some(operation) = operation else {
             return Ok((metadata, stream));
         };
-        Ok((metadata, operation.into_stream(selected_target, stream)?))
+        Ok((
+            metadata,
+            operation.into_stream(selected_target, phase, stream)?,
+        ))
     }
 }
 
@@ -635,7 +639,7 @@ where
             }
         };
         match operation {
-            Some(operation) => operation.into_stream(selected_target, stream),
+            Some(operation) => operation.into_stream(selected_target, phase, stream),
             None => Ok(stream),
         }
     }
