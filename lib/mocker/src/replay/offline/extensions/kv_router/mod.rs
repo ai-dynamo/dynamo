@@ -39,9 +39,10 @@ use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
     replay_slots, replay_worker_config, replay_workers_with_configs,
 };
+#[cfg(test)]
+use crate::replay::session_affinity::ReplaySessionAffinityMode;
 use crate::replay::session_affinity::{
-    ReplayKvObservationMode, ReplaySessionAffinity, ReplaySessionAffinityMode,
-    ReplaySessionSimulationOptions,
+    ReplayKvObservationMode, ReplaySessionAffinity, ReplaySessionSimulationOptions,
 };
 use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use aisimulate_core::replay::{
