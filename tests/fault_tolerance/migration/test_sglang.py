@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Test Execution Times (Last Run: 2026-01-13):
-- test_request_migration_sglang_aggregated: ~75s
+Test Execution Times (H100 validation: 2026-08-20):
+- test_request_migration_sglang_aggregated: ~104s
 - test_request_migration_sglang_prefill: N/A
 - test_request_migration_sglang_kv_transfer: N/A
-- test_request_migration_sglang_decode: ~75s
+- test_request_migration_sglang_decode: ~145-168s per case (~156s average)
 """
 
 import logging
@@ -212,7 +212,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.timeout(230)  # 3x average
+@pytest.mark.timeout(330)  # 3x measured H100 average
 @pytest.mark.post_merge
 @representative_worker_failure_parameter()
 def test_request_migration_sglang_aggregated(
@@ -273,7 +273,7 @@ def test_request_migration_sglang_aggregated(
 @pytest.mark.skip(
     reason="SGLang prefill completes before migration can be triggered; DYN-4059"
 )
-@pytest.mark.timeout(230)  # 3x average
+@pytest.mark.timeout(230)
 @pytest.mark.nightly
 @representative_worker_failure_parameter()
 def test_request_migration_sglang_prefill(
@@ -348,7 +348,7 @@ def test_request_migration_sglang_prefill(
 @pytest.mark.skip(
     reason="SGLang migration during KV transfer is not reliable; DYN-4059"
 )
-@pytest.mark.timeout(230)  # 3x average
+@pytest.mark.timeout(230)
 @pytest.mark.nightly
 @representative_worker_failure_parameter()
 def test_request_migration_sglang_kv_transfer(
@@ -420,7 +420,7 @@ def test_request_migration_sglang_kv_transfer(
                     )
 
 
-@pytest.mark.timeout(230)  # 3x average
+@pytest.mark.timeout(480)  # 3x measured H100 average
 @pytest.mark.nightly
 @migration_control_parameter()
 def test_request_migration_sglang_decode(
