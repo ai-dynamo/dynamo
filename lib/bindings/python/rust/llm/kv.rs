@@ -1681,6 +1681,53 @@ mod metric_worker_type_tests {
         assert_eq!(advertised, Some(llm_rs::worker_type::WorkerType::Decode));
         assert_eq!(policy, Some(llm_rs::worker_type::WorkerType::Decode));
     }
+
+    #[tokio::test]
+    async fn standalone_encode_kv_router_retains_graph_with_load_monitoring_disabled() {
+        let runtime = rs::Runtime::from_current().unwrap();
+        let distributed = rs::DistributedRuntime::new(
+            runtime.clone(),
+            rs::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let inner = distributed
+            .namespace("python-standalone-encode".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        inner.register_endpoint_instance().await.unwrap();
+        let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only("encode-model");
+        card.worker_type = Some(llm_rs::worker_type::WorkerType::Encode);
+        card.model_input = llm_rs::model_type::ModelInput::Tokens;
+        card.model_type = llm_rs::model_type::ModelType::Chat;
+        llm_rs::local_model::register_model_card(&inner, &card)
+            .await
+            .unwrap();
+        let client = inner.client().await.unwrap();
+        let endpoint = Endpoint {
+            inner,
+            event_loop: Python::with_gil(|py| py.None()),
+        };
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            ..Default::default()
+        };
+
+        let graph = create_kv_router_from_endpoint(&endpoint, client, 16, Some(config), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            graph.owner().source(),
+            llm_rs::kv_router::RouterLoadSource::Encode
+        );
+        assert!(graph.owner().monitor().is_none());
+        assert!(!graph.owner().scheduler_load_sender().is_enabled());
+        runtime.shutdown();
+    }
 }
 
 /// Create a KV router from an endpoint using the ModelManager for registration.
@@ -1772,8 +1819,7 @@ async fn create_kv_router_from_endpoint(
                     policy_worker_role,
                     llm_rs::kv_router::RouterLoadSource::from_worker_type(
                         card.effective_worker_type(),
-                    )
-                    .map_err(to_pyerr)?,
+                    ),
                 )
             }
             None => {
