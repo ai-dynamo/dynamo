@@ -41,6 +41,11 @@ on:
         required: false
         type: string
         default: '/workspace'
+      models_dir:
+        description: 'Pre-populated model-cache directory passed to pytest as --models-dir'
+        required: false
+        type: string
+        default: ''
       kvbm_mla_backend:
         description: 'KVBM MLA attention backend exported for KVBM tests'
         required: false
@@ -243,6 +248,7 @@ jobs:
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          models_dir: ${{ inputs.models_dir }}
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
@@ -274,6 +280,7 @@ jobs:
           test_type: "pre_merge_gpu_parallel"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          models_dir: ${{ inputs.models_dir }}
           # parallel_mode=auto + max_vram_gib hands off to the VRAM-aware
           # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
           parallel_mode: 'auto'
@@ -296,6 +303,7 @@ jobs:
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          models_dir: ${{ inputs.models_dir }}
           parallel_mode: 'none'
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
