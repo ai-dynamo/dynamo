@@ -90,6 +90,10 @@ async def test_build_mm_items_routes_video_to_video_data():
             return embeddings, 17
 
         @staticmethod
+        def release_embeddings(tensor_id):
+            raise AssertionError("successful construction transfers tensor ownership")
+
+        @staticmethod
         def create_multimodal_image_item(
             embeddings,
             image_grid_thw,
@@ -146,6 +150,104 @@ async def test_build_mm_items_routes_video_to_video_data():
         mm_item["second_per_grid_ts"], torch.tensor([0.5], dtype=torch.float32)
     )
     assert mm_item["video_timestamps"] == [[0.25, 0.75]]
+
+
+@pytest.mark.asyncio
+async def test_build_mm_items_releases_embeddings_when_validation_fails():
+    embeddings = torch.zeros((1, 4), dtype=torch.float16)
+    released_tensor_ids = []
+
+    class _FakeEmbeddingsProcessor:
+        async def process_embeddings(self, request):
+            return embeddings, 17
+
+        @staticmethod
+        def create_multimodal_image_item(embeddings, image_grid_thw):
+            raise AssertionError("validation should fail before item construction")
+
+        @staticmethod
+        def create_multimodal_video_item(
+            embeddings,
+            video_grid_thw,
+            second_per_grid_ts=None,
+            video_timestamps=None,
+        ):
+            raise AssertionError("validation should fail before item construction")
+
+        @staticmethod
+        def release_embeddings(tensor_id):
+            released_tensor_ids.append(tensor_id)
+            raise RuntimeError("release failed")
+
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[151652, 151656, 151653],
+            stop_conditions=StopConditions(max_tokens=32),
+            sampling_options=SamplingOptions(temperature=0.0),
+        ),
+        multimodal_inputs=[
+            MultiModalGroup(
+                multimodal_input=MultiModalInput(),
+                image_grid_thw=[1, 1, 1],
+                num_mm_tokens=2,
+            )
+        ],
+    )
+
+    with pytest.raises(
+        ValueError, match="Encoded token counts exceed received embedding rows"
+    ):
+        await _build_mm_items(request, _FakeEmbeddingsProcessor())
+
+    assert released_tensor_ids == [17]
+
+
+@pytest.mark.asyncio
+async def test_build_mm_items_releases_embeddings_when_item_construction_fails():
+    embeddings = torch.zeros((1, 4), dtype=torch.float16)
+    released_tensor_ids = []
+
+    class _FakeEmbeddingsProcessor:
+        async def process_embeddings(self, request):
+            return embeddings, 17
+
+        @staticmethod
+        def create_multimodal_image_item(embeddings, image_grid_thw):
+            raise ValueError("image item construction failed")
+
+        @staticmethod
+        def create_multimodal_video_item(
+            embeddings,
+            video_grid_thw,
+            second_per_grid_ts=None,
+            video_timestamps=None,
+        ):
+            raise AssertionError("image item construction should run")
+
+        @staticmethod
+        def release_embeddings(tensor_id):
+            released_tensor_ids.append(tensor_id)
+            raise RuntimeError("release failed")
+
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[151652, 151656, 151653],
+            stop_conditions=StopConditions(max_tokens=32),
+            sampling_options=SamplingOptions(temperature=0.0),
+        ),
+        multimodal_inputs=[
+            MultiModalGroup(
+                multimodal_input=MultiModalInput(),
+                image_grid_thw=[1, 1, 1],
+                num_mm_tokens=1,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="image item construction failed"):
+        await _build_mm_items(request, _FakeEmbeddingsProcessor())
+
+    assert released_tensor_ids == [17]
 
 
 async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
