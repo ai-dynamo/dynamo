@@ -165,6 +165,10 @@ impl RoutingLoadState {
         self.least_loaded_rank(&workers, worker_id)
     }
 
+    pub(crate) fn is_configured_worker(&self, worker_id: u64) -> bool {
+        self.workers.read().contains_key(&worker_id)
+    }
+
     fn select_worker(
         &self,
         router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
