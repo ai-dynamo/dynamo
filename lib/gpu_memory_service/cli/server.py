@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--use-v1",
         action="store_true",
-        help="Launch the CUDA-only V1 server for every visible device.",
+        help="Use the CUDA-only V1 profile for servers, loaders, or the restore-ready probe.",
     )
     parser.add_argument(
         "--device-type",
@@ -86,7 +86,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--probe-restore-ready",
         action="store_true",
-        help="Attempt bounded RO admission on every weights socket and exit.",
+        help=(
+            "One-shot: try bounded RO admission on every weights socket and "
+            "exit. Does not start servers or loaders."
+        ),
     )
     parser.add_argument(
         "--enable-loader",
@@ -97,11 +100,14 @@ def main(argv: list[str] | None = None) -> None:
             "--checkpoint-dir, go to the loader. Pass --device to load one GPU."
         ),
     )
+    raw = argv if argv is not None else sys.argv[1:]
+    if "--probe-restore-ready" in raw and "--enable-loader" in raw:
+        parser.error(
+            "--probe-restore-ready is one-shot and cannot start servers or loaders"
+        )
     args = parser.parse_args(argv)
     if args.use_v1 and args.device_type != VMMDeviceType.CUDA.value:
         parser.error("--use-v1 only supports --device-type=cuda")
-    if args.probe_restore_ready and args.enable_loader is not None:
-        parser.error("--probe-restore-ready cannot be combined with --enable-loader")
 
     init_vmm(VMMDeviceType.from_str(args.device_type))
     vmm = get_vmm()
