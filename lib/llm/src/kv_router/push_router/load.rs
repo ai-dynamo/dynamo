@@ -13,7 +13,7 @@ use dynamo_runtime::{
     CancellationToken, component::Endpoint, pipeline::PushRouter,
     traits::DistributedRuntimeProvider,
 };
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio::time::Instant;
 
 use crate::{
@@ -33,7 +33,9 @@ use dynamo_runtime::protocols::annotated::Annotated;
 /// as well so `LOAD` has one meaning across all routing policies.
 pub(crate) struct RoutingLoadState {
     slots: Arc<ActiveSequencesMulti>,
-    workers: RuntimeConfigWatch,
+    // This snapshot is published only after `slots` has reconciled the same topology, so
+    // selection never chooses a worker whose DP ranks have not been registered yet.
+    workers: RwLock<HashMap<u64, ModelRuntimeConfig>>,
     block_size: usize,
     config: KvRouterConfig,
     selection_gate: Mutex<()>,
@@ -54,7 +56,7 @@ impl RoutingLoadState {
         let slots = create_multi_worker_sequences(
             endpoint,
             block_size as usize,
-            initial_workers,
+            initial_workers.clone(),
             config.router_replica_sync,
             router_id,
             worker_type,
@@ -65,19 +67,18 @@ impl RoutingLoadState {
 
         let state = Arc::new(Self {
             slots,
-            workers,
+            workers: RwLock::new(initial_workers),
             block_size: block_size as usize,
             config,
             selection_gate: Mutex::new(()),
             cancellation_token,
         });
-        Self::watch_worker_topology(&state);
+        Self::watch_worker_topology(&state, workers);
         Ok(state)
     }
 
-    fn watch_worker_topology(state: &Arc<Self>) {
+    fn watch_worker_topology(state: &Arc<Self>, mut workers: RuntimeConfigWatch) {
         let weak = Arc::downgrade(state);
-        let mut workers = state.workers.clone();
         let cancellation_token = state.cancellation_token.child_token();
         tokio::spawn(async move {
             loop {
@@ -90,8 +91,8 @@ impl RoutingLoadState {
                         let Some(state) = weak.upgrade() else {
                             break;
                         };
-                        let ranges = workers
-                            .borrow_and_update()
+                        let configured_workers = workers.borrow_and_update().clone();
+                        let ranges = configured_workers
                             .iter()
                             .map(|(&worker_id, config)| {
                                 WorkerDpRange::new(
@@ -101,8 +102,11 @@ impl RoutingLoadState {
                                 )
                             })
                             .collect::<Vec<_>>();
+                        let _selection = state.selection_gate.lock();
                         if let Err(error) = state.slots.reconcile_workers(ranges) {
                             tracing::error!(%error, "Invalid routing load worker topology update");
+                        } else {
+                            *state.workers.write() = configured_workers;
                         }
                     }
                 }
@@ -120,9 +124,17 @@ impl RoutingLoadState {
         // Serialize the policy decision with its slot booking. Without this boundary, concurrent
         // P2C decisions could all observe the same pre-admission load.
         let _selection = self.selection_gate.lock();
-        let workers = self.workers.borrow();
-        let worker_id =
-            router.select_target_with_load(pinned_worker.map(|target| target.0), |worker_id| {
+        let workers = self.workers.read();
+        if let Some((worker_id, _)) = pinned_worker {
+            anyhow::ensure!(
+                workers.contains_key(&worker_id),
+                "worker {worker_id} has no runtime configuration"
+            );
+        }
+        let worker_id = router.select_target_with_load(
+            pinned_worker.map(|target| target.0),
+            |worker_id| workers.contains_key(&worker_id),
+            |worker_id| {
                 workers.get(&worker_id).map_or(0, |config| {
                     self.slots.active_request_count_for_worker(
                         worker_id,
@@ -130,7 +142,8 @@ impl RoutingLoadState {
                         config.data_parallel_size(),
                     ) as u64
                 })
-            })?;
+            },
+        )?;
         let worker = match pinned_worker {
             Some((pinned_worker_id, Some(dp_rank))) => {
                 debug_assert_eq!(worker_id, pinned_worker_id);
@@ -275,13 +288,13 @@ impl RoutingLoadReservation {
         self.state.track_output_blocks()
     }
 
-    pub(crate) fn retarget(&mut self, worker_id: u64) -> Result<()> {
+    pub(crate) fn retarget(&mut self, worker_id: u64) -> Result<WorkerWithDpRank> {
         if self.worker.worker_id == worker_id {
-            return Ok(());
+            return Ok(self.worker);
         }
 
         let _selection = self.state.selection_gate.lock();
-        let workers = self.state.workers.borrow();
+        let workers = self.state.workers.read();
         let next_worker = self.state.least_loaded_rank(&workers, worker_id)?;
         self.state
             .slots
@@ -301,7 +314,7 @@ impl RoutingLoadReservation {
             .with_context(|| format!("reserve routing load fallback on worker {next_worker:?}"))?;
         self.worker = next_worker;
         self.armed = true;
-        Ok(())
+        Ok(self.worker)
     }
 
     pub(crate) fn mark_prefill_completed(&self) -> Result<()> {
