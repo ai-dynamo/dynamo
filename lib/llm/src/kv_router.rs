@@ -544,22 +544,12 @@ where
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
-    /// Session-aware logical prefix index, present only when
-    /// `enable_session_prefix_index` is set. Held as an optional field rather
-    /// than threaded through the constructor signature so no caller has to
-    /// change to opt out.
+    /// Optional session-aware logical prefix index.
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 }
 
-/// The deepest device-tier block this lookup matched, as the last matched hash
-/// of the worker with the highest device overlap. Lower cache tiers are not
-/// considered; the only caller passes device match details.
-///
-/// The session index records what the session's prefix reached, not which
-/// worker served it, so this deliberately runs before worker selection: the
-/// scheduler may pick a less-overlapping worker for load reasons, and that
-/// choice says nothing about how much prefix the session actually has.
-/// Ties break on the hash so the choice is stable across map iteration orders.
+/// Returns the deepest device-tier match with stable hash tie-breaking.
+/// Lineage records matched prefix depth rather than the selected worker.
 fn deepest_matched_hash(details: &MatchDetails) -> Option<ExternalSequenceBlockHash> {
     details
         .last_matched_hashes
@@ -1355,9 +1345,7 @@ where
             .then(|| tiered_matches.router_hint_root_candidates().cloned())
             .flatten();
 
-        // Feed the session prefix index while the match details are still in
-        // scope. A failure here is a bookkeeping problem, never a routing one,
-        // so it is logged and the request continues.
+        // Indexing failures never affect routing.
         if let Some(index) = self.session_prefix_index.as_ref()
             && let Some(session) = session_context.as_ref()
         {
@@ -1368,13 +1356,7 @@ where
                 tracing::warn!(%err, "failed to record session prefix match");
             }
 
-            // Release the session once the request says it is over. These two
-            // markers are the only end-of-session signal the router sees, and
-            // both are optional, so this reclaims promptly when a client sends
-            // one without being the only thing that bounds the index — the
-            // indexer's own session cap covers clients that never send either.
-            // Ordering matters: reclaim after recording, so a final request
-            // that also carries a match does not leave the match behind.
+            // Reclaim after recording the final match.
             let session_over = session.session_final() == Some(true)
                 || session
                     .kv_hints()
