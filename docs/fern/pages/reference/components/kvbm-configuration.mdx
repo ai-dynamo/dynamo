@@ -62,6 +62,21 @@ KVBM offloads KV blocks GPU (G1) → host/CPU (G2) → disk (G3) → object stor
   Maximum number of block transfers in flight at once.
 </ParamField>
 
+<ParamField path="DYN_KVBM_DEVICE_LAYOUT_TYPE" type="string" default="unset">
+  Override the device (G1) layout of the vLLM connector instead of detecting it from the KV cache tensor shapes. Accepted values:
+
+  - `fully_contiguous`: one storage region spanning all layers, transferred as one NIXL descriptor per block.
+  - `layer_separate`: one storage region per layer. This selects the layout family only; `outer_contiguous` is still detected from the tensor shapes.
+  - `layer_separate_outer_contiguous`: one region per layer, laid out as `[outer_dim, n_blocks, ...]`.
+  - `layer_separate_block_contiguous`: one region per layer, laid out as `[n_blocks, outer_dim, ...]`.
+
+  A `layer_separate` device tier splits every host or disk transfer into `num_layers * outer_dim` NIXL descriptors per block, which costs throughput on network storage where the cost is per request rather than per byte.
+
+  Set this to `fully_contiguous` only when the engine hands KVBM a single cross-layer contiguous KV cache. vLLM registers one tensor per layer by default, and on that path forcing `fully_contiguous` aborts KV cache registration at startup.
+
+  Prefer plain `layer_separate` over the two explicit variants. Pinning a variant that contradicts the tensor shapes is rejected at startup, because honouring it would swap the block and outer strides and read the wrong K/V regions.
+</ParamField>
+
 <ParamField path="DYN_KVBM_DISABLE_WRITE_COMBINED" type="boolean" default="false">
   Disable write-combined memory for transfers.
 </ParamField>

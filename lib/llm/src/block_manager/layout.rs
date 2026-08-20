@@ -189,6 +189,157 @@ impl LayoutType {
     }
 }
 
+/// Lower-case a user-supplied layout name and drop the separators, so that
+/// `layer_separate`, `LayerSeparate` and `LAYER-SEPARATE` all name the same thing.
+fn normalize_layout_name(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+impl std::str::FromStr for LayoutType {
+    type Err = LayoutError;
+
+    /// Parse a fully specified layout type from a user-supplied string.
+    ///
+    /// Accepted values are case-insensitive and ignore `_` and `-`:
+    /// - `fully_contiguous`
+    /// - `layer_separate_outer_contiguous`
+    /// - `layer_separate_block_contiguous`
+    ///
+    /// Plain `layer_separate` is deliberately not accepted: it names the layout family
+    /// without fixing `outer_contiguous`, which has to come from the KV cache tensor
+    /// shapes. Parse it through [`LayoutTypeRequest`] instead.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match normalize_layout_name(s).as_str() {
+            "fullycontiguous" => Ok(LayoutType::FullyContiguous),
+            "layerseparateoutercontiguous" => Ok(LayoutType::layer_separate(true)),
+            "layerseparateblockcontiguous" => Ok(LayoutType::layer_separate(false)),
+            _ => Err(LayoutError::InvalidConfig(format!(
+                "unknown layout type '{s}'; expected one of 'fully_contiguous', \
+                 'layer_separate_outer_contiguous', 'layer_separate_block_contiguous'"
+            ))),
+        }
+    }
+}
+
+/// A layout selection as supplied by an operator, before the KV cache tensor shapes are
+/// known.
+///
+/// This is kept distinct from [`LayoutType`] because `layer_separate` names a family, not
+/// a memory layout: `outer_contiguous` still has to be derived from the tensor shapes.
+/// Collapsing the two loses that distinction, and the mistake is silent — a
+/// `[n_blocks, outer_dim, ...]` cache pinned to `outer_contiguous = true` needs exactly
+/// the same storage size, so [`LayerSeparate::new`] validates it happily and
+/// [`LayerSeparate::memory_region`] then swaps the block and outer strides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutTypeRequest {
+    /// Use this layout as given and skip shape-based detection.
+    Pinned(LayoutType),
+
+    /// Use `LayerSeparate`, with `outer_contiguous` detected from the tensor shapes.
+    LayerSeparateAuto,
+}
+
+impl LayoutTypeRequest {
+    /// Resolve the request against the shape of the first registered KV cache tensor.
+    ///
+    /// `shape` is `None` when no tensor is available for detection; the request then
+    /// falls back to [`LayoutType::layer_separate_auto_default`].
+    ///
+    /// A pinned `LayerSeparate` variant that contradicts the shape is rejected rather
+    /// than honoured, because both interpretations pass layout validation: the mistake
+    /// would otherwise surface as transfers reading the wrong K/V regions instead of as
+    /// a startup error.
+    pub fn resolve(
+        &self,
+        shape: Option<&[usize]>,
+        num_device_blocks: usize,
+    ) -> anyhow::Result<LayoutType> {
+        // Detection only ever yields a LayerSeparate variant. `None` means the shape was
+        // unavailable or inconclusive, in which case a pinned request stands on its own.
+        let detected = match shape {
+            Some(shape) => match LayoutType::layer_separate_auto(shape, num_device_blocks) {
+                Ok(detected) => Some(detected),
+                Err(e) => {
+                    tracing::warn!("Failed to detect layout from shape {shape:?}: {e}");
+                    None
+                }
+            },
+            None => {
+                tracing::warn!("No tensors available for layout detection");
+                None
+            }
+        };
+
+        match (*self, detected) {
+            (Self::Pinned(pinned @ LayoutType::FullyContiguous), _) => {
+                tracing::info!("Using explicit device layout: {pinned:?}");
+                Ok(pinned)
+            }
+            (Self::Pinned(pinned), Some(detected))
+                if pinned != detected && !layer_separate_modes_equivalent(shape) =>
+            {
+                Err(anyhow::anyhow!(
+                    "requested device layout {pinned:?} contradicts the KV cache tensor shape \
+                     {:?}, which describes {detected:?}; honouring the request would read the \
+                     wrong K/V regions, so drop the override to use shape-based detection",
+                    shape.unwrap_or_default(),
+                ))
+            }
+            (Self::Pinned(pinned), _) => {
+                tracing::info!("Using explicit device layout: {pinned:?}");
+                Ok(pinned)
+            }
+            (Self::LayerSeparateAuto, Some(detected)) => {
+                tracing::info!("Auto-detected device layout from tensor shape: {detected:?}");
+                Ok(detected)
+            }
+            (Self::LayerSeparateAuto, None) => {
+                let fallback = LayoutType::layer_separate_auto_default();
+                tracing::warn!("Using default device layout: {fallback:?}");
+                Ok(fallback)
+            }
+        }
+    }
+}
+
+/// True when the tensor has an outer dimension of 1, in which case the outer-contiguous
+/// and block-contiguous interpretations describe the same memory and a pinned variant
+/// cannot contradict the shape. Fused-MLA caches registered as `[1, n_blocks, ...]` or
+/// `[n_blocks, 1, ...]` land here.
+fn layer_separate_modes_equivalent(shape: Option<&[usize]>) -> bool {
+    matches!(shape, Some(shape) if shape.len() >= 2 && (shape[0] == 1 || shape[1] == 1))
+}
+
+impl std::str::FromStr for LayoutTypeRequest {
+    type Err = LayoutError;
+
+    /// Parse a layout request from a user-supplied string, e.g. an environment variable.
+    ///
+    /// Accepted values are case-insensitive and ignore `_` and `-`:
+    /// - `fully_contiguous`
+    /// - `layer_separate` — the family, with `outer_contiguous` left to detection
+    /// - `layer_separate_outer_contiguous`
+    /// - `layer_separate_block_contiguous`
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if normalize_layout_name(s) == "layerseparate" {
+            return Ok(LayoutTypeRequest::LayerSeparateAuto);
+        }
+
+        s.parse::<LayoutType>()
+            .map(LayoutTypeRequest::Pinned)
+            .map_err(|_| {
+                LayoutError::InvalidConfig(format!(
+                    "unknown layout type '{s}'; expected one of 'fully_contiguous', \
+                     'layer_separate', 'layer_separate_outer_contiguous', \
+                     'layer_separate_block_contiguous'"
+                ))
+            })
+    }
+}
+
 /// Local Memory Region
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Getters)]
 pub struct LocalMemoryRegion {
@@ -1049,6 +1200,143 @@ pub mod tests {
         };
 
         FullyContiguous::allocate(config, &NullDeviceAllocator)
+    }
+
+    #[test]
+    fn test_layout_type_from_str() {
+        use std::str::FromStr;
+
+        // A disk (FullyContiguous) -> device (LayerSeparate) onboard is emitted as
+        // `num_layers * outer_dim` NIXL descriptors per block, so operators need a way
+        // to force the device tier to FullyContiguous when the engine allows it.
+        for input in ["fully_contiguous", "FullyContiguous", "FULLY-CONTIGUOUS"] {
+            assert_eq!(
+                LayoutType::from_str(input).unwrap(),
+                LayoutType::FullyContiguous,
+                "failed to parse {input}"
+            );
+        }
+
+        assert_eq!(
+            LayoutType::from_str("layer_separate_outer_contiguous").unwrap(),
+            LayoutType::layer_separate(true)
+        );
+        assert_eq!(
+            LayoutType::from_str("layer_separate_block_contiguous").unwrap(),
+            LayoutType::layer_separate(false)
+        );
+
+        // `layer_separate` alone does not name a memory layout; only the request type
+        // accepts it, so that `outer_contiguous` keeps coming from the tensor shapes.
+        assert!(LayoutType::from_str("layer_separate").is_err());
+        assert!(LayoutType::from_str("").is_err());
+        assert!(LayoutType::from_str("contiguous").is_err());
+    }
+
+    #[test]
+    fn test_layout_type_request_from_str() {
+        use std::str::FromStr;
+
+        for input in ["layer_separate", "LayerSeparate", "LAYER-SEPARATE"] {
+            assert_eq!(
+                LayoutTypeRequest::from_str(input).unwrap(),
+                LayoutTypeRequest::LayerSeparateAuto,
+                "failed to parse {input}"
+            );
+        }
+
+        assert_eq!(
+            LayoutTypeRequest::from_str("fully_contiguous").unwrap(),
+            LayoutTypeRequest::Pinned(LayoutType::FullyContiguous)
+        );
+        assert_eq!(
+            LayoutTypeRequest::from_str("layer_separate_outer_contiguous").unwrap(),
+            LayoutTypeRequest::Pinned(LayoutType::layer_separate(true))
+        );
+        assert_eq!(
+            LayoutTypeRequest::from_str("layer_separate_block_contiguous").unwrap(),
+            LayoutTypeRequest::Pinned(LayoutType::layer_separate(false))
+        );
+
+        assert!(LayoutTypeRequest::from_str("").is_err());
+        assert!(LayoutTypeRequest::from_str("contiguous").is_err());
+    }
+
+    #[test]
+    fn test_layout_type_request_resolve() {
+        const NUM_BLOCKS: usize = 100;
+        // [n_blocks, outer_dim, page_size, inner_dim] and its outer-contiguous mirror.
+        const BLOCK_CONTIGUOUS: &[usize] = &[NUM_BLOCKS, 2, 16, 64];
+        const OUTER_CONTIGUOUS: &[usize] = &[2, NUM_BLOCKS, 16, 64];
+
+        let resolve = |request: LayoutTypeRequest, shape: Option<&[usize]>| {
+            request.resolve(shape, NUM_BLOCKS)
+        };
+
+        // Auto follows the shape in both directions, and falls back to the default when
+        // there is nothing to detect from.
+        assert_eq!(
+            resolve(LayoutTypeRequest::LayerSeparateAuto, Some(BLOCK_CONTIGUOUS)).unwrap(),
+            LayoutType::layer_separate(false)
+        );
+        assert_eq!(
+            resolve(LayoutTypeRequest::LayerSeparateAuto, Some(OUTER_CONTIGUOUS)).unwrap(),
+            LayoutType::layer_separate(true)
+        );
+        assert_eq!(
+            resolve(LayoutTypeRequest::LayerSeparateAuto, None).unwrap(),
+            LayoutType::layer_separate_auto_default()
+        );
+
+        // FullyContiguous is the point of the override: it is never second-guessed by
+        // shape detection, and fails later in LayoutConfig if the engine cannot supply it.
+        assert_eq!(
+            resolve(
+                LayoutTypeRequest::Pinned(LayoutType::FullyContiguous),
+                Some(BLOCK_CONTIGUOUS)
+            )
+            .unwrap(),
+            LayoutType::FullyContiguous
+        );
+
+        // A pinned LayerSeparate variant is honoured when it agrees with the shape...
+        assert_eq!(
+            resolve(
+                LayoutTypeRequest::Pinned(LayoutType::layer_separate(false)),
+                Some(BLOCK_CONTIGUOUS)
+            )
+            .unwrap(),
+            LayoutType::layer_separate(false)
+        );
+        // ...and rejected when it does not, instead of silently swapping the strides.
+        assert!(
+            resolve(
+                LayoutTypeRequest::Pinned(LayoutType::layer_separate(true)),
+                Some(BLOCK_CONTIGUOUS)
+            )
+            .is_err()
+        );
+
+        // With outer_dim = 1 the two modes describe the same memory, so a pinned variant
+        // is not a contradiction.
+        assert_eq!(
+            resolve(
+                LayoutTypeRequest::Pinned(LayoutType::layer_separate(true)),
+                Some(&[NUM_BLOCKS, 1, 16, 64])
+            )
+            .unwrap(),
+            LayoutType::layer_separate(true)
+        );
+
+        // An inconclusive shape leaves the pinned value as the only available answer.
+        assert_eq!(
+            resolve(
+                LayoutTypeRequest::Pinned(LayoutType::layer_separate(true)),
+                Some(&[4, 4, 16, 64])
+            )
+            .unwrap(),
+            LayoutType::layer_separate(true)
+        );
     }
 
     #[test]
