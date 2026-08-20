@@ -14,9 +14,8 @@ use crate::protocols::common::{
     extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
     llm_backend::PreprocessedRequest,
     preprocessor::RoutingHints,
-    timing::RequestPhase,
 };
-use crate::session_affinity::AffinityTarget;
+use crate::session_affinity::{AffinityTarget, SessionAffinityMode};
 
 /// Conditional-disagg decision: which decode worker to pin the request to,
 /// plus diagnostic counts for logging.
@@ -52,12 +51,34 @@ fn resolve_request_decode_pin(
     DecodePinResolution::Resolved(WorkerWithDpRank::new(worker_id, dp_rank))
 }
 
+fn has_explicit_prefill_pin(routing: Option<&RoutingHints>) -> bool {
+    routing.is_some_and(|routing| routing.prefill_worker_id.is_some())
+}
+
 fn decode_gate_allows_bypass(
     policy_says_bypass: bool,
     decode_gate_configured: bool,
     decode_busy: Option<bool>,
 ) -> bool {
     policy_says_bypass && (!decode_gate_configured || matches!(decode_busy, Some(false)))
+}
+
+fn resolve_affinity_binding(
+    target: Option<AffinityTarget>,
+    mode: SessionAffinityMode,
+    unique_dp_rank_for_worker: impl Fn(u64) -> Option<u32>,
+) -> Option<(Option<WorkerWithDpRank>, Option<WorkerWithDpRank>)> {
+    let Some(target) = target else {
+        return Some((None, None));
+    };
+    let dp_rank = target
+        .dp_rank
+        .or_else(|| unique_dp_rank_for_worker(target.worker_id))?;
+    let worker = WorkerWithDpRank::new(target.worker_id, dp_rank);
+    Some(match mode {
+        SessionAffinityMode::Hard => (None, Some(worker)),
+        SessionAffinityMode::Soft => (Some(worker), None),
+    })
 }
 
 impl<Sel> PrefillRouter<Sel>
@@ -78,10 +99,7 @@ where
             return Ok(None);
         }
 
-        let has_explicit_prefill_pin = req
-            .routing
-            .as_ref()
-            .is_some_and(|routing| routing.prefill_worker_id.is_some());
+        let has_explicit_prefill_pin = has_explicit_prefill_pin(req.routing.as_ref());
         if has_explicit_prefill_pin {
             tracing::debug!(
                 request_id,
@@ -147,25 +165,22 @@ where
                 return Ok(None);
             }
         };
-        let pinned_worker = match request_pinned_worker {
-            Some(worker) => Some(worker),
-            None => match decode_affinity_target {
-                Some(target) => {
-                    let Some(dp_rank) = target
-                        .dp_rank
-                        .or_else(|| decode_router.unique_dp_rank_for_worker(target.worker_id))
-                    else {
-                        tracing::debug!(
-                            request_id,
-                            worker_id = target.worker_id,
-                            "Skipping conditional disagg because decode affinity target has no resolved DP rank"
-                        );
-                        return Ok(None);
-                    };
-                    Some(WorkerWithDpRank::new(target.worker_id, dp_rank))
-                }
-                None => None,
-            },
+        let (affinity_target, pinned_worker) = match request_pinned_worker {
+            Some(worker) => (None, Some(worker)),
+            None => {
+                let Some(resolved) = resolve_affinity_binding(
+                    decode_affinity_target,
+                    self.session_affinity_mode,
+                    |id| decode_router.unique_dp_rank_for_worker(id),
+                ) else {
+                    tracing::debug!(
+                        request_id,
+                        "Skipping conditional disagg because decode affinity target has no resolved DP rank"
+                    );
+                    return Ok(None);
+                };
+                resolved
+            }
         };
         let routing_constraints = req
             .routing
@@ -187,6 +202,7 @@ where
                 policy_class.clone(),
                 session_context,
                 expected_output_tokens,
+                affinity_target,
                 pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
@@ -345,10 +361,12 @@ where
         if let Some(session_affinity) = session_affinity {
             probe_context.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
         }
-        let pinned_worker = router
-            .query_affinity_worker(&probe_context, RequestPhase::Prefill)
-            .ok()
-            .flatten();
+        let binding = router.query_affinity_target(&probe_context).ok().flatten();
+        let (affinity_target, pinned_worker) =
+            resolve_affinity_binding(binding, self.session_affinity_mode, |id| {
+                router.chooser.unique_dp_rank_for_worker(id)
+            })
+            .unwrap_or_default();
 
         let outcome = router
             .chooser
@@ -367,6 +385,7 @@ where
                     .as_ref()
                     .map(to_worker_selection_session_context),
                 expected_output_tokens,
+                affinity_target,
                 pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
@@ -386,9 +405,40 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodePinResolution, decode_gate_allows_bypass, resolve_request_decode_pin};
+    use super::{
+        DecodePinResolution, decode_gate_allows_bypass, has_explicit_prefill_pin,
+        resolve_affinity_binding, resolve_request_decode_pin,
+    };
     use crate::protocols::common::preprocessor::RoutingHints;
+    use crate::session_affinity::SessionAffinityMode;
     use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_runtime::pipeline::RouteTarget;
+
+    #[test]
+    fn affinity_binding_resolves_by_mode() {
+        let target = RouteTarget::new(7, Some(2));
+        let worker = WorkerWithDpRank::new(7, 2);
+
+        assert_eq!(
+            resolve_affinity_binding(Some(target), SessionAffinityMode::Hard, |_| None),
+            Some((None, Some(worker)))
+        );
+        assert_eq!(
+            resolve_affinity_binding(Some(target), SessionAffinityMode::Soft, |_| None),
+            Some((Some(worker), None))
+        );
+    }
+
+    #[test]
+    fn unresolved_affinity_can_fall_back_to_an_unpinned_probe() {
+        let resolved = resolve_affinity_binding(
+            Some(RouteTarget::new(7, None)),
+            SessionAffinityMode::Hard,
+            |_| None,
+        )
+        .unwrap_or_default();
+        assert_eq!(resolved, (None, None));
+    }
 
     #[test]
     fn request_decode_pin_resolves_explicit_rank() {
@@ -439,6 +489,22 @@ mod tests {
             resolve_request_decode_pin(Some(&RoutingHints::default()), |_| Some(0)),
             DecodePinResolution::None
         );
+    }
+
+    #[test]
+    fn only_prefill_targets_are_explicit_prefill_pins() {
+        assert!(!has_explicit_prefill_pin(Some(&RoutingHints {
+            backend_instance_id: Some(7),
+            ..Default::default()
+        })));
+        assert!(has_explicit_prefill_pin(Some(&RoutingHints {
+            prefill_worker_id: Some(7),
+            ..Default::default()
+        })));
+        assert!(!has_explicit_prefill_pin(Some(&RoutingHints {
+            decode_worker_id: Some(7),
+            ..Default::default()
+        })));
     }
 
     #[test]

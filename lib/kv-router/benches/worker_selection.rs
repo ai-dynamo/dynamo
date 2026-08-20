@@ -145,6 +145,7 @@ fn fixture(worker_count: usize) -> (HashMap<WorkerId, BenchWorkerConfig>, Schedu
         strict_priority: 0,
         policy_class: None,
         session_context: None,
+        affinity_target: None,
         overlap: OverlapSignals {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks,

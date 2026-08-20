@@ -352,6 +352,7 @@ impl Selector {
             session_id: None,
             priority_jump: req.priority_jump,
             strict_priority: req.strict_priority,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: req.allowed_worker_ids,
             routing_constraints: RoutingConstraints::default(),

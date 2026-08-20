@@ -255,17 +255,7 @@ fn log_selection<C: WorkerConfigLike>(
         .copied()
         .unwrap_or(0);
 
-    if request.pinned_worker == Some(worker) {
-        tracing::info!(
-            request_id,
-            "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
-            worker_type,
-            worker.worker_id,
-            worker.dp_rank,
-            cost,
-            effective_overlap_blocks,
-        );
-    } else if worker_type == "decode" {
+    if worker_type == "decode" {
         tracing::info!(
             router_mode = "kv",
             request_id,
@@ -297,6 +287,22 @@ fn log_selection<C: WorkerConfigLike>(
     }
 }
 
+fn log_pinned_selection(
+    request: &SchedulingRequest,
+    worker: WorkerWithDpRank,
+    worker_type: &'static str,
+    effective_overlap_blocks: f64,
+) {
+    tracing::info!(
+        request_id = request.mode.request_id().unwrap_or("-"),
+        worker_id = worker.worker_id,
+        dp_rank = worker.dp_rank,
+        worker_type,
+        effective_cached_blocks = effective_overlap_blocks,
+        "Selected pinned worker"
+    );
+}
+
 #[inline(always)]
 // DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
 // dispatched; eligibility outcomes and result construction stay host-owned and shared.
@@ -322,6 +328,14 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
             }
             Err(_) => return Err(KvSchedulerError::NoEndpoints),
         }
+        let result = selection_result(request, worker, block_size);
+        log_pinned_selection(
+            request,
+            worker,
+            worker_type,
+            result.effective_overlap_blocks,
+        );
+        return Ok(result);
     }
 
     let weights = selection_weights(kv_router_config, request);
@@ -501,6 +515,7 @@ mod test_support {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),

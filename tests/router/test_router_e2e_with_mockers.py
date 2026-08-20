@@ -596,7 +596,9 @@ def test_mocker_two_kv_router(
         )
 
 
-@pytest.mark.parametrize("store_backend", ["etcd", "file"])
+@pytest.mark.parametrize(
+    ("store_backend", "session_affinity_mode"), [("etcd", "hard"), ("file", "soft")]
+)
 @pytest.mark.timeout(180)
 def test_mocker_session_affinity(
     request,
@@ -604,6 +606,7 @@ def test_mocker_session_affinity(
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
+    session_affinity_mode,
 ):
     """Replica affinity overrides conflicting per-frontend KV-prefix placement."""
     mocker_args = {
@@ -624,6 +627,7 @@ def test_mocker_session_affinity(
             router_ports=allocate_frontend_ports(request, 2),
             test_payload=TEST_PAYLOAD,
             store_backend=store_backend,
+            session_affinity_mode=session_affinity_mode,
         )
 
 

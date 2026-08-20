@@ -8,7 +8,7 @@ use dynamo_kv_router::{
     WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
 };
 
-/// Uses device affinity for tool results and total cost for other requests.
+/// Uses device affinity for tool results, then preserves session affinity or total cost.
 pub(crate) struct RequestAwarePicker;
 
 impl WorkerPicker for RequestAwarePicker {
@@ -37,6 +37,15 @@ impl WorkerPicker for RequestAwarePicker {
                 })
                 .map(|(row, _)| row)
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"));
+        }
+
+        if let Some(target) = context.affinity_target()
+            && let Some(row) = input
+                .candidates()
+                .iter()
+                .position(|candidate| candidate.worker() == target)
+        {
+            return Ok(row);
         }
 
         input

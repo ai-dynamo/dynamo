@@ -38,7 +38,7 @@ use crate::{
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
-    session_affinity::{AffinityCoordinator, AffinityTarget},
+    session_affinity::{AffinityCoordinator, AffinityTarget, SessionAffinityMode},
 };
 
 mod activation;
@@ -195,6 +195,7 @@ where
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
+    session_affinity_mode: SessionAffinityMode,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
     /// `router_queue_threshold`. `None` means the prefill-load condition is disabled.
@@ -231,6 +232,7 @@ where
     worker_selector_factory: WorkerSelectorFactory<Sel>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
+    session_affinity_mode: SessionAffinityMode,
     model_name: String,
     is_eagle: bool,
 }
@@ -566,7 +568,7 @@ where
     fn decode_session_affinity_target(
         &self,
         session_affinity: Option<&SessionAffinityId>,
-    ) -> Result<Option<AffinityTarget>> {
+    ) -> Result<Option<crate::session_affinity::AffinityTarget>> {
         let Some(session_affinity) = session_affinity else {
             return Ok(None);
         };

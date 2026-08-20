@@ -663,6 +663,7 @@ where
                     self.worker_selector_factory.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
+                    router_config.session_affinity_mode,
                     model_name.clone(),
                     namespace.clone(),
                     prefill_enable_eagle,
@@ -704,6 +705,7 @@ where
                         encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
+                        router_config.session_affinity_mode,
                     )
                     .await
                     .context("build_preprocessed_routing")?,
@@ -1306,6 +1308,10 @@ fn effective_router_config<'a>(
         .kv_router_config
         .router_decode_policy
         .clone();
+    if frontend_config.session_affinity_ttl_secs.is_some() {
+        effective.session_affinity_ttl_secs = frontend_config.session_affinity_ttl_secs;
+    }
+    effective.session_affinity_mode = frontend_config.session_affinity_mode;
     Cow::Owned(effective)
 }
 
@@ -1356,6 +1362,7 @@ mod tests {
     use super::*;
     use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
+    use crate::session_affinity::SessionAffinityMode;
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::Error;
 
@@ -1991,10 +1998,13 @@ mod tests {
         let mut frontend = RouterConfig::default();
         frontend.kv_router_config.router_prefill_policy = Some("frontend-prefill".to_string());
         frontend.kv_router_config.router_decode_policy = Some("frontend-decode".to_string());
+        frontend.session_affinity_ttl_secs = Some(600);
+        frontend.session_affinity_mode = SessionAffinityMode::Soft;
 
         let mut worker = RouterConfig::default();
         worker.kv_router_config.router_temperature = 0.75;
         worker.kv_router_config.router_policy_config = Some("worker-policy.yaml".to_string());
+        worker.session_affinity_ttl_secs = Some(300);
 
         let effective = effective_router_config(Some(&worker), &frontend);
         assert_eq!(effective.kv_router_config.router_temperature, 0.75);
@@ -2009,6 +2019,13 @@ mod tests {
         assert_eq!(
             effective.kv_router_config.router_decode_policy.as_deref(),
             Some("frontend-decode")
+        );
+        assert_eq!(effective.session_affinity_ttl_secs, Some(600));
+        assert_eq!(effective.session_affinity_mode, SessionAffinityMode::Soft);
+        assert_eq!(
+            effective_router_config(Some(&worker), &RouterConfig::default())
+                .session_affinity_ttl_secs,
+            Some(300)
         );
         assert!(worker.kv_router_config.router_prefill_policy.is_none());
         assert!(worker.kv_router_config.router_decode_policy.is_none());

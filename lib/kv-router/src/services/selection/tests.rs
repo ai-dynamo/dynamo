@@ -75,6 +75,26 @@ impl WorkerPicker for LowestCostPicker {
     }
 }
 
+struct AffinityPicker;
+
+impl WorkerPicker for AffinityPicker {
+    fn pick(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        if let Some(target) = context.affinity_target()
+            && let Some(row) = input
+                .candidates()
+                .iter()
+                .position(|candidate| candidate.worker() == target)
+        {
+            return Ok(row);
+        }
+        LowestCostPicker.pick(context, input)
+    }
+}
+
 struct NonFiniteScorer;
 
 impl WorkerScorer for NonFiniteScorer {
@@ -401,6 +421,63 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
             .contains("non-finite")
     );
     assert_eq!(active_requests(app, 1).await, 0);
+}
+
+#[tokio::test]
+async fn selection_service_passes_affinity_target_to_custom_policy() {
+    let app = native_policy_app(|config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type.as_str(),
+            vec![Box::new(WorkerIdScorer)],
+            Box::new(AffinityPicker),
+        )
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        register_worker_id(app.clone(), 2, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let selected = post(
+        app,
+        "/select",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"affinity_target":{"worker_id":2,"dp_rank":0}}"#,
+    )
+    .await;
+    assert_eq!(selected.status(), StatusCode::OK);
+    assert_eq!(response_json(selected).await["worker_id"], 2);
+}
+
+#[tokio::test]
+async fn explicit_target_skips_custom_policy() {
+    let app = native_policy_app(|config, worker_type, _partition| {
+        WorkerSelectionPolicy::new_with_filters(
+            config.clone(),
+            worker_type.as_str(),
+            vec![Box::new(RejectAllFilter)],
+            Vec::new(),
+            Box::new(InvalidRowPicker),
+        )
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let selected = post(
+        app,
+        "/select",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"pinned_worker":{"worker_id":1,"dp_rank":0}}"#,
+    )
+    .await;
+    assert_eq!(selected.status(), StatusCode::OK);
+    assert_eq!(response_json(selected).await["worker_id"], 1);
 }
 
 #[tokio::test]

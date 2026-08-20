@@ -37,6 +37,7 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
     "session_affinity_ttl_secs",
+    "session_affinity_mode",
 )
 
 _ENFORCE_DISAGG_DEPRECATION = (
@@ -77,6 +78,7 @@ class RouterConfigBase(ConfigBase):
     min_initial_workers: int
     enforce_disagg: bool
     session_affinity_ttl_secs: Optional[int]
+    session_affinity_mode: str
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -255,6 +257,19 @@ class RouterArgGroup(ArgGroup):
             ),
             arg_type=int,
             dest="session_affinity_ttl_secs",
+        )
+        add_argument(
+            g,
+            flag_name="--router-session-affinity-mode",
+            env_var="DYN_ROUTER_SESSION_AFFINITY_MODE",
+            default="hard",
+            help=(
+                "How an existing session binding participates in KV worker selection. "
+                "hard pins the bound worker and bypasses selection policies; soft "
+                "provides the binding as a policy-visible preference."
+            ),
+            choices=("hard", "soft"),
+            dest="session_affinity_mode",
         )
         add_argument(
             g,

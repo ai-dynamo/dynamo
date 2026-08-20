@@ -68,6 +68,7 @@ def test_frontend_only_arguments_are_not_offered_to_workers():
     # ... while the ones a worker set genuinely advertises are present.
     assert "--router-mode" in flags
     assert "--router-session-affinity-ttl-secs" in flags
+    assert "--router-session-affinity-mode" in flags
     assert "--router-kv-events" in flags
 
 

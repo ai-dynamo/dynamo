@@ -126,12 +126,25 @@ a value from `1` through `31536000` to enable it, then send
 without the TTL option provides session identity but does not enable router affinity.
 
 The first successfully dispatched request binds the session ID to its selected
-worker and, when available, data-parallel rank. Later requests exact-dispatch to
-that target without transport fallback. Concurrent requests can share a binding.
-Active requests prevent expiry. When a request lease ends after EOF, early drop,
-error, or cancellation, the idle timer restarts. A missing bound worker or a
-non-cancellation selection, setup, dispatch, or target-validation failure invalidates
-the binding.
+worker and, when available, data-parallel rank. By default,
+`--router-session-affinity-mode hard` treats that binding like an explicit worker
+target: it bypasses custom filters, scorers, and pickers. If the target is no
+longer routable, Dynamo invalidates the binding and selects again.
+
+Set `--router-session-affinity-mode soft` or
+`DYN_ROUTER_SESSION_AFFINITY_MODE=soft` to pass an existing binding to KV worker
+selection as a preference. The built-in policy retains an eligible target. A
+custom policy can select another eligible worker, and Dynamo rebinds the session
+after successful dispatch to that worker. Router modes without policy selection
+continue to use exact affinity regardless of this setting.
+
+During a rolling upgrade, update every frontend in the default `hard` mode before enabling `soft`; pre-revision and current frontends do not reliably converge on each other's session migrations.
+
+Concurrent requests can share a binding. Active requests prevent expiry. When a
+request lease ends after EOF, early drop, error, or cancellation, the idle timer
+restarts. A setup or dispatch failure invalidates the binding only when the failed
+worker is the current target. In soft mode, a policy error does not invalidate the
+binding.
 
 The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
@@ -147,9 +160,10 @@ concurrent requests can observe it, then publishes it again when the request lea
 ends so peer idle timers restart when the request becomes idle. The extra event
 fanout is an intentional tradeoff.
 
-Synchronization is advisory. Each replica owns its local idle TTL and uses the
-first live binding it observes. A matching update refreshes that local deadline,
-an expired binding can be replaced, and a conflicting live binding is ignored.
+Synchronization is advisory. Each replica owns its local idle TTL. Each binding
+update carries a Lamport revision and router ID. A newer revision replaces the
+local binding, a matching revision refreshes the deadline, and a stale revision
+is ignored. This ordering lets session migration converge across router replicas.
 Events use the same component scope as active-sequence synchronization, and the
 session-affinity subscriber additionally rejects targets outside its local worker
 set. Stronger cross-model or worker-role isolation is future work.
@@ -159,21 +173,18 @@ temporarily reduce affinity. In particular, a long request can outlive a peer's
 local TTL, and a dropped lease-completion update can leave peer deadlines out of
 sync until a later request republishes the binding.
 
-If the bound worker disappears, Dynamo invalidates the binding so a subsequent
-selection can bind an available worker. Router restart clears all bindings. Bindings
-received from replicas are not authoritative storage. For strict affinity, configure
-the ingress or load balancer to consistently route a session to one frontend, or use
-an authoritative external binding store. When hashing at ingress, hash the raw
+If the bound worker disappears, Dynamo invalidates the stale binding. A successful
+dispatch to another worker installs its replacement. Router restart clears all
+bindings. Bindings received from replicas are not authoritative storage. For
+strict affinity, configure the ingress or load balancer to consistently route a
+session to one frontend, or use an authoritative external binding store. When
+hashing at ingress, hash the raw
 session header rather than Dynamo's normalized internal `session_id`: canonical
 clients send `X-Dynamo-Session-ID`, while agent-native clients use the corresponding
 header listed in [Session IDs](../../../../use-cases/agents/session-ids.mdx). Agent-native identity is
 normalized only after the request reaches the frontend.
 
-Direct mode still requires the phase-appropriate explicit worker ID on every
-affinity request. The stored binding validates that target but does not supply a
-missing ID. In disaggregated serving, prefill and decode use separate phase-local
-bindings. If no prefill router is active, only the decode or aggregated binding is
-created.
+Direct mode requires the phase-appropriate explicit worker ID on every request; a matching stored binding can supply an omitted DP rank. In disaggregated serving, prefill and decode use separate phase-local bindings. If no prefill router is active, only the decode or aggregated binding is created.
 
 Session affinity does not create a backend session or send lifecycle RPCs. There is
 no explicit unbind; idle expiry removes only router-local state. The same session

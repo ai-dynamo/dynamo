@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use dynamo_runtime::{
     engine::AsyncEngineContext,
@@ -12,8 +12,9 @@ use dynamo_runtime::{
 use futures::{StreamExt, stream};
 
 use super::{
-    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
-    coordinator::ReplicaApplyOutcome, explicit_target,
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, SessionAffinityMode,
+    affinity_id, explicit_target,
+    state::{ReplicaApplyOutcome, revision_timestamp},
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -51,6 +52,16 @@ fn error_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse> {
         Box::pin(stream::iter([Annotated::from_error("backend failed")])),
         Arc::new(Controller::default()),
     )
+}
+
+#[test]
+fn session_affinity_mode_defaults_to_hard_and_parses_soft() {
+    assert_eq!(SessionAffinityMode::default(), SessionAffinityMode::Hard);
+    assert_eq!(
+        SessionAffinityMode::from_str("soft").unwrap(),
+        SessionAffinityMode::Soft
+    );
+    assert!(SessionAffinityMode::from_str("invalid").is_err());
 }
 
 fn cancelled_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse> {
@@ -152,6 +163,7 @@ async fn session_affinity_initialization_is_atomic() {
     let AffinityAcquire::Bound {
         target: second_target,
         lease: second_lease,
+        ..
     } = second
     else {
         panic!("waiter must acquire the committed binding");
@@ -215,7 +227,7 @@ async fn session_affinity_wait_stops_when_request_is_cancelled() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_validates_worker_and_rank_contract() {
+async fn explicit_target_can_replace_an_existing_session_binding() {
     let coordinator = coordinator();
     let AffinityAcquire::Initialize(initializer) = coordinator
         .acquire(&session_id(), Some(target(7, None)))
@@ -226,24 +238,19 @@ async fn session_affinity_validates_worker_and_rank_contract() {
     };
     drop(initializer.commit(target(7, None)).unwrap());
 
-    assert!(
-        coordinator
-            .acquire(&session_id(), Some(target(8, None)))
-            .await
-            .is_err()
+    let operation = coordinator
+        .acquire(&session_id(), Some(target(8, Some(0))))
+        .await
+        .unwrap();
+    assert_eq!(operation.target(), Some(target(7, None)));
+    let stream = operation
+        .into_stream(target(8, Some(0)), response_stream(1))
+        .unwrap();
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(target(8, Some(0)))
     );
-    assert!(
-        coordinator
-            .acquire(&session_id(), Some(target(7, Some(0))))
-            .await
-            .is_err()
-    );
-    assert!(
-        coordinator
-            .acquire(&session_id(), Some(target(7, None)))
-            .await
-            .is_ok()
-    );
+    drop(stream);
 }
 
 #[tokio::test(start_paused = true)]
@@ -266,6 +273,202 @@ async fn session_affinity_failed_bound_operation_invalidates_binding() {
         coordinator.acquire(&session_id(), None).await.unwrap(),
         AffinityAcquire::Initialize(_)
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_rebinds_after_a_different_worker_is_dispatched() {
+    let coordinator = coordinator();
+    let original_target = target(7, Some(0));
+    let migrated_target = target(8, Some(0));
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(original_target).unwrap());
+
+    let operation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let stream = operation
+        .into_stream(migrated_target, response_stream(1))
+        .unwrap();
+
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(migrated_target)
+    );
+    drop(stream);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_rebind_preserves_concurrent_leases() {
+    let coordinator = coordinator();
+    let original_target = target(7, Some(0));
+    let migrated_target = target(8, Some(0));
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(original_target).unwrap());
+
+    let migrating = coordinator.acquire(&session_id(), None).await.unwrap();
+    let concurrent = coordinator.acquire(&session_id(), None).await.unwrap();
+    let migrated_stream = migrating
+        .into_stream(migrated_target, response_stream(1))
+        .unwrap();
+    drop(migrated_stream);
+
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(migrated_target)
+    );
+
+    drop(concurrent);
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(migrated_target)
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_replica_rebind_preserves_local_lease() {
+    let coordinator = coordinator();
+    let original_target = target(7, Some(0));
+    let replicated_target = target(8, Some(0));
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(original_target).unwrap());
+
+    let active = coordinator.acquire(&session_id(), None).await.unwrap();
+    let replicated_revision = revision_timestamp().saturating_add(1);
+    assert_eq!(
+        coordinator.apply_replica_revision_for_test(
+            session_id().as_str(),
+            replicated_target,
+            replicated_revision,
+            99,
+        ),
+        ReplicaApplyOutcome::ReplacedNewer
+    );
+
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(replicated_target)
+    );
+
+    drop(active);
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(replicated_target)
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_concurrent_selection_does_not_replace_a_newer_affinity_target() {
+    let coordinator = coordinator();
+    let original_target = target(7, Some(0));
+    let first_target = target(8, Some(0));
+    let stale_target = target(9, Some(0));
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(original_target).unwrap());
+
+    let first = coordinator.acquire(&session_id(), None).await.unwrap();
+    let stale = coordinator.acquire(&session_id(), None).await.unwrap();
+    let first_stream = first.into_stream(first_target, response_stream(1)).unwrap();
+    let stale_stream = stale.into_stream(stale_target, response_stream(1)).unwrap();
+
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(first_target)
+    );
+    drop(first_stream);
+
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(first_target)
+    );
+    drop(stale_stream);
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_invalidation_releases_its_lease_after_a_concurrent_rebind() {
+    let coordinator = coordinator();
+    let original_target = target(7, Some(0));
+    let migrated_target = target(8, Some(0));
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(original_target).unwrap());
+
+    let migrating = coordinator.acquire(&session_id(), None).await.unwrap();
+    let stale = coordinator.acquire(&session_id(), None).await.unwrap();
+    let migrated_stream = migrating
+        .into_stream(migrated_target, response_stream(1))
+        .unwrap();
+    stale.invalidate();
+    drop(migrated_stream);
+
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_migration_preserves_the_existing_affinity_target() {
+    let coordinator = coordinator();
+    let original_target = target(7, Some(0));
+    let failed_target = target(8, Some(0));
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(original_target).unwrap());
+
+    let operation = coordinator.acquire(&session_id(), None).await.unwrap();
+    operation.invalidate_selected(failed_target);
+
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(original_target)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn rankless_binding_invalidates_when_the_selected_worker_fails() {
+    let coordinator = coordinator();
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(target(7, None)).unwrap());
+
+    coordinator
+        .acquire(&session_id(), None)
+        .await
+        .unwrap()
+        .invalidate_selected(target(7, Some(2)));
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
 }
 
 #[tokio::test(start_paused = true)]
@@ -315,6 +518,7 @@ async fn session_affinity_cancelled_stream_refreshes_idle_ttl() {
     let AffinityAcquire::Bound {
         target: bound_target,
         lease,
+        ..
     } = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("continuation must acquire the existing binding");
@@ -499,7 +703,7 @@ async fn session_affinity_enforces_id_and_entry_limits() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_replica_applies_first_live_binding_wins() {
+async fn session_affinity_replica_replaces_only_with_a_newer_revision() {
     let coordinator = coordinator();
     let local_target = target(7, Some(0));
     let conflicting_target = target(8, Some(1));
@@ -516,13 +720,17 @@ async fn session_affinity_replica_applies_first_live_binding_wins() {
     );
     assert_eq!(
         coordinator.apply_replica_update_for_test("replicated", conflicting_target),
-        ReplicaApplyOutcome::IgnoredConflict
+        ReplicaApplyOutcome::IgnoredStale
     );
 
     coordinator.expire_for_test(&SessionAffinityId::new("replicated"));
     assert_eq!(
         coordinator.apply_replica_update_for_test("replicated", conflicting_target),
-        ReplicaApplyOutcome::ReplacedExpired
+        ReplicaApplyOutcome::IgnoredStale
+    );
+    assert_eq!(
+        coordinator.apply_replica_revision_for_test("replicated", conflicting_target, 2, 99,),
+        ReplicaApplyOutcome::ReplacedNewer
     );
     assert_eq!(
         coordinator
@@ -560,16 +768,55 @@ async fn session_affinity_replica_duplicate_refreshes_local_ttl() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_replica_ignores_initializing_sessions() {
+async fn session_affinity_failed_initialization_preserves_a_deferred_replica_binding() {
     let coordinator = coordinator();
     let initializing = coordinator.acquire(&session_id(), None).await.unwrap();
+    let replicated_target = target(7, Some(0));
 
     assert_eq!(
-        coordinator.apply_replica_update_for_test(session_id().as_str(), target(7, Some(0))),
-        ReplicaApplyOutcome::IgnoredInitializing
+        coordinator.apply_replica_update_for_test(session_id().as_str(), replicated_target),
+        ReplicaApplyOutcome::DeferredInitializing
     );
     assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
     drop(initializing);
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(replicated_target)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_successful_initialization_orders_after_a_deferred_replica() {
+    let coordinator = coordinator();
+    let mut updates = coordinator.enable_test_replica(99, 2);
+    let AffinityAcquire::Initialize(initializing) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    let remote_revision = revision_timestamp().saturating_add(1);
+    assert_eq!(
+        coordinator.apply_replica_revision_for_test(
+            session_id().as_str(),
+            target(7, Some(0)),
+            remote_revision,
+            10,
+        ),
+        ReplicaApplyOutcome::DeferredInitializing
+    );
+
+    let local_target = target(8, Some(0));
+    let stream = AffinityAcquire::Initialize(initializing)
+        .into_stream(local_target, response_stream(1))
+        .unwrap();
+    let update = updates.recv().await.unwrap();
+    assert!(update.revision > remote_revision);
+    assert_eq!(update.worker_id, local_target.worker_id);
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(local_target)
+    );
+    drop(stream);
 }
 
 #[tokio::test(start_paused = true)]
@@ -606,11 +853,86 @@ async fn session_affinity_publishes_after_dispatch_and_lease_completion() {
     assert_eq!(after_dispatch.worker_id, selected_target.worker_id);
     assert_eq!(after_dispatch.dp_rank, selected_target.dp_rank);
     assert_eq!(after_dispatch.router_id, 99);
+    assert_eq!(after_dispatch.revision_router_id, 99);
 
     drop(stream);
     let after_completion = updates.recv().await.unwrap();
     assert_eq!(after_completion, after_dispatch);
     assert!(updates.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_fresh_process_revision_replaces_an_older_process_revision() {
+    let previous_revision = revision_timestamp();
+    let old_target = target(7, Some(0));
+    let new_target = target(8, Some(0));
+    let replica = coordinator();
+    assert_eq!(
+        replica.apply_replica_revision_for_test(
+            session_id().as_str(),
+            old_target,
+            previous_revision,
+            10,
+        ),
+        ReplicaApplyOutcome::Inserted
+    );
+
+    let origin = coordinator();
+    let mut updates = origin.enable_test_replica(20, 2);
+    let operation = origin.acquire(&session_id(), None).await.unwrap();
+    let stream = operation
+        .into_stream(new_target, response_stream(1))
+        .unwrap();
+    let update = updates.recv().await.unwrap();
+
+    assert!(update.revision > previous_revision);
+    assert_eq!(
+        replica.apply_replica_revision_for_test(
+            update.session_id,
+            target(update.worker_id, update.dp_rank),
+            update.revision,
+            update.revision_router_id,
+        ),
+        ReplicaApplyOutcome::ReplacedNewer
+    );
+    assert_eq!(
+        replica.query_target(&session_id(), None).unwrap(),
+        Some(new_target)
+    );
+    drop(stream);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_forwarded_update_preserves_revision_origin() {
+    let forwarder = coordinator();
+    let mut updates = forwarder.enable_test_replica(30, 2);
+    let forwarded_target = target(7, Some(0));
+    assert_eq!(
+        forwarder.apply_replica_revision_for_test(session_id().as_str(), forwarded_target, 5, 10,),
+        ReplicaApplyOutcome::Inserted
+    );
+    let lease = forwarder.acquire(&session_id(), None).await.unwrap();
+    drop(lease);
+    let update = updates.recv().await.unwrap();
+
+    assert_eq!(update.router_id, 30);
+    assert_eq!(update.revision, 5);
+    assert_eq!(update.revision_router_id, 10);
+
+    let replica = coordinator();
+    assert_eq!(
+        replica.apply_replica_revision_for_test(session_id().as_str(), target(8, Some(0)), 5, 25,),
+        ReplicaApplyOutcome::Inserted
+    );
+    assert_eq!(
+        replica.apply_replica_revision_for_test(
+            update.session_id,
+            target(update.worker_id, update.dp_rank),
+            update.revision,
+            update.revision_router_id,
+        ),
+        ReplicaApplyOutcome::IgnoredStale
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -642,7 +964,7 @@ async fn session_affinity_completion_restores_expired_remote_binding() {
             after_completion.session_id,
             target(after_completion.worker_id, after_completion.dp_rank),
         ),
-        ReplicaApplyOutcome::ReplacedExpired
+        ReplicaApplyOutcome::Refreshed
     );
     assert_eq!(
         replica.query_target(&session_id(), None).unwrap(),

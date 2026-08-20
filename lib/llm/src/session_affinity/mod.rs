@@ -2,16 +2,52 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod coordinator;
+mod lifecycle;
 mod push_router;
 mod replica_sync;
+mod state;
 
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
-use dynamo_runtime::{component::Client, pipeline::Error};
+use dynamo_runtime::{
+    component::Client,
+    error::{ErrorType, match_error_chain},
+    pipeline::Error,
+};
+use serde::{Deserialize, Serialize};
 
-pub(crate) use coordinator::{AffinityAcquire, affinity_id};
-pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
+pub(crate) use coordinator::affinity_id;
+pub use coordinator::{AffinityCoordinator, explicit_target};
+pub(crate) use lifecycle::AffinityAcquire;
 pub use push_router::SessionAffinityPushRouter;
+
+pub type AffinityTarget = dynamo_runtime::pipeline::RouteTarget;
+
+pub(crate) fn is_cancelled(error: &Error) -> bool {
+    match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionAffinityMode {
+    #[default]
+    Hard,
+    Soft,
+}
+
+impl FromStr for SessionAffinityMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "hard" => Ok(Self::Hard),
+            "soft" => Ok(Self::Soft),
+            _ => Err(format!(
+                "invalid session affinity mode {value:?}; expected 'hard' or 'soft'"
+            )),
+        }
+    }
+}
 
 pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;
 pub const MAX_SESSION_AFFINITY_ENTRIES: usize = 65_536;

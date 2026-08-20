@@ -8,7 +8,7 @@ use dynamo_kv_router::{
     selector::WorkerSelector,
 };
 use dynamo_runtime::{
-    error::{DynamoError, ErrorType, match_error_chain},
+    error::DynamoError,
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
@@ -32,7 +32,8 @@ use crate::{
         timing::{RequestPhase, RoutingData},
     },
     session_affinity::{
-        AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
+        AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityMode, affinity_id,
+        explicit_target, is_cancelled,
     },
 };
 
@@ -47,21 +48,28 @@ use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
-fn is_cancelled(error: &Error) -> bool {
-    match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
-}
-
-fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error: &Error) {
+fn invalidate_selected_on_non_cancellation(
+    operation: &mut Option<AffinityAcquire>,
+    selected_target: AffinityTarget,
+    error: &Error,
+) {
     if is_cancelled(error) {
         return;
     }
     if let Some(operation) = operation.take() {
-        operation.invalidate();
+        operation.invalidate_selected(selected_target);
     }
 }
 
 fn route_target(worker: WorkerWithDpRank) -> AffinityTarget {
     AffinityTarget::new(worker.worker_id, Some(worker.dp_rank))
+}
+
+fn requested_target_matches_binding(requested: AffinityTarget, bound: AffinityTarget) -> bool {
+    requested.worker_id == bound.worker_id
+        && requested
+            .dp_rank
+            .is_none_or(|rank| bound.dp_rank == Some(rank))
 }
 
 fn monitor_response_stream<Sel>(
@@ -123,6 +131,7 @@ where
     pub chooser: Arc<KvRouter<Sel>>,
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
+    session_affinity_mode: SessionAffinityMode,
 }
 
 impl<Sel> KvPushRouter<Sel>
@@ -134,17 +143,37 @@ where
         chooser: Arc<KvRouter<Sel>>,
         session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
+        Self::new_with_mode(
+            inner,
+            chooser,
+            session_affinity_ttl,
+            SessionAffinityMode::Hard,
+        )
+    }
+
+    pub fn new_with_mode(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        chooser: Arc<KvRouter<Sel>>,
+        session_affinity_ttl: Option<Duration>,
+        session_affinity_mode: SessionAffinityMode,
+    ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
             .map(AffinityCoordinator::new)
             .transpose()?;
 
-        Ok(Self::new_with_coordinator(inner, chooser, affinity))
+        Ok(Self::new_with_coordinator_and_mode(
+            inner,
+            chooser,
+            affinity,
+            session_affinity_mode,
+        ))
     }
 
-    pub(crate) fn new_with_coordinator(
+    pub(crate) fn new_with_coordinator_and_mode(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter<Sel>>,
         affinity: Option<AffinityCoordinator>,
+        session_affinity_mode: SessionAffinityMode,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
@@ -157,23 +186,21 @@ where
             chooser,
             request_metrics,
             affinity,
+            session_affinity_mode,
         }
     }
 
-    pub(crate) fn query_affinity_worker(
+    pub(crate) fn query_affinity_target(
         &self,
         request: &SingleIn<PreprocessedRequest>,
-        phase: RequestPhase,
-    ) -> Result<Option<WorkerWithDpRank>, Error> {
+    ) -> Result<Option<AffinityTarget>, Error> {
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok(None);
         };
         let Some(session_id) = affinity_id(request)? else {
             return Ok(None);
         };
-        let explicit = explicit_target(request, phase)?;
-        let target = affinity.query_target(&session_id, explicit)?;
-        Ok(target.and_then(affinity_worker))
+        affinity.query_target(&session_id, None)
     }
 
     async fn select_request(
@@ -181,7 +208,7 @@ where
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
-        affinity_worker: Option<WorkerWithDpRank>,
+        session_target: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
@@ -191,6 +218,10 @@ where
             .map(to_worker_selection_session_context);
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
+        let (pinned_worker, affinity_target) = match self.session_affinity_mode {
+            SessionAffinityMode::Hard => (session_target, None),
+            SessionAffinityMode::Soft => (None, session_target),
+        };
         let selection_future = self
             .select_worker(
                 &context_id,
@@ -199,7 +230,8 @@ where
                 phase,
                 is_query_only,
                 SelectionOptions {
-                    affinity_worker,
+                    pinned_worker,
+                    affinity_target,
                     policy_class,
                     session_context,
                 },
@@ -231,10 +263,12 @@ where
         };
         let explicit = explicit_target(request, phase)?;
         if is_query_only {
-            let target = affinity.query_target(&session_id, explicit)?;
-            let worker = target.and_then(affinity_worker);
+            let affinity_target = affinity
+                .query_target(&session_id, None)?
+                .and_then(affinity_worker);
             return Ok((
-                self.select_request(request, phase, true, worker).await?,
+                self.select_request(request, phase, true, affinity_target)
+                    .await?,
                 None,
             ));
         }
@@ -243,31 +277,50 @@ where
         let operation = affinity
             .acquire_with_context(&session_id, explicit, request_context.as_ref())
             .await?;
-        let worker = operation.target().and_then(affinity_worker);
-        match self.select_request(request, phase, false, worker).await {
+        let session_target = operation.target().and_then(affinity_worker);
+        match self
+            .select_request(request, phase, false, session_target)
+            .await
+        {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
-            Err(_) if operation.target().is_some() && explicit.is_none() => {
+            Err(_)
+                if self.session_affinity_mode == SessionAffinityMode::Hard
+                    && operation.target().is_some()
+                    && explicit.is_none() =>
+            {
+                let failed_target = operation.target();
                 operation.invalidate();
                 let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
                     .await?;
-                let retry_worker = retry.target().and_then(affinity_worker);
+                let retry_target = retry
+                    .target()
+                    .filter(|target| Some(*target) != failed_target)
+                    .and_then(affinity_worker);
                 match self
-                    .select_request(request, phase, false, retry_worker)
+                    .select_request(request, phase, false, retry_target)
                     .await
                 {
                     Ok(selection) => Ok((selection, Some(retry))),
+                    Err(retry_error) if is_cancelled(&retry_error) => Err(retry_error),
                     Err(retry_error) => {
                         retry.invalidate();
                         Err(retry_error)
                     }
                 }
             }
-            Err(error) => {
-                operation.invalidate();
+            Err(error) if self.session_affinity_mode == SessionAffinityMode::Hard => {
+                if explicit.is_none_or(|requested| {
+                    operation
+                        .target()
+                        .is_none_or(|bound| requested_target_matches_binding(requested, bound))
+                }) {
+                    operation.invalidate();
+                }
                 Err(error)
             }
+            Err(error) => Err(error),
         }
     }
 
@@ -499,7 +552,11 @@ where
         {
             Ok(guard) => guard,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_selected_on_non_cancellation(
+                    &mut operation,
+                    route_target(selection.worker),
+                    &error,
+                );
                 return Err(error);
             }
         };
@@ -508,7 +565,7 @@ where
             Ok(metadata) => metadata,
             Err(error) => {
                 guard.abort().await;
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_selected_on_non_cancellation(&mut operation, selected_target, &error);
                 return Err(error);
             }
         };
@@ -519,7 +576,7 @@ where
         {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_selected_on_non_cancellation(&mut operation, selected_target, &error);
                 return Err(error);
             }
         };
@@ -618,7 +675,11 @@ where
         let guard = match self.track_selection(&request, &mut selection, false).await {
             Ok(guard) => guard,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_selected_on_non_cancellation(
+                    &mut operation,
+                    route_target(selection.worker),
+                    &error,
+                );
                 return Err(error);
             }
         };
@@ -630,7 +691,7 @@ where
         {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_selected_on_non_cancellation(&mut operation, selected_target, &error);
                 return Err(error);
             }
         };
@@ -731,6 +792,7 @@ mod tests {
         },
         storage::kv::Selector,
     };
+    use rstest::rstest;
     use tokio::sync::watch;
 
     use super::*;
@@ -889,6 +951,19 @@ mod tests {
         session_affinity_ttl: Option<Duration>,
         workers: HashMap<u64, ModelRuntimeConfig>,
     ) -> (KvPushRouter, Runtime) {
+        router_with_worker_configs_and_mode(
+            session_affinity_ttl,
+            workers,
+            SessionAffinityMode::Hard,
+        )
+        .await
+    }
+
+    async fn router_with_worker_configs_and_mode(
+        session_affinity_ttl: Option<Duration>,
+        workers: HashMap<u64, ModelRuntimeConfig>,
+        session_affinity_mode: SessionAffinityMode,
+    ) -> (KvPushRouter, Runtime) {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -928,7 +1003,13 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::KV)
             .await
             .unwrap();
-        let router = KvPushRouter::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+        let router = KvPushRouter::new_with_mode(
+            inner,
+            Arc::new(chooser),
+            session_affinity_ttl,
+            session_affinity_mode,
+        )
+        .unwrap();
         (router, runtime)
     }
 
@@ -955,6 +1036,27 @@ mod tests {
 
         drop(router);
         runtime.shutdown();
+    }
+
+    #[test]
+    fn worker_only_explicit_target_matches_any_bound_rank() {
+        let bound = AffinityTarget::new(7, Some(3));
+        assert!(requested_target_matches_binding(
+            AffinityTarget::new(7, None),
+            bound
+        ));
+        assert!(requested_target_matches_binding(
+            AffinityTarget::new(7, Some(3)),
+            bound
+        ));
+        assert!(!requested_target_matches_binding(
+            AffinityTarget::new(7, Some(2)),
+            bound
+        ));
+        assert!(!requested_target_matches_binding(
+            AffinityTarget::new(8, None),
+            bound
+        ));
     }
 
     #[tokio::test]
@@ -1050,7 +1152,7 @@ mod tests {
 
         let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
         let cancellation = cancellation::cancelled_error("cancelled-after-selection-request");
-        invalidate_on_non_cancellation(&mut operation, &cancellation);
+        invalidate_selected_on_non_cancellation(&mut operation, original_target, &cancellation);
         assert!(operation.is_some());
         drop(operation);
         assert_eq!(
@@ -1060,7 +1162,7 @@ mod tests {
 
         let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
         let failure = anyhow::anyhow!("dispatch failed");
-        invalidate_on_non_cancellation(&mut operation, &failure);
+        invalidate_selected_on_non_cancellation(&mut operation, original_target, &failure);
         assert!(operation.is_none());
         assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
 
@@ -1114,7 +1216,7 @@ mod tests {
             Some(original_target)
         );
 
-        let AffinityAcquire::Bound { target, lease } = router
+        let AffinityAcquire::Bound { target, lease, .. } = router
             .affinity
             .as_ref()
             .unwrap()
@@ -1132,7 +1234,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_affinity_worker_returns_existing_binding_without_reserving() {
+    async fn failed_explicit_retarget_preserves_existing_binding() {
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+        let affinity = router.affinity.as_ref().unwrap();
+        let session_id = SessionAffinityId::new("failed-explicit-retarget");
+        let original_target = AffinityTarget::new(7, Some(0));
+        let AffinityAcquire::Initialize(initializer) =
+            affinity.acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("first request must initialize");
+        };
+        drop(initializer.commit(original_target).unwrap());
+
+        let mut input = request();
+        input.routing_mut().backend_instance_id = Some(8);
+        input.routing_mut().dp_rank = Some(0);
+        let mut request = Context::new(input);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+        assert!(
+            router
+                .select_with_affinity(&request, RequestPhase::Aggregated, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(original_target)
+        );
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn query_affinity_target_returns_existing_target() {
         let (router, runtime) = router(Some(Duration::from_secs(10))).await;
         let session_id = SessionAffinityId::new("query-existing-binding");
         let target = AffinityTarget {
@@ -1154,28 +1290,23 @@ mod tests {
         let mut request = Context::new(request());
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
 
-        assert_eq!(
-            router
-                .query_affinity_worker(&request, RequestPhase::Prefill)
-                .unwrap(),
-            Some(WorkerWithDpRank::new(7, 0))
-        );
-        assert_eq!(
-            router
-                .affinity
-                .as_ref()
-                .unwrap()
-                .query_target(&session_id, None)
-                .unwrap(),
-            Some(target)
-        );
+        let queried = router
+            .query_affinity_target(&request)
+            .unwrap()
+            .expect("binding must exist");
+        assert_eq!(queried, target);
 
         drop(router);
         runtime.shutdown();
     }
 
+    #[rstest]
+    #[case(SessionAffinityMode::Hard)]
+    #[case(SessionAffinityMode::Soft)]
     #[tokio::test]
-    async fn migration_exclusion_rebinds_affinity_without_widening_or_escaping_hard_pins() {
+    async fn migration_exclusion_rebinds_affinity_without_escaping_explicit_pins(
+        #[case] mode: SessionAffinityMode,
+    ) {
         let mut constrained_worker = ModelRuntimeConfig::default();
         constrained_worker.taints.insert("retry-pool".to_string());
         let workers = HashMap::from([
@@ -1184,7 +1315,7 @@ mod tests {
             (9, ModelRuntimeConfig::default()),
         ]);
         let (router, runtime) =
-            router_with_worker_configs(Some(Duration::from_secs(10)), workers).await;
+            router_with_worker_configs_and_mode(Some(Duration::from_secs(10)), workers, mode).await;
         let session_id = SessionAffinityId::new("migration-exclusion");
         let original_target = AffinityTarget {
             worker_id: 7,

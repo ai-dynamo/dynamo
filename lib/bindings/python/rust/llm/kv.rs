@@ -57,6 +57,7 @@ type RsKvRouter = llm_rs::kv_router::KvRouter<WorkerSelectionPolicy>;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use llm_rs::session_affinity::SessionAffinityMode;
 
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
@@ -1980,7 +1981,7 @@ impl KvRouter {
     ///
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
     fn new(
         py: Python<'_>,
         endpoint: &Endpoint,
@@ -1988,12 +1989,16 @@ impl KvRouter {
         kv_router_config: &super::entrypoint::KvRouterConfig,
         aic_perf_config: Option<&AicPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
+        session_affinity_mode: &str,
     ) -> PyResult<Self> {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
+        let session_affinity_mode = session_affinity_mode
+            .parse::<SessionAffinityMode>()
+            .map_err(PyValueError::new_err)?;
         let kv_router_config = kv_router_config.inner();
         let worker_selection_policy_factory =
             crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
@@ -2053,10 +2058,11 @@ impl KvRouter {
                 )
                 .await?;
 
-                let kv_push_router = RsKvPushRouter::new(
+                let kv_push_router = RsKvPushRouter::new_with_mode(
                     push_router,
                     kv_router,
                     session_affinity_ttl_secs.map(Duration::from_secs),
+                    session_affinity_mode,
                 )
                 .map_err(to_pyerr)?;
 
@@ -2262,6 +2268,7 @@ impl KvRouter {
                     0.0,
                     strict_priority,
                     policy_class,
+                    None,
                     None,
                     None,
                     None,

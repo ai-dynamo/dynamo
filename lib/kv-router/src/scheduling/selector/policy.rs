@@ -183,6 +183,16 @@ impl WorkerSelectionContext<'_> {
         self.request.session_context.as_ref()
     }
 
+    /// Return the session-affinity target resolved by the request host.
+    ///
+    /// This value is a preference, not an eligibility constraint. The target
+    /// can be absent from the candidate table when it is unavailable,
+    /// overloaded, disallowed, or rejected by a filter. The value is fixed for
+    /// all policy callbacks during one selection attempt.
+    pub fn affinity_target(&self) -> Option<WorkerWithDpRank> {
+        self.request.affinity_target
+    }
+
     /// Return the expected output length, if the request supplies one.
     pub fn expected_output_tokens(&self) -> Option<u32> {
         self.request.expected_output_tokens
@@ -842,6 +852,82 @@ mod tests {
         policy
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
+    }
+
+    #[test]
+    fn custom_picker_receives_affinity_target_without_narrowing_candidates() {
+        struct AffinityPicker;
+
+        impl WorkerPicker for AffinityPicker {
+            fn pick(
+                &mut self,
+                context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let target = context.affinity_target().expect("affinity target");
+                assert_eq!(input.candidates().len(), 2);
+                input
+                    .candidates()
+                    .iter()
+                    .position(|candidate| candidate.worker() == target)
+                    .ok_or_else(|| {
+                        WorkerSelectionPolicyError::failed("affinity target unavailable")
+                    })
+            }
+        }
+
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        request.affinity_target = Some(worker1);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(AffinityPicker),
+        );
+
+        let selected = policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        assert_eq!(selected.worker, worker1);
+        assert_ne!(selected.worker, worker0);
+    }
+
+    #[test]
+    fn pinned_worker_skips_custom_policy_callbacks() {
+        struct RejectAll;
+
+        impl WorkerFilter for RejectAll {
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                _candidate: &WorkerCandidate,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                panic!("pinned selection must not call custom filters")
+            }
+        }
+
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
+        let mut request = base_request(16);
+        request.pinned_worker = Some(worker);
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(RejectAll)],
+            Vec::new(),
+            Box::new(DefaultWorkerPicker::new(0.0)),
+        );
+
+        let selected = policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        assert_eq!(selected.worker, worker);
     }
 
     #[test]
