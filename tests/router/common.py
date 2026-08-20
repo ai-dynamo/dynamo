@@ -2260,6 +2260,7 @@ def _test_router_decisions_disagg(
     router_aic_config: Optional[dict[str, Any]] = None,
     enable_bootstrap: bool = False,
     verify_timing: bool = True,
+    frontend_timeout: int = 120,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -2283,6 +2284,7 @@ def _test_router_decisions_disagg(
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         router_aic_config: Optional AIC router perf-model config for frontend KV routing.
         verify_timing: Request and validate response timing telemetry. Defaults to True.
+        frontend_timeout: Maximum time to wait for worker and frontend readiness.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -2337,7 +2339,7 @@ def _test_router_decisions_disagg(
                 expected_num_workers=(
                     prefill_workers.num_workers + decode_workers.num_workers
                 ),
-                timeout=120,
+                timeout=frontend_timeout,
                 engine_workers=[prefill_workers, decode_workers],
                 store_backend=store_backend,
                 request_plane=request_plane,

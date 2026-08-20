@@ -336,6 +336,7 @@ def test_router_decisions_sglang_multiple_workers(
 
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
+# The model's fused_topk_deepseek kernel is unsupported on the L4 lane (sm86).
 @pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
@@ -374,6 +375,7 @@ def test_router_decisions_sglang_dp(
 
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(12.0)
@@ -409,7 +411,9 @@ def test_router_decisions_sglang_disagg(
         },
         # SGLang disaggregated responses do not yet expose the complete timing
         # telemetry; this test covers NATS routing and worker separation.
-        test_kwargs={"verify_timing": False},
+        # Prefill model loading also performs a disaggregated warmup, so allow
+        # startup contention without consuming the test's full 600s budget.
+        test_kwargs={"verify_timing": False, "frontend_timeout": 300},
     )
 
 
