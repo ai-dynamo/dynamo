@@ -78,6 +78,27 @@ class Config:
             return DisaggregationMode.AGGREGATED
 
 
+def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
+    """Translate Dynamo's SGLang config into DiffGenerator arguments."""
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    kwargs = {
+        "model_path": server_args.model_path,
+        "num_gpus": tp_size * dp_size,
+        "tp_size": tp_size,
+        "dp_size": dp_size,
+        "dist_timeout": getattr(server_args, "dist_timeout", None),
+    }
+
+    # The text-engine CLI names this --nccl-port; DiffGenerator v0.5.15+
+    # names the same torch.distributed rendezvous setting ``master_port``.
+    # Omit it when unset so SGLang retains its own default/settling behavior.
+    if (master_port := getattr(server_args, "nccl_port", None)) is not None:
+        kwargs["master_port"] = master_port
+
+    return kwargs
+
+
 def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
     """Return the worker role when the selected path does not create an FPM relay."""
     if is_snapshot_enabled():
