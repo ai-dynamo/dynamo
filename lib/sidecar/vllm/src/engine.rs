@@ -36,6 +36,25 @@ fn cancelled(state: &ResponseState) -> LLMEngineOutput {
     ))
 }
 
+pub(crate) fn validate_http_endpoint(value: &str) -> Result<String, DynamoError> {
+    let value = value.trim();
+    let parsed = url::Url::parse(value).map_err(|error| {
+        client::invalid_argument(format!("invalid --vllm-http-endpoint: {error}"))
+    })?;
+    let has_valid_authority = value
+        .split_once("://")
+        .is_some_and(|(_, authority)| !authority.is_empty() && !authority.starts_with('/'));
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !has_valid_authority
+    {
+        return Err(client::invalid_argument(
+            "invalid --vllm-http-endpoint: expected an http:// or https:// URL with a host",
+        ));
+    }
+    Ok(value.to_string())
+}
+
 impl VllmSidecarEngine {
     pub(crate) fn new(
         endpoint: GrpcEndpoint,
@@ -102,15 +121,11 @@ impl VllmSidecarEngine {
 
         let endpoint = GrpcEndpoint::parse(&args.vllm_endpoint, "--vllm-endpoint")?;
         let enable_rl = args.sidecar.common.enable_rl;
-        let vllm_http_url = if enable_rl {
-            args.vllm_http_endpoint
-                .as_deref()
-                .map(|value| GrpcEndpoint::parse(value, "--vllm-http-endpoint"))
-                .transpose()?
-                .map(|endpoint| endpoint.to_string())
-        } else {
-            None
-        };
+        let vllm_http_url = args
+            .vllm_http_endpoint
+            .as_deref()
+            .map(validate_http_endpoint)
+            .transpose()?;
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
         eprintln!(

@@ -3164,6 +3164,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tonic-health",
  "tracing",
+ "url",
 ]
 
 [[package]]
