@@ -1716,14 +1716,7 @@ async fn create_kv_router_from_endpoint(
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
     let needs_policy_role = worker_selection_policy_factory.is_some();
-    let (
-        model_name,
-        policy_model_name,
-        enable_eagle,
-        worker_role,
-        policy_worker_role,
-        load_source,
-    ) = {
+    let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role, load_source) = {
         let maybe_card = if needs_model_name || needs_policy_role {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
                 .ok()
@@ -1801,8 +1794,7 @@ async fn create_kv_router_from_endpoint(
                     false,
                     None,
                     None,
-                    if metric_worker_type
-                        == llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
+                    if metric_worker_type == llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
                     {
                         llm_rs::kv_router::RouterLoadSource::Prefill
                     } else {

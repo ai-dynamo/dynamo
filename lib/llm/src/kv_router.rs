@@ -1756,7 +1756,7 @@ mod tests {
     use crate::local_model::runtime_config::ModelRuntimeConfig;
 
     fn scheduler_load_sender() -> SchedulerLoadSender {
-        routing_graph::scheduler_load_channel(CancellationToken::new()).0
+        routing_graph::scheduler_load_channel(RouterLoadSource::Decode, CancellationToken::new()).0
     }
 
     #[test]
