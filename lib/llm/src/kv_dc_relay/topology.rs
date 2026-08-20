@@ -157,6 +157,17 @@ impl TopologyPublisher {
         }
     }
 
+    /// Publishes an empty topology once the relay host has terminally stopped, so
+    /// consumers holding the watch never keep acting on the last live snapshot.
+    pub(crate) fn clear(&self) {
+        let mut state = self.state.lock();
+        state.membership = DcMembershipView::default();
+        state.availability.clear();
+        state.availability_owners.clear();
+        state.pools.clear();
+        publish_if_changed(&mut state, &self.sender);
+    }
+
     pub(crate) fn replace_catalog(&self, catalog: &DcPoolCatalog) {
         let pools = pool_links(catalog);
         let mut state = self.state.lock();

@@ -649,6 +649,7 @@ impl KvDcRelay {
             cancel.clone(),
             terminal.clone(),
             pools.clone(),
+            topology.clone(),
         ));
         Ok(Self {
             #[cfg(feature = "ckf-diagnostics")]
@@ -948,6 +949,7 @@ async fn run_host_supervisor(
         report_retired_endpoint_slot(Some(retired));
     }
     pools.shutdown().await;
+    topology.clear();
     outcome
 }
 
@@ -964,6 +966,7 @@ async fn supervise_host_task(
     cancel: CancellationToken,
     terminal: Arc<HostTerminalState>,
     pools: Arc<PoolRegistry>,
+    topology: Arc<TopologyPublisher>,
 ) {
     let result = host.await;
     if cancel.is_cancelled() {
@@ -976,6 +979,8 @@ async fn supervise_host_task(
     };
     record_host_failure(&cancel, &terminal, reason);
     pools.shutdown().await;
+    // A panicked host never reaches the supervisor's own exit path.
+    topology.clear();
 }
 
 fn record_host_failure(cancel: &CancellationToken, terminal: &HostTerminalState, reason: String) {
@@ -2585,6 +2590,7 @@ mod tests {
             cancel.clone(),
             terminal.clone(),
             pools.clone(),
+            test_topology(),
         )
         .await;
 
@@ -2623,11 +2629,28 @@ mod tests {
             Ok(())
         });
 
-        supervise_host_task(host, cancel.clone(), terminal.clone(), pools).await;
+        let member = membership("prod.backend.generate", domain(1, "meta/llama"));
+        let topology = Arc::new(TopologyPublisher::new(
+            DcMembershipView {
+                endpoints: Arc::new(HashMap::from([(member.endpoint.clone(), member)])),
+            },
+            &DcPoolCatalog::new(DcRelayIdentity::new(0, 1), 0, Vec::new()),
+        ));
+        assert!(!topology.snapshot().entries.is_empty());
+
+        supervise_host_task(
+            host,
+            cancel.clone(),
+            terminal.clone(),
+            pools,
+            topology.clone(),
+        )
+        .await;
 
         assert!(cancel.is_cancelled());
         let reason = terminal.last_error().expect("terminal host reason");
         assert!(reason.contains("injected host panic"));
+        assert!(topology.snapshot().entries.is_empty());
     }
 
     #[tokio::test]
@@ -2640,6 +2663,7 @@ mod tests {
             cancel,
             terminal.clone(),
             Arc::new(registry()),
+            test_topology(),
         )
         .await;
 
