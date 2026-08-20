@@ -569,6 +569,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
         validate::validate_tools(&self.inner.tools.as_deref())?;
+        validate::validate_tool_call_arguments(&self.inner.messages, self.inner.tools.as_deref())?;
         validate::validate_tool_choice(&self.inner.tool_choice, self.inner.tools.as_deref())?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;
@@ -1065,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_messages_rejects_bad_tool_call_arguments() {
+    fn test_validate_tool_call_arguments_rejects_bad_json_objects() {
         for arguments in ["{invalid json}", "[]", "null", "\"not an object\""] {
             let request_json = json!({
                 "model": "test-model",
@@ -1110,7 +1111,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_messages_accepts_empty_tool_call_arguments() {
+    fn test_validate_tool_call_arguments_accepts_empty_arguments() {
         for arguments in ["", " \n\t ", "{}"] {
             let request_json = json!({
                 "model": "test-model",
@@ -1143,6 +1144,209 @@ mod tests {
             ValidateRequest::validate(&request)
                 .unwrap_or_else(|err| panic!("empty tool_call arguments should validate: {err}"));
         }
+    }
+
+    fn validate_weather_arguments(
+        arguments: &str,
+        parameters: serde_json::Value,
+    ) -> Result<(), anyhow::Error> {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": arguments
+                        }
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+                {"role": "user", "content": "thanks"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": parameters
+                }
+            }]
+        });
+
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+        ValidateRequest::validate(&request)
+    }
+
+    #[test]
+    fn test_validate_tool_call_arguments_accepts_basic_json_types() {
+        for (expected, value) in [
+            ("string", json!("Seattle")),
+            ("number", json!(12.5)),
+            ("integer", json!(12)),
+            ("boolean", json!(true)),
+            ("object", json!({"city": "Seattle"})),
+            ("array", json!(["Seattle"])),
+            ("null", json!(null)),
+        ] {
+            let arguments = json!({"value": value}).to_string();
+            validate_weather_arguments(
+                &arguments,
+                json!({
+                    "type": "object",
+                    "properties": {"value": {"type": expected}},
+                    "required": ["value"]
+                }),
+            )
+            .unwrap_or_else(|error| panic!("{expected} should validate: {error}"));
+        }
+    }
+
+    #[test]
+    fn test_validate_tool_call_arguments_rejects_wrong_property_types() {
+        for (value, actual_type) in [
+            (json!(123), "number"),
+            (json!(true), "boolean"),
+            (json!(null), "null"),
+            (json!(["Seattle"]), "array"),
+            (json!({"city": "Seattle"}), "object"),
+        ] {
+            let arguments = json!({"location": value}).to_string();
+            let error = validate_weather_arguments(
+                &arguments,
+                json!({
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"]
+                }),
+            )
+            .expect_err("a non-string location must fail validation")
+            .to_string();
+
+            assert!(
+                error.contains(
+                    "`messages[1].tool_calls[0].function.arguments.location` must be of type \"string\""
+                ),
+                "unexpected error for {value}: {error}"
+            );
+            assert!(
+                error.contains(&format!("got {actual_type}")),
+                "unexpected error for {value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_tool_call_arguments_checks_nested_arrays() {
+        let error = validate_weather_arguments(
+            r#"{"forecast_days":[1,"2"]}"#,
+            json!({
+                "type": "object",
+                "properties": {
+                    "forecast_days": {
+                        "type": "array",
+                        "items": {"type": "integer"}
+                    }
+                }
+            }),
+        )
+        .expect_err("nested array item type must be validated")
+        .to_string();
+
+        assert!(
+            error.contains(
+                "`messages[1].tool_calls[0].function.arguments.forecast_days[1]` must be of type \"integer\", got string"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_validate_tool_call_arguments_checks_required_and_additional_properties() {
+        let parameters = json!({
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+            "required": ["location"],
+            "additionalProperties": false
+        });
+
+        let missing = validate_weather_arguments("{}", parameters.clone())
+            .expect_err("missing required property must fail")
+            .to_string();
+        assert!(
+            missing.contains("`messages[1].tool_calls[0].function.arguments.location` is required"),
+            "unexpected error: {missing}"
+        );
+
+        let unexpected =
+            validate_weather_arguments(r#"{"location":"Seattle","units":"C"}"#, parameters)
+                .expect_err("additional property must fail")
+                .to_string();
+        assert!(
+            unexpected
+                .contains("`messages[1].tool_calls[0].function.arguments.units` is not allowed"),
+            "unexpected error: {unexpected}"
+        );
+    }
+
+    #[test]
+    fn test_validate_tool_call_arguments_multiturn_uses_matching_current_tool() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "search"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_old",
+                        "type": "function",
+                        "function": {
+                            "name": "old_search",
+                            "arguments": "{\"query\":123}"
+                        }
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_old", "content": "done"},
+                {"role": "user", "content": "weather?"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_weather",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"location\":123}"
+                        }
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_weather", "content": "sunny"},
+                {"role": "user", "content": "thanks"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}}
+                    }
+                }
+            }]
+        });
+
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+        let error = ValidateRequest::validate(&request)
+            .expect_err("matching current tool must validate in multiturn history")
+            .to_string();
+        assert!(
+            error.contains("`messages[4].tool_calls[0].function.arguments.location`"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
