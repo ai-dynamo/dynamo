@@ -14,20 +14,6 @@ from gpu_memory_service.v1.client.mempool import TorchMempoolMemoryClient
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
-_FACTORY_TARGET = (
-    "sglang.srt.utils.torch_memory_saver_adapter.TorchMemorySaverAdapter.create"
-)
-_INITIAL_MODEL_LOAD_TARGET = (
-    "sglang.srt.model_executor.model_runner_components.load_model_utils."
-    "load_model_with_memory_saver"
-)
-_INIT_ALL_CUDA_GRAPHS_TARGET = (
-    "sglang.srt.managers.scheduler.Scheduler.init_all_cuda_graphs"
-)
-_CREATE_DSA_INDEX_BUFFERS_TARGET = (
-    "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers"
-)
-
 
 class GMSV1MemorySaverAdapter(TorchMemorySaverAdapter):
     """Share one GMS V1 client across SGLang's process-local adapters."""
@@ -86,10 +72,7 @@ def _adapter() -> GMSV1MemorySaverAdapter:
     return GMSV1MemorySaverAdapter()
 
 
-def _around_adapter_factory(original_factory, *args, **kwargs):
-    enable = args[0] if args else kwargs["enable"]
-    if not enable:
-        return original_factory(*args, **kwargs)
+def _around_adapter_factory(_original_factory, *_args, **_kwargs):
     return _adapter()
 
 
@@ -109,25 +92,34 @@ def _around_create_dsa_index_buffers(original, *args, **kwargs):
 
 def register_gms_v1_plugin() -> None:
     """Register the GMS hooks in SGLang processes where Dynamo enabled them."""
-    if os.environ.get("DYN_SGL_ENABLE_GMS_V1") != "true":
+    if os.environ.get("DYN_GMS_USE_V1") != "true":
         return
     HookRegistry.register(
-        _INITIAL_MODEL_LOAD_TARGET,
+        "sglang.srt.model_executor.model_runner_components.load_model_utils."
+        "load_model_with_memory_saver",
         _after_initial_model_load,
         HookType.AFTER,
     )
     HookRegistry.register(
-        _INIT_ALL_CUDA_GRAPHS_TARGET,
+        "sglang.srt.managers.scheduler.Scheduler.init_all_cuda_graphs",
         _before_init_all_cuda_graphs,
         HookType.BEFORE,
     )
     HookRegistry.register(
-        _FACTORY_TARGET,
+        "sglang.srt.utils.torch_memory_saver_adapter.TorchMemorySaverAdapter.create",
         _around_adapter_factory,
         HookType.AROUND,
     )
     HookRegistry.register(
-        _CREATE_DSA_INDEX_BUFFERS_TARGET,
+        "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers",
+        _around_create_dsa_index_buffers,
+        HookType.AROUND,
+    )
+    # Layer-split DSA overrides the parent method, so the parent hook does not
+    # wrap index_k_with_scale_buffer or remote_index_k_with_scale_buffer.
+    HookRegistry.register(
+        "sglang.srt.mem_cache.dsa_cache_layer_split."
+        "LayerSplitDSATokenToKVPool._create_index_buffers",
         _around_create_dsa_index_buffers,
         HookType.AROUND,
     )

@@ -30,6 +30,8 @@ _REMOVED_MULTIMODAL_ENV_VARS = {
     ),
 }
 
+GMS_V1_LLM_ONLY_ERROR = "GMS V1 is only supported for LLM workers"
+
 
 def _reject_removed_multimodal_env_vars() -> None:
     for env_var, replacement in _REMOVED_MULTIMODAL_ENV_VARS.items():
@@ -59,7 +61,7 @@ class DynamoSGLangArgGroup(ArgGroup):
         add_negatable_bool_argument(
             g,
             flag_name="--enable-gms-v1",
-            env_var="DYN_SGL_ENABLE_GMS_V1",
+            env_var="DYN_GMS_USE_V1",
             default=False,
             help=(
                 "Enable GMS V1 for Dynamo Snapshot. Requires "
@@ -227,6 +229,8 @@ class DynamoSGLangConfig(ConfigBase):
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."
             )
 
+        reject_gms_v1_for_non_llm(self)
+
         self.validate_multimodal_topology()
 
         self.validate_dedicated_mm_encoder()
@@ -249,3 +253,20 @@ class DynamoSGLangConfig(ConfigBase):
                 "deployment, pass the flag only to the frontend-facing worker "
                 "using --disaggregation-mode=encode."
             )
+
+
+def reject_gms_v1_for_non_llm(config: DynamoSGLangConfig) -> None:
+    """GMS V1 Snapshot only covers LLM prefill/decode workers."""
+    if not config.enable_gms_v1:
+        return
+    if (
+        config.image_diffusion_worker
+        or config.video_generation_worker
+        or config.embedding_worker
+        or config.multimodal_encode_worker
+        or config.multimodal_worker
+        or config.enable_multimodal
+        # dLLM is derived onto DynamoConfig after ServerArgs resolution.
+        or getattr(config, "diffusion_worker", False)
+    ):
+        raise ValueError(GMS_V1_LLM_ONLY_ERROR)

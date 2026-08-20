@@ -133,7 +133,7 @@ async def prepare_snapshot_engine(
     """
     snapshot_config = SnapshotConfig.from_env()
     # SGLang loads plugins independently in each scheduler process.
-    os.environ["DYN_SGL_ENABLE_GMS_V1"] = str(enable_gms_v1).lower()
+    os.environ["DYN_GMS_USE_V1"] = str(enable_gms_v1).lower()
     if enable_gms_v1 and server_args.load_format == "gms":
         raise ValueError("--enable-gms-v1 cannot be combined with --load-format gms")
     if enable_gms_v1 and snapshot_config is None:
