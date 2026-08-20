@@ -466,12 +466,8 @@ fn discovered_model_reports_rl_worker_metadata() {
         model
             .rl_worker_metadata(Some("http://worker:8120".to_string()))
             .expect("valid RL metadata"),
-        RlWorkerMetadata::new(
-            4,
-            Some("nccl".to_string()),
-            Some("http://worker:8120".to_string()),
-        )
-        .expect("valid expected metadata")
+        RlWorkerMetadata::new(4, Some("http://worker:8120".to_string()))
+            .expect("valid expected metadata")
     );
 }
 
@@ -883,12 +879,8 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(
         worker.rl_metadata,
         Some(
-            RlWorkerMetadata::new(
-                4,
-                Some("nccl".to_string()),
-                Some("http://worker:8120".to_string()),
-            )
-            .expect("valid RL metadata")
+            RlWorkerMetadata::new(4, Some("http://worker:8120".to_string()))
+                .expect("valid RL metadata")
         )
     );
     let config = engine.start(0).await.expect("start");
