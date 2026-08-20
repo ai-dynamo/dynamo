@@ -115,6 +115,8 @@ accepted, and ordinary physical classes are no longer direct header
 overrides. The sample is a Baseten-oriented continuing-session starting point,
 not a compatibility profile.
 
+For `--router-mode least-loaded`, set `DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE=1` to order workers by the total prompt tokens of their in-flight requests rather than by request count, using the request count only to break ties. See [Least-Loaded Routing](router-guide.md#least-loaded-routing).
+
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
 
 ## Session Affinity

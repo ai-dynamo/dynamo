@@ -110,9 +110,18 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Random** | `random` | Selects a random worker for each request |
 | **Power of Two** | `power-of-two` | Samples two workers and routes to the one with fewer in-flight requests; in disaggregated prefill paths it falls back to synchronous prefill |
 | **KV** | `kv` | Evaluates KV cache overlap and decode load per worker; picks lowest cost |
-| **Least-Loaded** | `least-loaded` | Routes to the worker with fewest active connections; in disaggregated prefill paths it skips bootstrap optimization and falls back to synchronous prefill |
+| **Least-Loaded** | `least-loaded` | Routes to the worker with fewest active connections, or fewest queued prompt tokens under `DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE`; in disaggregated prefill paths it skips bootstrap optimization and falls back to synchronous prefill |
 | **Device-Aware Weighted** | `device-aware-weighted` | Partitions workers into CPU and non-CPU groups, applies capability-normalized ratio budgeting using `DYN_ENCODER_CUDA_TO_CPU_RATIO` to decide which group receives the request, then selects the least-loaded worker within that group |
 | **Direct** | `direct` | Reads the target `worker_id` from the request's routing hints; no selection logic |
+
+### Least-Loaded Routing
+
+`least-loaded` routes each request to the worker holding the fewest in-flight requests.
+
+Set `DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE=1` to order workers by queued prompt tokens instead. The router tracks the prompt length of every request it has scheduled and not yet completed, routes to the worker with the smallest total, and uses the in-flight request count only to break ties. This suits fleets with a wide spread of prompt lengths, where one long prompt costs far more than several short ones.
+
+> [!NOTE]
+> Token-aware ordering applies to hops that route tokenized requests: the frontend's preprocessed-request hop and the prefill hop. Hops that dispatch untokenized OpenAI requests, such as embeddings, have no prompt length to charge and keep request-count ordering. `power-of-two` and `device-aware-weighted` are unaffected by this variable.
 
 ### Device-Aware Weighted Routing
 
