@@ -44,7 +44,7 @@ Internal responsibilities
    ``observations.fpm``.
 4. **PipelineOutcome → PlannerEffects projection**:
    Reads the orchestrator's ``final_proposal.targets``, detects "no
-   change" against ``worker_counts``, applies final min_endpoint / GPU
+   change" against ``worker_counts``, applies final component minimum / GPU
    budget invariants, and projects to
    ``PlannerEffects.scale_to`` and fills diagnostics from the shared
    scaling state.
@@ -63,11 +63,13 @@ import logging
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
+from dynamo.planner.config.planner_config import resolve_min_endpoint
 
 if TYPE_CHECKING:
     import grpc.aio
 
 from dynamo.planner.core.budget import (
+    apply_power_budget,
     proportional_clamp_pair,
     proportional_clamp_single,
 )
@@ -77,7 +79,6 @@ from dynamo.planner.core.types import (
     PlannerEffects,
     ScalingDecision,
     ScheduledTick,
-    TickDiagnostics,
     TickInput,
     TrafficObservation,
     WorkerCapabilities,
@@ -174,6 +175,9 @@ class OrchestratorEngineAdapter:
         self._last_tick_monotonic: float = 0.0
         self._last_load_loop_monotonic: float = 0.0
         self._last_throughput_loop_monotonic: float = 0.0
+        # Emit one rollout-hold warning per continuous mid-rollout stretch;
+        # reset when the deployment is stable again so the next rollout warns.
+        self._power_rollout_hold_warned: bool = False
 
         # Plugin-framework metrics live alongside the adapter so they
         # share the orchestrator's lifecycle.  Use the default global
@@ -644,130 +648,6 @@ class OrchestratorEngineAdapter:
         )
         return response.tick_input
 
-    def _project_load_diagnostics(self, diagnostics: TickDiagnostics) -> None:
-        """Read ``BuiltinLoadPropose._last_load_diagnostics`` and write
-        to ``diagnostics.load_decision_reason*`` + ``estimated_*_ms``.
-
-        Mirrors the builtin planner diagnostic surface:
-        - mode=agg → aggregate ``load_decision_reason``
-        - mode=disagg → per-component ``load_decision_reason_prefill`` /
-          ``_decode`` (and also the aggregate, set to whichever side
-          has a stronger signal; see ``_aggregate_disagg_load_reason``)
-        - mode=prefill/decode → aggregate reason from the single side
-        """
-        propose = self._builtins.get("load_propose")
-        if propose is None:
-            return
-        d = getattr(propose, "_last_load_diagnostics", None)
-        if d is None:
-            return
-
-        mode = self._config.mode
-        if mode == "agg":
-            diagnostics.load_decision_reason = d.get("agg")
-        elif mode == "disagg":
-            diagnostics.load_decision_reason_prefill = d.get("prefill")
-            diagnostics.load_decision_reason_decode = d.get("decode")
-            # Aggregate: prefer scale_up > scale_down > no_change >
-            # <skip reason>. Lets a single dashboard widget show "what
-            # did the load path do" without dropping into the per-
-            # component detail.
-            diagnostics.load_decision_reason = self._aggregate_disagg_load_reason(
-                d.get("prefill"), d.get("decode")
-            )
-        elif mode in ("prefill", "decode"):
-            diagnostics.load_decision_reason = d.get(mode)
-
-        diagnostics.estimated_ttft_ms = d.get("estimated_ttft_ms")
-        diagnostics.estimated_itl_ms = d.get("estimated_itl_ms")
-
-    def _project_throughput_diagnostics(self, diagnostics: TickDiagnostics) -> None:
-        """Read ``BuiltinThroughputPropose._last_throughput_diagnostics``
-        and write to ``diagnostics.throughput_decision_reason*``.
-
-        Symmetric with ``_project_load_diagnostics``: throughput proposal
-        records per-component reasons and this helper projects them onto
-        the public ``TickDiagnostics`` fields.
-
-        Mode mapping:
-        - mode=agg → aggregate ``throughput_decision_reason``
-        - mode=disagg → per-component
-          ``throughput_decision_reason_prefill``/``_decode`` plus the
-          aggregate (precedence via ``_aggregate_disagg_throughput_reason``)
-        - mode=prefill/decode → aggregate from the single side
-        """
-        propose = self._builtins.get("throughput_propose")
-        if propose is None:
-            return
-        d = getattr(propose, "_last_throughput_diagnostics", None)
-        if d is None:
-            return
-
-        mode = self._config.mode
-        if mode == "agg":
-            diagnostics.throughput_decision_reason = d.get("agg")
-        elif mode == "disagg":
-            diagnostics.throughput_decision_reason_prefill = d.get("prefill")
-            diagnostics.throughput_decision_reason_decode = d.get("decode")
-            diagnostics.throughput_decision_reason = (
-                self._aggregate_disagg_throughput_reason(
-                    d.get("prefill"), d.get("decode")
-                )
-            )
-        elif mode in ("prefill", "decode"):
-            diagnostics.throughput_decision_reason = d.get(mode)
-
-    @staticmethod
-    def _aggregate_disagg_load_reason(
-        prefill_reason: Optional[str], decode_reason: Optional[str]
-    ) -> Optional[str]:
-        """Collapse two per-component reasons to a single aggregate
-        string. Precedence keeps "a side scaled"
-        wins over "both stable", "stable with data" wins over "no
-        data"."""
-        priority = [
-            "scale_up",
-            "scale_down_capped_by_throughput",
-            "scale_down",
-            "no_change",
-            "insufficient_data",
-            "worker_count_mismatch",
-            "scaling_in_progress",
-            "no_fpm_data",
-            "disabled",
-        ]
-        pairs = [r for r in (prefill_reason, decode_reason) if r is not None]
-        if not pairs:
-            return None
-        for p in priority:
-            if p in pairs:
-                return p
-        return pairs[0]
-
-    @staticmethod
-    def _aggregate_disagg_throughput_reason(
-        prefill_reason: Optional[str], decode_reason: Optional[str]
-    ) -> Optional[str]:
-        """Collapse two per-component throughput reasons. Vocabulary
-        differs from load reasons (no scale_up/down enums on this
-        side); ranking keeps "stronger action wins":
-        ``scale`` > ``set_lower_bound`` > skip reasons."""
-        priority = [
-            "scale",
-            "set_lower_bound",
-            "model_not_ready",
-            "no_traffic_data",
-            "predict_failed",
-            "disabled",
-        ]
-        pairs = [r for r in (prefill_reason, decode_reason) if r is not None]
-        if not pairs:
-            return None
-        for p in priority:
-            if p in pairs:
-                return p
-        return pairs[0]
-
     async def shutdown(self) -> None:
         # Stop the gateway BEFORE unregistering plugins so no new
         # external Register / Heartbeat call can race the teardown.
@@ -1031,7 +911,13 @@ class OrchestratorEngineAdapter:
 
     def _project_scale_to(self, outcome, worker_counts: WorkerCounts):
         """Project the pipeline outcome onto ``PlannerEffects.scale_to``
-        with planner "no change -> None" detection."""
+        with planner "no change -> None" detection.
+
+        ``type_aware_merge`` fills omitted roles from the ready-count baseline.
+        ``PipelineOutcome.proposed_components`` preserves which roles PROPOSE
+        actually targeted before that merge, so the power path can charge
+        baseline peers without treating them as adjustable targets.
+        """
         if outcome.execute_action != "apply" or outcome.final_proposal is None:
             return None
 
@@ -1043,18 +929,110 @@ class OrchestratorEngineAdapter:
 
         current_p = worker_counts.ready_num_prefill
         current_d = worker_counts.ready_num_decode
+        mode = self._config.mode
+        prefill_min_endpoint = resolve_min_endpoint(self._config, "prefill")
+        decode_min_endpoint = resolve_min_endpoint(self._config, "decode")
 
-        p_unchanged = (num_p is None) or (num_p == current_p)
-        d_unchanged = (num_d is None) or (num_d == current_d)
-        if p_unchanged and d_unchanged:
-            return None
+        def _role_scaling(
+            current: Optional[int], expected: Optional[int], in_progress: bool
+        ) -> bool:
+            return in_progress or (
+                current is not None and expected is not None and current != expected
+            )
+
+        deployment_scaling = _role_scaling(
+            current_p,
+            worker_counts.expected_num_prefill,
+            worker_counts.prefill_scaling_in_progress,
+        ) or _role_scaling(
+            current_d,
+            worker_counts.expected_num_decode,
+            worker_counts.decode_scaling_in_progress,
+        )
+        prefill_floor_needed = (
+            mode in ("disagg", "prefill")
+            and not deployment_scaling
+            and current_p is not None
+            and current_p < prefill_min_endpoint
+        )
+        decode_floor_needed = (
+            mode in ("disagg", "decode", "agg")
+            and not deployment_scaling
+            and current_d is not None
+            and current_d < decode_min_endpoint
+        )
+        floor_reconcile = mode == "disagg" and (
+            prefill_floor_needed or decode_floor_needed
+        )
+        if prefill_floor_needed:
+            num_p = max(num_p or 0, prefill_min_endpoint)
+        if decode_floor_needed:
+            num_d = max(num_d or 0, decode_min_endpoint)
+
+        prefill_key = ComponentKey(sub_component_type="prefill")
+        decode_key = ComponentKey(sub_component_type="decode")
+        prefill_proposed = prefill_key in outcome.proposed_components
+        decode_proposed = decode_key in outcome.proposed_components
+        if self._config.enable_power_awareness:
+            # Restore the explicit PROPOSE-stage mask before the final budget
+            # boundary. Omitted roles are still charged via ``current_*`` inside
+            # the clamps, but can never become emitted targets. A disaggregated
+            # floor repair temporarily keeps both roles adjustable so the paired
+            # GPU/power clamps can first shrink a peer that occupies the budget.
+            if (
+                not prefill_proposed
+                and not prefill_floor_needed
+                and not floor_reconcile
+            ):
+                num_p = None
+            if not decode_proposed and not decode_floor_needed and not floor_reconcile:
+                num_d = None
+            if num_p is None and num_d is None:
+                return None
+        else:
+            p_unchanged = (num_p is None) or (num_p == current_p)
+            d_unchanged = (num_d is None) or (num_d == current_d)
+            if p_unchanged and d_unchanged:
+                return None
 
         num_p, num_d = self._apply_final_budget(num_p, num_d, worker_counts)
 
-        p_unchanged = (num_p is None) or (num_p == current_p)
-        d_unchanged = (num_d is None) or (num_d == current_d)
-        if p_unchanged and d_unchanged:
-            return None
+        if floor_reconcile:
+            # Drop unchanged merged-baseline echoes after a paired clamp. A peer
+            # that was actually reduced to make room for the floor remains an
+            # emitted target; an unchanged peer must not cancel its own rollout.
+            if (
+                num_p is not None
+                and num_p == current_p
+                and not prefill_proposed
+                and not prefill_floor_needed
+            ):
+                num_p = None
+            if (
+                num_d is not None
+                and num_d == current_d
+                and not decode_proposed
+                and not decode_floor_needed
+            ):
+                num_d = None
+
+        if self._config.enable_power_awareness:
+            # Suppress only a proven stable no-op. During a rollout ``expected``
+            # is unknown, so an explicit target equal to transient ready may be
+            # intentional cancellation of the in-flight desired count.
+            expected_p = worker_counts.expected_num_prefill
+            expected_d = worker_counts.expected_num_decode
+            if num_p is not None and expected_p is not None and num_p == expected_p:
+                num_p = None
+            if num_d is not None and expected_d is not None and num_d == expected_d:
+                num_d = None
+            if num_p is None and num_d is None:
+                return None
+        else:
+            p_unchanged = (num_p is None) or (num_p == current_p)
+            d_unchanged = (num_d is None) or (num_d == current_d)
+            if p_unchanged and d_unchanged:
+                return None
 
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
 
@@ -1064,7 +1042,174 @@ class OrchestratorEngineAdapter:
         num_d: Optional[int],
         worker_counts: WorkerCounts,
     ) -> tuple[Optional[int], Optional[int]]:
-        min_endpoint = self._config.min_endpoint
+        """Final invariant boundary: GPU budget then power budget.
+
+        Order is deliberate and non-commutative — the GPU clamp fits replica
+        counts to the GPU band first, then the power clamp holds the result to
+        the projected ``total_gpu_power_limit`` (a bound on projected draw from
+        the requested caps, not a proven hardware limit). Applied here once, it
+        covers builtin and external-plugin proposals alike.
+        """
+        proposed_p, proposed_d = num_p, num_d
+        num_p, num_d = self._apply_gpu_final_budget(num_p, num_d, worker_counts)
+        return self._apply_power_final_budget(
+            num_p,
+            num_d,
+            worker_counts,
+            proposed_before_gpu=(proposed_p, proposed_d),
+        )
+
+    def _hold_scale_up_during_rollout(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        ready_p: Optional[int],
+        ready_d: Optional[int],
+        p_watts: Optional[int],
+        d_watts: Optional[int],
+        worker_counts: WorkerCounts,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Hold every scale-up at its ready count while ANY power-relevant role
+        is mid-rollout (conservative, fail-closed).
+
+        The Kubernetes environment tracks a single deployment-wide stability
+        flag, so a rollout of *either* role marks *both* roles' ``expected``
+        (settled) count unknown (None) — there is no per-role desired target to
+        reason about. A rolling role's settled power can only be charged at its
+        transient ready count, which undercounts it, so while any role rolls no
+        role may scale up above its ready count; otherwise the settled total (the
+        rolling role at its unknown-but-larger desired plus another role grown)
+        can exceed the budget. Scale-downs stay allowed. A held scale-up becomes
+        ``None`` immediately, so the already-issued rollout's DGD desired is left
+        untouched even when the other role legitimately scales down this tick.
+
+        Rollout *state*, not None targets, is the signal — ``type_aware_merge``
+        fills a role a plugin omitted from the baseline, so the proposal usually
+        carries a target for every role. (A future per-role desired/stability
+        connector contract could relax this to only the roles actually rolling.)
+        """
+
+        def _rolling(ready, expected, watts):
+            return ready is not None and expected is None and bool(watts)
+
+        any_rolling = _rolling(
+            ready_p, worker_counts.expected_num_prefill, p_watts
+        ) or _rolling(ready_d, worker_counts.expected_num_decode, d_watts)
+        if not any_rolling:
+            self._power_rollout_hold_warned = False
+            return num_p, num_d
+
+        held_roles: list[str] = []
+        if num_p is not None and ready_p is not None and num_p > ready_p:
+            held_roles.append(f"prefill at {ready_p} (proposed {num_p})")
+            num_p = None
+        if num_d is not None and ready_d is not None and num_d > ready_d:
+            held_roles.append(f"decode at {ready_d} (proposed {num_d})")
+            num_d = None
+        if held_roles and not self._power_rollout_hold_warned:
+            log.warning(
+                "power budget: holding %s — a power-relevant role is "
+                "mid-rollout with an unknown settled target, so a scale-up "
+                "cannot be safely budgeted this tick (further holds this "
+                "rollout are silent)",
+                "; ".join(held_roles),
+            )
+            self._power_rollout_hold_warned = True
+        return num_p, num_d
+
+    def _apply_power_final_budget(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        worker_counts: WorkerCounts,
+        proposed_before_gpu: Optional[tuple[Optional[int], Optional[int]]] = None,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Clamp the GPU-clamped proposal to the DGD-owned power budget.
+
+        Reads startup-cached per-replica watts from ``WorkerCapabilities`` (no
+        DGD I/O). No-op unless power awareness is on and a total budget is
+        configured. Power wins over the GPU floor when they conflict — this
+        runs after the GPU clamp and only lowers counts.
+
+        Fails closed during a rollout: while any power-relevant role is
+        mid-rollout (its settled target unknown), every role's scale-up is held
+        at its ready count — see ``_hold_scale_up_during_rollout`` — so a
+        proposal cannot admit an over-budget settled state.
+        """
+        if not self._config.enable_power_awareness:
+            return num_p, num_d
+        budget = self._config.total_gpu_power_limit
+        if budget is None:
+            return num_p, num_d
+
+        p_caps = self._capabilities.prefill
+        d_caps = self._capabilities.decode
+        p_watts = p_caps.power_watts_per_replica if p_caps else None
+        d_watts = d_caps.power_watts_per_replica if d_caps else None
+
+        ready_p = worker_counts.ready_num_prefill
+        ready_d = worker_counts.ready_num_decode
+
+        num_p, num_d = self._hold_scale_up_during_rollout(
+            num_p, num_d, ready_p, ready_d, p_watts, d_watts, worker_counts
+        )
+
+        new_p, new_d, reason = apply_power_budget(
+            num_p,
+            num_d,
+            ready_p,
+            ready_d,
+            p_watts,
+            d_watts,
+            budget,
+            resolve_min_endpoint(self._config, "prefill"),
+            resolve_min_endpoint(self._config, "decode"),
+        )
+        if reason is not None and (new_p, new_d) != (num_p, num_d):
+            gpu_then_power = ""
+            if proposed_before_gpu is not None and proposed_before_gpu != (
+                num_p,
+                num_d,
+            ):
+                gpu_then_power = (
+                    f" [GPU clamp first adjusted proposed "
+                    f"prefill {proposed_before_gpu[0]}->{num_p} "
+                    f"decode {proposed_before_gpu[1]}->{num_d}; "
+                    f"power wins over GPU floor]"
+                )
+            log.warning(
+                "power budget clamp (%s): prefill %s->%s decode %s->%s "
+                "(budget=%sW, prefill=%sW/replica, decode=%sW/replica)%s",
+                reason,
+                num_p,
+                new_p,
+                num_d,
+                new_d,
+                budget,
+                p_watts,
+                d_watts,
+                gpu_then_power,
+            )
+        return new_p, new_d
+
+    def _apply_gpu_final_budget(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        worker_counts: WorkerCounts,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Clamp proposed counts to the GPU budget band.
+
+        Disagg proposals that name both roles use a joint proportional clamp.
+        When power awareness is on and exactly one role is proposed (the
+        power-induced proposal-mask path), the peer is charged at its ready
+        count and the adjustable role is sized against the residual GPU
+        ceiling/floor — joint-then-discard would leave the applied state over
+        ``max_gpu_budget``. Power-off disagg keeps the historical joint clamp
+        and discards the unproposed role's result.
+        """
+        prefill_min_endpoint = resolve_min_endpoint(self._config, "prefill")
+        decode_min_endpoint = resolve_min_endpoint(self._config, "decode")
         min_gpus = self._config.min_gpu_budget
         max_gpus = self._config.max_gpu_budget
         mode = self._config.mode
@@ -1072,6 +1217,9 @@ class OrchestratorEngineAdapter:
         def clamp_single(component: str, replicas: Optional[int]) -> Optional[int]:
             if replicas is None:
                 return None
+            min_endpoint = (
+                prefill_min_endpoint if component == "prefill" else decode_min_endpoint
+            )
             caps = (
                 self._capabilities.prefill
                 if component == "prefill"
@@ -1097,8 +1245,10 @@ class OrchestratorEngineAdapter:
 
         proposed_p = num_p is not None
         proposed_d = num_d is not None
-        base_p = num_p if proposed_p else worker_counts.ready_num_prefill
-        base_d = num_d if proposed_d else worker_counts.ready_num_decode
+        ready_p = worker_counts.ready_num_prefill
+        ready_d = worker_counts.ready_num_decode
+        base_p = num_p if proposed_p else ready_p
+        base_d = num_d if proposed_d else ready_d
         if base_p is None or base_d is None:
             return clamp_single("prefill", num_p), clamp_single("decode", num_d)
 
@@ -1108,20 +1258,95 @@ class OrchestratorEngineAdapter:
         d_gpu = d_caps.num_gpu if d_caps else None
         if p_gpu is None or d_gpu is None:
             return (
-                max(base_p, min_endpoint) if proposed_p else None,
-                max(base_d, min_endpoint) if proposed_d else None,
+                max(base_p, prefill_min_endpoint) if proposed_p else None,
+                max(base_d, decode_min_endpoint) if proposed_d else None,
             )
 
+        # Both roles proposed: joint proportional clamp (unchanged).
+        if proposed_p and proposed_d:
+            clamped_p, clamped_d = proportional_clamp_pair(
+                max(base_p, prefill_min_endpoint),
+                max(base_d, decode_min_endpoint),
+                p_gpu,
+                d_gpu,
+                min_gpus,
+                max_gpus,
+                prefill_min_endpoint,
+                decode_min_endpoint,
+            )
+            return clamped_p, clamped_d
+
+        if not proposed_p and not proposed_d:
+            return None, None
+
+        # Power-awareness collapses ready-equal peers to None before this
+        # clamp, which makes the latent joint-then-discard over-ceiling bug
+        # reachable on ordinary one-role proposals. Residual sizing is gated
+        # to that power path so power-off disagg keeps historical joint-clamp
+        # behavior (see Ted P2 on #12012). A general residual GPU-budget
+        # correction belongs in a focused follow-up.
+        if self._config.enable_power_awareness:
+            # base_* already proved ready_peer is non-None above.
+            if proposed_p:
+                assert ready_d is not None
+                fixed_gpus = ready_d * d_gpu
+                residual_max = max(0, max_gpus - fixed_gpus) if max_gpus >= 0 else -1
+                residual_min = (
+                    -1
+                    if min_gpus < 0 or (min_gpus - fixed_gpus) <= 0
+                    else (min_gpus - fixed_gpus)
+                )
+                desired_p = max(base_p, prefill_min_endpoint)
+                # When the fixed peer alone meets/exceeds the ceiling,
+                # proportional_clamp_single would return 0 (infeasible). Hold
+                # at ready instead — never emit a spurious scale-to-zero.
+                if residual_max >= 0 and residual_max < prefill_min_endpoint * p_gpu:
+                    if ready_p is None:
+                        return None, None
+                    return min(desired_p, ready_p), None
+                return (
+                    proportional_clamp_single(
+                        desired_p,
+                        p_gpu,
+                        residual_min,
+                        residual_max,
+                        prefill_min_endpoint,
+                    ),
+                    None,
+                )
+            assert ready_p is not None
+            fixed_gpus = ready_p * p_gpu
+            residual_max = max(0, max_gpus - fixed_gpus) if max_gpus >= 0 else -1
+            residual_min = (
+                -1
+                if min_gpus < 0 or (min_gpus - fixed_gpus) <= 0
+                else (min_gpus - fixed_gpus)
+            )
+            desired_d = max(base_d, decode_min_endpoint)
+            if residual_max >= 0 and residual_max < decode_min_endpoint * d_gpu:
+                if ready_d is None:
+                    return None, None
+                return None, min(desired_d, ready_d)
+            return (
+                None,
+                proportional_clamp_single(
+                    desired_d,
+                    d_gpu,
+                    residual_min,
+                    residual_max,
+                    decode_min_endpoint,
+                ),
+            )
+
+        # Power off: historical joint clamp, then discard the unproposed role.
         clamped_p, clamped_d = proportional_clamp_pair(
-            max(base_p, min_endpoint),
-            max(base_d, min_endpoint),
+            max(base_p, prefill_min_endpoint),
+            max(base_d, decode_min_endpoint),
             p_gpu,
             d_gpu,
             min_gpus,
             max_gpus,
-            min_endpoint,
+            prefill_min_endpoint,
+            decode_min_endpoint,
         )
         return clamped_p if proposed_p else None, clamped_d if proposed_d else None
-
-
-__all__ = ["OrchestratorEngineAdapter"]

@@ -281,7 +281,10 @@ type ModelCacheSpec struct {
 	PVCName string `json:"pvcName,omitempty"`
 
 	// PVCModelPath is the path to the model checkpoint directory within the PVC
-	// (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
+	// (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). It may also be a
+	// container-visible absolute path already under PVCMountPath. Such an absolute
+	// path is interpreted as container-visible; use the relative form without a
+	// leading slash to address the same path prefix within the PVC.
 	// +optional
 	PVCModelPath string `json:"pvcModelPath,omitempty"`
 
@@ -456,7 +459,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (planner image).
-	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0".
 	// For Dynamo < 1.1.0, use dynamo-frontend.
 	// +optional
 	Image string `json:"image,omitempty"`
@@ -632,10 +635,6 @@ type DynamoGraphDeploymentRequestList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoGraphDeploymentRequest `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeploymentRequest{}, &DynamoGraphDeploymentRequestList{})
 }
 
 // SetPhase updates the Phase field in the DGDR status.

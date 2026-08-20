@@ -9,13 +9,14 @@ use std::{
     },
 };
 
+use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
-    protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId},
+    protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
+    selector::WorkerSelector,
 };
-use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
@@ -24,8 +25,9 @@ use super::{
 };
 
 use dynamo_runtime::{
-    component::{Endpoint, build_transport_type},
-    discovery::{Discovery, DiscoverySpec},
+    component::{Client, Endpoint, build_transport_type},
+    discovery::{Discovery, DiscoverySpec, ModelCardInstanceId},
+    pipeline::network::RequestPlanePayloadCodec,
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
@@ -35,51 +37,27 @@ use crate::{
         KvEventSourceRequirement, KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
         shared_cache::HicacheSharedKvCache,
     },
-    local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig, topology_taint},
+    local_model::runtime_config::{
+        DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        topology_taint,
+    },
+    lora::state_tracker::LoraWorkerProjection,
     lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
-    model_card::ModelDeploymentCard,
+    model_card::{LoraInfo, ModelDeploymentCard},
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
         openai::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
-            completions::OpenAICompletionsStreamingEngine,
+            classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
-            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
     worker_type::WorkerType,
 };
-
-/// State for prefill router activation rendezvous.
-///
-/// Once a prefill endpoint has been observed for a (model, namespace) pair,
-/// `PrefillReady` is left in the activator map indefinitely (until prefill
-/// workers all disappear). This survives `register_prefill_router` consuming
-/// the entry — that consumer hands out a fresh `oneshot::Receiver` synthesized
-/// from the cached endpoint, then re-inserts `PrefillReady` so future decode
-/// WorkerSet rebuilds (e.g., decode pod restarts) can find it and activate
-/// immediately without waiting for prefill workers to re-register.
-enum PrefillActivationState {
-    /// Decode model registered, waiting for prefill endpoint
-    DecodeWaiting(oneshot::Sender<Endpoint>),
-    /// Prefill endpoint observed and cached for this (model, namespace).
-    /// Anyone calling `register_prefill_router` synthesizes a fresh
-    /// `oneshot::Receiver` from this and re-inserts the cached endpoint.
-    ///
-    /// Boxed to keep the enum variant sizes balanced (`Endpoint` is much
-    /// larger than `oneshot::Sender`). Satisfies `clippy::large_enum_variant`.
-    PrefillReady(Box<Endpoint>),
-}
-
-/// State for the optional Encode endpoint / token-pipeline rendezvous.
-#[derive(Default)]
-struct EncoderActivationState {
-    consumer: Option<oneshot::Sender<Endpoint>>,
-    endpoint: Option<Box<Endpoint>>,
-    routing_enabled: bool,
-}
 
 struct LoraEndpointDomain {
     routing_table: LoraRoutingTable,
@@ -87,6 +65,7 @@ struct LoraEndpointDomain {
     load_estimator: Arc<LoadEstimator>,
     filter: Arc<LoraFilter>,
     controller_started: AtomicBool,
+    controller_cancel: parking_lot::Mutex<Option<tokio_util::sync::CancellationToken>>,
 }
 
 impl LoraEndpointDomain {
@@ -103,7 +82,19 @@ impl LoraEndpointDomain {
             load_estimator: Arc::new(LoadEstimator::new()),
             filter,
             controller_started: AtomicBool::new(false),
+            controller_cancel: parking_lot::Mutex::new(None),
         }
+    }
+
+    fn shutdown(&self) {
+        if let Some(cancel) = self.controller_cancel.lock().take() {
+            cancel.cancel();
+        }
+        self.controller_started.store(false, Ordering::Release);
+        self.routing_table.clear();
+        self.load_estimator.reset();
+        self.state_tracker
+            .replace_endpoint_projection(HashMap::new());
     }
 }
 
@@ -126,6 +117,37 @@ pub enum ModelManagerError {
 /// implausible while keeping the value readable in Grafana dropdowns.
 pub const UNKNOWN_METRIC_MODEL: &str = "unknown_model";
 
+#[derive(Default)]
+struct CommittedCatalog {
+    models: Arc<HashMap<String, Arc<Model>>>,
+    cards: Arc<HashMap<String, Arc<ModelDeploymentCard>>>,
+    aliases: Arc<HashMap<String, String>>,
+}
+
+struct CommittedDiscoveryGroup {
+    primary: String,
+    namespace: String,
+    worker_set_key: String,
+    aliases: Vec<String>,
+    cards: HashMap<String, ModelDeploymentCard>,
+    adapters: HashMap<String, ModelDeploymentCard>,
+    representative: ModelDeploymentCard,
+    worker_set: Arc<WorkerSet>,
+}
+
+#[derive(Default)]
+struct PendingLoraProjection {
+    base_capacities: Vec<u32>,
+    adapters: HashMap<String, LoraInfo>,
+}
+
+type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
+
+pub(crate) struct RemovedDiscoveryGroup {
+    pub(crate) representative: ModelDeploymentCard,
+    pub(crate) cards: Vec<ModelDeploymentCard>,
+}
+
 /// Central manager for model engines, routing, and configuration.
 ///
 /// Models are stored hierarchically: ModelManager → Model → WorkerSet.
@@ -136,17 +158,25 @@ pub struct ModelManager {
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
+    /// Atomically published request-plane view. Discovery lifecycle changes are assembled in the
+    /// mutable maps above and become visible with one pointer swap.
+    catalog: ArcSwap<CommittedCatalog>,
+
     /// Per-instance model cards, keyed by instance path. Used for cleanup on worker removal.
-    cards: DashMap<String, ModelDeploymentCard>,
+    cards: DashMap<String, Arc<ModelDeploymentCard>>,
 
-    /// Prefill router activation rendezvous, keyed by "model_name:namespace".
-    prefill_router_activators: DashMap<String, PrefillActivationState>,
-
-    /// Encode router activation rendezvous, keyed by "model_name:namespace".
-    encoder_router_activators: DashMap<String, EncoderActivationState>,
+    /// Controller-owned committed groups, keyed by the controller's stable GroupKey encoding.
+    discovery_groups: DashMap<String, CommittedDiscoveryGroup>,
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
+    ///
+    /// NOTE: These shared receivers currently live for the manager lifetime. Rebinding to a new
+    /// endpoint therefore leaves the previous watcher cached; safe eviction requires shared
+    /// ownership tracking because multiple routers may consume the same endpoint watch.
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
+
+    /// Per-endpoint HiCache state and its one Mooncake event subscriber.
+    hicache_caches: DashMap<EndpointId, HicacheSharedKvCache>,
 
     /// Shared KV-source membership coordinators, scoped by exact serving endpoint.
     /// Weak ownership lets the discovery loop stop when its last consumer goes away.
@@ -154,13 +184,13 @@ pub struct ModelManager {
 
     /// Exact endpoint → independent LoRA allocation and load domain.
     lora_domains: DashMap<EndpointId, Arc<LoraEndpointDomain>>,
+    committed_lora_endpoints: parking_lot::Mutex<HashSet<EndpointId>>,
     lora_enabled: bool,
     /// Per-decode-endpoint LoRA load-feed subscription handles, so we start exactly one feed
     /// per endpoint and can restart it if the previous one exited (avoids double counting on
     /// rebuilds while keeping the feed durable).
     lora_load_feeds: DashMap<String, tokio::task::JoinHandle<()>>,
     lora_controller_cancel: parking_lot::Mutex<Option<tokio_util::sync::CancellationToken>>,
-    lora_controller_handles: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 
     /// Alias → primary model name mapping. Used to normalize metrics labels.
     alias_to_primary: DashMap<String, String>,
@@ -184,18 +214,200 @@ impl ModelManager {
     pub fn new() -> Self {
         Self {
             models: DashMap::new(),
+            catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
-            prefill_router_activators: DashMap::new(),
-            encoder_router_activators: DashMap::new(),
+            discovery_groups: DashMap::new(),
             runtime_configs: DashMap::new(),
+            hicache_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
             lora_domains: DashMap::new(),
+            committed_lora_endpoints: parking_lot::Mutex::new(HashSet::new()),
             lora_enabled: crate::lora::lora_serving_enabled(),
             lora_load_feeds: DashMap::new(),
             lora_controller_cancel: parking_lot::Mutex::new(None),
-            lora_controller_handles: parking_lot::Mutex::new(Vec::new()),
             alias_to_primary: DashMap::new(),
             reservation_lock: parking_lot::Mutex::new(()),
+        }
+    }
+
+    fn publish_catalog_locked(&self) {
+        let models = self
+            .models
+            .iter()
+            .map(|entry| (entry.key().clone(), Arc::new(entry.value().snapshot())))
+            .collect();
+        let cards = self
+            .cards
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        let aliases = self
+            .alias_to_primary
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        self.catalog.store(Arc::new(CommittedCatalog {
+            models: Arc::new(models),
+            cards: Arc::new(cards),
+            aliases: Arc::new(aliases),
+        }));
+    }
+
+    fn lora_projection_locked(&self) -> EndpointLoraProjection {
+        let mut pending: HashMap<EndpointId, HashMap<WorkerWithDpRank, PendingLoraProjection>> =
+            HashMap::new();
+        for group in self.discovery_groups.iter() {
+            for (key, card) in &group.cards {
+                let Ok(mcid) = ModelCardInstanceId::from_path(key) else {
+                    continue;
+                };
+                let endpoint_id = EndpointId {
+                    namespace: mcid.namespace.clone(),
+                    component: mcid.component.clone(),
+                    name: mcid.endpoint.clone(),
+                };
+                let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+                let worker_projection = pending
+                    .entry(endpoint_id)
+                    .or_default()
+                    .entry(worker)
+                    .or_default();
+                if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
+                    worker_projection.base_capacities.push(capacity);
+                }
+
+                for (adapter_key, adapter_card) in &group.adapters {
+                    let Ok(adapter_mcid) = ModelCardInstanceId::from_path(adapter_key) else {
+                        continue;
+                    };
+                    if adapter_mcid.namespace != mcid.namespace
+                        || adapter_mcid.component != mcid.component
+                        || adapter_mcid.endpoint != mcid.endpoint
+                        || adapter_mcid.instance_id != mcid.instance_id
+                    {
+                        continue;
+                    }
+                    if let Some(lora) = &adapter_card.lora {
+                        worker_projection
+                            .adapters
+                            .insert(lora.name.clone(), lora.clone());
+                    }
+                }
+            }
+        }
+
+        pending
+            .into_iter()
+            .map(|(endpoint_id, workers)| {
+                let workers = workers
+                    .into_iter()
+                    .filter_map(|(worker, mut projection)| {
+                        projection.base_capacities.sort_unstable();
+                        projection.base_capacities.dedup();
+                        if projection.base_capacities.len() > 1 {
+                            tracing::warn!(
+                                endpoint = %endpoint_id,
+                                worker_id = worker.worker_id,
+                                capacities = ?projection.base_capacities,
+                                "Base MDCs disagree on LoRA capacity; using the conservative minimum"
+                            );
+                        }
+                        let mut loras = projection.adapters.into_values().collect::<Vec<_>>();
+                        loras.sort_by(|left, right| left.name.cmp(&right.name));
+                        let mut adapter_capacities = loras
+                            .iter()
+                            .filter_map(|lora| lora.max_gpu_lora_count)
+                            .collect::<Vec<_>>();
+                        adapter_capacities.sort_unstable();
+                        adapter_capacities.dedup();
+                        if adapter_capacities.len() > 1 {
+                            tracing::warn!(
+                                endpoint = %endpoint_id,
+                                worker_id = worker.worker_id,
+                                capacities = ?adapter_capacities,
+                                "Adapter MDCs disagree on LoRA capacity; using the conservative minimum"
+                            );
+                        }
+                        let capacity = projection
+                            .base_capacities
+                            .first()
+                            .copied()
+                            .or_else(|| adapter_capacities.first().copied())
+                            .or_else(|| (!loras.is_empty()).then_some(4))?;
+                        Some((worker, LoraWorkerProjection { capacity, loras }))
+                    })
+                    .collect();
+                (endpoint_id, workers)
+            })
+            .collect()
+    }
+
+    fn union_lora_projection(
+        before: &EndpointLoraProjection,
+        after: &EndpointLoraProjection,
+    ) -> EndpointLoraProjection {
+        let mut union = before.clone();
+        for (endpoint, workers) in after {
+            let endpoint_union = union.entry(endpoint.clone()).or_default();
+            for (worker, projection) in workers {
+                let Some(existing) = endpoint_union.get_mut(worker) else {
+                    endpoint_union.insert(*worker, projection.clone());
+                    continue;
+                };
+                existing.capacity = existing.capacity.min(projection.capacity);
+                let mut loras = existing
+                    .loras
+                    .iter()
+                    .chain(&projection.loras)
+                    .map(|lora| (lora.name.clone(), lora.clone()))
+                    .collect::<HashMap<_, _>>()
+                    .into_values()
+                    .collect::<Vec<_>>();
+                loras.sort_by(|left, right| left.name.cmp(&right.name));
+                existing.loras = loras;
+            }
+        }
+        union
+    }
+
+    fn publish_lora_projection_locked(&self, projection: EndpointLoraProjection) {
+        let mut endpoints = self.committed_lora_endpoints.lock();
+        let next_endpoints = projection.keys().cloned().collect::<HashSet<_>>();
+        for endpoint_id in endpoints.union(&next_endpoints) {
+            let workers = projection.get(endpoint_id).cloned().unwrap_or_default();
+            if let Some(domain) = self.lora_domains.get(endpoint_id) {
+                domain.state_tracker.replace_endpoint_projection(workers);
+            } else if !workers.is_empty() {
+                self.lora_domain(endpoint_id)
+                    .state_tracker
+                    .replace_endpoint_projection(workers);
+            }
+        }
+        *endpoints = next_endpoints;
+        drop(endpoints);
+        self.prune_idle_lora_domains();
+    }
+
+    fn prune_idle_lora_domains(&self) {
+        let committed = self.committed_lora_endpoints.lock().clone();
+        let removable = self
+            .lora_domains
+            .iter()
+            .filter_map(|entry| {
+                (!committed.contains(entry.key())
+                    && entry.state_tracker.is_empty()
+                    && Arc::strong_count(&entry.filter) == 1)
+                    .then(|| entry.key().clone())
+            })
+            .collect::<Vec<_>>();
+        for endpoint_id in removable {
+            let Some((_, domain)) = self.lora_domains.remove(&endpoint_id) else {
+                continue;
+            };
+            domain.shutdown();
+            if let Some((_, feed)) = self.lora_load_feeds.remove(&endpoint_id.to_string()) {
+                feed.abort();
+            }
         }
     }
 
@@ -216,9 +428,21 @@ impl ModelManager {
             .map(|entry| entry.value().clone())
     }
 
+    pub(crate) fn get_committed_model(&self, model_name: &str) -> Option<Arc<Model>> {
+        self.catalog.load().models.get(model_name).cloned()
+    }
+
+    fn get_model_internal(&self, model_name: &str) -> Option<Arc<Model>> {
+        self.models
+            .get(model_name)
+            .map(|entry| entry.value().clone())
+    }
+
     /// Remove a Model if it has no remaining WorkerSets.
+    ///
+    /// The caller holds `reservation_lock` and publishes the resulting catalog update.
     /// Uses atomic remove_if to avoid TOCTOU race between checking is_empty and removing.
-    pub fn remove_model_if_empty(&self, model_name: &str) {
+    fn remove_model_if_empty(&self, model_name: &str) {
         if self
             .models
             .remove_if(model_name, |_, model| model.is_empty())
@@ -240,7 +464,7 @@ impl ModelManager {
     /// reservation first-come and symmetric across namespaces. A later deployment
     /// re-using a name fails loudly rather than silently displacing the owner.
     ///
-    /// Holds [`Self::reservation_lock`] across the reserved-name check and the
+    /// Holds `Self::reservation_lock` across the reserved-name check and the
     /// insert so the claim is atomic against a concurrent `register_alias` for
     /// the same name (a name can never end up both a live primary and an alias).
     /// The lock is always taken before any map access, so it never inverts with a
@@ -257,15 +481,10 @@ impl ModelManager {
             return false;
         }
         let model = self.get_or_create_model(model_name);
-        let topology_namespace = (matches!(
-            worker_set.card().worker_type,
-            Some(crate::worker_type::WorkerType::Prefill | crate::worker_type::WorkerType::Decode)
-        ))
-        .then(|| worker_set.namespace().to_string());
+        let topology_namespace = worker_set.namespace().to_string();
         model.add_worker_set(namespace.to_string(), Arc::new(worker_set));
-        if let Some(topology_namespace) = topology_namespace {
-            self.reconcile_prefill_router_topology(model_name, &topology_namespace);
-        }
+        self.reconcile_discovery_topology(model_name, &topology_namespace);
+        self.publish_catalog_locked();
         true
     }
 
@@ -281,6 +500,7 @@ impl ModelManager {
         namespace: &str,
         worker_set: Arc<WorkerSet>,
     ) -> bool {
+        let _reservation = self.reservation_lock.lock();
         // Collision check: if `model_name` already exists as a primary (i.e.
         // already has worker sets AND is not currently an alias), refuse to
         // clobber it. The two facts are read one map at a time — the `models`
@@ -303,6 +523,7 @@ impl ModelManager {
 
         let model = self.get_or_create_model(model_name);
         model.add_worker_set(namespace.to_string(), worker_set);
+        self.publish_catalog_locked();
         true
     }
 
@@ -315,7 +536,7 @@ impl ModelManager {
     /// refused and logged so operators find the collision in the logs rather
     /// than through silent metric re-attribution.
     ///
-    /// Holds [`Self::reservation_lock`] across the live-primary probe and the
+    /// Holds `Self::reservation_lock` across the live-primary probe and the
     /// entry insert so the claim is atomic against a concurrent `add_worker_set`
     /// for the same name. Within that section the `models` guard is dropped before
     /// touching `alias_to_primary` (via `is_some_and`), and the lock is taken
@@ -354,6 +575,7 @@ impl ModelManager {
             }
             Entry::Vacant(slot) => {
                 slot.insert(primary.to_string());
+                self.publish_catalog_locked();
                 true
             }
         }
@@ -361,6 +583,7 @@ impl ModelManager {
 
     /// Remove a previously registered alias mapping once the alias has no WorkerSets.
     pub fn unregister_alias_if_empty(&self, alias: &str, primary: &str) {
+        let _reservation = self.reservation_lock.lock();
         if self
             .models
             .get(alias)
@@ -371,14 +594,17 @@ impl ModelManager {
 
         self.alias_to_primary
             .remove_if(alias, |_, existing| existing == primary);
+        self.publish_catalog_locked();
     }
 
     /// Return the primary (canonical) model name for `model`, resolving aliases.
     /// Returns `model` unchanged if it is not an alias.
     pub fn resolve_canonical_name(&self, model: &str) -> String {
-        self.alias_to_primary
+        self.catalog
+            .load()
+            .aliases
             .get(model)
-            .map(|v| v.value().clone())
+            .cloned()
             .unwrap_or_else(|| model.to_string())
     }
 
@@ -392,67 +618,378 @@ impl ModelManager {
 
     /// Remove a WorkerSet from a Model. Removes the Model if it becomes empty.
     pub fn remove_worker_set(&self, model_name: &str, namespace: &str) -> Option<Arc<WorkerSet>> {
+        let _reservation = self.reservation_lock.lock();
         let model = self.models.get(model_name)?;
         let removed = model.remove_worker_set(namespace);
-        let topology_namespace = removed.as_ref().and_then(|worker_set| {
-            matches!(
-                worker_set.card().worker_type,
-                Some(
-                    crate::worker_type::WorkerType::Prefill
-                        | crate::worker_type::WorkerType::Decode
-                )
-            )
-            .then(|| worker_set.namespace().to_string())
-        });
+        let topology_namespace = removed
+            .as_ref()
+            .map(|worker_set| worker_set.namespace().to_string());
+        if let Some(worker_set) = &removed {
+            Self::clear_worker_set_targets(worker_set);
+        }
         drop(model);
         if let Some(topology_namespace) = topology_namespace {
-            self.reconcile_prefill_router_topology(model_name, &topology_namespace);
+            self.reconcile_discovery_topology(model_name, &topology_namespace);
         }
         self.remove_model_if_empty(model_name);
+        self.publish_catalog_locked();
         removed
+    }
+
+    /// Commit a complete discovery group atomically.
+    ///
+    pub(crate) fn commit_discovery_group(
+        &self,
+        group_id: &str,
+        worker_set_key: &str,
+        worker_set: WorkerSet,
+        members: Vec<(String, ModelDeploymentCard)>,
+        adapters: Vec<(String, ModelDeploymentCard)>,
+    ) -> anyhow::Result<()> {
+        let representative = members
+            .first()
+            .map(|(_, card)| card)
+            .ok_or_else(|| anyhow::anyhow!("cannot commit an empty discovery group"))?;
+        let primary = representative.name().to_string();
+        let aliases = representative
+            .aliases
+            .iter()
+            .filter(|alias| alias.as_str() != primary)
+            .cloned()
+            .collect::<Vec<_>>();
+        let namespace = worker_set.namespace().to_string();
+        let representative = representative.clone();
+
+        let _reservation = self.reservation_lock.lock();
+        let lora_before = self.lora_projection_locked();
+        anyhow::ensure!(
+            !self.discovery_groups.contains_key(group_id),
+            "discovery group {group_id:?} is already committed"
+        );
+        if let Some(owner) = self.alias_to_primary.get(&primary) {
+            anyhow::bail!(
+                "model name {primary:?} is reserved as an alias of {:?}",
+                owner.value()
+            );
+        }
+        anyhow::ensure!(
+            !self.discovery_groups.iter().any(|entry| entry
+                .adapters
+                .values()
+                .any(|adapter| adapter.name() == primary)),
+            "model name {primary:?} is reserved by a LoRA adapter"
+        );
+
+        for alias in &aliases {
+            if let Some(owner) = self.alias_to_primary.get(alias)
+                && owner.value() != &primary
+            {
+                anyhow::bail!("alias {alias:?} is already reserved by {:?}", owner.value());
+            }
+            let is_other_primary = self
+                .models
+                .get(alias)
+                .is_some_and(|model| !model.is_empty())
+                && self
+                    .alias_to_primary
+                    .get(alias)
+                    .is_none_or(|owner| owner.value() != &primary);
+            anyhow::ensure!(
+                !is_other_primary,
+                "alias {alias:?} collides with a registered primary model"
+            );
+        }
+        self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
+
+        let worker_set = Arc::new(worker_set);
+        self.get_or_create_model(&primary)
+            .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+        for alias in &aliases {
+            self.alias_to_primary.insert(alias.clone(), primary.clone());
+            self.get_or_create_model(alias)
+                .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+        }
+        for (_, adapter) in &adapters {
+            let adapter_view = Arc::new(worker_set.adapter_view(adapter.clone()));
+            self.get_or_create_model(adapter.name())
+                .add_worker_set(worker_set_key.to_string(), adapter_view);
+        }
+
+        let cards = members.into_iter().collect::<HashMap<_, _>>();
+        for (key, card) in &cards {
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
+        }
+        let adapters = adapters.into_iter().collect::<HashMap<_, _>>();
+        for (key, card) in &adapters {
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
+        }
+        self.discovery_groups.insert(
+            group_id.to_string(),
+            CommittedDiscoveryGroup {
+                primary: primary.clone(),
+                namespace: namespace.clone(),
+                worker_set_key: worker_set_key.to_string(),
+                aliases,
+                cards,
+                adapters,
+                representative,
+                worker_set,
+            },
+        );
+        let lora_after = self.lora_projection_locked();
+        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
+        self.reconcile_discovery_topology(&primary, &namespace);
+        self.publish_catalog_locked();
+        self.publish_lora_projection_locked(lora_after);
+        Ok(())
+    }
+
+    fn validate_adapter_claims<'a>(
+        &self,
+        primary: &str,
+        adapters: impl Iterator<Item = &'a ModelDeploymentCard>,
+    ) -> anyhow::Result<()> {
+        for adapter in adapters {
+            let lora = adapter
+                .lora
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("adapter card is missing LoRA metadata"))?;
+            anyhow::ensure!(!lora.name.is_empty(), "LoRA adapter name cannot be empty");
+            let name = adapter.name();
+            anyhow::ensure!(
+                name != primary,
+                "LoRA adapter name {name:?} collides with its base model"
+            );
+            anyhow::ensure!(
+                !self.alias_to_primary.contains_key(name),
+                "LoRA adapter name {name:?} collides with a registered alias"
+            );
+            let owned_by_same_base = self.discovery_groups.iter().any(|entry| {
+                entry.primary == primary
+                    && entry
+                        .adapters
+                        .values()
+                        .any(|existing| existing.name() == name)
+            });
+            let collides_with_primary =
+                self.models.get(name).is_some_and(|model| !model.is_empty()) && !owned_by_same_base;
+            anyhow::ensure!(
+                !collides_with_primary,
+                "LoRA adapter name {name:?} collides with a registered model"
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replace_discovery_group(
+        &self,
+        group_id: &str,
+        members: Vec<(String, ModelDeploymentCard)>,
+        adapters: Vec<(String, ModelDeploymentCard)>,
+    ) -> anyhow::Result<()> {
+        let _reservation = self.reservation_lock.lock();
+        let group = self
+            .discovery_groups
+            .get(group_id)
+            .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
+        let primary = group.primary.clone();
+        let worker_set_key = group.worker_set_key.clone();
+        let worker_set = group.worker_set.clone();
+        let previous_member_keys = group.cards.keys().cloned().collect::<HashSet<_>>();
+        let previous_adapter_keys = group.adapters.keys().cloned().collect::<HashSet<_>>();
+        let previous_adapter_names = group
+            .adapters
+            .values()
+            .map(|card| card.name().to_string())
+            .collect::<HashSet<_>>();
+        drop(group);
+
+        anyhow::ensure!(
+            !members.is_empty(),
+            "cannot replace with an empty discovery group"
+        );
+        self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
+        let members = members.into_iter().collect::<HashMap<_, _>>();
+        let adapters = adapters.into_iter().collect::<HashMap<_, _>>();
+        let desired_member_keys = members.keys().cloned().collect::<HashSet<_>>();
+        let desired_adapter_keys = adapters.keys().cloned().collect::<HashSet<_>>();
+        let desired_adapter_names = adapters
+            .values()
+            .map(|card| card.name().to_string())
+            .collect::<HashSet<_>>();
+        let adapter_views = adapters
+            .values()
+            .map(|card| {
+                (
+                    card.name().to_string(),
+                    Arc::new(worker_set.adapter_view(card.clone())),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let lora_before = self.lora_projection_locked();
+
+        for key in previous_member_keys.difference(&desired_member_keys) {
+            self.cards.remove(key);
+        }
+        for key in previous_adapter_keys.difference(&desired_adapter_keys) {
+            self.cards.remove(key);
+        }
+        for (key, card) in members.iter().chain(adapters.iter()) {
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
+        }
+
+        let mut group = self
+            .discovery_groups
+            .get_mut(group_id)
+            .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
+        group.representative = members
+            .values()
+            .next()
+            .cloned()
+            .expect("non-empty members checked above");
+        group.cards = members;
+        group.adapters = adapters;
+        drop(group);
+
+        for (name, adapter_view) in adapter_views {
+            self.get_or_create_model(&name)
+                .add_worker_set(worker_set_key.clone(), adapter_view);
+        }
+        for name in previous_adapter_names.difference(&desired_adapter_names) {
+            if let Some(model) = self.models.get(name) {
+                model.remove_worker_set(&worker_set_key);
+            }
+            self.remove_model_if_empty(name);
+        }
+        let lora_after = self.lora_projection_locked();
+        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
+        self.publish_catalog_locked();
+        self.publish_lora_projection_locked(lora_after);
+        Ok(())
+    }
+
+    pub(crate) fn discovery_group_adapter_cards(&self, group_id: &str) -> Vec<ModelDeploymentCard> {
+        self.discovery_groups
+            .get(group_id)
+            .map(|group| group.adapters.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Remove a complete discovery group atomically.
+    ///
+    pub(crate) fn remove_discovery_group(&self, group_id: &str) -> Option<RemovedDiscoveryGroup> {
+        let _reservation = self.reservation_lock.lock();
+        let lora_before = self.lora_projection_locked();
+        let (_, group) = self.discovery_groups.remove(group_id)?;
+        let representative = group.representative.clone();
+        let topology_namespace = group.namespace.clone();
+
+        for key in group.cards.keys() {
+            self.cards.remove(key);
+        }
+        for key in group.adapters.keys() {
+            self.cards.remove(key);
+        }
+        if let Some(model) = self.models.get(&group.primary)
+            && let Some(worker_set) = model.remove_worker_set(&group.worker_set_key)
+        {
+            Self::clear_worker_set_targets(&worker_set);
+        }
+        self.remove_model_if_empty(&group.primary);
+        for alias in &group.aliases {
+            if let Some(model) = self.models.get(alias) {
+                model.remove_worker_set(&group.worker_set_key);
+            }
+            self.remove_model_if_empty(alias);
+            if self.models.get(alias).is_none_or(|model| model.is_empty()) {
+                self.alias_to_primary
+                    .remove_if(alias, |_, owner| owner == &group.primary);
+            }
+        }
+        for adapter in group.adapters.values() {
+            if let Some(model) = self.models.get(adapter.name()) {
+                model.remove_worker_set(&group.worker_set_key);
+            }
+            self.remove_model_if_empty(adapter.name());
+        }
+        let cards = group
+            .cards
+            .into_values()
+            .chain(group.adapters.into_values())
+            .collect();
+        let removed = RemovedDiscoveryGroup {
+            representative,
+            cards,
+        };
+        let lora_after = self.lora_projection_locked();
+        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
+        self.reconcile_discovery_topology(&group.primary, &topology_namespace);
+        self.publish_catalog_locked();
+        self.publish_lora_projection_locked(lora_after);
+        Some(removed)
     }
 
     // -- Model cards --
 
     pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
-        self.cards.iter().map(|r| r.value().clone()).collect()
+        self.catalog
+            .load()
+            .cards
+            .values()
+            .map(|card| (**card).clone())
+            .collect()
     }
 
-    /// Return owned discovery instance keys for the locally recorded cards.
-    /// Reconciliation must not hold DashMap guards while it performs
-    /// asynchronous cleanup.
+    /// Return owned keys for cards in the published catalog.
     pub fn get_model_card_keys(&self) -> Vec<String> {
-        self.cards.iter().map(|r| r.key().clone()).collect()
+        self.catalog.load().cards.keys().cloned().collect()
     }
 
-    /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
-    /// deleted.
+    /// Compatibility path for explicit in-process callers. Discovery uses the atomic group
+    /// lifecycle methods above and never publishes a card independently.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
-        self.cards.insert(key.to_string(), card);
+        let _reservation = self.reservation_lock.lock();
+        self.cards.insert(key.to_string(), Arc::new(card));
+        self.publish_catalog_locked();
         Ok(())
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
     pub fn get_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
-        self.cards.get(key).map(|r| r.value().clone())
+        self.catalog
+            .load()
+            .cards
+            .get(key)
+            .map(|card| (**card).clone())
     }
 
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
-        self.cards.remove(key).map(|(_, v)| v)
+        let _reservation = self.reservation_lock.lock();
+        let removed = self.cards.remove(key).map(|(_, value)| (*value).clone());
+        if removed.is_some() {
+            self.publish_catalog_locked();
+        }
+        removed
     }
 
     // -- Engine accessors (delegate through Model → WorkerSet) --
 
     /// Check if a decode model (chat or completions) is registered
     pub fn has_decode_model(&self, model: &str) -> bool {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .is_some_and(|m| m.has_decode_engine())
     }
 
     /// Check if a prefill model is registered
     pub fn has_prefill_model(&self, model: &str) -> bool {
-        self.models.get(model).is_some_and(|m| m.has_prefill())
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .is_some_and(|m| m.has_prefill())
     }
 
     /// Check if any model (decode or prefill) is registered.
@@ -465,7 +1002,7 @@ impl ModelManager {
     /// [`has_model_any`](Self::has_model_any), which checks specifically for a
     /// decode or prefill engine.
     pub fn has_registered_model(&self, model: &str) -> bool {
-        self.models.contains_key(model)
+        self.catalog.load().models.contains_key(model)
     }
 
     /// Resolve the model name to use in frontend Prometheus metrics.
@@ -486,7 +1023,9 @@ impl ModelManager {
     /// Whether `model` has at least one WorkerSet that can serve an inference
     /// request right now. See [`Model::is_ready_to_serve`].
     pub fn is_model_ready_to_serve(&self, model: &str) -> bool {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .is_some_and(|m| m.is_ready_to_serve())
     }
@@ -494,16 +1033,20 @@ impl ModelManager {
     /// Whether any registered model can serve at least one inference request
     /// right now. See [`Model::is_ready_to_serve`].
     pub fn has_any_ready_model(&self) -> bool {
-        self.models
-            .iter()
-            .any(|entry| entry.value().is_ready_to_serve())
+        self.catalog
+            .load()
+            .models
+            .values()
+            .any(|model| model.is_ready_to_serve())
     }
 
     pub fn model_display_names(&self) -> HashSet<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().is_displayable())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.is_displayable())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
@@ -514,93 +1057,143 @@ impl ModelManager {
     /// deployment (e.g. decode-only with no prefill peer) is neither advertised
     /// nor chosen as an implicit default.
     pub fn serving_ready_display_names(&self) -> HashSet<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| {
-                let model = entry.value();
-                model.is_displayable() && model.has_ready_workers()
-            })
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.is_displayable() && model.has_ready_workers())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_chat_completions_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_chat_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_chat_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_completions_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_completions_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_completions_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_embeddings_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_embeddings_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_embeddings_engine())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    pub fn list_classify_models(&self) -> Vec<String> {
+        self.catalog
+            .load()
+            .models
+            .iter()
+            .filter(|(_, model)| model.has_classify_engine())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    pub fn list_pooling_models(&self) -> Vec<String> {
+        self.catalog
+            .load()
+            .models
+            .iter()
+            .filter(|(_, model)| model.has_pooling_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_tensor_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_tensor_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_tensor_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_images_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_images_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_images_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_audios_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_audios_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_audios_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_videos_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_videos_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_videos_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_realtime_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_realtime_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_realtime_engine())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_generate_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_generate_engine())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_generate_engine())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// List Generate models with an engine that advertises `capability`.
+    pub fn list_generate_models_for_capability(&self, capability: &str) -> Vec<String> {
+        self.catalog
+            .load()
+            .models
+            .iter()
+            .filter(|(_, model)| model.has_generate_engine_for_capability(capability))
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
     pub fn list_prefill_models(&self) -> Vec<String> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .iter()
-            .filter(|entry| entry.value().has_prefill())
-            .map(|entry| entry.key().clone())
+            .filter(|(_, model)| model.has_prefill())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
@@ -608,17 +1201,45 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_embeddings_engine()
+    }
+
+    pub fn get_classify_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_classify_engine()
+    }
+
+    pub fn get_pooling_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIPoolingStreamingEngine, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_pooling_engine()
     }
 
     pub fn get_completions_engine(
         &self,
         model: &str,
     ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_completions_engine()
@@ -628,7 +1249,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_chat_engine()
@@ -638,7 +1261,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<TensorStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_tensor_engine()
@@ -648,7 +1273,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_images_engine()
@@ -658,7 +1285,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_videos_engine()
@@ -668,7 +1297,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_audios_engine()
@@ -678,7 +1309,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_realtime_engine()
@@ -688,10 +1321,25 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<GenerateStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine()
+    }
+    /// Get a Generate engine for `model` from a worker advertising `capability`.
+    pub fn get_generate_engine_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine_for_capability(capability)
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -706,7 +1354,9 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_chat_engine_with_parsing()
@@ -722,7 +1372,9 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_completions_engine_with_parsing()
@@ -738,7 +1390,9 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine_with_parsing()
@@ -768,6 +1422,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_chat_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -780,6 +1435,7 @@ impl ModelManager {
         );
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -789,6 +1445,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAICompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_completions_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -801,6 +1458,7 @@ impl ModelManager {
         );
         ws.completions_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -810,6 +1468,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIEmbeddingsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_embeddings_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -822,6 +1481,53 @@ impl ModelManager {
         );
         ws.embeddings_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
+        Ok(())
+    }
+
+    pub fn add_classify_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIClassifyStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_classify_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_classify_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.classify_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
+        Ok(())
+    }
+
+    pub fn add_pooling_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIPoolingStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_pooling_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_pooling_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.pooling_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -831,6 +1537,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: TensorStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_tensor_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -843,6 +1550,7 @@ impl ModelManager {
         );
         ws.tensor_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -852,6 +1560,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIImagesStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_images_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -864,6 +1573,7 @@ impl ModelManager {
         );
         ws.images_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -873,6 +1583,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIVideosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_videos_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -885,6 +1596,7 @@ impl ModelManager {
         );
         ws.videos_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -894,6 +1606,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIAudiosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_audios_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -906,6 +1619,7 @@ impl ModelManager {
         );
         ws.audios_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -915,6 +1629,7 @@ impl ModelManager {
         card_checksum: &str,
         engine: RealtimeBidirectionalEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_realtime_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -927,6 +1642,7 @@ impl ModelManager {
         );
         ws.realtime_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -936,18 +1652,21 @@ impl ModelManager {
         card_checksum: &str,
         engine: GenerateStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_generate_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_generate_{}", model);
-        let mut ws = WorkerSet::new(
-            namespace.clone(),
-            card_checksum.to_string(),
-            Self::aggregated_local_card(),
+        let mut card = Self::aggregated_local_card();
+        card.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            serde_json::Value::Bool(true),
         );
+        let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.generate_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -956,6 +1675,7 @@ impl ModelManager {
         model: &str,
         card_checksum: &str,
     ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_prefill() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -966,6 +1686,7 @@ impl ModelManager {
         card.needs = vec![vec![crate::worker_type::WorkerType::Decode]];
         let ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
         Ok(())
     }
 
@@ -974,7 +1695,12 @@ impl ModelManager {
     /// Remove a model entirely (all its WorkerSets).
     /// Returns the removed Model, or None if not found.
     pub fn remove_model(&self, model: &str) -> Option<Arc<Model>> {
-        self.models.remove(model).map(|(_, m)| m)
+        let _reservation = self.reservation_lock.lock();
+        let removed = self.models.remove(model).map(|(_, value)| value);
+        if removed.is_some() {
+            self.publish_catalog_locked();
+        }
+        removed
     }
 
     // Per-type remove methods for in-process models (used by Python bindings).
@@ -1003,6 +1729,20 @@ impl ModelManager {
 
     pub fn remove_embeddings_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_embeddings_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_classify_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_classify_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_pooling_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_pooling_{}", model);
         self.remove_worker_set(model, &namespace)
             .map(|_| ())
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
@@ -1050,6 +1790,45 @@ impl ModelManager {
         lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
     }
 
+    fn hicache_cache_for(
+        &self,
+        endpoint: &Endpoint,
+        runtime_configs: RuntimeConfigWatch,
+    ) -> HicacheSharedKvCache {
+        self.hicache_caches
+            .entry(endpoint.id())
+            .or_insert_with(|| {
+                let frontend_kv_events_endpoint = std::env::var("DYN_MOONCAKE_KV_EVENTS_ENDPOINT")
+                    .ok()
+                    .filter(|endpoint| !endpoint.is_empty());
+                let cache = HicacheSharedKvCache::new_with_cancellation_and_endpoint(
+                    runtime_configs,
+                    endpoint.component().drt().child_token(),
+                    frontend_kv_events_endpoint,
+                );
+                cache.start_subscriber();
+                cache
+            })
+            .clone()
+    }
+
+    pub fn remove_hicache_caches(&self, namespace: &str, component: &str) {
+        let endpoint_ids = self
+            .hicache_caches
+            .iter()
+            .filter(|entry| {
+                entry.key().namespace == namespace && entry.key().component == component
+            })
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+
+        for endpoint_id in endpoint_ids {
+            if let Some((_, cache)) = self.hicache_caches.remove(&endpoint_id) {
+                cache.shutdown();
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for(
         &self,
@@ -1086,12 +1865,76 @@ impl ModelManager {
         model_name: Option<String>,
         is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
+        self.kv_chooser_for_with_selector(
+            endpoint,
+            kv_cache_block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+        )
+        .await
+    }
+
+    /// Construct a KV chooser with a selector resolved by the router host at startup.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn kv_chooser_for_with_selector<Sel>(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<Arc<KvRouter<Sel>>>
+    where
+        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    {
         let client = endpoint.client().await?;
+        self.kv_chooser_for_with_selector_and_client(
+            endpoint,
+            client,
+            kv_cache_block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn kv_chooser_for_with_selector_and_client<Sel>(
+        &self,
+        endpoint: &Endpoint,
+        client: Client,
+        kv_cache_block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<Arc<KvRouter<Sel>>>
+    where
+        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    {
         let lora_domain = self.lora_domain(&endpoint.id());
 
         // Register router via discovery mechanism.
-        let discovery = endpoint.component().drt().discovery();
-        let instance_id = discovery.instance_id();
+        let drt = endpoint.component().drt();
+        let instance_id = drt.discovery().instance_id();
 
         // Build transport for router endpoint based on request plane mode
         // Use the worker's component name so each target pool gets its own router discovery group
@@ -1105,14 +1948,13 @@ impl ModelManager {
             endpoint: router_endpoint_id.name.clone(),
             transport,
             device_type: None,
+            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
-        discovery.register(discovery_spec).await?;
+        let registration = drt.register_endpoint_lease(discovery_spec).await?;
 
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
-
-        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
 
         // Build shared cache client based on shared_cache_type.
         let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
@@ -1127,9 +1969,9 @@ impl ModelManager {
                     worker_component = worker_component_name,
                     "Using HiCache shared KV cache"
                 );
-                Some(Box::new(HicacheSharedKvCache::new(
-                    workers_with_configs.clone(),
-                )))
+                Some(Box::new(
+                    self.hicache_cache_for(endpoint, workers_with_configs.clone()),
+                ))
             }
         };
 
@@ -1146,7 +1988,7 @@ impl ModelManager {
                 None
             };
 
-        let chooser = KvRouter::new_with_worker_role(
+        let mut chooser = KvRouter::new_with_worker_role(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -1163,6 +2005,7 @@ impl ModelManager {
             self.lora_enabled.then(|| lora_domain.filter.clone()),
         )
         .await?;
+        chooser.set_endpoint_registration(registration);
 
         // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
         // subscription per decode endpoint. WORKER_TYPE_DECODE is the routing path for BOTH
@@ -1225,16 +2068,6 @@ impl ModelManager {
         Ok(Arc::new(chooser))
     }
 
-    // -- Prefill router coordination --
-    // Keyed by "model_name:namespace" so each namespace's decode WorkerSet gets its own
-    // prefill router activated by same-namespace prefill workers.
-
-    /// Build a key for a (model, namespace) pair. Used for prefill router activators
-    /// and registration guards.
-    pub(crate) fn model_namespace_key(model_name: &str, namespace: &str) -> String {
-        format!("{}:{}", model_name, namespace)
-    }
-
     // ── LoRA allocation accessors ───────────────────────────────────────
 
     fn lora_domain(&self, endpoint_id: &EndpointId) -> Arc<LoraEndpointDomain> {
@@ -1268,18 +2101,20 @@ impl ModelManager {
                 ema_alpha: config.ema_alpha,
                 ..Default::default()
             });
-        let handle = crate::lora::LoraController::start_for_endpoint(
+        let domain_cancel = cancel_token.child_token();
+        *domain.controller_cancel.lock() = Some(domain_cancel.clone());
+        let _handle = crate::lora::LoraController::start_for_endpoint(
             endpoint_id.clone(),
             config,
             domain.routing_table.clone(),
             domain.state_tracker.clone(),
             domain.load_estimator.clone(),
-            cancel_token,
+            domain_cancel,
         );
-        self.lora_controller_handles.lock().push(handle);
     }
 
-    pub fn lora_state_tracker_for(&self, endpoint_id: &EndpointId) -> LoraStateTracker {
+    #[cfg(test)]
+    pub(crate) fn lora_state_tracker_for(&self, endpoint_id: &EndpointId) -> LoraStateTracker {
         self.lora_domain(endpoint_id).state_tracker.clone()
     }
 
@@ -1310,502 +2145,80 @@ impl ModelManager {
         })
     }
 
-    /// Register a prefill router for a decode WorkerSet. Returns a receiver that will be
-    /// activated when the corresponding prefill model in the same namespace is discovered.
-    /// Returns None if a decode WorkerSet in this namespace was already registered.
-    pub fn register_prefill_router(
-        &self,
-        model_name: &str,
-        namespace: &str,
-        decode_endpoint: &EndpointId,
-    ) -> anyhow::Result<Option<oneshot::Receiver<Endpoint>>> {
-        if let Some(model) = self.get_model(model_name)
-            && let Err(error) =
-                model.prefill_router_topology_with_decode_candidate(namespace, decode_endpoint)
-        {
-            self.deactivate_prefill_router_topology(model_name, namespace);
-            return Err(error.into());
-        }
+    fn supports_encoder_result_handoff(card: &ModelDeploymentCard) -> bool {
+        card.runtime_config
+            .runtime_data
+            .get("encoder_result_handoff")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
 
-        let key = Self::model_namespace_key(model_name, namespace);
-        // Use the entry API so the activator state mutation is atomic per-key:
-        // a concurrent `remove_prefill_activator` (called by the watcher on
-        // prefill-component teardown) can't slip into the gap between a
-        // `remove`-then-`insert` pair and miss the cleanup, leaving a stale
-        // PrefillReady cached for a prefill that's already gone.
-        match self.prefill_router_activators.entry(key) {
-            Entry::Occupied(o) => match o.get() {
-                PrefillActivationState::PrefillReady(endpoint) => {
-                    // Read the cached endpoint without removing the entry — its
-                    // shard lock is held for the duration of the OccupiedEntry,
-                    // so any concurrent prefill teardown serializes after us
-                    // and observes the entry it needs to clear.
-                    let endpoint_clone = (**endpoint).clone();
-                    let (tx, rx) = oneshot::channel();
-                    let _ = tx.send(endpoint_clone);
-                    tracing::debug!(
-                        model_name = %model_name,
-                        namespace = %namespace,
-                        "Prefill endpoint cached; returning fresh receiver"
-                    );
-                    Ok(Some(rx))
-                }
-                PrefillActivationState::DecodeWaiting(_) => {
-                    // Decode already registered — entry stays in place so the
-                    // existing live waiter isn't disturbed. Return None to
-                    // signal the caller that this shouldn't have happened.
-                    tracing::error!(
-                        model_name = %model_name,
-                        namespace = %namespace,
-                        "Decode WorkerSet already registered for this prefill router"
-                    );
-                    Ok(None)
-                }
-            },
-            Entry::Vacant(v) => {
-                // New registration: create tx/rx pair, store sender, return receiver.
-                let (tx, rx) = oneshot::channel();
-                v.insert(PrefillActivationState::DecodeWaiting(tx));
-                tracing::debug!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "No prefill endpoint for namespace yet, storing sender for future activation"
-                );
-                Ok(Some(rx))
-            }
+    fn clear_worker_set_targets(worker_set: &WorkerSet) {
+        if let Some(router) = &worker_set.prefill_router {
+            router.set_target(None);
+        }
+        if let Some(router) = &worker_set.encoder_router {
+            router.set_target(None);
         }
     }
 
-    fn deactivate_prefill_router_topology(&self, model_name: &str, namespace: &str) {
-        let Some(model) = self.get_model(model_name) else {
+    /// Derive routing targets exclusively from committed WorkerSets. The
+    /// caller holds `reservation_lock`; target clearing is synchronous and
+    /// happens before the catalog pointer is published.
+    fn reconcile_discovery_topology(&self, model_name: &str, namespace: &str) {
+        let Some(model) = self.get_model_internal(model_name) else {
             return;
         };
-        for worker_set in model.prefill_routed_decode_worker_sets_in_namespace(namespace) {
-            if let Some(ref prefill_router) = worker_set.prefill_router {
-                prefill_router.deactivate();
+        let worker_sets = model
+            .worker_sets()
+            .into_iter()
+            .filter(|worker_set| worker_set.namespace() == namespace)
+            .collect::<Vec<_>>();
+
+        let prefill_providers = worker_sets
+            .iter()
+            .filter(|worker_set| worker_set.card().worker_type == Some(WorkerType::Prefill))
+            .filter_map(|worker_set| worker_set.topology_endpoint().cloned())
+            .collect::<Vec<_>>();
+        let decode_consumers = worker_sets
+            .iter()
+            .filter(|worker_set| worker_set.card().worker_type == Some(WorkerType::Decode))
+            .collect::<Vec<_>>();
+        let prefill_target = (prefill_providers.len() == 1 && decode_consumers.len() == 1)
+            .then(|| prefill_providers[0].clone());
+        for worker_set in &decode_consumers {
+            if let Some(router) = &worker_set.prefill_router {
+                router.set_target(prefill_target.clone());
             }
         }
-    }
 
-    fn reconcile_prefill_router_topology(&self, model_name: &str, namespace: &str) {
-        let Some(model) = self.get_model(model_name) else {
-            return;
-        };
-        let worker_set = match model.unique_prefill_routed_worker_set_in_namespace(namespace) {
-            Ok(Some(worker_set)) => worker_set,
-            Ok(None) => {
-                self.deactivate_prefill_router_topology(model_name, namespace);
-                return;
-            }
-            Err(error) => {
-                tracing::error!(
-                    model_name,
-                    namespace,
-                    %error,
-                    "P/D routing is disabled until endpoint membership is unique"
-                );
-                self.deactivate_prefill_router_topology(model_name, namespace);
-                return;
-            }
-        };
-
-        let key = Self::model_namespace_key(model_name, namespace);
-        let selected_prefill = model.worker_sets().into_iter().find_map(|worker_set| {
-            (worker_set.namespace() == namespace
-                && worker_set.card().worker_type == Some(crate::worker_type::WorkerType::Prefill))
-            .then(|| worker_set.endpoint_id().cloned())
-            .flatten()
-        });
-        let cached_prefill_matches =
-            self.prefill_router_activators
-                .get(&key)
-                .is_some_and(|state| {
-                    matches!(
-                        state.value(),
-                        PrefillActivationState::PrefillReady(endpoint)
-                            if Some(endpoint.id()) == selected_prefill
-                    )
-                });
-        if !cached_prefill_matches {
-            tracing::error!(
-                model_name,
-                namespace,
-                ?selected_prefill,
-                "P/D routing remains disabled because the sole prefill endpoint does not match the cached activation"
-            );
-            self.deactivate_prefill_router_topology(model_name, namespace);
-            return;
-        }
-
-        if let Some(prefill_router) = worker_set.prefill_router.as_ref()
-            && prefill_router.is_deactivated()
-        {
-            prefill_router.reactivate();
-        }
-    }
-
-    /// Activate a prefill router by sending the endpoint through the oneshot channel.
-    /// The namespace must match the decode WorkerSet's namespace.
-    pub fn activate_prefill_router(
-        &self,
-        model_name: &str,
-        namespace: &str,
-        endpoint: Endpoint,
-    ) -> anyhow::Result<()> {
-        let key = Self::model_namespace_key(model_name, namespace);
-
-        // Resolve the namespace-level topology before mutating rendezvous
-        // state. Endpoint-scoped WorkerSets are leaves, but a model namespace
-        // supports only one P/D pairing; discovery order must not choose among
-        // multiple prefill-routed decode endpoints.
-        let reactivation_target = if let Some(model) = self.get_model(model_name) {
-            match model.unique_prefill_routed_worker_set_in_namespace(namespace) {
-                Ok(worker_set) => worker_set,
-                Err(error) => {
-                    self.deactivate_prefill_router_topology(model_name, namespace);
-                    return Err(error.into());
-                }
-            }
-        } else {
-            None
-        };
-
-        // Reactivate any existing deactivated decode-side `PrefillRouter`. Used
-        // by the PrefillReady-refresh and Vacant arms — the rebuilding case
-        // for prefill workers that previously died and now rejoin.
-        let reactivate_if_needed = || {
-            if let Some(ws) = reactivation_target.as_ref()
-                && let Some(ref pr) = ws.prefill_router
-                && pr.is_deactivated()
-            {
-                pr.reactivate();
-                true
-            } else {
-                false
-            }
-        };
-
-        // Atomic per-key state transition via the entry API. Replaces the
-        // previous `remove → process → insert` pattern, which left a window in
-        // which a concurrent `remove_prefill_activator` (prefill teardown via
-        // the watcher) could slip in, observe an empty map, and skip the
-        // cleanup — letting a stale `PrefillReady` get resurrected here.
-        match self.prefill_router_activators.entry(key) {
-            Entry::Occupied(mut o) => {
-                // Atomically swap the value to a fresh PrefillReady. The old
-                // value tells us which transition we just performed.
-                let new_value = PrefillActivationState::PrefillReady(Box::new(endpoint.clone()));
-                let old = o.insert(new_value);
-                // Drop the OccupiedEntry to release the shard lock before any
-                // potentially-non-trivial work (e.g. nested DashMap accesses
-                // via reactivate_if_needed). The state transition above is
-                // already committed.
-                drop(o);
-
-                match old {
-                    PrefillActivationState::DecodeWaiting(sender) => {
-                        // Cold-start (or post-rebuild) handshake: decode
-                        // registered first. Wake the waiting receiver.
-                        sender.send(endpoint).map_err(|_| {
-                            anyhow::anyhow!(
-                                "Failed to send endpoint to prefill router activator for {}:{}",
-                                model_name,
-                                namespace
-                            )
-                        })?;
-                        // Structural reconciliation deactivates an incomplete P/D
-                        // topology while this waiter is pending. The now-unique
-                        // prefill leaf makes it eligible again.
-                        reactivate_if_needed();
-                        tracing::info!(
-                            model_name = %model_name,
-                            namespace = %namespace,
-                            "Activated prefill router for decode WorkerSet"
-                        );
-                    }
-                    PrefillActivationState::PrefillReady(_) => {
-                        // Stale PrefillReady from a prior handshake. Two cases:
-                        //   (a) Duplicate activate_prefill_router call (e.g.,
-                        //       the same prefill instance re-publishes its
-                        //       endpoint) — just refresh, no router action.
-                        //   (b) Prefill rejoin after a transient absence —
-                        //       reactivate any deactivated decode-side router.
-                        if reactivate_if_needed() {
-                            tracing::info!(
-                                model_name = %model_name,
-                                namespace = %namespace,
-                                "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
-                            );
-                        } else {
-                            tracing::debug!(
-                                model_name = %model_name,
-                                namespace = %namespace,
-                                "Refreshed cached prefill endpoint for future decode WorkerSet rebuild"
-                            );
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Entry::Vacant(v) => {
-                // No prior handshake state. Insert a fresh PrefillReady so a
-                // future decode rebuild's register_prefill_router finds the
-                // cache and activates immediately.
-                v.insert(PrefillActivationState::PrefillReady(Box::new(endpoint)));
-
-                // Then handle the prefill-rejoin case: an existing decode-side
-                // PrefillRouter that was deactivated when prefill went away.
-                if reactivate_if_needed() {
-                    tracing::info!(
-                        model_name = %model_name,
-                        namespace = %namespace,
-                        "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
-                    );
-                } else {
-                    tracing::info!(
-                        model_name = %model_name,
-                        namespace = %namespace,
-                        "Stored prefill endpoint for future decode WorkerSet registration"
-                    );
-                }
-                Ok(())
-            }
-        }
-    }
-
-    /// Deactivate the prefill router on the decode WorkerSet for the given model/namespace.
-    /// Called by the watcher when all prefill workers in a namespace are removed.
-    /// After deactivation, requests fall back to aggregated mode.
-    pub fn deactivate_prefill_router_for_decode(&self, model_name: &str, namespace: &str) {
-        let Some(model) = self.get_model(model_name) else {
-            return;
-        };
-
-        if let Err(error) = model.unique_prefill_routed_worker_set_in_namespace(namespace) {
-            tracing::error!(
-                model_name,
-                namespace,
-                %error,
-                "Deactivating every prefill router in ambiguous endpoint-scoped topology"
-            );
-        }
-
-        for worker_set in model.prefill_routed_decode_worker_sets_in_namespace(namespace) {
-            if let Some(ref prefill_router) = worker_set.prefill_router {
-                prefill_router.deactivate();
-            }
-        }
-    }
-
-    /// Reconcile the prefill activator after one prefill WorkerSet is removed.
-    /// The cached endpoint remains usable when that removal resolves a
-    /// duplicate leaf; it is dropped only after the final prefill leaf leaves.
-    pub fn remove_prefill_activator(&self, model_name: &str, namespace: &str) {
-        if self.get_model(model_name).is_some_and(|model| {
-            model.worker_sets().into_iter().any(|worker_set| {
-                worker_set.namespace() == namespace
-                    && worker_set.card().worker_type
-                        == Some(crate::worker_type::WorkerType::Prefill)
+        let encode_providers = worker_sets
+            .iter()
+            .filter(|worker_set| {
+                worker_set.card().worker_type == Some(WorkerType::Encode)
+                    && worker_set.card().model_type.is_empty()
             })
-        }) {
-            self.reconcile_prefill_router_topology(model_name, namespace);
-            return;
-        }
+            .filter_map(|worker_set| worker_set.topology_endpoint().cloned())
+            .collect::<Vec<_>>();
+        let unique_encode = (encode_providers.len() == 1).then(|| encode_providers[0].clone());
+        let capable_prefill = (prefill_providers.len() == 1)
+            && worker_sets.iter().any(|worker_set| {
+                worker_set.card().worker_type == Some(WorkerType::Prefill)
+                    && Self::supports_encoder_result_handoff(worker_set.card())
+            });
 
-        let key = Self::model_namespace_key(model_name, namespace);
-        if self.prefill_router_activators.remove(&key).is_some() {
-            tracing::debug!(
-                model_name = %model_name,
-                namespace = %namespace,
-                "Cleaned up prefill router activator for removed WorkerSet"
-            );
-        }
-    }
-
-    /// Remove a stale `DecodeWaiting(sender)` entry on decode WorkerSet teardown,
-    /// while preserving any `PrefillReady(endpoint)` cache.
-    ///
-    /// When a decode WorkerSet is torn down, the `DecodeWaiting` entry's sender
-    /// targets a `oneshot::Receiver` held by the now-dropped `PrefillRouter`. If
-    /// we leave it in the map:
-    ///   - the next decode rebuild's `register_prefill_router` finds the stale
-    ///     `DecodeWaiting`, hits the `Some(DecodeWaiting)` arm, and returns
-    ///     `None` — so the rebuilt WorkerSet has no `PrefillRouter` at all;
-    ///   - when prefill finally registers, `activate_prefill_router` wakes the
-    ///     orphaned receiver and activates a router that's about to be dropped,
-    ///     producing log lines that look like success while the rebuilt
-    ///     WorkerSet still has nothing.
-    ///
-    /// `PrefillReady` must be left intact — it's a cache of the prefill endpoint
-    /// that survives decode rebuilds (PR 8965's primary contribution).
-    pub fn remove_decode_prefill_waiter(&self, model_name: &str, namespace: &str) {
-        let key = Self::model_namespace_key(model_name, namespace);
-        // Atomic remove-if-stale: only drop the entry if it's `DecodeWaiting`,
-        // leaving `PrefillReady` cache entries untouched.
-        let removed = self.prefill_router_activators.remove_if(&key, |_, v| {
-            matches!(v, PrefillActivationState::DecodeWaiting(_))
-        });
-        if removed.is_some() {
-            tracing::debug!(
-                model_name = %model_name,
-                namespace = %namespace,
-                "Removed stale DecodeWaiting activator on decode WorkerSet teardown"
-            );
-        }
-    }
-
-    /// Register the optional encoder hop for a token-serving WorkerSet.
-    /// A cached Encode endpoint activates rebuilt consumers immediately.
-    pub fn register_encoder_router(
-        &self,
-        model_name: &str,
-        namespace: &str,
-    ) -> Option<oneshot::Receiver<Endpoint>> {
-        let key = Self::model_namespace_key(model_name, namespace);
-        match self.encoder_router_activators.entry(key) {
-            Entry::Occupied(mut o) => {
-                if o.get().consumer.is_some() {
-                    tracing::error!(
-                        model_name = %model_name,
-                        namespace = %namespace,
-                        "Token WorkerSet already registered for this encoder router"
-                    );
-                    return None;
-                }
-                let (tx, rx) = oneshot::channel();
-                let state = o.get_mut();
-                if state.routing_enabled {
-                    if let Some(endpoint) = state.endpoint.as_ref() {
-                        let _ = tx.send((**endpoint).clone());
-                    } else {
-                        state.consumer = Some(tx);
-                    }
-                } else {
-                    state.consumer = Some(tx);
-                }
-                Some(rx)
-            }
-            Entry::Vacant(v) => {
-                let (tx, rx) = oneshot::channel();
-                v.insert(EncoderActivationState {
-                    consumer: Some(tx),
-                    ..Default::default()
-                });
-                Some(rx)
-            }
-        }
-    }
-
-    /// Mark the model namespace as explicitly depending on an Encode worker.
-    /// Activation waits for both this signal and an Encode endpoint so worker
-    /// discovery order does not change routing behavior.
-    pub fn enable_encoder_routing(&self, model_name: &str, namespace: &str) {
-        let key = Self::model_namespace_key(model_name, namespace);
-        // Option::zip would eagerly evaluate consumer.take(), dropping the
-        // waiter when the Encode endpoint has not arrived yet.
-        #[allow(clippy::manual_option_zip)]
-        let sender_and_endpoint = match self.encoder_router_activators.entry(key) {
-            Entry::Occupied(mut o) => {
-                let state = o.get_mut();
-                state.routing_enabled = true;
-                state
-                    .endpoint
-                    .as_ref()
-                    .map(|endpoint| (**endpoint).clone())
-                    .and_then(|endpoint| state.consumer.take().map(|sender| (sender, endpoint)))
-            }
-            Entry::Vacant(v) => {
-                v.insert(EncoderActivationState {
-                    routing_enabled: true,
-                    ..Default::default()
-                });
-                None
-            }
-        };
-        if let Some((sender, endpoint)) = sender_and_endpoint {
-            let _ = sender.send(endpoint);
-        }
-    }
-
-    /// Publish an Encode endpoint and activate any waiting token pipeline.
-    pub fn activate_encoder_router(&self, model_name: &str, namespace: &str, endpoint: Endpoint) {
-        let key = Self::model_namespace_key(model_name, namespace);
-        let sender = match self.encoder_router_activators.entry(key) {
-            Entry::Occupied(mut o) => {
-                let state = o.get_mut();
-                state.endpoint = Some(Box::new(endpoint.clone()));
-                state
-                    .routing_enabled
-                    .then(|| state.consumer.take())
-                    .flatten()
-            }
-            Entry::Vacant(v) => {
-                v.insert(EncoderActivationState {
-                    endpoint: Some(Box::new(endpoint.clone())),
-                    ..Default::default()
-                });
-                None
-            }
-        };
-        if let Some(sender) = sender {
-            if sender.send(endpoint).is_err() {
-                tracing::warn!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Encoder router consumer disappeared before activation; endpoint remains cached"
-                );
-            }
-        } else {
-            self.reactivate_encoder_routers(model_name, namespace);
-        }
-    }
-
-    fn reactivate_encoder_routers(&self, model_name: &str, namespace: &str) {
-        if let Some(model) = self.get_model(model_name) {
-            for ws in model.worker_sets() {
-                if ws.namespace() == namespace
-                    && let Some(ref router) = ws.encoder_router
-                    && router.is_deactivated()
-                {
-                    router.reactivate();
-                }
-            }
-        }
-    }
-
-    /// Drop a stale Encode endpoint and make existing token pipelines bypass it.
-    pub fn remove_encoder_activator(&self, model_name: &str, namespace: &str) {
-        let key = Self::model_namespace_key(model_name, namespace);
-        if let Entry::Occupied(mut o) = self.encoder_router_activators.entry(key) {
-            let should_remove = {
-                let state = o.get_mut();
-                state.endpoint = None;
-                state.consumer.is_none()
+        for worker_set in &worker_sets {
+            let Some(router) = &worker_set.encoder_router else {
+                continue;
             };
-            if should_remove {
-                o.remove();
-            }
-        }
-    }
-
-    pub fn deactivate_encoder_router_for_consumers(&self, model_name: &str, namespace: &str) {
-        if let Some(model) = self.get_model(model_name) {
-            for ws in model.worker_sets() {
-                if ws.namespace() == namespace
-                    && let Some(ref router) = ws.encoder_router
-                {
-                    router.deactivate();
+            let routing_enabled = match worker_set.card().worker_type {
+                Some(WorkerType::Decode) => capable_prefill && decode_consumers.len() == 1,
+                Some(WorkerType::Prefill) => false,
+                Some(WorkerType::Aggregated | WorkerType::Encode) | None => {
+                    Self::supports_encoder_result_handoff(worker_set.card())
                 }
-            }
-        }
-    }
-
-    /// Remove a waiter owned by a token WorkerSet that failed or was removed,
-    /// while preserving a cached live Encode endpoint for rebuilds.
-    pub fn remove_consumer_encoder_waiter(&self, model_name: &str, namespace: &str) {
-        let key = Self::model_namespace_key(model_name, namespace);
-        if let Some(mut state) = self.encoder_router_activators.get_mut(&key) {
-            state.consumer = None;
+            };
+            router.set_target(routing_enabled.then(|| unique_encode.clone()).flatten());
         }
     }
 
@@ -1851,7 +2264,9 @@ impl ModelManager {
         // Slow path: create the watch (spawns a background task).
         // If another caller raced us, the entry() below picks up the winner;
         // the loser's background task stops once its receivers are dropped.
-        let rx = runtime_config_watch(endpoint).await?;
+        // This registry is keyed by endpoint and outlives any one WorkerSet, so
+        // the watch is scoped to the process, not to a caller's own lifecycle.
+        let rx = runtime_config_watch(endpoint, endpoint.drt().primary_token()).await?;
         let result = match self.runtime_configs.entry(endpoint_id) {
             Entry::Occupied(e) => e.get().clone(),
             Entry::Vacant(e) => {
@@ -2036,8 +2451,9 @@ mod tests {
     use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
-        discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
+        discovery::{Discovery, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
+        pipeline::RouterMode,
         transports::event_plane::EventScope,
     };
 
@@ -2379,6 +2795,38 @@ mod tests {
     }
 
     #[test]
+    fn remove_hicache_caches_cancels_only_the_removed_component() {
+        let manager = ModelManager::new();
+        let (_tx, runtime_configs) =
+            tokio::sync::watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let retained = tokio_util::sync::CancellationToken::new();
+        manager.hicache_caches.insert(
+            EndpointId::from("ns.worker.generate"),
+            HicacheSharedKvCache::new_with_cancellation(runtime_configs.clone(), cancelled.clone()),
+        );
+        manager.hicache_caches.insert(
+            EndpointId::from("ns.other.generate"),
+            HicacheSharedKvCache::new_with_cancellation(runtime_configs, retained.clone()),
+        );
+
+        manager.remove_hicache_caches("ns", "worker");
+
+        assert!(cancelled.is_cancelled());
+        assert!(!retained.is_cancelled());
+        assert!(
+            !manager
+                .hicache_caches
+                .contains_key(&EndpointId::from("ns.worker.generate"))
+        );
+        assert!(
+            manager
+                .hicache_caches
+                .contains_key(&EndpointId::from("ns.other.generate"))
+        );
+    }
+
+    #[test]
     fn test_alias_resolution_maps_to_primary() {
         let mm = ModelManager::new();
 
@@ -2502,6 +2950,18 @@ mod tests {
         let m2 = mm.get_or_create_model("llama");
         // Both should point to the same Model (same Arc)
         assert!(Arc::ptr_eq(&m1, &m2));
+    }
+
+    #[test]
+    fn public_get_model_retains_live_mutation_semantics() {
+        let manager = ModelManager::new();
+        manager.add_worker_set("llama", "first", make_worker_set("first", "same"));
+        let model = manager.get_model("llama").unwrap();
+
+        manager.add_worker_set("llama", "second", make_worker_set("second", "same"));
+
+        assert!(model.has_worker_set("second"));
+        assert!(Arc::ptr_eq(&model, &manager.get_model("llama").unwrap()));
     }
 
     // -- Model listing and filtering tests --
@@ -2653,508 +3113,319 @@ mod tests {
         assert!(mm.remove_model_card("nonexistent").is_none());
     }
 
-    // -- Prefill router rendezvous tests --
-    // Note: activate_prefill_router requires an Endpoint (needs DistributedRuntime),
-    // so we test the registration state machine and cleanup only.
+    #[test]
+    fn discovery_group_commit_is_all_or_nothing_across_aliases_and_cards() {
+        let manager = ModelManager::new();
+        manager.add_worker_set("taken", "existing", make_worker_set("existing", "old"));
 
-    fn decode_endpoint_id(namespace: &str) -> EndpointId {
-        EndpointId {
-            namespace: namespace.to_string(),
-            component: "decode".to_string(),
-            name: "generate".to_string(),
-        }
+        let mut blocked_card = ModelDeploymentCard::with_name_only("candidate");
+        blocked_card.aliases = vec!["taken".to_string()];
+        let blocked_worker_set = WorkerSet::new(
+            "deployment".to_string(),
+            blocked_card.mdcsum().to_string(),
+            blocked_card.clone(),
+        );
+        let error = manager
+            .commit_discovery_group(
+                "blocked-group",
+                "candidate-workers",
+                blocked_worker_set,
+                vec![("instance-1".to_string(), blocked_card)],
+                Vec::new(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("collides"));
+        assert!(manager.get_model("candidate").is_none());
+        assert!(manager.get_model_cards().is_empty());
+        assert!(manager.get_model("taken").is_some());
+
+        let mut card = ModelDeploymentCard::with_name_only("committed");
+        card.aliases = vec!["alias".to_string()];
+        let worker_set = WorkerSet::new(
+            "deployment".to_string(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        manager
+            .commit_discovery_group(
+                "ready-group",
+                "committed-workers",
+                worker_set,
+                vec![("instance-2".to_string(), card)],
+                Vec::new(),
+            )
+            .unwrap();
+
+        assert_eq!(manager.get_model_cards().len(), 1);
+        assert!(manager.get_model("committed").is_some());
+        assert!(manager.get_model("alias").is_some());
+        assert_eq!(manager.resolve_canonical_name("alias"), "committed");
+
+        manager.remove_discovery_group("ready-group").unwrap();
+        assert!(manager.get_model_cards().is_empty());
+        assert!(manager.get_model("committed").is_none());
+        assert!(manager.get_model("alias").is_none());
+        assert_eq!(manager.resolve_canonical_name("alias"), "alias");
     }
 
     #[test]
-    fn test_prefill_router_register_new() {
-        let mm = ModelManager::new();
+    fn discovery_group_derives_adapter_model_and_lora_projection() {
+        let manager = ModelManager::new();
+        let mut base = ModelDeploymentCard::with_name_only("base");
+        base.runtime_config.max_gpu_lora_count = Some(6);
+        let mut adapter = ModelDeploymentCard::with_name_only("adapter");
+        adapter.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter".to_string(),
+            max_gpu_lora_count: None,
+        });
+        let worker_set = WorkerSet::new(
+            "deployment".to_string(),
+            base.mdcsum().to_string(),
+            base.clone(),
+        );
+        let base_mcid = ModelCardInstanceId {
+            namespace: "namespace".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 17,
+            model_suffix: None,
+        };
+        let adapter_mcid = ModelCardInstanceId {
+            model_suffix: Some("adapter".to_string()),
+            ..base_mcid.clone()
+        };
 
-        // First registration for a (model, namespace) returns Some(rx)
-        let rx = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+        manager
+            .commit_discovery_group(
+                "adapter-group",
+                "base-workers",
+                worker_set,
+                vec![(base_mcid.to_path(), base)],
+                vec![(adapter_mcid.to_path(), adapter)],
+            )
             .unwrap();
-        assert!(rx.is_some());
-    }
 
-    #[test]
-    fn test_prefill_router_double_register_returns_none() {
-        let mm = ModelManager::new();
-
-        let rx1 = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+        assert_eq!(manager.get_model_cards().len(), 2);
+        let base_worker_set = manager
+            .get_committed_model("base")
+            .and_then(|model| model.get_worker_set("base-workers"))
             .unwrap();
-        assert!(rx1.is_some());
-
-        // Second registration for the same (model, namespace) returns None
-        let rx2 = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+        let adapter_worker_set = manager
+            .get_committed_model("adapter")
+            .and_then(|model| model.get_worker_set("base-workers"))
             .unwrap();
-        assert!(rx2.is_none());
-    }
-
-    #[test]
-    fn test_prefill_router_different_namespaces_independent() {
-        let mm = ModelManager::new();
-
-        // Different namespaces should be independent
-        let rx1 = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
-            .unwrap();
-        let rx2 = mm
-            .register_prefill_router("llama", "ns2", &decode_endpoint_id("ns2"))
-            .unwrap();
-        assert!(rx1.is_some());
-        assert!(rx2.is_some());
-    }
-
-    #[test]
-    fn test_prefill_router_different_models_independent() {
-        let mm = ModelManager::new();
-
-        // Different models should be independent
-        let rx1 = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
-            .unwrap();
-        let rx2 = mm
-            .register_prefill_router("gpt", "ns1", &decode_endpoint_id("ns1"))
-            .unwrap();
-        assert!(rx1.is_some());
-        assert!(rx2.is_some());
-    }
-
-    #[test]
-    fn test_prefill_router_remove_allows_reregister() {
-        let mm = ModelManager::new();
-
-        let rx = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
-            .unwrap();
-        assert!(rx.is_some());
-
-        // Remove the activator
-        mm.remove_prefill_activator("llama", "ns1");
-
-        // Should be able to register again
-        let rx2 = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
-            .unwrap();
-        assert!(rx2.is_some());
-    }
-
-    #[test]
-    fn test_prefill_router_remove_nonexistent_noop() {
-        let mm = ModelManager::new();
-        // Should not panic
-        mm.remove_prefill_activator("llama", "ns1");
-    }
-
-    #[test]
-    fn test_encoder_router_registration_and_waiter_cleanup() {
-        let mm = ModelManager::new();
-        let rx = mm.register_encoder_router("llama", "ns1");
-        assert!(rx.is_some());
-        assert!(mm.register_encoder_router("llama", "ns1").is_none());
-
-        drop(rx);
-        mm.remove_consumer_encoder_waiter("llama", "ns1");
-        assert!(mm.register_encoder_router("llama", "ns1").is_some());
-    }
-
-    #[test]
-    fn test_encoder_router_different_namespaces_are_independent() {
-        let mm = ModelManager::new();
-        assert!(mm.register_encoder_router("llama", "ns1").is_some());
-        assert!(mm.register_encoder_router("llama", "ns2").is_some());
-    }
-
-    #[test]
-    fn test_remove_encoder_activator_drops_stale_state_without_waiter() {
-        let mm = ModelManager::new();
-        let key = ModelManager::model_namespace_key("llama", "ns1");
-        mm.encoder_router_activators.insert(
-            key.clone(),
-            EncoderActivationState {
-                routing_enabled: true,
-                ..Default::default()
-            },
+        assert!(!Arc::ptr_eq(&base_worker_set, &adapter_worker_set));
+        assert_eq!(adapter_worker_set.card().name(), "adapter");
+        assert_eq!(
+            adapter_worker_set
+                .card()
+                .lora
+                .as_ref()
+                .map(|lora| lora.name.as_str()),
+            Some("adapter")
         );
 
-        mm.remove_encoder_activator("llama", "ns1");
+        let endpoint_id = EndpointId::from("namespace.worker.generate");
+        let tracker = manager.lora_state_tracker_for(&endpoint_id);
+        let worker = WorkerWithDpRank::new(17, 0);
+        assert!(tracker.is_loaded("adapter", &worker));
+        assert_eq!(tracker.total_lora_slots(), 6);
 
-        assert!(!mm.encoder_router_activators.contains_key(&key));
-        let _receiver = mm
-            .register_encoder_router("llama", "ns1")
-            .expect("registration after cleanup must succeed");
-        let state = mm.encoder_router_activators.get(&key).unwrap();
-        assert!(!state.routing_enabled);
-        assert!(state.consumer.is_some());
+        manager.remove_discovery_group("adapter-group").unwrap();
+        assert!(manager.get_model_cards().is_empty());
+        assert!(manager.get_committed_model("adapter").is_none());
+        assert!(tracker.is_empty());
     }
 
-    #[test]
-    fn test_remove_encoder_activator_preserves_waiting_consumer() {
-        let mm = ModelManager::new();
-        let key = ModelManager::model_namespace_key("llama", "ns1");
-        let _receiver = mm
-            .register_encoder_router("llama", "ns1")
-            .expect("consumer registration must succeed");
-        mm.enable_encoder_routing("llama", "ns1");
-
-        mm.remove_encoder_activator("llama", "ns1");
-
-        let state = mm.encoder_router_activators.get(&key).unwrap();
-        assert!(state.consumer.is_some());
-        assert!(state.endpoint.is_none());
-        assert!(state.routing_enabled);
+    fn topology_card(role: WorkerType) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only("topology-model");
+        card.worker_type = Some(role);
+        card.model_type = match role {
+            WorkerType::Decode => crate::model_type::ModelType::Chat,
+            _ => crate::model_type::ModelType::empty(),
+        };
+        card.needs = match role {
+            WorkerType::Prefill => vec![vec![WorkerType::Decode, WorkerType::Encode]],
+            WorkerType::Decode => vec![vec![WorkerType::Prefill]],
+            WorkerType::Encode => vec![vec![WorkerType::Prefill]],
+            WorkerType::Aggregated => Vec::new(),
+        };
+        if role == WorkerType::Prefill {
+            card.runtime_config
+                .set_engine_specific("encoder_result_handoff", true)
+                .unwrap();
+        }
+        card
     }
 
-    #[derive(Clone, Copy)]
-    enum EncoderActivationSignal {
-        Register,
-        Enable,
-        Activate,
+    fn topology_worker_set(
+        manager: Arc<ModelManager>,
+        role: WorkerType,
+        endpoint: Endpoint,
+    ) -> (
+        WorkerSet,
+        Option<Arc<crate::kv_router::PrefillRouter>>,
+        Option<Arc<crate::kv_router::EncoderRouter>>,
+    ) {
+        let card = topology_card(role);
+        let mut worker_set =
+            WorkerSet::new(endpoint.id().namespace, card.mdcsum().to_string(), card);
+        worker_set.set_topology_endpoint(endpoint);
+        if role != WorkerType::Decode {
+            return (worker_set, None, None);
+        }
+
+        let (_activation_tx, activation_rx) = tokio::sync::oneshot::channel();
+        let prefill = crate::kv_router::PrefillRouter::new(
+            activation_rx,
+            manager,
+            RouterMode::RoundRobin,
+            1,
+            None,
+            None,
+            None,
+            None,
+            "topology-model".to_string(),
+            worker_set.namespace().to_string(),
+            false,
+            None,
+        );
+        let encoder = crate::kv_router::EncoderRouter::new(
+            "topology-model".to_string(),
+            worker_set.namespace().to_string(),
+        );
+        worker_set.prefill_router = Some(prefill.clone());
+        worker_set.encoder_router = Some(encoder.clone());
+        (worker_set, Some(prefill), Some(encoder))
     }
 
     #[tokio::test]
-    async fn test_encoder_router_activates_in_every_signal_order() {
-        use EncoderActivationSignal::{Activate, Enable, Register};
-
+    async fn committed_topology_converges_for_every_epd_startup_order() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
                 .await
                 .unwrap();
-        let endpoint = distributed
-            .namespace("encoder-activation-orders".to_string())
-            .unwrap()
-            .component("encoder".to_string())
-            .unwrap()
-            .endpoint("generate".to_string());
         let orders = [
-            [Register, Enable, Activate],
-            [Register, Activate, Enable],
-            [Enable, Register, Activate],
-            [Enable, Activate, Register],
-            [Activate, Register, Enable],
-            [Activate, Enable, Register],
+            [WorkerType::Encode, WorkerType::Prefill, WorkerType::Decode],
+            [WorkerType::Encode, WorkerType::Decode, WorkerType::Prefill],
+            [WorkerType::Prefill, WorkerType::Encode, WorkerType::Decode],
+            [WorkerType::Prefill, WorkerType::Decode, WorkerType::Encode],
+            [WorkerType::Decode, WorkerType::Encode, WorkerType::Prefill],
+            [WorkerType::Decode, WorkerType::Prefill, WorkerType::Encode],
         ];
 
-        for order in orders {
-            let mm = ModelManager::new();
-            let mut receiver = None;
-            for signal in order {
-                match signal {
-                    Register => {
-                        receiver = mm.register_encoder_router("llama", "ns1");
-                    }
-                    Enable => mm.enable_encoder_routing("llama", "ns1"),
-                    Activate => {
-                        mm.activate_encoder_router("llama", "ns1", endpoint.clone());
-                    }
+        for (index, order) in orders.into_iter().enumerate() {
+            let manager = Arc::new(ModelManager::new());
+            let namespace = format!("epd-order-{index}");
+            let component = distributed
+                .namespace(namespace.clone())
+                .unwrap()
+                .component("workers".to_string())
+                .unwrap();
+            let prefill_endpoint = component.endpoint("prefill".to_string());
+            let encode_endpoint = component.endpoint("encode".to_string());
+            let decode_endpoint = component.endpoint("decode".to_string());
+            let mut prefill_router = None;
+            let mut encoder_router = None;
+
+            for (step, role) in order.into_iter().enumerate() {
+                let endpoint = match role {
+                    WorkerType::Prefill => prefill_endpoint.clone(),
+                    WorkerType::Encode => encode_endpoint.clone(),
+                    WorkerType::Decode => decode_endpoint.clone(),
+                    WorkerType::Aggregated => unreachable!(),
+                };
+                let (worker_set, prefill, encoder) =
+                    topology_worker_set(manager.clone(), role, endpoint);
+                prefill_router = prefill.or(prefill_router);
+                encoder_router = encoder.or(encoder_router);
+                let card = worker_set.card().clone();
+                manager
+                    .commit_discovery_group(
+                        &format!("{namespace}-{role:?}"),
+                        &format!("{role:?}"),
+                        worker_set,
+                        vec![(format!("{namespace}-{role:?}"), card)],
+                        Vec::new(),
+                    )
+                    .unwrap();
+                if step < 2 {
+                    assert!(
+                        !manager
+                            .get_committed_model("topology-model")
+                            .unwrap()
+                            .namespace_readiness()
+                            .ready
+                    );
                 }
             }
 
-            let activated = receiver
-                .expect("every order registers a consumer")
-                .await
-                .expect("all three signals must activate the consumer");
-            assert_eq!(activated, endpoint);
+            assert!(
+                manager
+                    .get_committed_model("topology-model")
+                    .unwrap()
+                    .namespace_readiness()
+                    .ready
+            );
+            let prefill_router = prefill_router.unwrap();
+            let encoder_router = encoder_router.unwrap();
+            assert_eq!(
+                prefill_router.target_endpoint_id(),
+                Some(prefill_endpoint.id())
+            );
+            assert_eq!(
+                encoder_router.target_endpoint_id(),
+                Some(encode_endpoint.id())
+            );
+
+            if index < 2 {
+                let duplicate_endpoint = component.endpoint("prefill-duplicate".to_string());
+                let (duplicate, _, _) = topology_worker_set(
+                    manager.clone(),
+                    WorkerType::Prefill,
+                    duplicate_endpoint.clone(),
+                );
+                let duplicate_card = duplicate.card().clone();
+                manager
+                    .commit_discovery_group(
+                        &format!("{namespace}-prefill-duplicate"),
+                        "PrefillDuplicate",
+                        duplicate,
+                        vec![(format!("{namespace}-prefill-duplicate"), duplicate_card)],
+                        Vec::new(),
+                    )
+                    .unwrap();
+                assert!(
+                    !manager
+                        .get_committed_model("topology-model")
+                        .unwrap()
+                        .namespace_readiness()
+                        .ready
+                );
+                assert_eq!(prefill_router.target_endpoint_id(), None);
+
+                let removed_group = if index == 0 {
+                    format!("{namespace}-prefill-duplicate")
+                } else {
+                    format!("{namespace}-Prefill")
+                };
+                manager.remove_discovery_group(&removed_group).unwrap();
+                let expected = if index == 0 {
+                    prefill_endpoint.id()
+                } else {
+                    duplicate_endpoint.id()
+                };
+                assert!(
+                    manager
+                        .get_committed_model("topology-model")
+                        .unwrap()
+                        .namespace_readiness()
+                        .ready
+                );
+                assert_eq!(prefill_router.target_endpoint_id(), Some(expected));
+            }
         }
-
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn test_encoder_router_repeated_enable_preserves_waiter() {
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let endpoint = distributed
-            .namespace("encoder-repeated-enable".to_string())
-            .unwrap()
-            .component("encoder".to_string())
-            .unwrap()
-            .endpoint("generate".to_string());
-        let mm = ModelManager::new();
-        let receiver = mm
-            .register_encoder_router("llama", "ns1")
-            .expect("consumer registration must succeed");
-
-        mm.enable_encoder_routing("llama", "ns1");
-        mm.enable_encoder_routing("llama", "ns1");
-        mm.activate_encoder_router("llama", "ns1", endpoint.clone());
-
-        assert_eq!(receiver.await.unwrap(), endpoint);
-        runtime.shutdown();
-    }
-
-    #[test]
-    fn test_encoder_router_reactivates_every_matching_worker_set() {
-        let router_a = crate::kv_router::EncoderRouter::disabled();
-        let router_b = crate::kv_router::EncoderRouter::disabled();
-        let mm = ModelManager::new();
-        let mut ws_a = make_worker_set("ns1", "checksum-a");
-        ws_a.encoder_router = Some(router_a.clone());
-        let mut ws_b = make_worker_set("ns1", "checksum-b");
-        ws_b.encoder_router = Some(router_b.clone());
-        mm.add_worker_set("llama", "ns1:chat:decode", ws_a);
-        mm.add_worker_set("llama", "ns1:completions:decode", ws_b);
-
-        mm.deactivate_encoder_router_for_consumers("llama", "ns1");
-        assert!(router_a.is_deactivated());
-        assert!(router_b.is_deactivated());
-
-        mm.reactivate_encoder_routers("llama", "ns1");
-
-        assert!(!router_a.is_deactivated());
-        assert!(!router_b.is_deactivated());
-    }
-
-    // -- remove_decode_prefill_waiter tests (stale-DecodeWaiting cleanup) --
-
-    /// Decode WorkerSet teardown while still in DecodeWaiting must drop the
-    /// stale waiter so a subsequent decode rebuild can register fresh.
-    #[test]
-    fn test_remove_decode_prefill_waiter_clears_decodewaiting() {
-        let mm = ModelManager::new();
-
-        // Decode registers first → DecodeWaiting in map.
-        let rx1 = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
-            .unwrap();
-        assert!(rx1.is_some());
-
-        // Decode WorkerSet is removed before prefill registers. Drop the
-        // receiver to mirror PrefillRouter being dropped along with the
-        // WorkerSet.
-        drop(rx1);
-
-        // Watcher's decode-teardown path calls this:
-        mm.remove_decode_prefill_waiter("llama", "ns1");
-
-        // Rebuild path: a new register_prefill_router must succeed.
-        let rx2 = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
-            .unwrap();
-        assert!(
-            rx2.is_some(),
-            "after stale-DecodeWaiting cleanup, decode rebuild must get a fresh rx"
-        );
-    }
-
-    /// Removing the waiter when the activator is already empty must not panic.
-    #[test]
-    fn test_remove_decode_prefill_waiter_empty_noop() {
-        let mm = ModelManager::new();
-        mm.remove_decode_prefill_waiter("llama", "ns1");
-        // And the next register must still work.
-        let rx = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
-            .unwrap();
-        assert!(rx.is_some());
-    }
-
-    #[test]
-    fn test_model_namespace_key_format() {
-        assert_eq!(
-            ModelManager::model_namespace_key("llama", "ns1"),
-            "llama:ns1"
-        );
-        assert_eq!(
-            ModelManager::model_namespace_key("gpt-4", "default-abc"),
-            "gpt-4:default-abc"
-        );
-    }
-
-    // -- deactivate_prefill_router_for_decode tests --
-
-    use crate::kv_router::PrefillRouter;
-
-    /// Helper: make a WorkerSet with an activated PrefillRouter attached.
-    fn make_worker_set_with_prefill_router(namespace: &str, mdcsum: &str) -> WorkerSet {
-        let mut card = ModelDeploymentCard::default();
-        card.worker_type = Some(crate::worker_type::WorkerType::Decode);
-        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
-        let pr = PrefillRouter::disabled(
-            std::sync::Arc::new(ModelManager::new()),
-            dynamo_runtime::pipeline::RouterMode::RoundRobin,
-            None,
-        );
-        pr.mark_active_for_test();
-        ws.prefill_router = Some(pr);
-        ws
-    }
-
-    fn make_endpoint_worker_set_with_prefill_router(namespace: &str, component: &str) -> WorkerSet {
-        let mut worker_set = make_worker_set_with_prefill_router(namespace, component);
-        worker_set.set_endpoint_id(EndpointId {
-            namespace: namespace.to_string(),
-            component: component.to_string(),
-            name: "generate".to_string(),
-        });
-        worker_set
-    }
-
-    fn make_typed_endpoint_worker_set(
-        namespace: &str,
-        component: &str,
-        worker_type: crate::worker_type::WorkerType,
-    ) -> WorkerSet {
-        let mut card = ModelDeploymentCard::default();
-        card.worker_type = Some(worker_type);
-        let mut worker_set = WorkerSet::new(namespace.to_string(), component.to_string(), card);
-        worker_set.set_endpoint_id(EndpointId {
-            namespace: namespace.to_string(),
-            component: component.to_string(),
-            name: "generate".to_string(),
-        });
-        worker_set
-    }
-
-    /// Calling deactivate on a non-existent model must not panic.
-    #[test]
-    fn test_deactivate_prefill_router_for_decode_noop_missing_model() {
-        let mm = ModelManager::new();
-        mm.deactivate_prefill_router_for_decode("nonexistent", "ns1");
-    }
-
-    /// Calling deactivate on a WorkerSet without a prefill_router must not panic.
-    #[test]
-    fn test_deactivate_prefill_router_for_decode_noop_no_router() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
-        mm.deactivate_prefill_router_for_decode("llama", "ns1");
-    }
-
-    /// Deactivation updates routing lifecycle but does not add a second visibility policy on top
-    /// of registered worker topology.
-    #[test]
-    fn test_deactivate_prefill_router_for_decode_keeps_model_visible() {
-        let mm = ModelManager::new();
-        mm.add_worker_set(
-            "llama",
-            "ns1",
-            make_worker_set_with_prefill_router("ns1", "abc"),
-        );
-
-        // Model is visible before deactivation.
-        assert!(mm.model_display_names().contains("llama"));
-
-        mm.deactivate_prefill_router_for_decode("llama", "ns1");
-
-        assert!(mm.model_display_names().contains("llama"));
-        let router = mm
-            .get_model("llama")
-            .and_then(|model| model.get_worker_set("ns1"))
-            .and_then(|ws| ws.prefill_router.clone())
-            .expect("prefill router");
-        assert!(router.is_deactivated());
-
-        // Idempotent: calling again must not panic.
-        mm.deactivate_prefill_router_for_decode("llama", "ns1");
-        assert!(mm.model_display_names().contains("llama"));
-    }
-
-    #[tokio::test]
-    async fn ambiguous_decode_leaf_disables_only_pd_and_recovers_on_removal() {
-        use crate::worker_type::WorkerType;
-
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let mm = ModelManager::new();
-        mm.add_worker_set(
-            "llama",
-            "decode-a",
-            make_endpoint_worker_set_with_prefill_router("ns1", "decode-a"),
-        );
-        mm.add_worker_set(
-            "llama",
-            "prefill",
-            make_typed_endpoint_worker_set("ns1", "prefill", WorkerType::Prefill),
-        );
-        mm.add_worker_set("llama", "ordinary", make_worker_set("ns1", "ordinary"));
-
-        let endpoint = distributed
-            .namespace("ns1".to_string())
-            .unwrap()
-            .component("prefill".to_string())
-            .unwrap()
-            .endpoint("generate".to_string());
-        mm.prefill_router_activators.insert(
-            ModelManager::model_namespace_key("llama", "ns1"),
-            PrefillActivationState::PrefillReady(Box::new(endpoint)),
-        );
-        let router = mm
-            .get_model("llama")
-            .and_then(|model| model.get_worker_set("decode-a"))
-            .and_then(|worker_set| worker_set.prefill_router.clone())
-            .expect("decode router");
-        router.mark_active_for_test();
-
-        mm.add_worker_set(
-            "llama",
-            "decode-b",
-            make_typed_endpoint_worker_set("ns1", "decode-b", WorkerType::Decode),
-        );
-
-        assert!(router.is_deactivated());
-        assert_eq!(mm.get_model("llama").unwrap().worker_set_count(), 4);
-        assert!(mm.get_model("llama").unwrap().has_worker_set("ordinary"));
-
-        mm.remove_worker_set("llama", "decode-b");
-        assert!(!router.is_deactivated());
-        assert_eq!(mm.get_model("llama").unwrap().worker_set_count(), 3);
-        assert!(mm.get_model("llama").unwrap().has_worker_set("ordinary"));
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn completing_initial_pd_handshake_reactivates_decode_router() {
-        use crate::worker_type::WorkerType;
-
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let mm = ModelManager::new();
-        let activation = mm
-            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
-            .unwrap()
-            .expect("decode activation receiver");
-
-        mm.add_worker_set(
-            "llama",
-            "decode",
-            make_endpoint_worker_set_with_prefill_router("ns1", "decode"),
-        );
-        let router = mm
-            .get_model("llama")
-            .and_then(|model| model.get_worker_set("decode"))
-            .and_then(|worker_set| worker_set.prefill_router.clone())
-            .expect("decode router");
-        assert!(router.is_deactivated());
-
-        mm.add_worker_set(
-            "llama",
-            "prefill",
-            make_typed_endpoint_worker_set("ns1", "prefill", WorkerType::Prefill),
-        );
-        let endpoint = distributed
-            .namespace("ns1".to_string())
-            .unwrap()
-            .component("prefill".to_string())
-            .unwrap()
-            .endpoint("generate".to_string());
-        mm.activate_prefill_router("llama", "ns1", endpoint)
-            .unwrap();
-
-        assert!(!router.is_deactivated());
-        drop(activation);
         runtime.shutdown();
     }
 

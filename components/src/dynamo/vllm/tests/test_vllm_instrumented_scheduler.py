@@ -32,7 +32,10 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 # not be resolvable and ``instrumented_scheduler`` will fail to load with
 # ``ModuleNotFoundError: No module named 'vllm.sampling_params'``.
 import dynamo.vllm.instrumented_scheduler as instrumented_scheduler_module  # noqa: E402
-from dynamo.vllm.benchmark_points import BenchmarkPoints  # noqa: E402
+from dynamo.vllm.benchmark_points import (  # noqa: E402
+    BenchmarkPoints,
+    PrefillPointCandidate,
+)
 from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
     BenchmarkConfig,
     BenchmarkPoint,
@@ -51,6 +54,38 @@ pytestmark = [
 STRUCTURED_OUTPUT_WAITING_STATUS = getattr(
     RequestStatus, "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR", None
 ) or getattr(RequestStatus, "WAITING_FOR_FSM")
+
+
+def _benchmark_capacity(
+    *,
+    max_model_len: int = 256,
+    max_num_scheduled_tokens: int = 10_000,
+    max_num_running_reqs: int = 10_000,
+    usable_blocks_without_watermark: int = 1_000,
+    usable_blocks_with_watermark: int | None = None,
+    grid_invariants_digest: str = "a" * 64,
+):
+    if usable_blocks_with_watermark is None:
+        usable_blocks_with_watermark = usable_blocks_without_watermark
+    return instrumented_scheduler_module._BenchmarkCapacityEnvelope(
+        max_model_len=max_model_len,
+        max_num_scheduled_tokens=max_num_scheduled_tokens,
+        max_num_running_reqs=max_num_running_reqs,
+        usable_blocks_without_watermark=usable_blocks_without_watermark,
+        usable_blocks_with_watermark=usable_blocks_with_watermark,
+        grid_invariants_digest=grid_invariants_digest,
+    )
+
+
+def _install_test_capacity_preflight(stub, capacity=None):
+    capacity = capacity or _benchmark_capacity()
+    stub._bench_make_local_capacity = lambda: capacity
+    stub._bench_synchronizer = None
+    # ``_bench_build_grid`` re-filters the decode capture list against the
+    # negotiated request limit before generating the grid; stubs that don't
+    # model captures still need the attribute to exist.
+    if not hasattr(stub, "_bench_decode_capture_sizes"):
+        stub._bench_decode_capture_sizes = []
 
 
 def _make_request(status, num_tokens: int, num_computed_tokens: int = 0):
@@ -522,6 +557,203 @@ def test_benchmark_synchronizer_aligns_point_and_shares_run_id():
         rank0.close()
 
 
+def test_benchmark_synchronizer_negotiates_minimum_capacity_and_grid():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank0_capacity = _benchmark_capacity(
+        max_model_len=383_168,
+        usable_blocks_without_watermark=23_944,
+        usable_blocks_with_watermark=23_940,
+    )
+    rank1_capacity = _benchmark_capacity(
+        max_model_len=351_104,
+        max_num_scheduled_tokens=8_192,
+        usable_blocks_without_watermark=21_940,
+        usable_blocks_with_watermark=21_936,
+    )
+    follower_result = {}
+
+    def run_follower():
+        follower_result["capacity"] = rank1.negotiate_capacity(rank1_capacity)
+        rank1.synchronize_grid(
+            grid_digest="b" * 64,
+            expected_points=1_368,
+            missing_phases=[],
+        )
+        follower_result["grid_synchronized"] = True
+
+    follower = threading.Thread(target=run_follower)
+    follower.start()
+    try:
+        common = rank0.negotiate_capacity(rank0_capacity)
+        rank0.synchronize_grid(
+            grid_digest="b" * 64,
+            expected_points=1_368,
+            missing_phases=[],
+        )
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert common == follower_result["capacity"]
+        assert common.max_model_len == 351_104
+        assert common.max_num_scheduled_tokens == 8_192
+        assert common.usable_blocks_without_watermark == 21_940
+        assert common.usable_blocks_with_watermark == 21_936
+        assert follower_result["grid_synchronized"] is True
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_rejects_capacity_invariant_mismatch():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    follower_error = {}
+
+    def run_follower():
+        try:
+            rank1.negotiate_capacity(
+                _benchmark_capacity(grid_invariants_digest="b" * 64)
+            )
+        except RuntimeError as error:
+            follower_error["error"] = error
+
+    follower = threading.Thread(target=run_follower)
+    follower.start()
+    try:
+        with pytest.raises(RuntimeError, match="grid invariants differ"):
+            rank0.negotiate_capacity(_benchmark_capacity())
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert "grid invariants differ" in str(follower_error["error"])
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def _digest_stub(max_num_running_reqs: int):
+    """Populate only the attributes ``_bench_grid_invariants_digest`` reads,
+    mirroring the activation-time filtering of the decode capture sizes."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig()
+    stub.block_size = 16
+    stub._bench_hash_block_size = 16
+    stub.cache_config = SimpleNamespace(block_size=16, enable_prefix_caching=True)
+    stub.max_num_running_reqs = max_num_running_reqs
+    stub._bench_prefill_cudagraph_mode = "PIECEWISE"
+    stub._bench_decode_cudagraph_mode = "FULL"
+    stub._bench_cudagraph_capture_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    stub._bench_prefill_capture_sizes = list(stub._bench_cudagraph_capture_sizes)
+    stub._bench_decode_capture_sizes = [
+        size
+        for size in stub._bench_cudagraph_capture_sizes
+        if size <= max_num_running_reqs
+    ]
+    return stub
+
+
+def test_capacity_digest_ignores_request_limit_filtered_capture_sizes():
+    """Ranks that differ only in ``max_num_running_reqs`` filter different
+    decode capture lists at activation. The invariants digest must hash the
+    unfiltered configuration so ``common()`` negotiates the minimum instead
+    of rejecting the ranks as structurally different."""
+    small = _digest_stub(max_num_running_reqs=128)
+    large = _digest_stub(max_num_running_reqs=256)
+    assert small._bench_decode_capture_sizes != large._bench_decode_capture_sizes
+
+    small_digest = InstrumentedScheduler._bench_grid_invariants_digest(small)
+    large_digest = InstrumentedScheduler._bench_grid_invariants_digest(large)
+    assert small_digest == large_digest
+
+    common = instrumented_scheduler_module._BenchmarkCapacityEnvelope.common(
+        [
+            _benchmark_capacity(
+                max_num_running_reqs=128, grid_invariants_digest=small_digest
+            ),
+            _benchmark_capacity(
+                max_num_running_reqs=256, grid_invariants_digest=large_digest
+            ),
+        ]
+    )
+    assert common.max_num_running_reqs == 128
+
+
+def test_benchmark_synchronizer_rejects_grid_mismatch_before_warmup():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    follower_error = {}
+
+    def run_follower():
+        try:
+            rank1.synchronize_grid(
+                grid_digest="b" * 64,
+                expected_points=1_368,
+                missing_phases=[],
+            )
+        except RuntimeError as error:
+            follower_error["error"] = error
+
+    follower = threading.Thread(target=run_follower)
+    follower.start()
+    try:
+        with pytest.raises(RuntimeError, match="grid mismatch"):
+            rank0.synchronize_grid(
+                grid_digest="a" * 64,
+                expected_points=1_368,
+                missing_phases=[],
+            )
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert "grid mismatch" in str(follower_error["error"])
+    finally:
+        rank1.close()
+        rank0.close()
+
+
 def test_benchmark_synchronizer_shares_timeout_stop_decision():
     endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
     rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
@@ -903,20 +1135,35 @@ def test_benchmark_output_summary_must_match_point_before_go():
         total_kv_read_tokens=128,
         batch_size=2,
     )
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    # The synchronized output is the admission step, which runs one token
+    # short per request (the steady step reads the full 128 afterwards).
+    stub._bench_admission_kv_tokens = 126
     matching = {
         "total_num_scheduled_tokens": 2,
         "num_prefill_requests": 0,
         "sum_prefill_tokens": 0,
         "sum_prefill_kv_tokens": 0,
         "num_decode_requests": 2,
-        "sum_decode_kv_tokens": 128,
+        "sum_decode_kv_tokens": 126,
     }
 
-    assert InstrumentedScheduler._bench_output_validation_error(point, matching) is None
+    assert (
+        InstrumentedScheduler._bench_output_validation_error(stub, point, matching)
+        is None
+    )
 
     mismatched = dict(matching, num_decode_requests=1)
-    error = InstrumentedScheduler._bench_output_validation_error(point, mismatched)
+    error = InstrumentedScheduler._bench_output_validation_error(
+        stub, point, mismatched
+    )
     assert "benchmark_id=3 SchedulerOutput does not match" in error
+
+    full_context = dict(matching, sum_decode_kv_tokens=128)
+    error = InstrumentedScheduler._bench_output_validation_error(
+        stub, point, full_context
+    )
+    assert error is not None, "the admission step must run one token short"
 
 
 def test_dp_rank_falls_back_to_rank_when_index_absent():
@@ -1284,6 +1531,60 @@ def test_decode_grid_uses_live_free_block_count_after_manager_reservations():
     )
 
 
+def test_decode_grid_uses_common_attention_dp_capacity():
+    # Regression for a DEP4 GLM-5.2 run where vLLM auto-fit two ranks to
+    # 5,987 blocks / 383,168 tokens and two ranks to 5,486 blocks / 351,104
+    # tokens. Independent grids had the same count but diverged at point 20:
+    # 383,103 versus 351,039 total KV-read tokens.
+    larger_rank = _grid_stub_with_kv_capacity(num_gpu_blocks=5_987, block_size=64)
+    smaller_rank = _grid_stub_with_kv_capacity(num_gpu_blocks=5_486, block_size=64)
+    larger_rank.max_model_len = 383_168
+    smaller_rank.max_model_len = 351_104
+    capture_sizes = [
+        1,
+        2,
+        4,
+        *range(8, 257, 8),
+        *range(272, 513, 16),
+    ]
+    for stub in (larger_rank, smaller_rank):
+        stub.max_num_scheduled_tokens = 8_192
+        stub.max_num_running_reqs = 1_024
+        stub._bench_decode_capture_sizes = capture_sizes
+    common = _benchmark_capacity(
+        max_model_len=351_104,
+        max_num_scheduled_tokens=8_192,
+        max_num_running_reqs=1_024,
+        usable_blocks_without_watermark=5_485,
+        usable_blocks_with_watermark=5_485,
+    )
+    larger_rank._bench_negotiated_capacity = common
+    smaller_rank._bench_negotiated_capacity = common
+
+    InstrumentedScheduler._bench_generate_decode_grid(larger_rank)
+    InstrumentedScheduler._bench_generate_decode_grid(smaller_rank)
+
+    larger_grid = [point.__dict__ for point in larger_rank._bench_grid]
+    smaller_grid = [point.__dict__ for point in smaller_rank._bench_grid]
+    assert larger_grid == smaller_grid
+    # Steady-coordinate normalization merges each batch's sub-2B presets into
+    # one point, so batch=1 keeps 19 ladder entries and its feasibility
+    # boundary sits at index 18.
+    assert len(larger_grid) == 1_266
+    assert larger_rank._bench_grid[18].total_kv_read_tokens == 351_039
+
+    # The common grid must remain feasible under each rank's original local
+    # capacity when the conservative shared envelope is removed.
+    for stub in (larger_rank, smaller_rank):
+        stub._bench_negotiated_capacity = None
+        assert all(
+            InstrumentedScheduler._bench_decode_point_feasible(
+                stub, point.batch_size, point.total_kv_read_tokens
+            )
+            for point in stub._bench_grid
+        )
+
+
 @pytest.mark.parametrize(
     ("mode", "prefill_points", "decode_points", "expected_missing_phases"),
     [
@@ -1299,11 +1600,12 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
     mode, prefill_points, decode_points, expected_missing_phases
 ):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode=mode)
+    stub._bench_config = BenchmarkConfig(mode=mode)
     stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
+    _install_test_capacity_preflight(stub)
 
     def generate_prefill_grid():
         stub._bench_grid.extend(
@@ -1326,12 +1628,13 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
 
 def test_benchmark_grid_has_no_point_cap():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_config = BenchmarkConfig(mode="prefill")
     stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
     stub._bench_grid_error = None
+    _install_test_capacity_preflight(stub)
 
     def generate_prefill_grid():
         stub._bench_grid.extend(
@@ -1351,12 +1654,13 @@ def test_benchmark_grid_has_no_point_cap():
 
 def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_config = BenchmarkConfig(mode="prefill")
     stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
     stub._bench_grid_error = None
+    _install_test_capacity_preflight(stub)
 
     def generate_prefill_grid():
         stub._bench_grid.extend(
@@ -1399,6 +1703,7 @@ def _explicit_grid_stub(mode="agg", points=None):
             "decode": [{"total_kv_read_tokens": 16, "batch_size": 1}],
         }
     )
+    _install_test_capacity_preflight(stub)
     return stub
 
 
@@ -1472,7 +1777,11 @@ def test_explicit_decode_respects_scheduled_token_limit():
             "decode": [{"total_kv_read_tokens": 2, "batch_size": 2}],
         },
     )
-    stub.max_num_scheduled_tokens = 1
+    # The limit is read through the negotiated capacity envelope, so the
+    # constraint must be installed there rather than on the stub attribute.
+    _install_test_capacity_preflight(
+        stub, _benchmark_capacity(max_num_scheduled_tokens=1)
+    )
 
     with pytest.raises(ValueError, match=r"decode\[0\].*infeasible"):
         InstrumentedScheduler._bench_build_grid(stub)
@@ -1690,6 +1999,15 @@ def _prefill_grid_stub(
     stub._bench_prefill_capture_sizes = [8, 16]
     stub._bench_prefill_cudagraph_mode = "PIECEWISE"
     stub.num_lookahead_tokens = 0
+    _install_test_capacity_preflight(
+        stub,
+        _benchmark_capacity(
+            max_model_len=stub.max_model_len,
+            max_num_scheduled_tokens=stub.max_num_scheduled_tokens,
+            max_num_running_reqs=stub.max_num_running_reqs,
+            usable_blocks_without_watermark=num_gpu_blocks - 1,
+        ),
+    )
     return stub
 
 
@@ -1869,6 +2187,71 @@ def test_prefill_grid_runs_larger_workload_coordinates_first():
     assert coordinates == sorted(coordinates, reverse=True)
 
 
+def test_prefill_grid_uses_common_attention_dp_capacity():
+    larger_rank = _prefill_grid_stub(num_gpu_blocks=64)
+    smaller_rank = _prefill_grid_stub(num_gpu_blocks=48)
+    common = _benchmark_capacity(
+        max_model_len=96,
+        max_num_scheduled_tokens=40,
+        max_num_running_reqs=8,
+        usable_blocks_without_watermark=47,
+        usable_blocks_with_watermark=47,
+    )
+    larger_rank._bench_negotiated_capacity = common
+    smaller_rank._bench_negotiated_capacity = common
+
+    InstrumentedScheduler._bench_generate_prefill_grid(larger_rank)
+    InstrumentedScheduler._bench_generate_prefill_grid(smaller_rank)
+
+    larger_grid = [point.__dict__ for point in larger_rank._bench_grid]
+    smaller_grid = [point.__dict__ for point in smaller_rank._bench_grid]
+    assert larger_grid == smaller_grid
+
+    for stub in (larger_rank, smaller_rank):
+        stub._bench_negotiated_capacity = None
+        assert all(
+            InstrumentedScheduler._bench_prefill_point_feasible(
+                stub,
+                point.total_prefill_tokens,
+                point.batch_size,
+                point.total_kv_read_tokens,
+            )
+            for point in stub._bench_grid
+        )
+
+
+def test_explicit_prefill_point_uses_negotiated_scheduled_token_limit():
+    """An explicit point at the negotiated ``max_num_scheduled_tokens`` must
+    get identical cudagraph metadata on every rank regardless of the rank's
+    local limit — otherwise ``sample_reasons`` (engine_limit vs
+    geometric_tail) and therefore the per-point digests diverge."""
+    at_limit_rank = _prefill_grid_stub()
+    above_limit_rank = _prefill_grid_stub()
+    above_limit_rank.max_num_scheduled_tokens = 48
+    common = _benchmark_capacity(
+        max_model_len=128,
+        max_num_scheduled_tokens=40,
+        max_num_running_reqs=8,
+        usable_blocks_without_watermark=63,
+    )
+    candidate = PrefillPointCandidate(
+        total_prefill_tokens=40, batch_size=1, total_kv_read_tokens=0
+    )
+
+    points = []
+    for stub in (at_limit_rank, above_limit_rank):
+        stub._bench_negotiated_capacity = common
+        points.append(
+            InstrumentedScheduler._bench_materialize_prefill_candidate(
+                stub, candidate, "points[0]"
+            )
+        )
+
+    assert points[0] == points[1]
+    assert "engine_limit" in points[0].sample_reasons
+    assert "geometric_tail" not in points[1].sample_reasons
+
+
 def test_agg_grid_contains_piecewise_prefill_then_full_decode_points():
     stub = _prefill_grid_stub()
     stub._bench_grid = deque()
@@ -1935,9 +2318,11 @@ def test_prefill_kv_read_ladder_is_uniformly_limited_with_endpoints():
 def test_decode_kv_read_ladder_keeps_every_power_of_two_and_exact_maximum():
     stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
 
+    # Presets 9 (all ctx=1) and 16 (mixed ctx 1/2) both measure at 18 after
+    # the admission clamp, so they normalize into a single steady coordinate;
+    # every preset at or above 2 * batch_size keeps its exact value.
     assert InstrumentedScheduler._bench_decode_kv_read_points(stub, 9) == [
-        9,
-        16,
+        18,
         32,
         64,
         128,
@@ -1945,6 +2330,52 @@ def test_decode_kv_read_ladder_keeps_every_power_of_two_and_exact_maximum():
         512,
         999,
     ]
+
+
+def test_decode_kv_read_points_are_normalized_steady_coordinates():
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
+
+    for batch_size in (1, 8, 24):
+        points = InstrumentedScheduler._bench_decode_kv_read_points(stub, batch_size)
+        assert points, f"batch_size={batch_size} produced an empty ladder"
+        assert len(points) == len(set(points))
+        assert points[0] == 2 * batch_size
+        assert all(
+            InstrumentedScheduler._bench_decode_steady_kv_tokens(batch_size, value)
+            == value
+            for value in points
+        ), "normalization must be idempotent: labels equal measured coordinates"
+
+
+def test_decode_kv_read_points_merge_colliding_sub_2b_presets():
+    # Non-power-of-two batch: presets 24 (all ctx=1) and 32 (8 ctx=2 +
+    # 16 ctx=1) both measure at 48, a coordinate absent from the raw preset
+    # ladder. They must collapse into one point instead of duplicating it.
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
+
+    assert InstrumentedScheduler._bench_decode_steady_kv_tokens(24, 24) == 48
+    assert InstrumentedScheduler._bench_decode_steady_kv_tokens(24, 32) == 48
+
+    points = InstrumentedScheduler._bench_decode_kv_read_points(stub, 24)
+    assert 48 in points
+    assert 24 not in points
+    assert 32 not in points
+    assert points.count(48) == 1
+
+
+def test_decode_kv_read_ladder_boundaries_at_model_len_floor():
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
+
+    # max_model_len=4 bounds every request to ctx=2, so max_kv is exactly
+    # 2 * batch_size and the ladder collapses to that single steady point.
+    stub.max_model_len = 4
+    assert InstrumentedScheduler._bench_decode_kv_read_points(stub, 4) == [8]
+
+    # Below the two-step floor (ctx=2 needs max(ctx, 2) + 2 slots) no point
+    # is feasible: the ladder must be empty rather than emit a normalized
+    # coordinate above the validated maximum.
+    stub.max_model_len = 3
+    assert InstrumentedScheduler._bench_decode_kv_read_points(stub, 4) == []
 
 
 def test_decode_grid_uniformly_limits_batch_and_kv_axes():
@@ -2018,13 +2449,37 @@ def test_prefill_kv_read_grid_accounts_for_eagle_cache_block_drop():
     stub = _prefill_grid_stub(block_size=8)
     stub.kv_cache_manager = SimpleNamespace(use_eagle=True)
 
+    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 8, 1) == [0]
+
     points = InstrumentedScheduler._bench_prefill_kv_read_points(stub, 40, 1)
     assert points[0] == 0
     assert all(point % 8 == 0 for point in points)
     assert InstrumentedScheduler._bench_seed_prompt_len(stub, 16) == 24
 
     # The extra seed block must also fit under max_model_len.
-    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 1, 1)[-1] == 112
+    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 9, 1)[-1] == 112
+
+
+def test_prefill_eagle_kv_read_requires_more_than_one_drop_block_per_request():
+    stub = _prefill_grid_stub(block_size=8)
+    stub.kv_cache_manager = SimpleNamespace(use_eagle=True)
+
+    assert not InstrumentedScheduler._bench_prefill_point_feasible(stub, 17, 2, 16)
+    assert InstrumentedScheduler._bench_prefill_point_feasible(stub, 18, 2, 16)
+
+
+def test_prefill_eagle_partial_hash_hit_uses_hash_drop_granularity():
+    stub = _prefill_grid_stub(block_size=16)
+    stub._bench_hash_block_size = 8
+    stub.kv_cache_manager = SimpleNamespace(
+        use_eagle=True,
+        coordinator=SimpleNamespace(enable_partial_hash_hits=True),
+    )
+
+    assert InstrumentedScheduler._bench_eagle_cache_drop_tokens(stub) == 8
+    assert InstrumentedScheduler._bench_seed_prompt_len(stub, 16) == 24
+    assert not InstrumentedScheduler._bench_prefill_point_feasible(stub, 8, 1, 8)
+    assert InstrumentedScheduler._bench_prefill_point_feasible(stub, 9, 1, 8)
 
 
 def test_prefill_fake_seed_feasibility_uses_uncapped_allocation():
@@ -2657,6 +3112,7 @@ def _benchmark_save_stub(point: BenchmarkPoint, fpms: list[dict]):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_current_point = point
     stub._bench_current_fpms = fpms
+    stub._bench_expected_fpms = 1
     stub._bench_results = []
     stub._bench_iteration_groups = []
     stub._bench_skipped_points = []
@@ -2885,5 +3341,309 @@ def test_zero_request_decode_injection_is_skipped_immediately():
     assert stub._bench_skipped_points == [
         SkippedBenchmarkPoint(point=point, reason="decode_injection_failed")
     ]
-    stub._bench_inject_fake_decode.assert_called_once_with([16, 16, 16])
+    # The admission step is injected one token short of the coordinate.
+    stub._bench_inject_fake_decode.assert_called_once_with([15, 15, 15])
     stub._bench_cleanup_requests.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# Steady-state decode measurement (two-step points)
+# ---------------------------------------------------------------------------
+
+
+def _steady_injection_stub(point: BenchmarkPoint):
+    """Populate only what the injection branch of ``_bench_step_decode``
+    reads; the injection itself is captured."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_drain_pending = False
+    stub._bench_active_req_ids = set()
+    stub._bench_grid = deque([point])
+    stub._bench_current_point = None
+    stub._bench_current_fpms = []
+    stub._bench_stop_at_timeout_boundary = MagicMock(return_value=False)
+    stub._bench_inject_fake_decode = MagicMock(
+        return_value=SimpleNamespace(total_num_scheduled_tokens=point.batch_size)
+    )
+    return stub
+
+
+def test_decode_injection_admits_one_token_short():
+    point = BenchmarkPoint(
+        point_type="decode", benchmark_id=5, total_kv_read_tokens=128, batch_size=2
+    )
+    stub = _steady_injection_stub(point)
+
+    output = InstrumentedScheduler._bench_step_decode(stub)
+
+    assert output is not None
+    stub._bench_inject_fake_decode.assert_called_once_with([63, 63])
+    assert stub._bench_admission_kv_tokens == 126
+    assert stub._bench_extra_steps_left == 1
+    assert stub._bench_expected_fpms == 2
+    # No clamping: the point keeps its grid coordinate.
+    assert stub._bench_current_point.total_kv_read_tokens == 128
+    assert "context_clamped" not in stub._bench_current_point.sample_reasons
+    assert stub._bench_sync_pending is True
+
+
+def test_decode_ctx1_point_is_clamped_and_recorded_at_measured_coordinate():
+    # total_kv == batch_size means every request targets a 1-token context,
+    # which cannot give up a token for the admission step.
+    point = BenchmarkPoint(
+        point_type="decode", benchmark_id=6, total_kv_read_tokens=4, batch_size=4
+    )
+    stub = _steady_injection_stub(point)
+
+    output = InstrumentedScheduler._bench_step_decode(stub)
+
+    assert output is not None
+    stub._bench_inject_fake_decode.assert_called_once_with([1, 1, 1, 1])
+    assert stub._bench_admission_kv_tokens == 4
+    # The steady step reads ctx=2 per request; the point is recorded at the
+    # coordinate it actually measures.
+    assert stub._bench_current_point.total_kv_read_tokens == 8
+    assert "context_clamped" in stub._bench_current_point.sample_reasons
+    assert stub._bench_current_point.benchmark_id == 6
+
+
+def test_steady_step_dispatch_then_wait_then_save():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_drain_pending = False
+    stub._bench_active_req_ids = {"__bench_0"}
+    stub._bench_current_fpms = []
+    stub._bench_extra_steps_left = 1
+    stub._bench_expected_fpms = 2
+    stub._bench_point_deadline = 0.0
+    steady_output = object()
+    stub._bench_make_steady_step = MagicMock(return_value=steady_output)
+
+    assert InstrumentedScheduler._bench_step_decode(stub) is steady_output
+    assert stub._bench_extra_steps_left == 0
+
+    # Only the admission FPM has arrived: keep waiting, no save.
+    stub._bench_save_current_point = MagicMock()
+    stub._bench_current_fpms = [{"admission": True}]
+    assert InstrumentedScheduler._bench_step_decode(stub) is None
+    stub._bench_save_current_point.assert_not_called()
+
+    # Second (steady) FPM arrived: save and enter drain.
+    stub._bench_current_fpms = [{"admission": True}, {"steady": True}]
+    stub._bench_cleanup_requests = MagicMock()
+    stub._bench_transition_to_timeout_done = MagicMock(return_value=False)
+    assert InstrumentedScheduler._bench_step_decode(stub) is None
+    stub._bench_save_current_point.assert_called_once_with()
+    assert stub._bench_drain_pending is True
+
+
+def test_steady_step_unavailable_waits_out_the_deadline():
+    import time
+
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_drain_pending = False
+    stub._bench_active_req_ids = {"__bench_0"}
+    stub._bench_current_fpms = [{"admission": True}]
+    stub._bench_extra_steps_left = 1
+    stub._bench_expected_fpms = 2
+    stub._bench_point_deadline = 0.0  # no deadline yet -> not timed out
+    stub._bench_make_steady_step = MagicMock(return_value=None)
+    stub._bench_save_current_point = MagicMock()
+
+    # Builder failed: no dispatch, no save, state intact for a retry.
+    assert InstrumentedScheduler._bench_step_decode(stub) is None
+    stub._bench_save_current_point.assert_not_called()
+    assert stub._bench_extra_steps_left == 1
+
+    # Once the deadline passes, the point flows into the normal save path
+    # (where the admission-only FPM fails shape validation and the group
+    # skips together).
+    stub._bench_point_deadline = time.monotonic() - 1.0
+    stub._bench_cleanup_requests = MagicMock()
+    stub._bench_transition_to_timeout_done = MagicMock(return_value=False)
+    assert InstrumentedScheduler._bench_step_decode(stub) is None
+    stub._bench_save_current_point.assert_called_once_with()
+
+
+def test_make_steady_step_builds_production_shaped_output():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    requests = [
+        SimpleNamespace(
+            request_id=f"__bench_{index}",
+            num_computed_tokens=63 + index,
+            num_output_tokens=0,
+            num_output_placeholders=1,
+            is_finished=lambda: False,
+        )
+        for index in range(2)
+    ]
+    stub.running = requests
+    stub._bench_active_req_ids = {r.request_id for r in requests}
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = None
+    kv = MagicMock()
+    kv.allocate_slots.return_value = blocks
+    kv.num_kv_cache_groups = 1
+    stub.kv_cache_manager = kv
+    stub.num_lookahead_tokens = 0
+    stub.needs_kv_cache_zeroing = False
+    stub.finished_req_ids = set()
+    stub.connector = None
+    stub.ec_connector = None
+
+    output = InstrumentedScheduler._bench_make_steady_step(stub)
+
+    assert output.scheduled_new_reqs == []
+    cached = output.scheduled_cached_reqs
+    assert cached.req_ids == ["__bench_0", "__bench_1"]
+    assert cached.resumed_req_ids == set()
+    assert cached.new_token_ids == []
+    assert cached.num_computed_tokens == [63, 64]
+    assert cached.num_output_tokens == [1, 1]
+    assert output.total_num_scheduled_tokens == 2
+    assert output.num_scheduled_tokens == {"__bench_0": 1, "__bench_1": 1}
+    kv.allocate_slots.assert_any_call(
+        requests[0], 1, num_lookahead_tokens=0, delay_cache_blocks=True
+    )
+    blocks.get_block_ids.assert_called_with(allow_none=True)
+
+
+def test_make_steady_step_returns_none_when_kv_exhausted():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    request = SimpleNamespace(
+        request_id="__bench_0",
+        num_computed_tokens=63,
+        num_output_tokens=0,
+        num_output_placeholders=1,
+        is_finished=lambda: False,
+    )
+    stub.running = [request]
+    stub._bench_active_req_ids = {"__bench_0"}
+    kv = MagicMock()
+    kv.allocate_slots.return_value = None
+    stub.kv_cache_manager = kv
+    stub.num_lookahead_tokens = 0
+
+    assert InstrumentedScheduler._bench_make_steady_step(stub) is None
+
+
+def _steady_fpm(sum_kv: int, batch: int, bench_id: int = 1, rank: int = 0) -> dict:
+    return {
+        "counter_id": bench_id,
+        "dp_rank": rank,
+        "wall_time": 1.0,
+        "scheduled_requests": {
+            "num_decode_requests": batch,
+            "sum_decode_kv_tokens": sum_kv,
+        },
+    }
+
+
+def test_save_records_only_the_steady_fpm():
+    point = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, total_kv_read_tokens=128, batch_size=2
+    )
+    admission = _steady_fpm(126, 2)
+    steady = _steady_fpm(128, 2)
+    stub = _benchmark_save_stub(point, [admission, steady])
+    stub._bench_expected_fpms = 2
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert len(stub._bench_results) == 1
+    assert stub._bench_results[0].fpms == [steady]
+    assert stub._bench_skipped_points == []
+
+
+def test_save_admission_only_fpm_becomes_validation_skip():
+    point = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, total_kv_read_tokens=128, batch_size=2
+    )
+    stub = _benchmark_save_stub(point, [_steady_fpm(126, 2)])
+    stub._bench_expected_fpms = 2  # steady FPM never arrived
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == [
+        SkippedBenchmarkPoint(point=point, reason="measured_decode_context_mismatch")
+    ]
+
+
+@pytest.mark.timeout(60)
+def test_two_step_group_skip_traverses_barrier_without_deadlock():
+    """One rank misses its steady FPM while the other has both: the short
+    rank must still enter collect_result so the whole group leaves the
+    barrier together and skips the point consistently."""
+    import time
+
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0, dp_size=2, master_ip="unused", port=0, timeout=5, endpoint=endpoint
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1, dp_size=2, master_ip="unused", port=0, timeout=5, endpoint=endpoint
+    )
+    point = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, total_kv_read_tokens=128, batch_size=2
+    )
+
+    def build(rank, synchronizer, fpms):
+        stub = _benchmark_save_stub(point, fpms)
+        stub._bench_expected_fpms = 2
+        stub._bench_synchronizer = synchronizer
+        stub._bench_dp_size = 2
+        stub._fpm_dp_rank = rank
+        stub._bench_deadline_monotonic = time.monotonic() + 30.0
+        return stub
+
+    # rank0 timed out with only the admission FPM; rank1 got both.
+    stub0 = build(0, rank0, [_steady_fpm(126, 2, rank=0)])
+    stub1 = build(1, rank1, [_steady_fpm(126, 2, rank=1), _steady_fpm(128, 2, rank=1)])
+
+    errors: dict[int, Exception] = {}
+
+    def save(rank, stub):
+        try:
+            InstrumentedScheduler._bench_save_current_point(stub)
+        except Exception as error:  # pragma: no cover - failure diagnostics
+            errors[rank] = error
+
+    follower = threading.Thread(target=save, args=(1, stub1))
+    follower.start()
+    try:
+        save(0, stub0)
+        follower.join(timeout=10)
+        assert not follower.is_alive(), "rank1 deadlocked in collect_result"
+    finally:
+        rank1.close()
+        rank0.close()
+
+    assert errors == {}
+    for stub in (stub0, stub1):
+        assert stub._bench_results == []
+        assert [s.reason for s in stub._bench_skipped_points] == [
+            "measured_decode_context_mismatch"
+        ]
+
+
+def test_steady_fpm_gate_only_fires_for_two_step_decode_points():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._last_update_time = 100.0
+    stub._bench_current_point = BenchmarkPoint(point_type="decode")
+    stub._bench_expected_fpms = 2
+    stub._bench_current_fpms = [{"admission": True}]
+    assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is True
+
+    stub._bench_current_fpms = []  # admission FPM not recorded yet
+    assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
+
+    stub._bench_current_fpms = [{"admission": True}]
+    stub._bench_expected_fpms = 1  # single-step point
+    assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
+
+    stub._bench_expected_fpms = 2
+    stub._bench_current_point = BenchmarkPoint(point_type="prefill")
+    assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
+
+    stub._bench_current_point = BenchmarkPoint(point_type="decode")
+    stub._last_update_time = 0.0  # previous update was an empty step
+    assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False

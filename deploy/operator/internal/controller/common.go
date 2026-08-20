@@ -55,8 +55,6 @@ type DockerSecretRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
 
-type dockerSecretRetriever = DockerSecretRetriever
-
 // getComponentNames returns the component names for logging purposes.
 func getComponentNames(components []v1beta1.DynamoComponentDeploymentSharedSpec) []string {
 	keys := make([]string, 0, len(components))

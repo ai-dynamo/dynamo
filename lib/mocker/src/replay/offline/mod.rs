@@ -3,19 +3,8 @@
 
 pub(crate) use crate::replay::normalize_trace_requests;
 
-pub(crate) mod agg;
-pub(crate) mod components;
-pub(crate) mod core;
-pub(crate) mod disagg;
 mod entrypoints;
-pub(crate) mod events;
-mod executor;
 pub(crate) mod extensions;
-mod progress;
-pub(crate) mod runtime_utils;
-pub(crate) mod scaling;
-pub(crate) mod single;
-pub(crate) mod state;
 
 pub use entrypoints::run_offline_handoff_conformance;
 pub(crate) use entrypoints::{
@@ -25,8 +14,9 @@ pub(crate) use entrypoints::{
     simulate_concurrency_workload_disagg_with_scaling_policy,
     simulate_concurrency_workload_with_scaling_policy, simulate_trace_disagg_with_scaling_policy,
     simulate_trace_with_scaling_policy, simulate_trace_workload_accumulating_deltas,
+    simulate_trace_workload_disagg_with_capture_options,
     simulate_trace_workload_disagg_with_scaling_policy,
-    simulate_trace_workload_with_scaling_policy,
+    simulate_trace_workload_with_capture_options, simulate_trace_workload_with_scaling_policy,
 };
 
 #[cfg(test)]

@@ -76,7 +76,7 @@ spec:
     spec:
       containers:
         - name: vllm
-          image: vllm/vllm-openai:v0.26.0
+          image: vllm/vllm-openai:v0.27.1
           args:
             - --model
             - Qwen/Qwen3-0.6B
@@ -110,14 +110,6 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
-          env:
-            # As non-root (UID 1000) the image's default HOME is not writable, so
-            # point HOME and the HF/model cache at world-writable /tmp — the worker
-            # can then download the model without a mounted volume for this example.
-            - name: HOME
-              value: /tmp
-            - name: HF_HOME
-              value: /tmp/huggingface
           resources:
             requests:
               nvidia.com/gpu: "1"
@@ -129,8 +121,14 @@ spec:
             # enforce non-root explicitly: pin a non-root UID/GID and require it
             # (kubelet refuses to start the container if the image would run as root).
             runAsNonRoot: true
-            runAsUser: 1000
-            runAsGroup: 1000
+            # 2000/0 is the `vllm` user the image itself ships in /etc/passwd. Use it
+            # rather than an arbitrary UID: PyTorch resolves the running UID via
+            # getpass.getuser() while setting up its compile cache, so a UID with no
+            # passwd entry raises KeyError and vLLM dies on import, before it parses
+            # a single argument. A resolvable UID also gets HOME from passwd, so the
+            # model cache needs no override.
+            runAsUser: 2000
+            runAsGroup: 0
             capabilities:
               drop:
                 - ALL

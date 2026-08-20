@@ -46,6 +46,7 @@ python3 -m dynamo.vllm \
     --model "$MODEL" \
     --enforce-eager \
     --disaggregation-mode decode \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
     $DECODE_GPU_MEM_ARGS \
     --max-model-len "$MAX_MODEL_LEN" \
@@ -58,6 +59,7 @@ python3 -m dynamo.vllm \
     --model "$MODEL" \
     --enforce-eager \
     --disaggregation-mode decode \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
     $DECODE_GPU_MEM_ARGS \
     --max-model-len "$MAX_MODEL_LEN" \
@@ -75,6 +77,7 @@ python3 -m dynamo.vllm \
     --model "$MODEL" \
     --enforce-eager \
     --disaggregation-mode prefill \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --gpu-memory-utilization "$KVBM_GPU_MEMORY_UTILIZATION" \
     --max-model-len "$MAX_MODEL_LEN" \
@@ -91,6 +94,7 @@ python3 -m dynamo.vllm \
     --model "$MODEL" \
     --enforce-eager \
     --disaggregation-mode prefill \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --gpu-memory-utilization "$KVBM_GPU_MEMORY_UTILIZATION" \
     --max-model-len "$MAX_MODEL_LEN" \

@@ -131,12 +131,16 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		grovePathway                      = false
 		validateInferencePoolAvailability = false
 	)
-	return v.validateDynamoComponentDeploymentSharedSpec(
+	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
+	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
-		grovePathway,
-		validateInferencePoolAvailability,
-	)
+		dynamoComponentDeploymentSharedSpecValidationOptions{
+			grovePathway:                      grovePathway,
+			validateInferencePoolAvailability: validateInferencePoolAvailability,
+		},
+	)...)
+	return allErrs
 }
 
 // validateDynamoComponentDeploymentUpdate validates an update. newDCD and oldDCD must not be nil.
@@ -159,7 +163,10 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	fldPath *field.Path,
 ) field.ErrorList {
 	// Standalone DCD updates preserve direct replica modification.
-	const canModifyReplicas = true
+	const (
+		canModifyReplicas                = true
+		validateGPUMemoryServiceNewState = false // ValidateUpdate already runs the stateless new-state traversal.
+	)
 
 	allErrs := field.ErrorList{}
 	if newSpec.BackendFramework != oldSpec.BackendFramework {
@@ -177,6 +184,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		fldPath,
 		canModifyReplicas,
 		nvidiacomv1beta1.DynamoComponentDeploymentGVK.GroupKind(),
+		validateGPUMemoryServiceNewState,
 	)...)
 	return allErrs
 }

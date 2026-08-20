@@ -25,9 +25,6 @@ sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 brew install cmake protobuf
-
-# Verify Metal is accessible
-xcrun -sdk macosx metal
 ```
 
 ## 2. 安装 Rust

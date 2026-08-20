@@ -795,7 +795,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// will log a warning but not return an error (double free is allowed).
     ///
     /// This also performs the underlying prefill-complete cleanup via
-    /// [`ActiveSequences::free`], so callers do not need to call
+    /// `ActiveSequences::free`, so callers do not need to call
     /// [`Self::mark_prefill_completed`] before freeing a completed request.
     pub fn free(&self, request_id: &RequestId, decay_now: Instant) -> Result<(), SequenceError> {
         match self.mutate_request_worker_prompt_state(
@@ -812,6 +812,39 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             }
             Err(err) => Err(err),
         }
+    }
+
+    /// Release `request_id`'s booking only if it is still on `worker`.
+    ///
+    /// This is safe for delayed cleanup that captured a worker when it acquired
+    /// the booking. An ownership mismatch or already-freed request is a no-op.
+    pub(crate) fn free_if_worker(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        decay_now: Instant,
+    ) -> Result<(), SequenceError> {
+        let lora_name = self.request_index.lora_for(request_id);
+        match self.mutate_request_worker_prompt_state_local(
+            worker,
+            request_id,
+            decay_now,
+            |seqs, rid, decay_now| seqs.free(rid, decay_now),
+            false,
+        ) {
+            Ok(()) | Err(SequenceError::RequestNotFound { .. }) => {}
+            Err(err) => return Err(err),
+        }
+        self.request_index
+            .remove_request_if_worker(request_id, worker);
+        self.enqueue_publish_event(ActiveSequenceEvent {
+            request_id: request_id.clone(),
+            worker,
+            data: ActiveSequenceEventData::Free,
+            router_id: self.router_id,
+            lora_name,
+        });
+        Ok(())
     }
 
     /// Mark prefill as completed for a request.
@@ -838,7 +871,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// This is used during generation to track output blocks as they are created.
     /// The decay_fraction represents how "temporary" the block is based on generation progress.
     // NOTE: Output blocks remain local and are intentionally not replicated because their
-    // frequency would consume disproportionate replica-sync network bandwidth.
+    // frequency would consume disproportionate replica-sync network bandwidth. Keep their load
+    // observation local too: a full snapshot containing replica-local output state must not
+    // overwrite shared worker load reported by another router.
     pub fn add_output_block(
         &self,
         request_id: &RequestId,
@@ -867,7 +902,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             load
         };
 
-        self.publish_worker_load_snapshot(worker, load, Instant::now());
+        let _ = self.observe_worker_load_snapshot(worker, load, Instant::now());
 
         Ok(())
     }
@@ -1814,6 +1849,28 @@ mod tests {
     }
 
     #[test]
+    fn output_block_observes_load_without_publishing_or_replication() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "output".to_string();
+
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .unwrap();
+        state.clear();
+
+        sequences.add_output_block(&request_id, None).unwrap();
+
+        assert!(state.events.lock().unwrap().is_empty());
+        assert!(state.single_loads.lock().unwrap().is_empty());
+        let observations = state.observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].0, worker);
+        assert_eq!(observations[0].1, 4);
+        assert_eq!(sequences.active_blocks().get(&worker), Some(&4));
+    }
+
+    #[test]
     fn active_sequence_publish_failure_logs_are_aggregated() {
         let limiter = SequencePublishFailureLogLimiter::default();
         let now = Instant::now();
@@ -1867,6 +1924,71 @@ mod tests {
             Some(0)
         );
         assert_eq!(active_request_count(&sequences, worker), 1);
+    }
+
+    #[tokio::test]
+    async fn same_id_conflicts_across_workers() {
+        let sequences = make_multi_sequences();
+        let decay_now = Instant::now();
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+
+        let req = |worker| SequenceRequest {
+            request_id: "req-1".to_string(),
+            token_sequence: Some(vec![1, 2, 3]),
+            track_prefill_tokens: false,
+            expected_output_tokens: None,
+            prefill_load_hint: None,
+            worker,
+            lora_name: None,
+        };
+
+        sequences.add_request(req(worker_a), decay_now).unwrap();
+        let err = sequences
+            .add_request(req(worker_b), decay_now)
+            .expect_err("a request ID already booked on another worker must conflict");
+        assert!(
+            matches!(err, SequenceError::DuplicateRequest { .. }),
+            "expected DuplicateRequest, got {err:?}"
+        );
+        assert_eq!(active_request_count(&sequences, worker_a), 1);
+        assert_eq!(active_request_count(&sequences, worker_b), 0);
+        assert_eq!(
+            sequences.request_worker(&"req-1".to_string()),
+            Some(worker_a)
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_targeted_cleanup_ignores_a_different_owner() {
+        let sequences = make_multi_sequences();
+        let decay_now = Instant::now();
+        let booked_worker = WorkerWithDpRank::new(2, 0);
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-1".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker: booked_worker,
+                    lora_name: None,
+                },
+                decay_now,
+            )
+            .unwrap();
+
+        sequences
+            .free_if_worker(&"req-1".to_string(), WorkerWithDpRank::new(1, 0), decay_now)
+            .unwrap();
+
+        assert_eq!(active_request_count(&sequences, booked_worker), 1);
+        assert_eq!(
+            sequences.request_worker(&"req-1".to_string()),
+            Some(booked_worker)
+        );
     }
 
     #[test]

@@ -16,7 +16,11 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
+from tests.serve.conftest import (
+    MULTIMODAL_IMG_URL,
+    MULTIMODAL_VIDEO_EXPECTED,
+    get_multimodal_test_image_bytes,
+)
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.serve.multimodal_profiles.vllm_xpu import (
     VLLM_MULTIMODAL_PROFILES,
@@ -490,7 +494,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["red", "static", "still"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -534,7 +538,9 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
+            # vLLM 0.27 warms more MRV2 scheduler/kernel specializations before
+            # serving; XPU CI measured 92-105s of startup warmup.
+            pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",

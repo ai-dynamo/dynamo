@@ -131,7 +131,7 @@ spec:
                         WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
                         This image is used for both temporary DGDs created during online profiling and the final DGD.
                         If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1"
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0"
                       type: string
                   type: object
                 enableGpuDiscovery:
@@ -206,7 +206,7 @@ spec:
                       description: |-
                         ProfilerImage specifies the container image to use for profiling jobs.
                         This image contains the profiler code and dependencies needed for SLA-based profiling.
-                        Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
+                        Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"
                       type: string
                     resources:
                       description: |-
@@ -698,7 +698,7 @@ spec:
                 image:
                   description: |-
                     Image is the container image reference for the profiling job (planner image).
-                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".
+                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0".
                     For Dynamo < 1.1.0, use dynamo-frontend.
                   type: string
                 model:
@@ -715,7 +715,10 @@ spec:
                     pvcModelPath:
                       description: |-
                         PVCModelPath is the path to the model checkpoint directory within the PVC
-                        (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
+                        (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). It may also be a
+                        container-visible absolute path already under PVCMountPath. Such an absolute
+                        path is interpreted as container-visible; use the relative form without a
+                        leading slash to address the same path prefix within the PVC.
                       type: string
                     pvcMountPath:
                       default: /opt/model-cache

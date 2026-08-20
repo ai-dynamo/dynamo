@@ -145,6 +145,13 @@ class TestResolveModelPath:
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(f"{tmp_path}/", "/model"))
         assert resolve_model_path(dgdr) == str(local_dir)
 
+    def test_absolute_pvc_model_path_inside_mount_is_not_doubled(self, tmp_path):
+        """An already container-visible pvcModelPath should not be joined again."""
+        local_dir = tmp_path / "model"
+        _make_model_dir(local_dir)
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), str(local_dir)))
+        assert resolve_model_path(dgdr) == str(local_dir)
+
     def test_returns_hf_id_when_local_path_is_a_file(self, tmp_path):
         """The resolved path exists but is a file, not a directory -> the HF id."""
         (tmp_path / "model").write_text("not a directory")
@@ -398,6 +405,20 @@ class TestThoroughResolvesModelPath:
 
         assert mock_enumerate.call_args.kwargs["model_path"] == str(local_dir)
 
+    async def test_enumerate_uses_relative_pvc_path_for_absolute_model_path(
+        self, tmp_path
+    ):
+        """run_thorough passes AIC a PVC-relative path for mounted model paths."""
+        pvc_root = tmp_path / "pvc"
+        local_dir = pvc_root / "model"
+        _make_model_dir(local_dir)
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(pvc_root), str(local_dir)))
+
+        mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
+
+        assert mock_enumerate.call_args.kwargs["model_path"] == str(local_dir)
+        assert mock_enumerate.call_args.kwargs["k8s_model_path_in_pvc"] == "model"
+
     async def test_enumerate_uses_hf_id_when_no_pvc(self, tmp_path):
         """run_thorough -> enumerate_profiling_configs gets the HF id when no PVC."""
         dgdr = _make_dgdr()
@@ -405,6 +426,20 @@ class TestThoroughResolvesModelPath:
         mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
 
         assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+
+    async def test_enumerate_preserves_unset_pvc_model_path(self, tmp_path):
+        """run_thorough keeps missing pvcModelPath as None for AIC."""
+        dgdr = _make_dgdr(
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath="/opt/model-cache",
+            )
+        )
+
+        mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
+
+        assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+        assert mock_enumerate.call_args.kwargs["k8s_model_path_in_pvc"] is None
 
     async def test_materializes_each_candidate_once_with_resolved_model_path(
         self, tmp_path
@@ -506,14 +541,16 @@ class TestThoroughResolvesModelPath:
             model_path=str(local_dir),
         )
         worker_name = next(
-            name
-            for name in candidate_config["spec"]["services"]
-            if name not in {"Frontend", "Planner"}
+            component["name"]
+            for component in candidate_config["spec"]["components"]
+            if component["name"] not in {"Frontend", "Planner"}
         )
         dgdr = _make_dgdr(
             backend="vllm",
             modelCache=_pvc_model_cache(str(pvc_root), "model"),
             overrides=OverridesSpec(
+                # Keep an unversioned v1alpha1-shaped override to exercise the
+                # compatibility path against a generated v1beta1 blueprint.
                 dgd={
                     "spec": {
                         "services": {
@@ -539,9 +576,12 @@ class TestThoroughResolvesModelPath:
 
         def _apply_override(config, _override):
             result = copy.deepcopy(config)
-            main_container = result["spec"]["services"][worker_name]["extraPodSpec"][
-                "mainContainer"
-            ]
+            worker = next(
+                component
+                for component in result["spec"]["components"]
+                if component["name"] == worker_name
+            )
+            main_container = worker["podTemplate"]["spec"]["containers"][0]
             main_container["image"] = "example/vllm:override"
             main_container["args"] = [
                 "--model=/stale/path",
@@ -592,12 +632,15 @@ class TestThoroughResolvesModelPath:
                 _HF_ID,
                 str(local_dir),
             )
-            services = candidate.dgd_config["spec"]["services"]
-            worker = services[worker_name]
-            args = worker["extraPodSpec"]["mainContainer"]["args"]
-            assert worker["extraPodSpec"]["mainContainer"]["image"] == (
-                "example/vllm:override"
-            )
+            components = {
+                component["name"]: component
+                for component in candidate.dgd_config["spec"]["components"]
+            }
+            worker_container = components[worker_name]["podTemplate"]["spec"][
+                "containers"
+            ][0]
+            args = worker_container["args"]
+            assert worker_container["image"] == "example/vllm:override"
             assert [
                 arg for arg in args if arg == "--model" or arg.startswith("--model=")
             ] == ["--model"]
@@ -607,16 +650,21 @@ class TestThoroughResolvesModelPath:
                 if arg == "--served-model-name"
                 or arg.startswith("--served-model-name=")
             ] == ["--served-model-name"]
-            frontend_args = services["Frontend"]["extraPodSpec"]["mainContainer"][
-                "args"
-            ]
+            frontend_args = components["Frontend"]["podTemplate"]["spec"]["containers"][
+                0
+            ]["args"]
             assert frontend_args[frontend_args.index("--model-name") + 1] == _HF_ID
             assert frontend_args[frontend_args.index("--model-path") + 1] == str(
                 local_dir
             )
             assert all(
-                any(vm.get("name") == "model-cache" for vm in service["volumeMounts"])
-                for service in services.values()
+                any(
+                    volume_mount.get("name") == "model-cache"
+                    for volume_mount in component["podTemplate"]["spec"]["containers"][
+                        0
+                    ]["volumeMounts"]
+                )
+                for component in components.values()
             )
 
     async def _capture_task_config(self, dgdr, output_dir) -> MagicMock:

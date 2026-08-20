@@ -23,8 +23,9 @@ import (
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -33,13 +34,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // setCheckpointOwner marks snap as controller-owned by ckpt (manual owner ref, scheme-free).
-func setCheckpointOwner(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, snap *nvidiacomv1alpha1.PodSnapshot) {
+func setCheckpointOwner(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, snap *snapshotv1alpha1.PodSnapshot) {
 	snap.OwnerReferences = []metav1.OwnerReference{{
 		APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
 		Kind:       "DynamoCheckpoint",
@@ -133,15 +135,15 @@ func TestFindSourcePod_IgnoresPodNotOwnedByJob(t *testing.T) {
 
 // foreignPodSnapshot builds a PodSnapshot at the checkpoint's name carrying the owner search label
 // but NOT controlled by ckpt (a name/label collision from another owner).
-func foreignPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) *nvidiacomv1alpha1.PodSnapshot {
-	return &nvidiacomv1alpha1.PodSnapshot{
+func foreignPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) *snapshotv1alpha1.PodSnapshot {
+	return &snapshotv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podSnapshotName(ckpt),
 			Namespace: testNamespace,
 			Labels:    map[string]string{consts.SnapshotOwnerLabel: ckpt.Name},
 		},
-		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
-			Source: nvidiacomv1alpha1.PodSnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "someone-else"}},
+		Spec: snapshotv1alpha1.PodSnapshotSpec{
+			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "someone-else"}},
 		},
 	}
 }
@@ -155,7 +157,7 @@ func TestCreatePodSnapshot_CreatesWhenAbsent(t *testing.T) {
 	require.NotNil(t, created)
 	assert.Equal(t, ckpt.Name, created.Name, "PodSnapshot name is the checkpoint name")
 
-	snap := &nvidiacomv1alpha1.PodSnapshot{}
+	snap := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(),
 		client.ObjectKey{Namespace: testNamespace, Name: podSnapshotName(ckpt)}, snap))
 	assert.Equal(t, ckpt.Name, snap.Labels[consts.SnapshotOwnerLabel])
@@ -163,7 +165,53 @@ func TestCreatePodSnapshot_CreatesWhenAbsent(t *testing.T) {
 	assert.Equal(t, "worker-xyz", snap.Spec.Source.PodRef.Name)
 	assert.Equal(t, "worker-xyz-uid", string(snap.Spec.Source.PodRef.UID),
 		"source pod UID is pinned so a same-named recreation is rejected")
+	assert.Equal(t, []string{"main"}, snap.Spec.Source.PodRef.Containers,
+		"target container is copied from spec.job.targetContainerName")
 	assert.True(t, metav1.IsControlledBy(snap, ckpt), "snapshot must be controlled by the checkpoint")
+}
+
+func TestCaptureTargetContainer_ReturnsName(t *testing.T) {
+	ckpt := newOwnedCheckpoint()
+	ckpt.Spec.Job.TargetContainerName = "engine"
+
+	got, err := captureTargetContainer(ckpt)
+	require.NoError(t, err)
+	assert.Equal(t, "engine", got)
+}
+
+func TestCaptureTargetContainer_ErrorsOnEmpty(t *testing.T) {
+	ckpt := newOwnedCheckpoint()
+	ckpt.Spec.Job.TargetContainerName = ""
+
+	_, err := captureTargetContainer(ckpt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "targetContainerName")
+}
+
+func TestBuildPodSnapshot_ErrorsOnEmptyTarget(t *testing.T) {
+	ckpt := newOwnedCheckpoint()
+	ckpt.Spec.Job.TargetContainerName = ""
+
+	snap, err := buildPodSnapshot(ckpt, testHash, podNamed("worker-xyz"))
+	require.Error(t, err)
+	assert.Nil(t, snap)
+}
+
+func TestCreatePodSnapshot_EmptyTargetEmitsBuildFailedEvent(t *testing.T) {
+	ckpt := newOwnedCheckpoint()
+	ckpt.Spec.Job.TargetContainerName = ""
+	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt)
+
+	_, err := r.createPodSnapshot(context.Background(), ckpt, testHash, podNamed("worker-xyz"))
+	require.Error(t, err)
+
+	recorder := r.Recorder.(*events.FakeRecorder)
+	select {
+	case ev := <-recorder.Events:
+		assert.Contains(t, ev, "PodSnapshotBuildFailed")
+	default:
+		t.Fatal("expected a PodSnapshotBuildFailed warning event")
+	}
 }
 
 func TestCreatePodSnapshot_AlreadyExistsOwnedReturnsExisting(t *testing.T) {
@@ -179,7 +227,7 @@ func TestCreatePodSnapshot_AlreadyExistsOwnedReturnsExisting(t *testing.T) {
 	require.NotNil(t, second)
 	assert.Equal(t, first.Name, second.Name)
 
-	var snaps nvidiacomv1alpha1.PodSnapshotList
+	var snaps snapshotv1alpha1.PodSnapshotList
 	require.NoError(t, r.List(context.Background(), &snaps, client.InNamespace(testNamespace)))
 	assert.Len(t, snaps.Items, 1, "no duplicate snapshot created")
 }
@@ -203,7 +251,7 @@ func TestCreatePodSnapshot_AlreadyExistsNotYetVisibleRequeues(t *testing.T) {
 	name := podSnapshotName(ckpt)
 	funcs := interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			if _, ok := obj.(*nvidiacomv1alpha1.PodSnapshot); ok {
+			if _, ok := obj.(*snapshotv1alpha1.PodSnapshot); ok {
 				return apierrors.NewAlreadyExists(
 					schema.GroupResource{Group: "nvidia.com", Resource: "podsnapshots"}, name)
 			}
@@ -220,7 +268,8 @@ func TestCreatePodSnapshot_AlreadyExistsNotYetVisibleRequeues(t *testing.T) {
 
 func TestFindOwnedPodSnapshot_FindsOwnedIgnoresForeign(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
-	owned := buildPodSnapshot(ckpt, testHash, podNamed("worker-xyz"))
+	owned, err := buildPodSnapshot(ckpt, testHash, podNamed("worker-xyz"))
+	require.NoError(t, err)
 	setCheckpointOwner(ckpt, owned)
 	foreign := foreignPodSnapshot(ckpt)
 	foreign.Name = "foreign-snap" // different name so both can coexist, same owner label
@@ -244,14 +293,16 @@ func TestFindOwnedPodSnapshot_NoneReturnsNotFound(t *testing.T) {
 
 func TestFindOwnedPodSnapshot_MultipleOwnedErrors(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
-	first := buildPodSnapshot(ckpt, testHash, podNamed("worker-0"))
+	first, err := buildPodSnapshot(ckpt, testHash, podNamed("worker-0"))
+	require.NoError(t, err)
 	setCheckpointOwner(ckpt, first)
-	second := buildPodSnapshot(ckpt, testHash, podNamed("worker-1"))
+	second, err := buildPodSnapshot(ckpt, testHash, podNamed("worker-1"))
+	require.NoError(t, err)
 	second.Name = "second-owned"
 	setCheckpointOwner(ckpt, second)
 	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt, first, second)
 
-	_, err := r.findOwnedPodSnapshot(context.Background(), ckpt)
+	_, err = r.findOwnedPodSnapshot(context.Background(), ckpt)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "multiple PodSnapshots owned")
 	// Non-terminal: a transient invariant report, not a Forbidden.

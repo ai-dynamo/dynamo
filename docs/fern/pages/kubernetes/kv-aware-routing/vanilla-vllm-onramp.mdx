@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Vanilla vLLM GAIE On-ramp"
-sidebar-title: "Vanilla vLLM On-ramp"
+title: "Using GAIE with vanilla vLLM"
+sidebar-title: "Using GAIE with vanilla vLLM"
 subtitle: Add Dynamo's advanced KV-aware routing to GAIE deployments that use upstream vLLM images.
 ---
 
@@ -212,7 +212,7 @@ variables, ports, readiness probe, ServiceAccount, and RBAC in place. Keep its l
 the existing Service selector, and keep the Service and `endpointPickerRef` unchanged.
 
 Ensure that the Gateway listener allows routes from `$NAMESPACE`. See
-[Install Gateway API Routing](../installation/gateway-api-routing.mdx) for the shared agentgateway and Istio
+[Install Gateway API Inference Extension](../installation/gateway-api-routing.mdx) for the shared agentgateway and Istio
 prerequisites.
 
 ### Configure vLLM
@@ -244,7 +244,7 @@ Compare a typical existing vLLM container with the changes required by the on-ra
 ```yaml
 containers:
   - name: vllm
-    image: vllm/vllm-openai:v0.26.0
+    image: vllm/vllm-openai:v0.27.1
     args:
       - --model
       - Qwen/Qwen3-0.6B
@@ -260,7 +260,7 @@ containers:
 ```yaml
 containers:
   - name: vllm
-    image: vllm/vllm-openai:v0.26.0
+    image: vllm/vllm-openai:v0.27.1
     args:
       - --model
       - Qwen/Qwen3-0.6B
@@ -285,6 +285,14 @@ containers:
         path: /health
         port: http
 ```
+
+<Warning>
+If your workers run as non-root, set `runAsUser` to a UID that exists in the image's
+`/etc/passwd` — `2000` (the `vllm` user) for `vllm/vllm-openai`. While configuring its compile
+cache, PyTorch resolves the running UID through `getpass.getuser()`, so an arbitrary UID with no
+passwd entry fails that lookup and vLLM exits on import before parsing any argument. The on-ramp
+itself adds no requirement here: the image runs as root by default and needs no such change.
+</Warning>
 
 To tokenize each routing request, the Dynamo EPP calls vLLM's
 `/v1/chat/completions/render` endpoint through a stable Service URL. This is not a separate renderer
@@ -503,7 +511,7 @@ The standalone path currently targets aggregated vLLM serving with data-parallel
 does not provide the DGD/operator lifecycle, Dynamo runtime discovery, disaggregated prefill/decode
 orchestration, request migration, topology-aware routing, or full operator-managed observability.
 
-Use [Route Requests with Gateway API](gateway-api.mdx) when you want the supported
+Use [GAIE with Dynamo](gateway-api.mdx) when you want the supported
 operator-managed lifecycle, Dynamo workers, or disaggregated serving. Use
 [Gateway API Routing Reference](../../reference/components/gateway-api-routing.mdx) for the DGD and
 operator-generated resource contract; that contract does not configure standalone mode.

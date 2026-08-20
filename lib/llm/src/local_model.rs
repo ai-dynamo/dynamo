@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::discovery::DiscoveryInstance;
-use dynamo_runtime::discovery::DiscoverySpec;
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoverySpec, ModelCardInstanceId};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -20,6 +19,7 @@ use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -37,7 +37,8 @@ const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 /// 'pub' because the bindings use it for consistency.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
-/// Default for `LocalModelBuilder::self_host_metadata`. Truthy values opt in.
+/// Default for `LocalModelBuilder::self_host_metadata`. On by default;
+/// set to an explicitly falsy value (`0`/`false`/`no`/`off`) to opt out.
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
@@ -46,7 +47,10 @@ fn env_self_host_metadata_default() -> bool {
 }
 
 fn self_host_metadata_default(value: Option<&str>) -> bool {
-    value.is_some_and(dynamo_runtime::config::is_truthy)
+    // Unset, empty, and unrecognized values keep the default-on behavior.
+    value
+        .and_then(dynamo_runtime::config::parse_bool_opt)
+        .unwrap_or(true)
 }
 
 pub struct LocalModelBuilder {
@@ -207,8 +211,13 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Opt in or out of self-hosting MDC artifacts. Default `false`.
-    /// Set this at runtime with environment variable DYN_SELF_HOST_METADATA.
+    pub fn reasoning_field(&mut self, reasoning_field: ReasoningField) -> &mut Self {
+        self.frontend_api_config
+            .set_reasoning_field(reasoning_field);
+        self
+    }
+
+    /// Opt in or out of self-hosting MDC artifacts. Default `true`.
     pub fn self_host_metadata(&mut self, enabled: bool) -> &mut Self {
         self.self_host_metadata = enabled;
         self
@@ -461,15 +470,38 @@ pub async fn register_model_card(
     let model_suffix = derive_lora_suffix(lora_name);
 
     let discovery = endpoint.drt().discovery();
+    let wire_card = card.for_mdc_wire();
     let spec = DiscoverySpec::from_model_with_suffix(
         endpoint.component().namespace().name().to_string(),
         endpoint.component().name().to_string(),
         endpoint.name().to_string(),
-        card,
+        &wire_card,
         model_suffix,
     )?;
     let _instance = discovery.register(spec).await?;
     Ok(())
+}
+
+/// Replace the caller-managed taints on this worker's existing model card.
+pub async fn update_model_taints(
+    endpoint: &Endpoint,
+    taints: HashSet<String>,
+) -> anyhow::Result<()> {
+    let endpoint_id = endpoint.id();
+    let instance_id = endpoint.drt().connection_id();
+    let discovery = endpoint.drt().discovery();
+    discovery
+        .update_model_taints(
+            ModelCardInstanceId {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+                instance_id,
+                model_suffix: None,
+            },
+            taints,
+        )
+        .await
 }
 
 impl LocalModel {
@@ -547,6 +579,10 @@ impl LocalModel {
         self.frontend_api_config
             .streaming_dispatch()
             .reasoning_dispatch()
+    }
+
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
     }
 
     pub fn tls_cert_path(&self) -> Option<&Path> {
@@ -675,12 +711,15 @@ impl LocalModel {
         let component = endpoint.component().name().to_string();
         let endpoint_name = endpoint.name().to_string();
         let Some(base_url) = self_host_base_url(drt)? else {
-            tracing::warn!(
-                model_slug = %self.card.slug(),
-                "self_host_metadata enabled but system_status_server is not \
-                 running (DYN_SYSTEM_PORT unset); skipping http rewrites — \
-                 set DYN_SYSTEM_PORT to enable",
-            );
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "self_host_metadata is ON but DYN_SYSTEM_PORT is unset; \
+                     falling back to shared-storage MDC. Set DYN_SYSTEM_PORT \
+                     (e.g. 9090) to enable self-hosting, or set \
+                     DYN_SELF_HOST_METADATA=0 to silence this warning.",
+                );
+            });
             return Ok(());
         };
         let model_slug = self.card.slug().to_string();
@@ -876,24 +915,18 @@ fn harvest_extra_files(
 }
 
 #[cfg(test)]
-mod env_self_host_metadata_tests {
+mod self_host_metadata_default_tests {
     use super::*;
 
+    // parse_bool_opt owns the falsy/truthy vocabulary (tested in the `truthy`
+    // crate); here we only lock the default-on inversion this flag introduced:
+    // anything that isn't an explicit falsy token stays ON.
     #[test]
-    fn env_default_parsing() {
-        assert!(!self_host_metadata_default(None), "unset → default OFF");
-
-        for v in [
-            "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
-        ] {
-            assert!(
-                !self_host_metadata_default(Some(v)),
-                "expected OFF for {v:?}"
-            );
-        }
-        for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
-            assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
-        }
+    fn defaults_on_unless_explicitly_falsy() {
+        assert!(self_host_metadata_default(None)); // unset
+        assert!(self_host_metadata_default(Some(""))); // empty
+        assert!(self_host_metadata_default(Some("garbage"))); // unrecognized
+        assert!(!self_host_metadata_default(Some("false"))); // explicit opt-out
     }
 }
 

@@ -29,7 +29,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
     ```bash
     export DYN_SYSTEM_PORT=8081
-    export DYN_LOGGING_JSONL=true
+    export DYN_LOGGING_CONSOLE_FORMAT=jsonl
     export DYN_LOG=info
 
     # Frontend (serves dynamo_frontend_* on DYN_HTTP_PORT, default 8000)
@@ -51,8 +51,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
       name: vllm-agg-tracing
     spec:
       envs:                              # applied to every component
-        - name: DYN_LOGGING_JSONL
-          value: "true"
+        - name: DYN_LOGGING_CONSOLE_FORMAT
+          value: "jsonl"
         - name: OTEL_EXPORT_ENABLED
           value: "true"
         - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
@@ -150,8 +150,14 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
 ## Logging
 
+<ParamField path="DYN_LOGGING_CONSOLE_FORMAT" type="string" default="readable">
+  Console output format. Supported values are `readable` and `jsonl`; surrounding whitespace is ignored. When unset or blank, Dynamo falls back to `DYN_LOGGING_JSONL` for backward compatibility. This setting does not control OTLP export.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>readable</Badge> <Badge intent="note" minimal>jsonl</Badge></span>
+</ParamField>
+
 <ParamField path="DYN_LOGGING_JSONL" type="boolean" default="false">
-  Emit logs as JSONL. When enabled, logs include `trace_id` and `span_id` fields and spans are created per request. Recommended for Loki.
+  Legacy JSONL switch used when `DYN_LOGGING_CONSOLE_FORMAT` is unset or blank. It also remains a local trace-context enablement signal for backward compatibility when the new setting explicitly selects readable output.
 </ParamField>
 
 <ParamField path="DYN_LOGGING_SPAN_EVENTS" type="boolean" default="false">
@@ -319,7 +325,7 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_REGION" type="string">
-  Region override for the `s3` sink. When unset the AWS SDK resolves the region from the environment, profile, or IMDS.
+  Region override for the `s3` sink. When unset, the client uses `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_PREFIX" type="string">

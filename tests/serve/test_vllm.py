@@ -29,12 +29,14 @@ from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
+    classify_payload,
     completion_payload_default,
     completion_payload_with_logprobs,
     embedding_payload,
     embedding_payload_default,
     kv_events_metrics_payload,
     metric_payload_default,
+    pooling_payload,
     router_cached_tokens_chat_payload,
     router_selection_chat_payload_default,
 )
@@ -465,9 +467,15 @@ vllm_configs = {
             "2",
         ],
         timeout=700,
+        # Each request is bounded by BasePayload.timeout (60s, tests/utils/
+        # payloads.py), not by the readiness budget above. This deployment
+        # decodes at ~15.5 tok/s, so the 1000-token payload default needs ~65s
+        # and cannot fit; 128 tokens finishes in ~8s and leaves ~7x headroom.
+        # Keep the cap small here — a longer decode turns the read timeout back
+        # into an accidental throughput assertion.
         request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
+            chat_payload_default(max_tokens=128),
+            completion_payload_default(max_tokens=128),
         ],
     ),
     "aggregated_toolcalling": VLLMConfig(
@@ -731,6 +739,90 @@ vllm_configs = {
                 repeat_count=1,
                 expected_log=[],
                 expected_response=["Generated 1 embeddings with dimension 128"],
+            ),
+        ],
+    ),
+    "classify_agg": VLLMConfig(
+        name="classify_agg",
+        directory=vllm_dir,
+        script_name="agg_classify.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            # Small RoBERTa NLI classifier plus vLLM pooling overhead.
+            pytest.mark.profiled_vram_gib(3.0),
+            # Pooling models do not use a KV cache, but the harness requires
+            # a non-zero allocation budget.
+            pytest.mark.requested_vllm_kv_cache_bytes(559_693_824),
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="cross-encoder/nli-MiniLM2-L6-H768",
+        request_payloads=[
+            classify_payload(
+                input_data=("A man is playing a sport. Some men are playing a sport."),
+            ),
+            classify_payload(
+                input_data=[
+                    "A soccer game is underway. Some men are playing a sport.",
+                    "A cat sleeps on a mat. A dog is swimming in the ocean.",
+                ],
+            ),
+            # A single token-ID prompt must be truncated through vLLM's
+            # renderer rather than bypassing truncate_prompt_tokens.
+            classify_payload(
+                input_data=[0, 101, 102, 2],
+                expected_prompt_tokens=2,
+                extra_body={"truncate_prompt_tokens": 2},
+            ),
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+            ),
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+                task="classify",
+            ),
+            # Token-level classification preserves the token-by-class matrix.
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+                task="token_classify",
+            ),
+            # A batch of token-ID prompts covers the second pre-tokenized
+            # request shape from the vLLM completion-input contract.
+            pooling_payload(
+                input_data=[[0, 101, 102, 2], [0, 201, 202, 2]],
+                task="classify",
+                expected_prompt_tokens=4,
+                extra_body={"truncate_prompt_tokens": 2},
+            ),
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+                task="classify",
+                extra_body={
+                    "encoding_format": "base64",
+                    "embed_dtype": "float16",
+                    "endianness": "big",
+                },
+            ),
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+                task="classify",
+                expected_response=["Pooled 1 binary tensors"],
+                extra_body={
+                    "encoding_format": "bytes",
+                    "embed_dtype": "float16",
+                    "endianness": "big",
+                },
+            ),
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+                task="classify",
+                expected_response=["Pooled bytes_only response"],
+                extra_body={
+                    "encoding_format": "bytes_only",
+                    "embed_dtype": "float16",
+                    "endianness": "big",
+                },
             ),
         ],
     ),

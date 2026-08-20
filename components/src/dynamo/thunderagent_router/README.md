@@ -36,6 +36,7 @@ uv pip install -e .
 # 1. Start your Dynamo workers (vLLM example, with KV events on)
 python -m dynamo.vllm \
     --model <model> --tensor-parallel-size <N> \
+    --endpoint-types none \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events",
                          "endpoint":"tcp://*:20080",
                          "enable_kv_cache_events":true}'
@@ -50,6 +51,12 @@ python -m dynamo.thunderagent_router \
 #    a model handler, which our service registered)
 python -m dynamo.frontend --router-mode round-robin
 ```
+
+Use `--endpoint-types none` on workers wrapped by ThunderAgent so they register
+only for topology and readiness. ThunderAgent registers the public
+chat/completions surface; if the wrapped backend also advertises that surface
+for the same model, the frontend may route requests directly to the backend and
+bypass ThunderAgent lifecycle handling such as `x-dynamo-session-final`.
 
 The control-loop knobs (`--pause-threshold`, `--pause-target`,
 `--resume-hysteresis`, `--scheduler-interval-seconds`, …) and their defaults are

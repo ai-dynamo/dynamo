@@ -1,9 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""The ``python -m dynamo.replay`` CLI for single-run simulation.
+
+This module owns Dynamo-specific Planner preparation and the online replay
+surface in addition to the shared offline replay integration.
+"""
+
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import os
@@ -12,35 +19,29 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
+
+import msgspec
+from aisimulate.aic import materialize_aic_num_gpu_blocks
+from aisimulate.replay.cli import add_base_replay_arguments
+from aisimulate.replay.config import parse_base_replay_config
 
 if TYPE_CHECKING:
     from dynamo.planner.core.types import EngineCapabilities
 
-from dynamo._internal.aic import (
-    DEFAULT_GPU_MEMORY_UTILIZATION,
-    DEFAULT_MEM_FRACTION_STATIC,
-    _normalize_aic_quant_mode,
-    estimate_num_gpu_blocks,
-)
+from dynamo._internal.aic import _normalize_aic_quant_mode
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
 )
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
-from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
 
 class PlannerProfileDataResult(Protocol):
     npz_path: Path | None
-
-
-_DEFAULT_AIC_SYSTEM = "h200_sxm"
-_DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
-_DEFAULT_VLLM_BLOCK_SIZE = 64
 
 
 def _load_router_config(
@@ -61,10 +62,6 @@ def _load_router_config(
     return KvRouterConfig.from_json(json.dumps(values))
 
 
-_DEFAULT_SGLANG_BLOCK_SIZE = 1
-_DEFAULT_TRTLLM_BLOCK_SIZE = 32
-
-
 def resolve_planner_profile_data(
     planner_profile_data: Path | None,
 ) -> PlannerProfileDataResult:
@@ -83,129 +80,12 @@ def resolve_planner_profile_data(
     return module.resolve_planner_profile_data(planner_profile_data)
 
 
-def _resolve_block_size_for_capacity(raw: dict) -> int:
-    block_size = raw.get("block_size")
-    if block_size is not None:
-        return cast(int, block_size)
-    if raw.get("engine_type") == "sglang":
-        sglang = raw.get("sglang")
-        if isinstance(sglang, dict) and sglang.get("page_size") is not None:
-            return cast(int, sglang["page_size"])
-        return _DEFAULT_SGLANG_BLOCK_SIZE
-    if raw.get("engine_type") == "trtllm":
-        return _DEFAULT_TRTLLM_BLOCK_SIZE
-    return _DEFAULT_VLLM_BLOCK_SIZE
-
-
-def _aic_quant_mode(raw: dict, name: str) -> str | None:
-    # Extract + type-check the raw JSON value here; defer the dtype-vocabulary
-    # normalization (`auto` -> default, `int4` -> `int4_wo`, ...) to the single
-    # source of truth shared with the latency engine and the KV-block estimator.
-    value = raw.get(name)
-    if value is not None and not isinstance(value, str):
-        raise ValueError(f"{name} must be a string when set")
-    return _normalize_aic_quant_mode(value)
-
-
 def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
-    attention_dp = raw.get("aic_attention_dp_size")
-    dp = attention_dp or 1
-    configured_dp = raw.get("dp_size") or 1
-    has_aic_config = raw.get("aic_backend") is not None or attention_dp is not None
-    if has_aic_config and configured_dp > 1 and configured_dp != dp:
-        raise ValueError(
-            "dp_size must match aic_attention_dp_size for AIC-backed replay "
-            f"(got dp_size={configured_dp}, aic_attention_dp_size={dp})"
-        )
-    if attention_dp is not None and dp > 1:
-        # AIC attention-DP describes the silicon scheduler topology, independent
-        # of whether KV capacity is explicit or estimated.
-        raw["dp_size"] = dp
+    """Compatibility wrapper around the AISimulate-owned capacity lowerer."""
 
-    if raw.get("num_gpu_blocks") is not None:
-        return
-
-    aic_backend = raw.get("aic_backend")
-    if aic_backend is None:
-        return
-
-    aic_model_path = raw.get("aic_model_path")
-    if not aic_model_path:
-        raise ValueError(
-            "AIC KV cache capacity estimation requires aic_model_path in engine args"
-        )
-
-    tp_size = raw.get("aic_tp_size")
-    max_num_batched_tokens = raw.get("max_num_batched_tokens")
-    gpu_memory_utilization = raw.get("gpu_memory_utilization")
-    mem_fraction_static = raw.get("mem_fraction_static")
-    free_gpu_memory_fraction = raw.get("free_gpu_memory_fraction")
-
-    per_rank_blocks = estimate_num_gpu_blocks(
-        backend_name=aic_backend,
-        system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
-        model_path=aic_model_path,
-        tp_size=cast(int, tp_size if tp_size is not None else 1),
-        block_size=_resolve_block_size_for_capacity(raw),
-        max_num_batched_tokens=cast(
-            int,
-            max_num_batched_tokens
-            if max_num_batched_tokens is not None
-            else _DEFAULT_MAX_NUM_BATCHED_TOKENS,
-        ),
-        gpu_memory_utilization=cast(
-            float,
-            gpu_memory_utilization
-            if gpu_memory_utilization is not None
-            else DEFAULT_GPU_MEMORY_UTILIZATION,
-        ),
-        mem_fraction_static=cast(
-            float,
-            mem_fraction_static
-            if mem_fraction_static is not None
-            else DEFAULT_MEM_FRACTION_STATIC,
-        ),
-        # None -> aic.py applies the TRT-LLM default.
-        free_gpu_memory_fraction=free_gpu_memory_fraction,
-        backend_version=raw.get("aic_backend_version"),
-        moe_tp_size=raw.get("aic_moe_tp_size"),
-        moe_ep_size=raw.get("aic_moe_ep_size"),
-        attention_dp_size=raw.get("aic_attention_dp_size"),
-        gemm_dtype=_aic_quant_mode(raw, "aic_gemm_dtype"),
-        moe_dtype=_aic_quant_mode(raw, "aic_moe_dtype"),
-        fmha_dtype=_aic_quant_mode(raw, "aic_fmha_dtype"),
-        kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
-        comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
-    )
-    # AIC returns a per-rank (per-GPU) block count. Under attention-DP the offline runtime
-    # mirrors the live path (lib/llm/src/mocker.rs): each mocker worker owns `dp`
-    # independent per-rank schedulers and KV pools. Keep the per-rank count; engine-wide
-    # capacity stays per_rank * dp, partitioned by rank as on real hardware.
-    raw["num_gpu_blocks"] = per_rank_blocks
-
-
-def _resolve_kv_bytes_per_token(raw: dict) -> None:
-    if raw.get("kv_bytes_per_token") is not None:
-        return
-
-    offload_requested = (
-        any(
-            isinstance(raw.get(name), int) and raw[name] > 0
-            for name in ("num_g2_blocks", "num_g3_blocks")
-        )
-        or raw.get("enable_g4_storage") is True
-    )
-    if not offload_requested:
-        return
-
-    model_path = raw.get("aic_model_path")
-    if not model_path:
-        return
-
-    kv_cache_dtype = _aic_quant_mode(raw, "aic_kv_cache_dtype") or "auto"
-    kv_bytes_per_token = compute_kv_bytes_per_token(model_path, kv_cache_dtype)
-    if kv_bytes_per_token is not None:
-        raw["kv_bytes_per_token"] = kv_bytes_per_token
+    lowered = materialize_aic_num_gpu_blocks(raw)
+    raw.clear()
+    raw.update(lowered)
 
 
 def _load_engine_args(raw_args: str | None):
@@ -241,7 +121,6 @@ def _load_engine_args(raw_args: str | None):
             else:
                 del raw["planner_profile_data"]
     _resolve_aic_num_gpu_blocks(raw)
-    _resolve_kv_bytes_per_token(raw)
     return MockEngineArgs.from_json(json.dumps(raw))
 
 
@@ -383,12 +262,25 @@ def _generate_aic_decode_fpms(
     return decode_fpms
 
 
+def _aic_fpm_digest(
+    prefill_fpms: list[ForwardPassMetrics],
+    decode_fpms: list[ForwardPassMetrics],
+) -> str:
+    payload = {
+        "prefill": [msgspec.to_builtins(fpm) for fpm in prefill_fpms],
+        "decode": [msgspec.to_builtins(fpm) for fpm in decode_fpms],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _prepare_planner_replay(
     extra_engine_args: MockEngineArgs | None,
     prefill_engine_args: MockEngineArgs | None,
     decode_engine_args: MockEngineArgs | None,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
+    capture_details: bool = True,
 ):
     """Create and bootstrap the scaling component for an offline replay.
 
@@ -437,8 +329,11 @@ def _prepare_planner_replay(
     adapter = create_replay_planner_adapter(
         planner_config=planner_config,
         capabilities=capabilities,
+        benchmark_granularity=benchmark_granularity,
         warmup_observations=warmup_observations,
+        capture_details=capture_details,
     )
+    adapter.set_bootstrap_metadata({"status": "not_required"})
 
     # Bootstrap regression models from mocker's perf model.
     # AIC provides accurate batch-size-aware timing that works with the
@@ -470,6 +365,12 @@ def _prepare_planner_replay(
             or ref_args.aic_system is None
             or ref_args.aic_model_path is None
         ):
+            adapter.set_bootstrap_metadata(
+                {
+                    "status": "not_configured_load_only",
+                    "benchmark_granularity": benchmark_granularity,
+                }
+            )
             sys.stderr.write(
                 "Note: throughput-based scaling regression requires AIC perf model "
                 "(set aic_backend/aic_system/aic_model_path in --extra-engine-args). "
@@ -529,6 +430,12 @@ def _prepare_planner_replay(
                     f"Warning: AIC session creation failed ({e}); "
                     "throughput regression will not be bootstrapped.\n"
                 )
+                adapter.set_bootstrap_metadata(
+                    {
+                        "status": "session_failed_load_only",
+                        "benchmark_granularity": benchmark_granularity,
+                    }
+                )
                 aic_session = None
 
             # Generate benchmark FPMs and load into regression.  Disagg
@@ -552,6 +459,13 @@ def _prepare_planner_replay(
                     )
                     prefill_fpms, decode_fpms = [], []
 
+                bootstrap_metadata = {
+                    "status": "installed",
+                    "benchmark_granularity": benchmark_granularity,
+                    "prefill_fpm_count": len(prefill_fpms),
+                    "decode_fpm_count": len(decode_fpms),
+                    "fpm_sha256": _aic_fpm_digest(prefill_fpms, decode_fpms),
+                }
                 if planner_config.mode == "agg":
                     # Agg regression fits on (sum_prefill_tokens, sum_decode_kv_tokens);
                     # combine prefill-only and decode-only points so both features
@@ -560,6 +474,7 @@ def _prepare_planner_replay(
                     if agg_fpms:
                         adapter.install_benchmark_fpms(agg_fpms=agg_fpms)
                     else:
+                        bootstrap_metadata["status"] = "empty"
                         sys.stderr.write(
                             "Warning: AIC produced no agg benchmark FPMs\n"
                         )
@@ -569,10 +484,12 @@ def _prepare_planner_replay(
                             prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
                         )
                     else:
+                        bootstrap_metadata["status"] = "empty"
                         sys.stderr.write(
                             f"Warning: AIC produced empty benchmark FPMs "
                             f"(prefill={len(prefill_fpms)}, decode={len(decode_fpms)})\n"
                         )
+                adapter.set_bootstrap_metadata(bootstrap_metadata)
 
     return adapter
 
@@ -584,6 +501,7 @@ def _planner_replay_adapter(
     decode_engine_args: MockEngineArgs | None,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
+    capture_details: bool = True,
 ):
     """Own planner preparation, replay execution, and cleanup as one scope."""
     adapter = _prepare_planner_replay(
@@ -592,17 +510,34 @@ def _planner_replay_adapter(
         decode_engine_args=decode_engine_args,
         planner_config_arg=planner_config_arg,
         benchmark_granularity=benchmark_granularity,
+        capture_details=capture_details,
     )
     with adapter:
         yield adapter
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m dynamo.replay")
-    parser.add_argument("trace_files", nargs="*")
-    parser.add_argument("--extra-engine-args")
-    parser.add_argument("--prefill-engine-args")
-    parser.add_argument("--decode-engine-args")
+def _write_per_request_jsonl(
+    output_path: str | Path,
+    records: list[dict] | None,
+) -> None:
+    if records is None:
+        raise ValueError("per-request capture was not enabled")
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as output:
+        for record in records:
+            output.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+            output.write("\n")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Compose the AISimulate base parser with Dynamo-only extensions."""
+
+    parser = argparse.ArgumentParser(
+        prog="python -m dynamo.replay",
+        description="Run one Dynamo-integrated replay.",
+    )
+    add_base_replay_arguments(parser)
     parser.add_argument("--router-config")
     parser.add_argument(
         "--router-policy-config",
@@ -652,94 +587,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--aic-nextn", type=int)
     parser.add_argument("--aic-nextn-accept-rates")
-    parser.add_argument("--input-tokens", type=int)
-    parser.add_argument("--output-tokens", type=int)
-    parser.add_argument(
-        "--request-count",
-        type=int,
-        help="number of synthetic requests; when --turns-per-session > 1, this is the number of sessions",
-    )
-    parser.add_argument(
-        "--request-rate",
-        type=float,
-        help="Poisson open-loop request rate in requests per second",
-    )
-    parser.add_argument(
-        "--arrival-interval-ms",
-        type=float,
-        help="fixed open-loop interval between synthetic requests in milliseconds",
-    )
-    parser.add_argument(
-        "--arrival-seed",
-        type=int,
-        default=42,
-        help="seed for synthetic open-loop arrival timestamps",
-    )
-    parser.add_argument("--turns-per-session", type=int, default=1)
-    parser.add_argument("--shared-prefix-ratio", type=float, default=0.0)
-    parser.add_argument("--num-prefix-groups", type=int, default=0)
-    parser.add_argument("--inter-turn-delay-ms", type=float, default=0.0)
-    parser.add_argument("--num-workers", type=int, default=1)
-    parser.add_argument("--num-prefill-workers", type=int, default=1)
-    parser.add_argument("--num-decode-workers", type=int, default=1)
-    parser.add_argument("--replay-concurrency", type=int)
-    parser.add_argument(
-        "--replay-mode",
-        choices=("offline", "online"),
-        default="offline",
-    )
     parser.add_argument(
         "--router-mode",
         choices=("round_robin", "kv_router"),
         default="round_robin",
-    )
-    parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
-    parser.add_argument(
-        "--trace-format",
-        choices=(
-            "mooncake",
-            "mooncake-delta",
-            "agentic_mooncake",
-            "applied_compute_agentic",
-            "dynamo",
-        ),
-        default="mooncake",
-        help=(
-            "format of trace files when replaying from files; mooncake-delta "
-            "accumulates per-session input deltas into cumulative prompts and "
-            "can use substantially more memory than mooncake; agentic_mooncake "
-            "replays request-level workflow dependencies"
-        ),
-    )
-    parser.add_argument(
-        "--trace-block-size",
-        type=int,
-        help="tokens represented by each hash_id; defaults to 512 for existing formats and is derived from Dynamo request traces",
-    )
-    parser.add_argument(
-        "--trace-shared-prefix-ratio",
-        type=float,
-        default=0.0,
-        help="fraction of the initial prompt blocks to share across sessions for applied_compute_agentic trace replay",
-    )
-    parser.add_argument(
-        "--trace-num-prefix-groups",
-        type=int,
-        default=0,
-        help="number of cross-session shared-prefix groups for applied_compute_agentic trace replay",
-    )
-    parser.add_argument(
-        "--report-json",
-        help="path to save the full replay report JSON; defaults to a timestamped file in the current directory",
-    )
-    parser.add_argument(
-        "--report-jsonl",
-        default=None,
-        help="optional path to emit one JSON object per request for trace-file replay. "
-        "Useful for per-request analysis (TTFT vs ISL scatter, ITL trace per request, "
-        "worker-residency analysis). Each line carries arrival/admit/token timestamps, "
-        "input/output lengths, full ITL series, and available prefill/decode worker indices "
-        "(prefill_worker_idx=None indicates a conditional-prefill bypass).",
     )
     parser.add_argument(
         "--planner-config",
@@ -751,106 +602,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=8,
         help="number of sweep points for synthetic perf model benchmark (default: 8, matching profiler)",
     )
-    parser.add_argument(
-        "--max-sim-time-seconds",
-        type=float,
-        default=None,
-        help="optional cap on simulated wall-clock duration for offline replay (disagg and agg); when set, replay stops once the simulated clock would exceed this many seconds, leaving in-flight requests as incomplete in the report",
-    )
-    # Goodput SLA — the threshold a request must meet to count toward goodput in
-    # the report. This is INDEPENDENT of the planner's own scaling SLA (in
-    # --planner-config); the two can hold different values and are never read
-    # from each other. Set --sla-ttft-ms + --sla-itl-ms, or --sla-e2e-ms alone.
-    parser.add_argument(
-        "--sla-ttft-ms",
-        type=float,
-        default=None,
-        help="goodput SLA: max time-to-first-token (ms). Independent of the planner's scaling SLA. "
-        "When an SLA is set, the report adds goodput_* (SLA-satisfying throughput).",
-    )
-    parser.add_argument(
-        "--sla-itl-ms",
-        type=float,
-        default=None,
-        help="goodput SLA: max average inter-token latency (ms), per request (e2e - ttft)/(osl - 1) "
-        "(aiperf definition). Independent of the planner's scaling SLA.",
-    )
-    parser.add_argument(
-        "--sla-e2e-ms",
-        type=float,
-        default=None,
-        help="goodput SLA: max end-to-end latency (ms); use instead of --sla-ttft-ms/--sla-itl-ms. "
-        "Independent of the planner's scaling SLA.",
-    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
-    using_trace_file = bool(args.trace_files)
-    synthetic_args = (args.input_tokens, args.output_tokens, args.request_count)
-    using_synthetic = any(value is not None for value in synthetic_args) or any(
-        (
-            args.turns_per_session != 1,
-            args.shared_prefix_ratio != 0.0,
-            args.num_prefix_groups != 0,
-            args.inter_turn_delay_ms != 0.0,
-        )
-    )
+    try:
+        base_config = parse_base_replay_config(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    using_trace_file = base_config.uses_trace
+    workload = base_config.workload
+    per_request_jsonl = base_config.output.per_request_jsonl
 
-    if args.trace_format == "dynamo" and not using_trace_file:
-        parser.error("--trace-format=dynamo requires at least one trace file")
-    if args.trace_format != "dynamo" and len(args.trace_files) > 1:
-        parser.error(
-            f"--trace-format={args.trace_format} requires exactly one trace file"
-        )
-
-    if using_trace_file == using_synthetic:
-        parser.error(
-            "provide either trace_file or all of --input-tokens/--output-tokens/--request-count"
-        )
-    if using_synthetic and not all(value is not None for value in synthetic_args):
-        parser.error(
-            "synthetic replay requires --input-tokens, --output-tokens, and --request-count"
-        )
-    if using_synthetic:
-        load_controllers = (
-            args.replay_concurrency,
-            args.request_rate,
-            args.arrival_interval_ms,
-        )
-        if sum(value is not None for value in load_controllers) != 1:
-            parser.error(
-                "synthetic replay requires exactly one of --replay-concurrency, "
-                "--request-rate, or --arrival-interval-ms"
-            )
-    elif args.request_rate is not None or args.arrival_interval_ms is not None:
-        parser.error(
-            "--request-rate and --arrival-interval-ms only apply to synthetic replay"
-        )
     if (
-        using_trace_file
-        and args.trace_format == "applied_compute_agentic"
-        and args.replay_concurrency is None
+        per_request_jsonl is not None
+        and base_config.replay_mode == "online"
+        and not using_trace_file
     ):
         parser.error(
-            "--trace-format=applied_compute_agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
+            "--per-request-jsonl with online replay currently only supports trace files"
         )
-
-    if args.report_jsonl is not None:
-        if args.planner_config is not None:
-            parser.error("--report-jsonl is not supported with --planner-config")
-        if not using_trace_file:
-            parser.error("--report-jsonl currently only supports trace-file replay")
     if args.max_sim_time_seconds is not None:
         if args.planner_config is not None:
             parser.error(
                 "--max-sim-time-seconds is not supported with --planner-config"
             )
-        if not using_trace_file:
-            parser.error(
-                "--max-sim-time-seconds currently only supports trace-file replay"
-            )
-    extra_engine_args = _load_engine_args(args.extra_engine_args)
-    prefill_engine_args = _load_engine_args(args.prefill_engine_args)
-    decode_engine_args = _load_engine_args(args.decode_engine_args)
+    extra_engine_args = _load_engine_args(
+        json.dumps(base_config.extra_engine_args)
+        if base_config.extra_engine_args is not None
+        else None
+    )
+    prefill_engine_args = _load_engine_args(
+        json.dumps(base_config.prefill_engine_args)
+        if base_config.prefill_engine_args is not None
+        else None
+    )
+    decode_engine_args = _load_engine_args(
+        json.dumps(base_config.decode_engine_args)
+        if base_config.decode_engine_args is not None
+        else None
+    )
     router_config = _load_router_config(
         args.router_config,
         args.router_policy_config,
@@ -860,7 +654,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    # Planner-in-the-loop mode
     if args.planner_config is not None:
         if args.replay_mode != "offline":
             parser.error("--planner-config only supports --replay-mode=offline")
@@ -869,132 +662,83 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--planner-config only supports --trace-format=mooncake or dynamo"
             )
 
-        replay_options = {
-            "extra_engine_args": extra_engine_args,
-            "prefill_engine_args": prefill_engine_args,
-            "decode_engine_args": decode_engine_args,
-            "router_config": router_config,
-            "aic_perf_config": aic_perf_config,
-            "num_workers": args.num_workers,
-            "num_prefill_workers": args.num_prefill_workers,
-            "num_decode_workers": args.num_decode_workers,
-            "replay_concurrency": args.replay_concurrency,
-            "replay_mode": args.replay_mode,
-            "router_mode": args.router_mode,
-            "arrival_speedup_ratio": args.arrival_speedup_ratio,
-            "model_name": args.model_name,
-            "sla_ttft_ms": args.sla_ttft_ms,
-            "sla_itl_ms": args.sla_itl_ms,
-            "sla_e2e_ms": args.sla_e2e_ms,
-            "planner_config": args.planner_config,
-            "benchmark_granularity": args.benchmark_granularity,
-        }
-        if using_trace_file:
-            planner_report = run_trace_replay(
-                args.trace_files,
-                trace_block_size=args.trace_block_size,
-                trace_format=args.trace_format,
-                trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
-                trace_num_prefix_groups=args.trace_num_prefix_groups,
-                **replay_options,
-            )
-        else:
-            planner_report = run_synthetic_trace_replay(
-                input_tokens=args.input_tokens,
-                output_tokens=args.output_tokens,
-                request_count=args.request_count,
-                request_rate=args.request_rate,
-                arrival_interval_ms=args.arrival_interval_ms,
-                arrival_seed=args.arrival_seed,
-                turns_per_session=args.turns_per_session,
-                shared_prefix_ratio=args.shared_prefix_ratio,
-                num_prefix_groups=args.num_prefix_groups,
-                inter_turn_delay_ms=args.inter_turn_delay_ms,
-                **replay_options,
-            )
-        report = planner_report.trace_report
-        if planner_report.scaling_events:
+    capture_per_request = (
+        base_config.replay_mode == "offline" and per_request_jsonl is not None
+    )
+    replay_options = {
+        "extra_engine_args": extra_engine_args,
+        "prefill_engine_args": prefill_engine_args,
+        "decode_engine_args": decode_engine_args,
+        "router_config": router_config,
+        "aic_perf_config": aic_perf_config,
+        "num_workers": base_config.num_workers,
+        "num_prefill_workers": base_config.num_prefill_workers,
+        "num_decode_workers": base_config.num_decode_workers,
+        "replay_concurrency": workload.get("replay_concurrency"),
+        "replay_mode": base_config.replay_mode,
+        "router_mode": args.router_mode,
+        "arrival_speedup_ratio": workload.get("arrival_speedup_ratio", 1.0),
+        "model_name": args.model_name,
+        "sla_ttft_ms": args.sla_ttft_ms,
+        "sla_itl_ms": args.sla_itl_ms,
+        "sla_e2e_ms": args.sla_e2e_ms,
+        "planner_config": args.planner_config,
+        "benchmark_granularity": args.benchmark_granularity,
+        "capture_per_request": capture_per_request,
+    }
+
+    if using_trace_file:
+        report = run_trace_replay(
+            list(base_config.trace_files),
+            trace_block_size=workload.get("trace_block_size"),
+            trace_format=workload.get("trace_format", "mooncake"),
+            trace_shared_prefix_ratio=workload.get("trace_shared_prefix_ratio", 0.0),
+            trace_num_prefix_groups=workload.get("trace_num_prefix_groups", 0),
+            report_jsonl_path=per_request_jsonl,
+            max_sim_time_ms=workload.get("max_sim_time_ms"),
+            **replay_options,
+        )
+    else:
+        report = run_synthetic_trace_replay(
+            workload["isl"],
+            workload["osl"],
+            workload["request_count"],
+            request_rate=workload.get("request_rate"),
+            arrival_interval_ms=workload.get("arrival_interval_ms"),
+            arrival_seed=workload.get("arrival_seed", 42),
+            turns_per_session=workload.get("turns_per_session", 1),
+            shared_prefix_ratio=workload.get("shared_prefix_ratio", 0.0),
+            num_prefix_groups=workload.get("num_prefix_groups", 0),
+            inter_turn_delay_ms=workload.get("inter_turn_delay_ms", 0.0),
+            **replay_options,
+        )
+
+    if base_config.replay_mode == "online":
+        summary = report
+        report_payload = report
+    else:
+        summary = report.summary
+        report_payload = report.to_dict()
+        if per_request_jsonl is not None and not using_trace_file:
+            _write_per_request_jsonl(per_request_jsonl, report.per_request)
+
+    report_path = write_report_json(report_payload, base_config.output.report_json)
+    sys.stdout.write(format_report_table(summary))
+    sys.stdout.write("\n")
+    sys.stdout.write(f"Saved full report to: {report_path}\n")
+    if base_config.replay_mode == "offline" and report.planner is not None:
+        planner = report.planner
+        if planner.scaling_events:
             sys.stdout.write("\nScaling events:\n")
-            for event in planner_report.scaling_events:
+            for event in planner.scaling_events:
                 sys.stdout.write(
                     f"  t={event.at_s:.1f}s [{event.component}]: "
                     f"{event.from_count} -> {event.to_count} workers"
                     f" ({event.reason})\n"
                 )
-        report_path = write_report_json(report, args.report_json)
-        sys.stdout.write(format_report_table(report))
-        sys.stdout.write("\n")
-        sys.stdout.write(f"Saved full report to: {report_path}\n")
-        sys.stdout.write(f"Planner ticks: {planner_report.total_ticks}\n")
-        if planner_report.html_report_path:
+        sys.stdout.write(f"Planner ticks: {planner.total_ticks}\n")
+        if planner.html_report_path:
             sys.stdout.write(
-                f"Planner diagnostics report: {planner_report.html_report_path}\n"
+                f"Planner diagnostics report: {planner.html_report_path}\n"
             )
-        return 0
-
-    if using_trace_file:
-        max_sim_time_ms = (
-            args.max_sim_time_seconds * 1_000.0
-            if args.max_sim_time_seconds is not None
-            else None
-        )
-        report = run_trace_replay(
-            args.trace_files,
-            extra_engine_args=extra_engine_args,
-            prefill_engine_args=prefill_engine_args,
-            decode_engine_args=decode_engine_args,
-            router_config=router_config,
-            aic_perf_config=aic_perf_config,
-            num_workers=args.num_workers,
-            num_prefill_workers=args.num_prefill_workers,
-            num_decode_workers=args.num_decode_workers,
-            replay_concurrency=args.replay_concurrency,
-            replay_mode=args.replay_mode,
-            router_mode=args.router_mode,
-            arrival_speedup_ratio=args.arrival_speedup_ratio,
-            trace_block_size=args.trace_block_size,
-            trace_format=args.trace_format,
-            trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
-            trace_num_prefix_groups=args.trace_num_prefix_groups,
-            report_jsonl_path=args.report_jsonl,
-            max_sim_time_ms=max_sim_time_ms,
-            model_name=args.model_name,
-            sla_ttft_ms=args.sla_ttft_ms,
-            sla_itl_ms=args.sla_itl_ms,
-            sla_e2e_ms=args.sla_e2e_ms,
-        )
-    else:
-        report = run_synthetic_trace_replay(
-            args.input_tokens,
-            args.output_tokens,
-            args.request_count,
-            extra_engine_args=extra_engine_args,
-            prefill_engine_args=prefill_engine_args,
-            decode_engine_args=decode_engine_args,
-            router_config=router_config,
-            aic_perf_config=aic_perf_config,
-            num_workers=args.num_workers,
-            num_prefill_workers=args.num_prefill_workers,
-            num_decode_workers=args.num_decode_workers,
-            replay_concurrency=args.replay_concurrency,
-            replay_mode=args.replay_mode,
-            router_mode=args.router_mode,
-            arrival_speedup_ratio=args.arrival_speedup_ratio,
-            request_rate=args.request_rate,
-            arrival_interval_ms=args.arrival_interval_ms,
-            arrival_seed=args.arrival_seed,
-            turns_per_session=args.turns_per_session,
-            shared_prefix_ratio=args.shared_prefix_ratio,
-            num_prefix_groups=args.num_prefix_groups,
-            inter_turn_delay_ms=args.inter_turn_delay_ms,
-            model_name=args.model_name,
-            sla_ttft_ms=args.sla_ttft_ms,
-            sla_itl_ms=args.sla_itl_ms,
-            sla_e2e_ms=args.sla_e2e_ms,
-        )
-
-    report_path = write_report_json(report, args.report_json)
-    sys.stdout.write(format_report_table(report))
-    sys.stdout.write("\n")
-    sys.stdout.write(f"Saved full report to: {report_path}\n")
     return 0

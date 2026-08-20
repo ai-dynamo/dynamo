@@ -1,12 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{Result, bail};
-use rustc_hash::FxHashMap;
+//! Dynamo compatibility types for the shared Replay handoff coordinator.
+//!
+//! Dynamo retains its UUID transport DTOs at this boundary. Ordering and
+//! cleanup are owned by `aisimulate_core::replay`; this module only converts between
+//! the public Dynamo surface and Replay's runtime-neutral value types.
+
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::protocols::{EngineType, KvTransferTimingMode};
+
+pub use aisimulate_core::replay::{
+    HandoffActionId, HandoffActionOutcome, HandoffCompletion, HandoffOrder, NormalizedHandoffEvent,
+    NormalizedStoredTiming, expected_normalized_handoff, validate_transfer_delay_ms,
+};
 
 /// Stable identifier for one prefill-to-decode handoff attempt.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -37,10 +47,10 @@ impl From<HandoffId> for Uuid {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum HandoffOrder {
-    SourceFirst,
-    DestinationFirst,
+impl From<HandoffId> for aisimulate_core::replay::HandoffId {
+    fn from(value: HandoffId) -> Self {
+        Self::from(value.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -53,27 +63,11 @@ pub struct HandoffTransferTiming {
 
 impl HandoffTransferTiming {
     pub fn delay_ms(self, destination_missing_tokens: usize) -> Option<f64> {
-        let tokens = match self.mode {
-            KvTransferTimingMode::FullPrompt => self.full_prompt_tokens,
-            KvTransferTimingMode::DestinationMissing => destination_missing_tokens,
-        };
-        let (Some(bytes_per_token), Some(bandwidth_gb_s)) =
-            (self.kv_bytes_per_token, self.bandwidth_gb_s)
-        else {
-            return None;
-        };
-        if bandwidth_gb_s <= 0.0 {
-            return None;
-        }
-        Some(tokens as f64 * bytes_per_token as f64 / (bandwidth_gb_s * 1e9) * 1000.0)
+        replay_timing(self).delay_ms(destination_missing_tokens)
     }
 
     pub fn full_prompt_delay_ms(self) -> Option<f64> {
-        let full_prompt = Self {
-            mode: KvTransferTimingMode::FullPrompt,
-            ..self
-        };
-        full_prompt.delay_ms(0)
+        replay_timing(self).full_prompt_delay_ms()
     }
 }
 
@@ -99,19 +93,6 @@ pub enum HandoffFact {
     Canceled {
         handoff_id: HandoffId,
     },
-}
-
-impl HandoffFact {
-    fn handoff_id(&self) -> HandoffId {
-        match *self {
-            Self::SourceHeld { handoff_id, .. }
-            | Self::DestinationReserved { handoff_id, .. }
-            | Self::TransferCompleted { handoff_id }
-            | Self::Failed { handoff_id }
-            | Self::TimedOut { handoff_id }
-            | Self::Canceled { handoff_id } => handoff_id,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -143,51 +124,13 @@ pub enum HandoffAction {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub struct HandoffActionId(u64);
-
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IssuedHandoffAction {
     pub id: HandoffActionId,
     pub action: HandoffAction,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum HandoffActionOutcome {
-    Submitted,
-    Accepted,
-    Scheduled,
-    Applied,
-    Noop,
-    Failed(String),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CoordinatorMode {
-    Active,
-    CleaningUp,
-    Complete,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HandoffCompletion {
-    Success,
-    Canceled,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum NormalizedHandoffEvent {
-    SourceHeld,
-    DestinationAccepted,
-    DestinationReserved,
-    DestinationActivated,
-    SourceReleased,
-    Completed,
-}
-
-/// Surface-independent summary used to compare offline replay with the live
-/// handoff driver. This is public only so cross-crate conformance tests can
-/// exercise both implementations.
+/// Compatibility summary used by Dynamo's live/offline conformance tests.
 #[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NormalizedHandoffConformance {
@@ -203,238 +146,78 @@ pub struct NormalizedHandoffConformance {
     pub driver_drained: bool,
 }
 
-#[doc(hidden)]
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct NormalizedStoredTiming {
-    pub before_activation: usize,
-    pub on_activation: usize,
-    pub repeated_activation_hashes_after_activation: usize,
-}
-
 impl NormalizedHandoffConformance {
-    /// Validate the deterministic one-request fixture shared by offline and
-    /// live conformance tests.
     #[doc(hidden)]
     pub fn validate(&self) -> Result<()> {
-        let expected_order = match self.engine_type {
-            EngineType::Vllm => HandoffOrder::SourceFirst,
-            EngineType::Sglang => HandoffOrder::DestinationFirst,
-            EngineType::Trtllm => bail!("TRT-LLM does not support destination handoff"),
-        };
-        if self.order != expected_order {
-            bail!(
-                "normalized handoff order mismatch: expected {expected_order:?}, got {:?}",
-                self.order
-            );
+        aisimulate_core::replay::NormalizedHandoffConformance {
+            engine_type: match self.engine_type {
+                EngineType::Vllm => aisimulate_core::engine::Backend::Vllm,
+                EngineType::Sglang => aisimulate_core::engine::Backend::Sglang,
+                EngineType::Trtllm => aisimulate_core::engine::Backend::Trtllm,
+            },
+            order: self.order,
+            lifecycle: self.lifecycle.clone(),
+            source_output_tokens: self.source_output_tokens,
+            destination_output_tokens: self.destination_output_tokens,
+            completed_requests: self.completed_requests,
+            destination_stored: self.destination_stored.clone(),
+            source_drained: self.source_drained,
+            destination_drained: self.destination_drained,
+            driver_drained: self.driver_drained,
         }
-        if self.lifecycle != expected_normalized_handoff(self.order) {
-            bail!(
-                "normalized handoff lifecycle mismatch: expected {:?}, got {:?}",
-                expected_normalized_handoff(self.order),
-                self.lifecycle
-            );
-        }
-        if self.source_output_tokens != 1 {
-            bail!(
-                "normalized source output count mismatch: expected 1, got {}",
-                self.source_output_tokens
-            );
-        }
-        if self.destination_output_tokens != 2 {
-            bail!(
-                "normalized destination output count mismatch: expected 2, got {}",
-                self.destination_output_tokens
-            );
-        }
-        if self.completed_requests != 1 {
-            bail!(
-                "normalized completion count mismatch: expected 1, got {}",
-                self.completed_requests
-            );
-        }
-        if self.destination_stored.before_activation != 0 {
-            bail!(
-                "destination published {} KV blocks before activation",
-                self.destination_stored.before_activation
-            );
-        }
-        if self.destination_stored.on_activation == 0 {
-            bail!("destination activation published no KV blocks");
-        }
-        if self
-            .destination_stored
-            .repeated_activation_hashes_after_activation
-            != 0
-        {
-            bail!(
-                "destination republished {} activation KV blocks",
-                self.destination_stored
-                    .repeated_activation_hashes_after_activation
-            );
-        }
-        if !self.source_drained || !self.destination_drained || !self.driver_drained {
-            bail!(
-                "handoff did not drain: source={}, destination={}, driver={}",
-                self.source_drained,
-                self.destination_drained,
-                self.driver_drained
-            );
-        }
-        Ok(())
+        .validate()
     }
 }
 
-pub fn expected_normalized_handoff(order: HandoffOrder) -> &'static [NormalizedHandoffEvent] {
-    use NormalizedHandoffEvent::*;
-    match order {
-        HandoffOrder::SourceFirst => &[
-            SourceHeld,
-            DestinationAccepted,
-            DestinationReserved,
-            DestinationActivated,
-            SourceReleased,
-            Completed,
-        ],
-        HandoffOrder::DestinationFirst => &[
-            DestinationAccepted,
-            DestinationReserved,
-            SourceHeld,
-            DestinationActivated,
-            SourceReleased,
-            Completed,
-        ],
+impl From<aisimulate_core::replay::NormalizedHandoffConformance> for NormalizedHandoffConformance {
+    fn from(value: aisimulate_core::replay::NormalizedHandoffConformance) -> Self {
+        Self {
+            engine_type: match value.engine_type {
+                aisimulate_core::engine::Backend::Vllm => EngineType::Vllm,
+                aisimulate_core::engine::Backend::Sglang => EngineType::Sglang,
+                aisimulate_core::engine::Backend::Trtllm => EngineType::Trtllm,
+            },
+            order: value.order,
+            lifecycle: value.lifecycle,
+            source_output_tokens: value.source_output_tokens,
+            destination_output_tokens: value.destination_output_tokens,
+            completed_requests: value.completed_requests,
+            destination_stored: value.destination_stored,
+            source_drained: value.source_drained,
+            destination_drained: value.destination_drained,
+            driver_drained: value.driver_drained,
+        }
     }
 }
 
-#[derive(Default)]
-struct ActionJournal {
-    started: bool,
-    next_id: u64,
-    issued: FxHashMap<HandoffActionId, HandoffAction>,
-    outcomes: FxHashMap<HandoffActionId, HandoffActionOutcome>,
-}
-
-#[derive(Default)]
-struct SourceProgress {
-    submit_issued: bool,
-    submitted: bool,
-    held: bool,
-    transfer_timing: Option<HandoffTransferTiming>,
-    release_issued: bool,
-    cancel_issued: bool,
-    cleanup_done: bool,
-}
-
-#[derive(Default)]
-struct DestinationProgress {
-    reserve_issued: bool,
-    accepted: bool,
-    reserved: bool,
-    transferable_prompt_tokens: Option<usize>,
-    activation_issued: bool,
-    activation_applied: bool,
-    cancel_issued: bool,
-    cleanup_done: bool,
-}
-
-#[derive(Default)]
-struct TransferProgress {
-    issued: bool,
-    scheduled: bool,
-    completed: bool,
-}
-
-/// Pure state machine for one prefill-to-decode ownership handoff.
-///
-/// Drivers execute returned actions and feed action outcomes and asynchronous
-/// facts back into this core. The core owns ordering only; it owns no engine or
-/// transport resources.
+/// Thin UUID-compatibility wrapper around Replay's single handoff state machine.
 pub struct HandoffCoordinatorCore {
-    handoff_id: HandoffId,
-    order: HandoffOrder,
-    mode: CoordinatorMode,
-    actions: ActionJournal,
-    source: SourceProgress,
-    destination: DestinationProgress,
-    transfer: TransferProgress,
-    completion: Option<HandoffCompletion>,
+    inner: aisimulate_core::replay::HandoffCoordinatorCore,
 }
 
 impl HandoffCoordinatorCore {
     pub fn new(handoff_id: HandoffId, order: HandoffOrder) -> Self {
         Self {
-            handoff_id,
-            order,
-            mode: CoordinatorMode::Active,
-            actions: ActionJournal::default(),
-            source: SourceProgress::default(),
-            destination: DestinationProgress::default(),
-            transfer: TransferProgress::default(),
-            completion: None,
+            inner: aisimulate_core::replay::HandoffCoordinatorCore::new(handoff_id.into(), order),
         }
     }
 
     pub fn start(&mut self) -> Result<Vec<IssuedHandoffAction>> {
-        if self.actions.started {
-            return Ok(Vec::new());
-        }
-        self.actions.started = true;
-        let action = match self.order {
-            HandoffOrder::SourceFirst => self.issue_submit_prefill(),
-            HandoffOrder::DestinationFirst => self.issue_reserve_destination(),
-        };
-        Ok(vec![action])
+        Ok(self
+            .inner
+            .start()?
+            .into_iter()
+            .map(convert_action)
+            .collect())
     }
 
     pub fn on_fact(&mut self, fact: HandoffFact) -> Result<Vec<IssuedHandoffAction>> {
-        self.validate_handoff(fact.handoff_id())?;
-        if self.mode != CoordinatorMode::Active {
-            return Ok(Vec::new());
-        }
-
-        match fact {
-            HandoffFact::SourceHeld {
-                transfer_timing, ..
-            } => {
-                if self.source.held {
-                    return Ok(Vec::new());
-                }
-                if !self.source.submitted {
-                    bail!("source held before prefill submission was acknowledged");
-                }
-                validate_transfer_timing(transfer_timing)?;
-                self.source.held = true;
-                self.source.transfer_timing = Some(transfer_timing);
-                self.advance_active()
-            }
-            HandoffFact::DestinationReserved {
-                transferable_prompt_tokens,
-                ..
-            } => {
-                if self.destination.reserved {
-                    return Ok(Vec::new());
-                }
-                if !self.destination.accepted {
-                    bail!("destination reserved before ownership was accepted");
-                }
-                self.destination.reserved = true;
-                self.destination.transferable_prompt_tokens = Some(transferable_prompt_tokens);
-                self.advance_active()
-            }
-            HandoffFact::TransferCompleted { .. } => {
-                if self.transfer.completed {
-                    return Ok(Vec::new());
-                }
-                if !self.transfer.scheduled {
-                    bail!("transfer completed before it was scheduled");
-                }
-                self.transfer.completed = true;
-                self.advance_active()
-            }
-            HandoffFact::Failed { .. }
-            | HandoffFact::TimedOut { .. }
-            | HandoffFact::Canceled { .. } => self.begin_cleanup(),
-        }
+        Ok(self
+            .inner
+            .on_fact(convert_fact(fact))?
+            .into_iter()
+            .map(convert_action)
+            .collect())
     }
 
     pub fn on_action_outcome(
@@ -442,243 +225,123 @@ impl HandoffCoordinatorCore {
         action_id: HandoffActionId,
         outcome: HandoffActionOutcome,
     ) -> Result<Vec<IssuedHandoffAction>> {
-        if self.mode == CoordinatorMode::Complete {
-            return Ok(Vec::new());
-        }
-        let Some(action) = self.actions.issued.get(&action_id).copied() else {
-            bail!("unknown handoff action {action_id:?}");
-        };
-        if let Some(previous) = self.actions.outcomes.get(&action_id) {
-            if previous != &outcome {
-                bail!("conflicting outcome for handoff action {action_id:?}");
-            }
-            return Ok(Vec::new());
-        }
-        self.actions.outcomes.insert(action_id, outcome.clone());
-
-        if let HandoffActionOutcome::Failed(_) = outcome {
-            if matches!(
-                action,
-                HandoffAction::CancelSource { .. } | HandoffAction::CancelDestination { .. }
-            ) {
-                bail!("handoff cleanup action {action_id:?} failed");
-            }
-            return self.begin_cleanup();
-        }
-
-        match action {
-            HandoffAction::SubmitPrefill { .. } => {
-                require_outcome(&outcome, &[HandoffActionOutcome::Submitted])?;
-                self.source.submitted = true;
-            }
-            HandoffAction::ReserveDestination { .. } => {
-                require_outcome(&outcome, &[HandoffActionOutcome::Accepted])?;
-                self.destination.accepted = true;
-            }
-            HandoffAction::StartTransfer { .. } => {
-                require_outcome(&outcome, &[HandoffActionOutcome::Scheduled])?;
-                self.transfer.scheduled = true;
-            }
-            HandoffAction::ActivateDestination { .. } => {
-                require_outcome(&outcome, &[HandoffActionOutcome::Applied])?;
-                self.destination.activation_applied = true;
-            }
-            HandoffAction::ReleaseSource { .. } => {
-                require_outcome(
-                    &outcome,
-                    &[HandoffActionOutcome::Applied, HandoffActionOutcome::Noop],
-                )?;
-                self.source.cleanup_done = true;
-            }
-            HandoffAction::CancelSource { .. } => {
-                require_outcome(
-                    &outcome,
-                    &[HandoffActionOutcome::Applied, HandoffActionOutcome::Noop],
-                )?;
-                self.source.cleanup_done = true;
-            }
-            HandoffAction::CancelDestination { .. } => {
-                require_outcome(
-                    &outcome,
-                    &[HandoffActionOutcome::Applied, HandoffActionOutcome::Noop],
-                )?;
-                self.destination.cleanup_done = true;
-            }
-            HandoffAction::Complete { .. } => return Ok(Vec::new()),
-        }
-
-        match self.mode {
-            CoordinatorMode::Active => self.advance_active(),
-            CoordinatorMode::CleaningUp => self.advance_cleanup(),
-            CoordinatorMode::Complete => Ok(Vec::new()),
-        }
+        Ok(self
+            .inner
+            .on_action_outcome(action_id, outcome)?
+            .into_iter()
+            .map(convert_action)
+            .collect())
     }
 
     pub fn is_complete(&self) -> bool {
-        self.mode == CoordinatorMode::Complete
+        self.inner.is_complete()
     }
 
     pub fn completion(&self) -> Option<HandoffCompletion> {
-        self.completion
+        self.inner.completion()
     }
-
-    fn advance_active(&mut self) -> Result<Vec<IssuedHandoffAction>> {
-        if self.order == HandoffOrder::SourceFirst
-            && self.source.held
-            && !self.destination.reserve_issued
-        {
-            return Ok(vec![self.issue_reserve_destination()]);
-        }
-        if self.order == HandoffOrder::DestinationFirst
-            && self.destination.reserved
-            && !self.source.submit_issued
-        {
-            return Ok(vec![self.issue_submit_prefill()]);
-        }
-        if self.source.held && self.destination.reserved && !self.transfer.issued {
-            self.transfer.issued = true;
-            let transfer_timing = self
-                .source
-                .transfer_timing
-                .expect("held source must retain transfer timing");
-            let transferable_prompt_tokens = self
-                .destination
-                .transferable_prompt_tokens
-                .expect("reserved destination must report its transferable footprint");
-            return Ok(vec![
-                self.issue(HandoffAction::StartTransfer {
-                    handoff_id: self.handoff_id,
-                    delay_ms: transfer_timing
-                        .delay_ms(transferable_prompt_tokens)
-                        .unwrap_or_default(),
-                }),
-            ]);
-        }
-        if self.transfer.completed && !self.destination.activation_issued {
-            self.destination.activation_issued = true;
-            return Ok(vec![self.issue(HandoffAction::ActivateDestination {
-                handoff_id: self.handoff_id,
-            })]);
-        }
-        if self.destination.activation_applied && !self.source.release_issued {
-            self.source.release_issued = true;
-            return Ok(vec![self.issue(HandoffAction::ReleaseSource {
-                handoff_id: self.handoff_id,
-            })]);
-        }
-        if self.source.cleanup_done {
-            return Ok(vec![self.complete()]);
-        }
-        Ok(Vec::new())
-    }
-
-    fn begin_cleanup(&mut self) -> Result<Vec<IssuedHandoffAction>> {
-        if self.mode == CoordinatorMode::Complete {
-            return Ok(Vec::new());
-        }
-        self.mode = CoordinatorMode::CleaningUp;
-        self.advance_cleanup()
-    }
-
-    fn advance_cleanup(&mut self) -> Result<Vec<IssuedHandoffAction>> {
-        let mut actions = Vec::new();
-        if self.source.submit_issued && !self.source.cancel_issued && !self.source.cleanup_done {
-            self.source.cancel_issued = true;
-            actions.push(self.issue(HandoffAction::CancelSource {
-                handoff_id: self.handoff_id,
-            }));
-        }
-        if self.destination.reserve_issued
-            && !self.destination.cancel_issued
-            && !self.destination.cleanup_done
-        {
-            self.destination.cancel_issued = true;
-            actions.push(self.issue(HandoffAction::CancelDestination {
-                handoff_id: self.handoff_id,
-            }));
-        }
-        if actions.is_empty()
-            && (!self.source.submit_issued || self.source.cleanup_done)
-            && (!self.destination.reserve_issued || self.destination.cleanup_done)
-        {
-            actions.push(self.complete());
-        }
-        Ok(actions)
-    }
-
-    fn issue_submit_prefill(&mut self) -> IssuedHandoffAction {
-        self.source.submit_issued = true;
-        self.issue(HandoffAction::SubmitPrefill {
-            handoff_id: self.handoff_id,
-        })
-    }
-
-    fn issue_reserve_destination(&mut self) -> IssuedHandoffAction {
-        self.destination.reserve_issued = true;
-        self.issue(HandoffAction::ReserveDestination {
-            handoff_id: self.handoff_id,
-        })
-    }
-
-    fn complete(&mut self) -> IssuedHandoffAction {
-        self.completion = Some(if self.mode == CoordinatorMode::CleaningUp {
-            HandoffCompletion::Canceled
-        } else {
-            HandoffCompletion::Success
-        });
-        self.mode = CoordinatorMode::Complete;
-        let action = self.issue(HandoffAction::Complete {
-            handoff_id: self.handoff_id,
-        });
-        self.actions.issued = FxHashMap::default();
-        self.actions.outcomes = FxHashMap::default();
-        action
-    }
-
-    fn issue(&mut self, action: HandoffAction) -> IssuedHandoffAction {
-        let id = HandoffActionId(self.actions.next_id);
-        self.actions.next_id = self
-            .actions
-            .next_id
-            .checked_add(1)
-            .expect("handoff action ID overflow");
-        let previous = self.actions.issued.insert(id, action);
-        debug_assert!(previous.is_none());
-        IssuedHandoffAction { id, action }
-    }
-
-    fn validate_handoff(&self, handoff_id: HandoffId) -> Result<()> {
-        if handoff_id != self.handoff_id {
-            bail!("fact belongs to a different handoff");
-        }
-        Ok(())
-    }
-}
-
-pub fn validate_transfer_delay_ms(transfer_delay_ms: Option<f64>) -> Result<()> {
-    let Some(delay_ms) = transfer_delay_ms else {
-        return Ok(());
-    };
-    if !delay_ms.is_finite() || delay_ms < 0.0 {
-        bail!("invalid handoff transfer delay {delay_ms}");
-    }
-    Ok(())
 }
 
 pub fn validate_transfer_timing(transfer_timing: HandoffTransferTiming) -> Result<()> {
-    if let Some(bandwidth_gb_s) = transfer_timing.bandwidth_gb_s
-        && (!bandwidth_gb_s.is_finite() || bandwidth_gb_s <= 0.0)
-    {
-        bail!("invalid handoff transfer bandwidth {bandwidth_gb_s}");
-    }
-    validate_transfer_delay_ms(transfer_timing.full_prompt_delay_ms())
+    aisimulate_core::replay::validate_transfer_timing(replay_timing(transfer_timing))
 }
 
-fn require_outcome(outcome: &HandoffActionOutcome, allowed: &[HandoffActionOutcome]) -> Result<()> {
-    if allowed.contains(outcome) {
-        return Ok(());
+fn replay_timing(timing: HandoffTransferTiming) -> aisimulate_core::replay::HandoffTransferTiming {
+    aisimulate_core::replay::HandoffTransferTiming {
+        mode: match timing.mode {
+            KvTransferTimingMode::FullPrompt => {
+                aisimulate_core::engine::TransferTimingMode::FullPrompt
+            }
+            KvTransferTimingMode::DestinationMissing => {
+                aisimulate_core::engine::TransferTimingMode::DestinationMissing
+            }
+        },
+        full_prompt_tokens: timing.full_prompt_tokens,
+        kv_bytes_per_token: timing.kv_bytes_per_token,
+        bandwidth_gb_s: timing.bandwidth_gb_s,
     }
-    bail!("invalid handoff action outcome {outcome:?}")
+}
+
+fn convert_fact(fact: HandoffFact) -> aisimulate_core::replay::HandoffFact {
+    match fact {
+        HandoffFact::SourceHeld {
+            handoff_id,
+            transfer_timing,
+        } => aisimulate_core::replay::HandoffFact::SourceHeld {
+            handoff_id: handoff_id.into(),
+            transfer_timing: replay_timing(transfer_timing),
+        },
+        HandoffFact::DestinationReserved {
+            handoff_id,
+            transferable_prompt_tokens,
+        } => aisimulate_core::replay::HandoffFact::DestinationReserved {
+            handoff_id: handoff_id.into(),
+            transferable_prompt_tokens,
+        },
+        HandoffFact::TransferCompleted { handoff_id } => {
+            aisimulate_core::replay::HandoffFact::TransferCompleted {
+                handoff_id: handoff_id.into(),
+            }
+        }
+        HandoffFact::Failed { handoff_id } => aisimulate_core::replay::HandoffFact::Failed {
+            handoff_id: handoff_id.into(),
+        },
+        HandoffFact::TimedOut { handoff_id } => aisimulate_core::replay::HandoffFact::TimedOut {
+            handoff_id: handoff_id.into(),
+        },
+        HandoffFact::Canceled { handoff_id } => aisimulate_core::replay::HandoffFact::Canceled {
+            handoff_id: handoff_id.into(),
+        },
+    }
+}
+
+fn convert_action(action: aisimulate_core::replay::IssuedHandoffAction) -> IssuedHandoffAction {
+    let aisimulate_core::replay::IssuedHandoffAction { id, action } = action;
+    let action = match action {
+        aisimulate_core::replay::HandoffAction::SubmitPrefill { handoff_id } => {
+            HandoffAction::SubmitPrefill {
+                handoff_id: HandoffId::from(handoff_id.get()),
+            }
+        }
+        aisimulate_core::replay::HandoffAction::ReserveDestination { handoff_id } => {
+            HandoffAction::ReserveDestination {
+                handoff_id: HandoffId::from(handoff_id.get()),
+            }
+        }
+        aisimulate_core::replay::HandoffAction::StartTransfer {
+            handoff_id,
+            delay_ms,
+        } => HandoffAction::StartTransfer {
+            handoff_id: HandoffId::from(handoff_id.get()),
+            delay_ms,
+        },
+        aisimulate_core::replay::HandoffAction::ActivateDestination { handoff_id } => {
+            HandoffAction::ActivateDestination {
+                handoff_id: HandoffId::from(handoff_id.get()),
+            }
+        }
+        aisimulate_core::replay::HandoffAction::ReleaseSource { handoff_id } => {
+            HandoffAction::ReleaseSource {
+                handoff_id: HandoffId::from(handoff_id.get()),
+            }
+        }
+        aisimulate_core::replay::HandoffAction::CancelSource { handoff_id } => {
+            HandoffAction::CancelSource {
+                handoff_id: HandoffId::from(handoff_id.get()),
+            }
+        }
+        aisimulate_core::replay::HandoffAction::CancelDestination { handoff_id } => {
+            HandoffAction::CancelDestination {
+                handoff_id: HandoffId::from(handoff_id.get()),
+            }
+        }
+        aisimulate_core::replay::HandoffAction::Complete { handoff_id } => {
+            HandoffAction::Complete {
+                handoff_id: HandoffId::from(handoff_id.get()),
+            }
+        }
+    };
+    IssuedHandoffAction { id, action }
 }
 
 #[cfg(test)]

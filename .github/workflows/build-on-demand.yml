@@ -98,8 +98,7 @@ jobs:
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   sglang-copy-to-acr:
@@ -109,8 +108,7 @@ jobs:
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   trtllm-copy-to-acr:
@@ -134,9 +132,9 @@ jobs:
     name: Operator
     runs-on: prod-default-v2
     env:
-      IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -146,11 +144,12 @@ jobs:
           builder_name: ${{ needs.init.outputs.builder_name }}
           flavor: general
           arch: 'linux/amd64,linux/arm64'
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
@@ -158,8 +157,8 @@ jobs:
         shell: bash
         working-directory: ./deploy/operator
         run: |
-          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          ECR_DEFAULT_IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${ACR_REPOSITORY}"
           DEFAULT_TAG="${{ github.sha }}-operator"
           BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-operator"
           IMAGE_URIS=(
@@ -174,8 +173,7 @@ jobs:
 
           docker buildx build --push \
               --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              --build-context snapshot=../snapshot \
+              --build-arg DOCKER_PROXY=${ECR_REGISTRY}/dockerhub/ \
               ${TAGGING_FLAGS} -f Dockerfile .
 
           echo "### Operator Container Images" >> $GITHUB_STEP_SUMMARY
@@ -204,6 +202,7 @@ jobs:
       with:
         builder_name: ${{ needs.init.outputs.builder_name }}
         buildkit_worker_addresses: ''
+        namespace: ${{ vars.BUILDKIT_NAMESPACE }}
         skip_bootstrap: true
     - name: Builder Cleanup in case of k8s builder
       shell: bash
