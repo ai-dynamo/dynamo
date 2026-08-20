@@ -46,9 +46,6 @@ spec:
     - name: Frontend
       type: frontend
       replicas: 1
-      # Image tag is not pure X.Y.Z semver; the DGD CRD validator requires
-      # an explicit runtime version.
-      runtimeVersionOverride: "1.4.0"
       podTemplate:
         spec:
           imagePullSecrets:
@@ -95,8 +92,6 @@ spec:
       type: worker
       replicas: 8
       sharedMemorySize: 40Gi
-      # See Frontend.runtimeVersionOverride.
-      runtimeVersionOverride: "1.4.0"
       podTemplate:
         spec:
           imagePullSecrets:
