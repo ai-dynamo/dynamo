@@ -992,11 +992,7 @@ impl Client {
                                 break;
                             }
                             None => {
-                                // The discovery stream ends when the watch is torn down
-                                // locally — most commonly because the runtime's primary
-                                // cancellation token fired during shutdown. That is not an
-                                // observation that the endpoint became empty, so the last
-                                // published snapshot is deliberately left standing.
+                                // Stream termination is not an observed endpoint removal.
                                 tracing::debug!(
                                     exit_reason = "discovery_stream_ended",
                                     preserved_instances = map.len(),
@@ -1026,11 +1022,7 @@ impl Client {
                     }
                 }
 
-                // An authoritative empty set — every instance drained by observed
-                // `Removed` events — is published right here, from inside the loop.
-                // Exiting the loop therefore never needs to publish one, and must not:
-                // a terminal `send(vec![])` would be indistinguishable from this
-                // authoritative empty while carrying no discovery observation at all.
+                // Observed removals publish an authoritative empty set here.
                 let instances: Vec<Instance> = map.values().cloned().collect();
                 if watch_tx.send(instances).is_err() {
                     tracing::debug!(
@@ -1803,25 +1795,9 @@ mod tests {
         rt.shutdown();
     }
 
-    /// Regression test for the endpoint watcher's terminal snapshot publish.
-    ///
-    /// Cancelling the runtime's primary cancellation token — what `SIGTERM`
-    /// eventually does — tears the discovery watch down *locally*. That teardown
-    /// is not an observation that the endpoint became empty, so the last known
-    /// snapshot must survive it: handlers still draining behind an HTTP graceful
-    /// shutdown need to resolve the instance they were already routed to, and a
-    /// fabricated empty list makes them fail with "instance not found and no
-    /// other instances available".
-    ///
-    /// No `DiscoveryEvent::Removed` is ever delivered here, so any empty snapshot
-    /// this test observes was manufactured by the watcher's own teardown.
-    /// All identifiers are synthetic; nothing leaves the process.
     #[tokio::test]
     async fn test_local_watcher_cancellation_preserves_last_instance_snapshot() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
-        // Generous enough for the watcher's terminal publish to land on the
-        // secondary runtime. The pre-fix behaviour trips the early exit below
-        // long before this elapses.
         const OBSERVE_WINDOW: Duration = Duration::from_secs(2);
 
         let rt = Runtime::from_current().unwrap();
@@ -1841,8 +1817,7 @@ mod tests {
         let discovered = client.wait_for_instances().await.unwrap();
         let instance_id = discovered[0].id();
 
-        // Local teardown only. This is the token `KVStoreDiscovery` was built
-        // with, so cancelling it ends the underlying watch stream.
+        // End the watch without emitting DiscoveryEvent::Removed.
         drt.primary_token().cancel();
 
         let deadline = tokio::time::Instant::now() + OBSERVE_WINDOW;
@@ -1861,10 +1836,6 @@ mod tests {
         );
     }
 
-    /// Negative control for the test above: when discovery *actually* observes
-    /// the last instance leaving, the empty snapshot must still be published.
-    /// This is the case the watcher is allowed — and required — to report, and
-    /// it passes both before and after the terminal-publish change.
     #[tokio::test]
     async fn test_authoritative_removal_still_publishes_empty_snapshot() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
@@ -1886,7 +1857,6 @@ mod tests {
         endpoint.register_endpoint_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
-        // A real removal observed by discovery, with the watcher still alive.
         endpoint.unregister_endpoint_instance().await.unwrap();
 
         let deadline = tokio::time::Instant::now() + OBSERVE_WINDOW;
