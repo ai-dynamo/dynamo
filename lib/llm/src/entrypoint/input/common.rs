@@ -21,7 +21,9 @@ use crate::{
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
-    protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+    protocols::common::llm_backend::{
+        BackendOutput, LLMEngineOutput, PreprocessedRequest, preprocessed_prompt_load_weight,
+    },
     request_template::RequestTemplate,
     session_affinity::{
         AffinityCoordinator, SessionAffinityPushRouter, create_affinity_coordinator,
@@ -302,7 +304,8 @@ where
         embedding_cache_indexer,
         cache_key_extractor,
     )
-    .await?;
+    .await?
+    .with_load_weight(preprocessed_prompt_load_weight());
 
     // Eagerly register router request metrics so they appear as zeros even in
     // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.

@@ -433,6 +433,14 @@ where
 }
 
 impl PreprocessedRequest {
+    /// Prompt length used as this request's routing load weight.
+    ///
+    /// Prefill cost scales with the prompt, so occupancy-ordered routing charges
+    /// this against the chosen worker for as long as the request is in flight.
+    pub fn prompt_token_count(&self) -> u64 {
+        self.token_ids.len() as u64
+    }
+
     pub fn has_annotation(&self, annotation: &str) -> bool {
         self.annotations.contains(&annotation.to_string())
     }

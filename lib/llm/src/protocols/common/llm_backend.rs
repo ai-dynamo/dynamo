@@ -14,6 +14,17 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
 
+/// Charge each request's prompt length against per-worker routing occupancy.
+///
+/// Hand this to [`PushRouter::with_load_weight`](dynamo_runtime::pipeline::PushRouter::with_load_weight)
+/// on any hop that dispatches [`PreprocessedRequest`]s, so occupancy-ordered
+/// routing can weigh workers by queued prompt tokens rather than request count
+/// alone. Inert unless token-aware ordering is enabled.
+pub fn preprocessed_prompt_load_weight()
+-> dynamo_runtime::pipeline::RequestLoadWeight<PreprocessedRequest> {
+    std::sync::Arc::new(|request: &PreprocessedRequest| request.prompt_token_count())
+}
+
 /// Per-position prompt logprob entry reported by an engine adapter.
 #[derive(Serialize, Deserialize, utoipa::ToSchema, Debug, Clone, PartialEq)]
 pub struct PromptLogprobEntry {
