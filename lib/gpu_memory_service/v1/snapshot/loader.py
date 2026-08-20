@@ -40,7 +40,10 @@ def _build_parser():
         "--device",
         type=int,
         default=0,
-        help="CUDA-visible rank-local device ordinal.",
+        help=(
+            "CUDA-visible device ordinal. Omit this flag on the snapshot "
+            "wrapper CLI to run one child per visible device."
+        ),
     )
     parser.add_argument(
         "--posix-backend-param",
