@@ -3319,19 +3319,6 @@ async fn responses(
             include_usage: true,
             continuous_usage_stats: false,
         });
-    if response_params.reasoning.is_some() {
-        let extra_fields = chat_request
-            .nvext
-            .get_or_insert_default()
-            .extra_fields
-            .get_or_insert_default();
-        if !extra_fields
-            .iter()
-            .any(|field| field == "completion_token_ids")
-        {
-            extra_fields.push("completion_token_ids".to_string());
-        }
-    }
 
     let mut request = context.map(|mut _req| chat_request);
     if response_params.max_output_tokens.is_none() {
@@ -3499,16 +3486,7 @@ async fn responses(
                 })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
-        let reasoning_token_counter = Arc::new(std::sync::Mutex::new(
-            crate::protocols::openai::responses::ReasoningTokenCounter::default(),
-        ));
-        let stream_reasoning_token_counter = reasoning_token_counter.clone();
         let stream = stream_with_check.inspect(move |response| {
-            if let Some(chunk) = response.data.as_ref()
-                && let Ok(mut counter) = stream_reasoning_token_counter.lock()
-            {
-                counter.observe(chunk);
-            }
             process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
@@ -3516,7 +3494,7 @@ async fn responses(
             );
         });
 
-        let mut response =
+        let response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
                 .map_err(|e| {
@@ -3526,53 +3504,6 @@ async fn responses(
                     inflight_guard.mark_error(extract_error_type_from_response(&err_response));
                     err_response
                 })?;
-        if let Ok(counter) = reasoning_token_counter.lock() {
-            let reasoning_only = response.inner.choices.iter().any(|choice| {
-                choice
-                    .message
-                    .reasoning_content
-                    .as_deref()
-                    .is_some_and(|reasoning| !reasoning.is_empty())
-                    && choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty)
-                    && match choice.message.content.as_ref() {
-                        None => true,
-                        Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(text)) => {
-                            text.is_empty()
-                        }
-                        Some(dynamo_protocols::types::ChatCompletionMessageContent::Parts(
-                            parts,
-                        )) => parts.is_empty(),
-                    }
-            });
-            let backend_reasoning_tokens = response
-                .inner
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.completion_tokens_details.as_ref())
-                .and_then(|details| details.reasoning_tokens)
-                .filter(|count| *count > 0);
-            let reasoning_tokens = backend_reasoning_tokens.unwrap_or_else(|| {
-                if counter.total() > 0 {
-                    counter.total()
-                } else if reasoning_only {
-                    response
-                        .inner
-                        .usage
-                        .as_ref()
-                        .map_or(0, |usage| usage.completion_tokens)
-                } else {
-                    0
-                }
-            });
-            if reasoning_tokens > 0
-                && let Some(usage) = response.inner.usage.as_mut()
-            {
-                usage
-                    .completion_tokens_details
-                    .get_or_insert_default()
-                    .reasoning_tokens = Some(reasoning_tokens);
-            }
-        }
 
         // Convert NvCreateChatCompletionResponse --> NvResponse
         let response: NvResponse =
