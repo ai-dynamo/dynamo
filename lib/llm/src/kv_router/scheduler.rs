@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
-use dynamo_kv_router::scheduling::PolicyClassAdmissionPolicies;
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
     SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+};
+use dynamo_kv_router::scheduling::{
+    PolicyClassAdmissionPolicies, PolicyProfile, RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS,
+    RANK_BALANCED_COHORT_POLICY_TYPE, RankBalancedCohortAdmissionPolicy,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -43,6 +46,65 @@ where
     queue_metric_indices: HashMap<String, usize>,
 }
 
+fn install_builtin_admission_policies(
+    profile: &PolicyProfile,
+    worker_type: &str,
+    router_id: u64,
+    admission_policies: &mut PolicyClassAdmissionPolicies,
+) -> Result<(), KvSchedulerError> {
+    let mut rank_balanced_configured = false;
+    for class in profile.classes() {
+        let Some(config) = class.admission.as_ref() else {
+            continue;
+        };
+        if config.policy_type() != RANK_BALANCED_COHORT_POLICY_TYPE {
+            continue;
+        }
+        rank_balanced_configured = true;
+        if worker_type != "prefill" {
+            return Err(KvSchedulerError::InitFailed(format!(
+                "rank-balanced cohort admission is only valid for prefill workers, got {worker_type:?}"
+            )));
+        }
+        if admission_policies.contains_key(&class.name) {
+            return Err(KvSchedulerError::InitFailed(format!(
+                "admission policy for policy class {:?} is registered twice",
+                class.name
+            )));
+        }
+        let policy = RankBalancedCohortAdmissionPolicy::from_config(config, router_id)
+            .map_err(KvSchedulerError::InitFailed)?;
+        admission_policies.insert(class.name.clone(), Box::new(policy));
+    }
+    if !rank_balanced_configured {
+        return Ok(());
+    }
+
+    let bypass_class = profile
+        .classes()
+        .iter()
+        .find(|class| class.name == RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS)
+        .ok_or_else(|| {
+            KvSchedulerError::InitFailed(format!(
+                "rank-balanced cohort admission requires an explicit policy class named {RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS:?}"
+            ))
+        })?;
+    if bypass_class.admission.is_some() {
+        return Err(KvSchedulerError::InitFailed(format!(
+            "rank-balanced cohort bypass policy class {RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS:?} must not configure admission"
+        )));
+    }
+    if profile
+        .direct_class_index(Some(RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS))
+        .is_none()
+    {
+        return Err(KvSchedulerError::InitFailed(format!(
+            "rank-balanced cohort bypass policy class {RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS:?} must be explicit"
+        )));
+    }
+    Ok(())
+}
+
 impl<Sel, RF> KvScheduler<Sel, RF>
 where
     Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + Sync + 'static,
@@ -63,7 +125,7 @@ where
         model_name: Option<&str>,
         worker_type: &'static str,
         cancellation_token: CancellationToken,
-        admission_policies: PolicyClassAdmissionPolicies,
+        mut admission_policies: PolicyClassAdmissionPolicies,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
@@ -88,6 +150,12 @@ where
         let profile = kv_router_config
             .policy_profile(model_name)
             .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
+        install_builtin_admission_policies(
+            &profile,
+            worker_type,
+            router_id,
+            &mut admission_policies,
+        )?;
         let queue_recheck_interval = kv_router_config.router_queue_recheck_interval();
         let metric_model = model_name.unwrap_or("unknown");
         let queue_metrics = profile
@@ -420,6 +488,7 @@ fn update_queue_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::{config::RouterQueuePolicy, scheduling::RouterPolicyConfig};
     use dynamo_runtime::component::Component;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
@@ -433,6 +502,75 @@ mod tests {
         namespace
             .component(format!("test-component-{name}"))
             .unwrap()
+    }
+
+    fn rank_balanced_profile(include_bypass: bool) -> PolicyProfile {
+        let bypass = if include_bypass {
+            r#"
+  - name: prefill-rank-balanced-passthrough
+    quantum: 1
+"#
+        } else {
+            ""
+        };
+        let yaml = format!(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: standard
+    policy_family: standard
+    cache_bucket: all
+    quantum: 1
+    admission:
+      type: rank_balanced_cohort
+      cohort_size: 4
+{bypass}
+"#
+        );
+        RouterPolicyConfig::from_yaml(&yaml)
+            .unwrap()
+            .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
+    }
+
+    #[test]
+    fn rank_balanced_builtin_requires_and_registers_explicit_bypass() {
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        install_builtin_admission_policies(
+            &rank_balanced_profile(true),
+            "prefill",
+            7,
+            &mut policies,
+        )
+        .unwrap();
+        assert!(policies.contains_key("standard"));
+
+        let error = install_builtin_admission_policies(
+            &rank_balanced_profile(false),
+            "prefill",
+            7,
+            &mut PolicyClassAdmissionPolicies::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires an explicit policy class")
+        );
+    }
+
+    #[test]
+    fn rank_balanced_builtin_rejects_decode_scheduler() {
+        let error = install_builtin_admission_policies(
+            &rank_balanced_profile(true),
+            "decode",
+            7,
+            &mut PolicyClassAdmissionPolicies::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("only valid for prefill workers"));
     }
 
     #[test]

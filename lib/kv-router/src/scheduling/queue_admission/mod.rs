@@ -11,6 +11,13 @@ use serde::Deserialize;
 
 use crate::protocols::WorkerWithDpRank;
 
+mod rank_balanced;
+
+pub use rank_balanced::{
+    RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS, RANK_BALANCED_COHORT_POLICY_TYPE,
+    RankBalancedCohortAdmissionPolicy,
+};
+
 /// Router-assigned identity for one request's admission lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AdmissionId(u64);
@@ -135,6 +142,53 @@ impl WorkerEligibilitySnapshot {
     pub fn has_structural_worker(&self) -> bool {
         !self.structural.is_empty()
     }
+
+    /// Structurally eligible worker/rank pairs, independent of transient
+    /// overload state.
+    pub fn structural_workers(&self) -> impl Iterator<Item = WorkerWithDpRank> + '_ {
+        self.structural.iter().copied()
+    }
+}
+
+/// One producer-owned request population that must enter a backend together.
+///
+/// The scheduler attaches this only after an admission policy has also chosen
+/// an exact worker/rank for every member. Backend adapters may translate it to
+/// their native atomic-admission contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionCohort {
+    id: String,
+    size: u32,
+    index: u32,
+}
+
+impl AdmissionCohort {
+    pub fn new(id: String, size: u32, index: u32) -> Result<Self, String> {
+        if id.is_empty() {
+            return Err("admission cohort id must not be empty".to_string());
+        }
+        if size == 0 {
+            return Err("admission cohort size must be positive".to_string());
+        }
+        if index >= size {
+            return Err(format!(
+                "admission cohort index {index} must be less than size {size}"
+            ));
+        }
+        Ok(Self { id, size, index })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+
+    pub fn index(&self) -> u32 {
+        self.index
+    }
 }
 
 /// Read-only request facts exposed to admission policies.
@@ -148,6 +202,7 @@ pub struct AdmissionRequest<'a> {
     session_id: Option<&'a str>,
     progress: RequestProgress,
     worker_eligibility: WorkerEligibility,
+    pinned_worker: Option<WorkerWithDpRank>,
 }
 
 impl<'a> AdmissionRequest<'a> {
@@ -175,7 +230,13 @@ impl<'a> AdmissionRequest<'a> {
             session_id,
             progress,
             worker_eligibility,
+            pinned_worker: None,
         }
+    }
+
+    pub(crate) fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
+        self.pinned_worker = pinned_worker;
+        self
     }
 
     pub fn id(&self) -> AdmissionId {
@@ -198,6 +259,12 @@ impl<'a> AdmissionRequest<'a> {
 
     pub fn worker_eligibility(&self) -> &WorkerEligibility {
         &self.worker_eligibility
+    }
+
+    /// Exact placement already owned by the caller or conversation-affinity
+    /// layer. Admission policies must preserve this placement.
+    pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
+        self.pinned_worker
     }
 }
 
@@ -246,6 +313,9 @@ pub enum AdmissionAction {
     MakeReady {
         id: AdmissionId,
         placement: WorkerPlacement,
+        /// Optional backend admission transaction paired with the exact
+        /// placement. Policies must not attach a cohort to `Any` placement.
+        cohort: Option<AdmissionCohort>,
     },
 }
 

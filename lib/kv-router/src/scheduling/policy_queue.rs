@@ -524,6 +524,7 @@ impl<T> PolicyQueue<T> {
         class_index: usize,
         session_id: Option<&str>,
         context_tokens: usize,
+        pinned_worker: Option<WorkerWithDpRank>,
         worker_eligibility: WorkerEligibility,
     ) -> Option<(AdmissionTicket, RequestProgressUpdater, AdmissionDecision)> {
         let policy = &mut self.classes[class_index].admission_policy.as_mut()?.policy;
@@ -531,12 +532,10 @@ impl<T> PolicyQueue<T> {
         self.next_admission_id = self.next_admission_id.wrapping_add(1);
         let ticket = AdmissionTicket { class_index, id };
         let (progress, updater) = RequestProgress::new(context_tokens);
-        let decision = policy.admit(AdmissionRequest::with_progress(
-            id,
-            session_id,
-            progress,
-            worker_eligibility,
-        ));
+        let decision = policy.admit(
+            AdmissionRequest::with_progress(id, session_id, progress, worker_eligibility)
+                .with_pinned_worker(pinned_worker),
+        );
         Some((ticket, updater, decision))
     }
 
@@ -600,6 +599,28 @@ impl<T> PolicyQueue<T> {
             );
         }
         actions
+    }
+
+    /// Reconcile one admission policy immediately after its newly deferred
+    /// request has entered host queue storage. This lets a now-complete cohort
+    /// become ready in the same actor turn; it does not infer completeness from
+    /// elapsed time.
+    pub(crate) fn reconcile_admission_class(
+        &mut self,
+        class_index: usize,
+    ) -> Vec<ClassAdmissionAction> {
+        let Some(scheduled) = &mut self.classes[class_index].admission_policy else {
+            return Vec::new();
+        };
+        scheduled
+            .policy
+            .on_event(AdmissionEvent::Reconcile)
+            .into_iter()
+            .map(|action| ClassAdmissionAction {
+                class_index,
+                action,
+            })
+            .collect()
     }
 
     fn admission_event(
@@ -1351,8 +1372,8 @@ policy_classes:
         .unwrap();
         let eligibility = || WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([]));
 
-        let first = queue.admit(0, None, 1, eligibility()).unwrap().0.id;
-        let second = queue.admit(1, None, 1, eligibility()).unwrap().0.id;
+        let first = queue.admit(0, None, 1, None, eligibility()).unwrap().0.id;
+        let second = queue.admit(1, None, 1, None, eligibility()).unwrap().0.id;
 
         assert_ne!(first, second);
     }

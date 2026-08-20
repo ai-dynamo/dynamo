@@ -16,9 +16,10 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestLifecycleLease,
-        RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
-        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
+        AdmissionCohort, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
+        RequestLifecycleLease, RequestProgressUpdater, ScheduleMode, ScheduleRequest,
+        TieredOverlapRefresher, effective_prefill_tokens,
+        overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
 use dynamo_runtime::{
@@ -136,6 +137,7 @@ pub enum FindBestMatchOutcome {
         effective_overlap_blocks: f64,
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
+        admission_cohort: Option<AdmissionCohort>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -890,6 +892,7 @@ where
                 effective_overlap_blocks: response.effective_overlap_blocks,
                 cached_tokens: response.cached_tokens,
                 routing_hashes,
+                admission_cohort: response.admission_cohort,
             },
             lifecycle,
         ))

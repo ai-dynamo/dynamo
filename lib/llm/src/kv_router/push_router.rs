@@ -3,7 +3,10 @@
 
 use std::{sync::Arc, time::Duration};
 
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::{
+    protocols::{TokensWithHashes, WorkerWithDpRank},
+    scheduling::{AdmissionCohort, RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS},
+};
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -39,6 +42,36 @@ use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
+const PREFILL_COHORT_ANNOTATION_PREFIX: &str = "sglang_prefill_cohort_v1:";
+const RANK_BALANCED_PASSTHROUGH_ANNOTATION: &str =
+    "sglang_prefill_rank_balanced_admission_v1:passthrough";
+
+fn append_prefill_admission_cohort(
+    phase: RequestPhase,
+    annotations: &mut Vec<String>,
+    cohort: &AdmissionCohort,
+) -> Result<(), Error> {
+    if phase != RequestPhase::Prefill {
+        return Err(anyhow::anyhow!(
+            "admission cohort was assigned outside the prefill phase"
+        ));
+    }
+    if annotations
+        .iter()
+        .any(|annotation| annotation.starts_with(PREFILL_COHORT_ANNOTATION_PREFIX))
+    {
+        return Err(anyhow::anyhow!(
+            "request already contains an explicit prefill cohort annotation"
+        ));
+    }
+    let payload = serde_json::json!({
+        "id": cohort.id(),
+        "size": cohort.size(),
+        "index": cohort.index(),
+    });
+    annotations.push(format!("{PREFILL_COHORT_ANNOTATION_PREFIX}{payload}"));
+    Ok(())
+}
 
 fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
@@ -150,7 +183,17 @@ impl KvPushRouter {
         affinity_worker: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
-        let policy_class = request.metadata().get("policy-class").cloned();
+        let policy_class = if request.is_probe
+            || request.has_annotation(RANK_BALANCED_PASSTHROUGH_ANNOTATION)
+            || request
+                .annotations
+                .iter()
+                .any(|annotation| annotation.starts_with(PREFILL_COHORT_ANNOTATION_PREFIX))
+        {
+            Some(RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS.to_string())
+        } else {
+            request.metadata().get("policy-class").cloned()
+        };
         let session_id = request
             .agent_context
             .as_ref()
@@ -344,6 +387,14 @@ impl KvPushRouter {
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
         let (mut backend_input, context) = request.into_parts();
+        if let Some(cohort) = selection.admission_cohort.as_ref() {
+            if let Err(error) =
+                append_prefill_admission_cohort(phase, &mut backend_input.annotations, cohort)
+            {
+                guard.abort().await;
+                return Err(error);
+            }
+        }
         backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
         let updated_request = context.map(|_| backend_input);
         guard.record_prefill_start();
@@ -697,6 +748,40 @@ mod tests {
             .output_options(Default::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn prefill_admission_cohort_annotation_is_versioned_and_exact() {
+        let cohort = AdmissionCohort::new("wave-7".to_string(), 4, 2).unwrap();
+        let mut annotations = vec!["unrelated".to_string()];
+        append_prefill_admission_cohort(RequestPhase::Prefill, &mut annotations, &cohort).unwrap();
+
+        let encoded = annotations.last().unwrap();
+        let payload = encoded
+            .strip_prefix(PREFILL_COHORT_ANNOTATION_PREFIX)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(payload["id"], "wave-7");
+        assert_eq!(payload["size"], 4);
+        assert_eq!(payload["index"], 2);
+    }
+
+    #[test]
+    fn prefill_admission_cohort_rejects_duplicate_or_wrong_phase() {
+        let cohort = AdmissionCohort::new("wave-7".to_string(), 4, 2).unwrap();
+        let mut duplicate = vec![format!(
+            "{PREFILL_COHORT_ANNOTATION_PREFIX}{{\"id\":\"client\",\"size\":4,\"index\":2}}"
+        )];
+        let error = append_prefill_admission_cohort(RequestPhase::Prefill, &mut duplicate, &cohort)
+            .unwrap_err();
+        assert!(error.to_string().contains("already contains"));
+
+        let mut annotations = Vec::new();
+        let error =
+            append_prefill_admission_cohort(RequestPhase::Aggregated, &mut annotations, &cohort)
+                .unwrap_err();
+        assert!(error.to_string().contains("outside the prefill phase"));
+        assert!(annotations.is_empty());
     }
 
     struct NoopSequencePublisher;

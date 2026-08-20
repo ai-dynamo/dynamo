@@ -18,7 +18,7 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
-use crate::scheduling::queue_admission::RequestProgressUpdater;
+use crate::scheduling::queue_admission::{AdmissionCohort, RequestProgressUpdater};
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
@@ -79,6 +79,8 @@ pub struct SchedulingResponse {
     pub request_progress: Option<RequestProgressUpdater>,
     pub lifecycle_lease: Option<super::queue::RequestLifecycleLease>,
     pub potential_decode_blocks: usize,
+    /// Atomic backend admission transaction assigned by the scheduler policy.
+    pub admission_cohort: Option<AdmissionCohort>,
 }
 
 #[derive(Debug, Clone)]

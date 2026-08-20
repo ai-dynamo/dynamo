@@ -21,7 +21,7 @@ use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::{
-    AdmissionAction, AdmissionDecision, AdmissionTicket, ClassAdmissionAction,
+    AdmissionAction, AdmissionCohort, AdmissionDecision, AdmissionTicket, ClassAdmissionAction,
     PolicyClassAdmissionPolicies, RequestProgressUpdater, WorkerEligibility,
     WorkerEligibilitySnapshot, WorkerPlacement,
 };
@@ -64,6 +64,7 @@ struct QueuedRequest {
 struct RequestAdmission {
     ticket: AdmissionTicket,
     progress: RequestProgressUpdater,
+    cohort: Option<AdmissionCohort>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -850,10 +851,18 @@ impl<
                     admission_class_index,
                     request.session_id.as_deref(),
                     request.isl_tokens,
+                    request.pinned_worker,
                     worker_eligibility,
                 )
                 .map(|(ticket, progress, decision)| {
-                    (RequestAdmission { ticket, progress }, decision)
+                    (
+                        RequestAdmission {
+                            ticket,
+                            progress,
+                            cohort: None,
+                        },
+                        decision,
+                    )
                 })
         } else {
             None
@@ -967,7 +976,15 @@ impl<
         self.pending_isl_tokens
             .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.add_class_counters(queue_class_index, snapshot);
-        (false, true)
+        let made_ready = if deferred {
+            let actions = self
+                .pending
+                .reconcile_admission_class(admission_class_index);
+            self.apply_admission_actions(actions)
+        } else {
+            false
+        };
+        (made_ready, true)
     }
 
     fn should_queue(
@@ -1146,7 +1163,11 @@ impl<
         let mut made_ready = false;
         let mut actions: VecDeque<_> = actions.into_iter().collect();
         while let Some(class_action) = actions.pop_front() {
-            let AdmissionAction::MakeReady { id, placement } = class_action.action;
+            let AdmissionAction::MakeReady {
+                id,
+                placement,
+                cohort,
+            } = class_action.action;
 
             let prepared = {
                 let Some(queued) = self
@@ -1162,48 +1183,53 @@ impl<
                 match apply_admission_placement(&mut queued.request, placement) {
                     Err(error) => Err(error),
                     Ok(()) => {
-                        let effective_placement = queued
-                            .request
-                            .pinned_worker
-                            .map_or(placement, WorkerPlacement::Exact);
-                        let replacement =
-                            if matches!(effective_placement, WorkerPlacement::Exact(_)) {
-                                let workers = self.workers_with_configs.borrow();
-                                Some((
-                                    Self::snapshot_for_with(&queued.request, &workers),
-                                    queued
-                                        .enqueue_at
-                                        .duration_since(self.start_time)
-                                        .as_secs_f64(),
-                                    queued.request.priority_jump,
-                                ))
-                            } else {
-                                None
-                            };
-                        let target_class_index = replacement.as_ref().map_or(
-                            class_action.class_index,
-                            |(snapshot, _, _)| {
-                                self.profile.resolve_class_index(
-                                    queued.request.policy_class.as_deref(),
-                                    snapshot.uncached_tokens,
-                                )
-                            },
-                        );
-                        let request_id =
-                            (target_class_index != class_action.class_index).then(|| {
-                                queued
+                        match apply_admission_cohort(queued.admission.as_mut(), placement, cohort) {
+                            Err(error) => Err(error),
+                            Ok(()) => {
+                                let effective_placement = queued
                                     .request
-                                    .mode
-                                    .tracked_request_id()
-                                    .expect("admitted request is tracked")
-                                    .to_owned()
-                            });
-                        Ok((
-                            effective_placement,
-                            target_class_index,
-                            replacement,
-                            request_id,
-                        ))
+                                    .pinned_worker
+                                    .map_or(placement, WorkerPlacement::Exact);
+                                let replacement =
+                                    if matches!(effective_placement, WorkerPlacement::Exact(_)) {
+                                        let workers = self.workers_with_configs.borrow();
+                                        Some((
+                                            Self::snapshot_for_with(&queued.request, &workers),
+                                            queued
+                                                .enqueue_at
+                                                .duration_since(self.start_time)
+                                                .as_secs_f64(),
+                                            queued.request.priority_jump,
+                                        ))
+                                    } else {
+                                        None
+                                    };
+                                let target_class_index = replacement.as_ref().map_or(
+                                    class_action.class_index,
+                                    |(snapshot, _, _)| {
+                                        self.profile.resolve_class_index(
+                                            queued.request.policy_class.as_deref(),
+                                            snapshot.uncached_tokens,
+                                        )
+                                    },
+                                );
+                                let request_id = (target_class_index != class_action.class_index)
+                                    .then(|| {
+                                        queued
+                                            .request
+                                            .mode
+                                            .tracked_request_id()
+                                            .expect("admitted request is tracked")
+                                            .to_owned()
+                                    });
+                                Ok((
+                                    effective_placement,
+                                    target_class_index,
+                                    replacement,
+                                    request_id,
+                                ))
+                            }
+                        }
                     }
                 }
             };
@@ -1451,9 +1477,13 @@ impl<
             }
         };
 
-        let (admission, request_progress) = match admission {
-            Some(RequestAdmission { ticket, progress }) => (Some(ticket), Some(progress)),
-            None => (None, None),
+        let (admission, request_progress, admission_cohort) = match admission {
+            Some(RequestAdmission {
+                ticket,
+                progress,
+                cohort,
+            }) => (Some(ticket), Some(progress), cohort),
+            None => (None, None, None),
         };
 
         let response = SchedulingResponse {
@@ -1464,6 +1494,7 @@ impl<
             request_progress,
             lifecycle_lease: None,
             potential_decode_blocks: selection.potential_decode_blocks,
+            admission_cohort,
         };
 
         if !request.mode.is_tracked() {
@@ -1688,6 +1719,33 @@ fn apply_admission_placement(
     request.eligibility().validate_pinned_worker_allowed()
 }
 
+fn apply_admission_cohort(
+    admission: Option<&mut RequestAdmission>,
+    placement: WorkerPlacement,
+    cohort: Option<AdmissionCohort>,
+) -> Result<(), KvSchedulerError> {
+    let Some(cohort) = cohort else {
+        return Ok(());
+    };
+    if matches!(placement, WorkerPlacement::Any) {
+        return Err(KvSchedulerError::BookingFailed(
+            "admission cohort requires exact worker placement".to_string(),
+        ));
+    }
+    let Some(admission) = admission else {
+        return Err(KvSchedulerError::BookingFailed(
+            "admission cohort action targets an unmanaged request".to_string(),
+        ));
+    };
+    if admission.cohort.is_some() {
+        return Err(KvSchedulerError::BookingFailed(
+            "request received multiple admission cohort assignments".to_string(),
+        ));
+    }
+    admission.cohort = Some(cohort);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -1707,7 +1765,7 @@ mod tests {
     use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
     use crate::scheduling::{
         AdmissionEvent, AdmissionId, AdmissionRequest, PolicyClassAdmissionPolicy,
-        RefreshedOverlap, RequestProgress, RouterPolicyConfig,
+        RankBalancedCohortAdmissionPolicy, RefreshedOverlap, RequestProgress, RouterPolicyConfig,
     };
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -2351,6 +2409,7 @@ mod tests {
                         vec![AdmissionAction::MakeReady {
                             id,
                             placement: WorkerPlacement::Exact(WorkerWithDpRank::new(0, 0)),
+                            cohort: None,
                         }]
                     })
                     .unwrap_or_default(),
@@ -2441,6 +2500,131 @@ policy_classes:
             .unwrap(),
         );
         (queue, slots)
+    }
+
+    fn make_rank_balanced_queue() -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let profile = policy_profile(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: standard
+    policy_family: standard
+    cache_bucket: all
+    prefill_busy_threshold: 0
+    quantum: 1
+"#,
+        );
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            16,
+            HashMap::from([(0, (0, 4))]),
+            false,
+            0,
+            "prefill",
+        ));
+        let (_cfg_tx, cfg_rx) = watch::channel(HashMap::from([(
+            0,
+            SimpleWorkerConfig {
+                data_parallel_size: 4,
+                max_num_batched_tokens: Some(1_000),
+                ..Default::default()
+            },
+        )]));
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert(
+            "standard".to_owned(),
+            Box::new(RankBalancedCohortAdmissionPolicy::new(4, 9).unwrap()),
+        );
+        let queue = Arc::new(
+            SchedulerQueue::new_with_policy_profile(
+                Arc::clone(&slots),
+                cfg_rx,
+                profile,
+                16,
+                DefaultWorkerSelector::new(None, "prefill"),
+                None,
+                None,
+                None,
+                Duration::from_secs(60),
+                policies,
+            )
+            .unwrap(),
+        );
+        (queue, slots)
+    }
+
+    #[tokio::test]
+    async fn rank_balanced_cohort_is_placed_and_released_in_one_actor_turn() {
+        let (queue, slots) = make_rank_balanced_queue();
+        let mut responses = Vec::new();
+        let mut leases = Vec::new();
+        for index in 0..3 {
+            let (request, response) = make_admission_request(&format!("cohort-{index}"), 64);
+            leases.push(enqueue_with_lease(&queue, request).await);
+            responses.push(response);
+        }
+        assert_eq!(queue.pending_count(), 3);
+        assert!(responses.iter_mut().all(|response| matches!(
+            response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        )));
+
+        let (request, response) = make_admission_request("cohort-3", 64);
+        leases.push(enqueue_with_lease(&queue, request).await);
+        responses.push(response);
+
+        let mut ranks = Vec::new();
+        let mut cohort_ids = HashSet::new();
+        for response in responses {
+            let selected = tokio::time::timeout(Duration::from_secs(1), response)
+                .await
+                .expect("complete cohort did not release in the enqueue actor turn")
+                .unwrap()
+                .unwrap();
+            ranks.push(selected.best_worker.dp_rank);
+            let cohort = selected
+                .admission_cohort
+                .expect("rank-balanced selection must carry cohort metadata");
+            assert_eq!(cohort.size(), 4);
+            assert_eq!(cohort.index(), selected.best_worker.dp_rank);
+            cohort_ids.insert(cohort.id().to_owned());
+        }
+        ranks.sort_unstable();
+        assert_eq!(ranks, vec![0, 1, 2, 3]);
+        assert_eq!(cohort_ids.len(), 1);
+        assert_eq!(queue.pending_count(), 0);
+
+        drop(leases);
+        queue.update().await;
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test]
+    async fn rank_balanced_exact_pin_bypasses_without_waiting_for_other_ranks() {
+        let (queue, slots) = make_rank_balanced_queue();
+        let (mut request, response) = make_admission_request("pinned-affinity", 64);
+        let pinned = WorkerWithDpRank::new(0, 2);
+        request.pinned_worker = Some(pinned);
+        let lease = enqueue_with_lease(&queue, request).await;
+
+        let selected = tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .expect("exact affinity pin was incorrectly held for a full-rank cohort")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.best_worker, pinned);
+        assert!(selected.admission_cohort.is_none());
+        assert_eq!(queue.pending_count(), 0);
+
+        drop(lease);
+        queue.update().await;
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test]
@@ -2885,6 +3069,7 @@ policy_classes:
                     vec![AdmissionAction::MakeReady {
                         id,
                         placement: WorkerPlacement::Any,
+                        cohort: None,
                     }]
                 })
                 .unwrap_or_default()
@@ -2942,6 +3127,7 @@ policy_classes:
                     vec![AdmissionAction::MakeReady {
                         id,
                         placement: WorkerPlacement::Any,
+                        cohort: None,
                     }]
                 })
                 .unwrap_or_default()

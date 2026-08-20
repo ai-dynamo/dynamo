@@ -36,8 +36,10 @@ pub use prefill_load::{
 };
 pub use queue::RequestLifecycleLease;
 pub use queue_admission::{
-    AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionPolicyConfig,
-    AdmissionRequest, PolicyClassAdmissionPolicies, PolicyClassAdmissionPolicy, RequestProgress,
+    AdmissionAction, AdmissionCohort, AdmissionDecision, AdmissionEvent, AdmissionId,
+    AdmissionPolicyConfig, AdmissionRequest, PolicyClassAdmissionPolicies,
+    PolicyClassAdmissionPolicy, RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS,
+    RANK_BALANCED_COHORT_POLICY_TYPE, RankBalancedCohortAdmissionPolicy, RequestProgress,
     RequestProgressUpdater, WorkerEligibility, WorkerEligibilitySnapshot, WorkerPlacement,
 };
 pub use types::*;
