@@ -1494,7 +1494,11 @@ jobs:
     steps:
       - name: "Check all deploy test jobs"
         run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
+          # "cancelled" is deliberately not accepted: a job killed by its own
+          # timeout-minutes (pods that never reach Ready, a hung port-forward)
+          # is reported as cancelled, not failure, so allowing it would report
+          # deploy tests that never ran as green.
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   # ============================================================================
   # CLEANUP JOBS
@@ -1523,7 +1527,12 @@ jobs:
 
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
-    if: always() && github.event_name != 'workflow_dispatch'
+    # Not always(): deploy-status-check no longer accepts "cancelled", so a
+    # human cancelling this run now turns the gate red and would page Slack
+    # about a pipeline someone stopped on purpose. cancelled() is run-level,
+    # while a job killed by its own timeout-minutes is not, so the timeout
+    # case this gate exists to catch still notifies.
+    if: ${{ !cancelled() && github.event_name != 'workflow_dispatch' }}
     needs: [ deploy-status-check ]
     permissions:
       contents: read

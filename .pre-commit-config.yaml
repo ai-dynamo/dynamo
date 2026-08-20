@@ -188,6 +188,22 @@ repos:
       pass_filenames: false
       additional_dependencies:
         - pyyaml
+    - id: validate-ci-status-gates
+      name: Check CI status-check gates reject cancelled jobs
+      entry: python3 scripts/validate_ci_status_gates.py
+      language: python
+      files: ^(\.github/workflows/|scripts/validate_ci_status_gates\.py$)
+      pass_filenames: false
+      additional_dependencies:
+        - pyyaml
+    - id: validate-ci-status-gates-selftest
+      name: Self-test the CI status-gate parser
+      entry: python3 scripts/validate_ci_status_gates.py --test
+      language: python
+      files: ^scripts/validate_ci_status_gates\.py$
+      pass_filenames: false
+      additional_dependencies:
+        - pyyaml
     - id: DCO check
       name: Checks the commit message for a developer certificate of origin signature
       entry: python3 scripts/dco_check.py

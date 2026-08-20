@@ -126,6 +126,9 @@ ignore:
   - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
   - 'scripts/validate_skills.py'
+  # Status-gate allowlist validator. Runs from pre-commit on workflow changes
+  # and self-tests its own parser, so it needs no backend CI of its own.
+  - 'scripts/validate_ci_status_gates.py'
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
