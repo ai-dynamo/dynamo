@@ -118,7 +118,9 @@ impl OwnedResponseState {
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineResponse, OwnedResponseState};
+    use super::{EngineResponse, MockEngineResponse, OwnedResponseState, ProcessorCore};
+    use crate::push_egress::response_channel;
+    use futures::StreamExt;
     use serde_json::json;
 
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}
@@ -209,5 +211,93 @@ mod tests {
         });
 
         assert_eq!(frames, vec![json!({"token_ids": [1], "index": 0})]);
+    }
+
+    #[test]
+    fn processor_interleaves_clients_without_reordering_each_stream() {
+        let processor = ProcessorCore::default();
+        let (sender_a, stream_a) = response_channel::<serde_json::Value>(8);
+        let (sender_b, stream_b) = response_channel::<serde_json::Value>(8);
+        processor
+            .register(10, 2, 1, sender_a.sink(), 0.0)
+            .expect("register client 10");
+        processor
+            .register(20, 1, 1, sender_b.sink(), 0.0)
+            .expect("register client 20");
+
+        let first = processor.process_batch(vec![
+            MockEngineResponse::tokens(10, vec![vec![1]], false),
+            MockEngineResponse::tokens(20, vec![vec![7]], false),
+        ]);
+        assert!(first.completed_client_ids.is_empty());
+        assert_eq!(first.responses_processed, 2);
+
+        let final_batch = processor.process_batch(vec![
+            MockEngineResponse::tokens(20, vec![vec![8]], true),
+            MockEngineResponse::tokens(10, vec![vec![2, 3]], true),
+        ]);
+        assert_eq!(final_batch.completed_client_ids, vec![20, 10]);
+
+        let frames_a = futures::executor::block_on(stream_a.collect::<Vec<_>>());
+        let frames_b = futures::executor::block_on(stream_b.collect::<Vec<_>>());
+        assert_eq!(
+            frames_a[0].data,
+            Some(json!({"token_ids": [1], "index": 0}))
+        );
+        assert_eq!(
+            frames_a[1].data.as_ref().unwrap()["token_ids"],
+            json!([2, 3])
+        );
+        assert_eq!(
+            frames_b[0].data,
+            Some(json!({"token_ids": [7], "index": 0}))
+        );
+        assert_eq!(frames_b[1].data.as_ref().unwrap()["token_ids"], json!([8]));
+        assert_eq!(processor.active_requests(), 0);
+    }
+
+    #[test]
+    fn processor_closes_errors_and_ignores_late_responses() {
+        let processor = ProcessorCore::default();
+        let (sender, stream) = response_channel::<serde_json::Value>(2);
+        processor
+            .register(30, 0, 1, sender.sink(), 0.0)
+            .expect("register client 30");
+
+        let error = processor.process_batch(vec![MockEngineResponse::error(
+            30,
+            "engine failed".to_string(),
+        )]);
+        assert_eq!(error.completed_client_ids, vec![30]);
+        let late =
+            processor.process_batch(vec![MockEngineResponse::tokens(30, vec![vec![99]], true)]);
+        assert_eq!(late.responses_dropped, 1);
+
+        let frames = futures::executor::block_on(stream.collect::<Vec<_>>());
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].is_error());
+        assert!(
+            frames[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("engine failed")
+        );
+    }
+
+    #[test]
+    fn duplicate_registration_is_rejected() {
+        let processor = ProcessorCore::default();
+        let (sender, _stream) = response_channel::<serde_json::Value>(2);
+        let sink = sender.sink();
+        processor
+            .register(40, 0, 1, sink.clone(), 0.0)
+            .expect("first registration");
+
+        let error = processor
+            .register(40, 0, 1, sink, 0.0)
+            .expect_err("duplicate must fail");
+        assert!(error.contains("already registered"));
     }
 }
