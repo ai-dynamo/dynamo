@@ -15,10 +15,13 @@ import argparse
 import importlib
 import logging
 import os
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from gpu_memory_service.cli.snapshot import should_fan_out_v1
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
@@ -30,6 +33,48 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _run_v1_loaders(argv: list[str]) -> None:
+    init_vmm(VMMDeviceType.CUDA)
+    devices = get_vmm().list_devices()
+    processes: list[subprocess.Popen] = []
+    try:
+        for device in devices:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "gpu_memory_service.v1.snapshot.loader",
+                    *argv,
+                    "--device",
+                    str(device),
+                ]
+            )
+            logger.info(
+                "Started GMS V1 loader device=%d pid=%d",
+                device,
+                process.pid,
+            )
+            processes.append(process)
+
+        pending = list(processes)
+        while pending:
+            for process in list(pending):
+                exit_code = process.poll()
+                if exit_code is None:
+                    continue
+                if exit_code:
+                    raise SystemExit(exit_code)
+                pending.remove(process)
+            if pending:
+                time.sleep(1)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+        for process in processes:
+            process.wait()
 
 
 def _load_device(
@@ -163,8 +208,11 @@ def main(argv: list[str] | None = None) -> None:
     selector.add_argument("--use-v1", action="store_true")
     options, remaining = selector.parse_known_args(argv)
     if options.use_v1:
-        v1_loader = importlib.import_module("gpu_memory_service.v1.snapshot.loader")
-        v1_loader.main(remaining)
+        if should_fan_out_v1(remaining):
+            _run_v1_loaders(remaining)
+        else:
+            v1_loader = importlib.import_module("gpu_memory_service.v1.snapshot.loader")
+            v1_loader.main(remaining)
         return
 
     parser = _build_parser()

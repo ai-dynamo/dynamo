@@ -19,6 +19,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from gpu_memory_service.cli.snapshot import should_fan_out_v1
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
@@ -167,14 +168,9 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     selector.add_argument("--use-v1", action="store_true")
-    selector.add_argument("--all-devices", action="store_true")
     options, remaining = selector.parse_known_args(argv)
-    if options.all_devices and not options.use_v1:
-        selector.error("--all-devices requires --use-v1")
     if options.use_v1:
-        if options.all_devices and not any(
-            argument in {"-h", "--help"} for argument in remaining
-        ):
+        if should_fan_out_v1(remaining):
             _run_v1_savers(remaining)
         else:
             v1_saver = importlib.import_module("gpu_memory_service.v1.snapshot.saver")

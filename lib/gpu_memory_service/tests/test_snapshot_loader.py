@@ -3,6 +3,8 @@
 
 """Unit tests for the GMS snapshot loader CLI."""
 
+from types import SimpleNamespace
+
 import pytest
 from _deps import HAS_GMS
 
@@ -114,3 +116,83 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
             "clear_existing": True,
         },
     )
+
+
+class _ExitedProcess:
+    def __init__(self, command: list[str]) -> None:
+        self.command = command
+        self.pid = 1
+
+    def poll(self) -> int:
+        return 0
+
+    def terminate(self) -> None:
+        return None
+
+    def wait(self) -> int:
+        return 0
+
+
+def test_v1_loader_defaults_to_all_visible_devices(monkeypatch):
+    started: list[list[str]] = []
+
+    monkeypatch.setattr(loader, "init_vmm", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        loader, "get_vmm", lambda: SimpleNamespace(list_devices=lambda: [0, 2])
+    )
+    monkeypatch.setattr(
+        loader.subprocess,
+        "Popen",
+        lambda command: started.append(command) or _ExitedProcess(command),
+    )
+
+    loader.main(
+        ["--use-v1", "--checkpoint-dir", "/ckpt", "--transfer-backend", "nixl-gds"]
+    )
+
+    assert [command[-2:] for command in started] == [
+        ["--device", "0"],
+        ["--device", "2"],
+    ]
+    assert all(
+        "gpu_memory_service.v1.snapshot.loader" in command for command in started
+    )
+    assert all(
+        "--checkpoint-dir" in command and "/ckpt" in command for command in started
+    )
+
+
+def test_v1_loader_device_flag_stays_rank_local(monkeypatch):
+    calls: list[tuple[str, list[str]]] = []
+
+    monkeypatch.setattr(
+        loader.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(main=lambda argv: calls.append((name, argv))),
+    )
+
+    loader.main(
+        [
+            "--use-v1",
+            "--checkpoint-dir",
+            "/ckpt",
+            "--device",
+            "1",
+            "--transfer-backend",
+            "nixl-gds",
+        ]
+    )
+
+    assert calls == [
+        (
+            "gpu_memory_service.v1.snapshot.loader",
+            [
+                "--checkpoint-dir",
+                "/ckpt",
+                "--device",
+                "1",
+                "--transfer-backend",
+                "nixl-gds",
+            ],
+        )
+    ]

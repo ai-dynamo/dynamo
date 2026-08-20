@@ -73,6 +73,161 @@ def test_v1_cli_dispatches_cuda_only_child(monkeypatch, capsys):
     assert "--use-v1 only supports --device-type=cuda" in capsys.readouterr().err
 
 
+def test_loader_command_injects_device_only_when_fanning_out():
+    remainder = ["--checkpoint-dir", "/ckpt", "--transfer-backend", "nixl-gds"]
+    assert server._loader_command(remainder, 1) == [
+        sys.executable,
+        "-m",
+        "gpu_memory_service.v1.snapshot.loader",
+        "--checkpoint-dir",
+        "/ckpt",
+        "--transfer-backend",
+        "nixl-gds",
+        "--device",
+        "1",
+    ]
+    assert server._loader_command(remainder + ["--device", "3"]) == [
+        sys.executable,
+        "-m",
+        "gpu_memory_service.v1.snapshot.loader",
+        "--checkpoint-dir",
+        "/ckpt",
+        "--transfer-backend",
+        "nixl-gds",
+        "--device",
+        "3",
+    ]
+
+
+def test_enable_loader_requires_use_v1(capsys):
+    with pytest.raises(SystemExit):
+        server.main(["--enable-loader", "--checkpoint-dir", "/ckpt"])
+    assert "--enable-loader requires --use-v1" in capsys.readouterr().err
+
+
+def test_enable_loader_cannot_combine_with_probe(capsys):
+    with pytest.raises(SystemExit):
+        server.main(["--use-v1", "--probe-restore-ready", "--enable-loader"])
+    assert "--probe-restore-ready cannot be combined with --enable-loader" in (
+        capsys.readouterr().err
+    )
+
+
+def test_enable_loader_defaults_to_all_visible_devices(monkeypatch):
+    started: list[list[str]] = []
+    supervised: list[tuple[int, int]] = []
+
+    class _Process:
+        def __init__(self, command: list[str]) -> None:
+            started.append(command)
+            self.pid = len(started)
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+    monkeypatch.setattr(server, "init_vmm", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        server,
+        "get_vmm",
+        lambda: SimpleNamespace(list_devices=lambda: [0, 1]),
+    )
+    monkeypatch.setattr(server.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(server.subprocess, "Popen", _Process)
+    monkeypatch.setattr(
+        server,
+        "_supervise",
+        lambda servers, loaders=None: (
+            supervised.append((len(servers), len(loaders or []))) or 0
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        server.main(
+            [
+                "--use-v1",
+                "--enable-loader",
+                "--checkpoint-dir",
+                "/ckpt",
+                "--transfer-backend",
+                "nixl-gds",
+            ]
+        )
+
+    assert exc.value.code == 0
+    assert supervised == [(2, 2)]
+    loader_commands = [
+        command
+        for command in started
+        if "gpu_memory_service.v1.snapshot.loader" in command
+    ]
+    assert [command[-2:] for command in loader_commands] == [
+        ["--device", "0"],
+        ["--device", "1"],
+    ]
+    assert all(
+        "--checkpoint-dir" in command and "/ckpt" in command
+        for command in loader_commands
+    )
+
+
+def test_enable_loader_device_flag_starts_one_loader(monkeypatch):
+    started: list[list[str]] = []
+    supervised: list[tuple[int, int]] = []
+
+    class _Process:
+        def __init__(self, command: list[str]) -> None:
+            started.append(command)
+            self.pid = len(started)
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+    monkeypatch.setattr(server, "init_vmm", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        server,
+        "get_vmm",
+        lambda: SimpleNamespace(list_devices=lambda: [0, 1]),
+    )
+    monkeypatch.setattr(server.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(server.subprocess, "Popen", _Process)
+    monkeypatch.setattr(
+        server,
+        "_supervise",
+        lambda servers, loaders=None: (
+            supervised.append((len(servers), len(loaders or []))) or 0
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        server.main(
+            [
+                "--use-v1",
+                "--enable-loader",
+                "--checkpoint-dir",
+                "/ckpt",
+                "--device",
+                "1",
+            ]
+        )
+
+    assert exc.value.code == 0
+    assert supervised == [(2, 1)]
+    loader_commands = [
+        command
+        for command in started
+        if "gpu_memory_service.v1.snapshot.loader" in command
+    ]
+    assert len(loader_commands) == 1
+    assert loader_commands[0].count("--device") == 1
+    assert loader_commands[0][-2:] == ["--device", "1"]
+
+
 def test_v1_socket_path_rejects_af_unix_overflow(monkeypatch):
     monkeypatch.setenv("GMS_SOCKET_DIR", "/" + "s" * 200)
     monkeypatch.setattr(v1_device, "get_device_uuid", lambda _device: "GPU-0")
