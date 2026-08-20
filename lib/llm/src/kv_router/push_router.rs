@@ -755,6 +755,7 @@ where
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(&request, phase)?;
+        let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         if policy == BuiltinRoutingPolicy::Direct && explicit.is_none() {
             anyhow::bail!("worker ID required for {phase} request in Direct routing mode");
         }
@@ -844,6 +845,31 @@ where
                         guard.retarget_worker(worker_id)?;
                         let target = AffinityTarget::new(worker_id, None);
                         request.routing_mut().dp_rank = None;
+                        prepare(request, target).map(|metadata| (metadata, target))
+                    },
+                ),
+            )
+            .await
+            .and_then(|result| result)
+            .map(|((metadata, target), stream)| (metadata, target, stream))
+        } else if policy == BuiltinRoutingPolicy::Direct && !has_affinity_session {
+            // Preserve the old Direct adapter's transport fallback. This is intentionally only
+            // for a standalone Direct request: an active affinity session owns a hard binding
+            // and must not silently move to a different worker.
+            let target = pinned_target.expect("Direct routing requires an explicit target");
+            cancel_on_stop(
+                request_context.as_ref(),
+                self.inner.direct_within_prepared(
+                    request,
+                    target.worker_id,
+                    None,
+                    |request, worker_id| {
+                        guard.retarget_worker(worker_id)?;
+                        let target = AffinityTarget::new(
+                            worker_id,
+                            target.dp_rank.filter(|_| worker_id == target.worker_id),
+                        );
+                        request.routing_mut().dp_rank = target.dp_rank;
                         prepare(request, target).map(|metadata| (metadata, target))
                     },
                 ),
