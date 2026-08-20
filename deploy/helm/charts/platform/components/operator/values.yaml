@@ -133,6 +133,11 @@ dynamo:
       # true=always create (use for helm template / GitOps workflows),
       # false=never create
       enabled: null
+      # -- Path scraped on the frontend HTTP port. Must match the frontend's
+      # DYN_HTTP_SVC_METRICS_PATH, or the scrape 404s and every dynamo_frontend_*
+      # series goes missing. Applies only to the endpoints that scrape a frontend
+      # HTTP service; the system port always serves /metrics.
+      frontendPath: /metrics
       # -- Enable the NIXL telemetry metrics collection on workers.
       # Requires workers with NIXL_TELEMETRY_ENABLE=y in their environment
       nixlTelemetry: false
