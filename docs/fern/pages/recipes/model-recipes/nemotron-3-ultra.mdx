@@ -82,9 +82,9 @@ The Refresh manifests use the released `vllm-runtime:1.4.0` image pinned by dige
 | GB200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 140 | `vllm/disagg-gb200-agentic-256k-1p2d/deploy.yaml` |
 | GB200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 48 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
 | H200 | 256K | Disaggregated | 1P TP8 + 1D TP8 | 42 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
-| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | pending | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
+| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | 30 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
 
-The numeric disaggregated rows passed the complete exact-count trace and all three SLA gates. H200 1M is still qualifying a lower-concurrency 1P1D point after CC32 missed the TTFT gate.
+The numeric disaggregated rows passed the complete exact-count trace and all three SLA gates. H200 1M selects CC30; CC32 is its first valid TTFT failure.
 
 The B200 and GB200 256K 1P2D profiles use FlashInfer attention; the H200 256K 1P1D profile uses FlashAttention. GB200 disaggregated profiles use GKE multi-network MRDMA.
 

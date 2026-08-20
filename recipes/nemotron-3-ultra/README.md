@@ -60,7 +60,7 @@ nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff931046210249
 | GB200 | 256K | 1P TP4 + 2D TP4 | disabled | 256 | 32768 | 140 | `vllm/disagg-gb200-agentic-256k-1p2d/deploy.yaml` |
 | GB200 | 1M | 1P TP4 + 1D TP4 | disabled | 256 | 49152 | 48 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
 | H200 | 256K | 1P TP8 + 1D TP8 | disabled | 256 | 24576 | 42 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
-| H200 | 1M | 1P TP8 + 1D TP8 | disabled | 256 | 24576 | pending | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
+| H200 | 1M | 1P TP8 + 1D TP8 | disabled | 256 | 24576 | 30 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
 
 The Refresh manifests enable KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and hybrid KV cache management. Expert Parallelism is disabled.
 
@@ -68,7 +68,7 @@ The H200 and B200 disaggregated profiles use UCX/RDMA and request one `rdma/ib` 
 
 The B200 and GB200 256K 1P2D profiles use FlashInfer attention; the H200 256K 1P1D profile uses FlashAttention. These explicit backends are part of the qualified configurations.
 
-The following selected disaggregated reference points passed all three gates on the complete 3,541-row agentic trace: 50 output tok/s/user, 5,000 ms p50 TTFT, and 20 ms p50 ITL. H200 1M remains in lower-concurrency qualification because its complete CC32 result missed the TTFT gate.
+The following selected disaggregated reference points passed all three gates on the complete 3,541-row agentic trace: 50 output tok/s/user, 5,000 ms p50 TTFT, and 20 ms p50 ITL. H200 1M selects CC30; CC32 is its first valid TTFT failure.
 
 | GPU | Context | Concurrency | Output tok/s/GPU | Output tok/s/user | TTFT p50 (ms) | ITL p50 (ms) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -77,6 +77,7 @@ The following selected disaggregated reference points passed all three gates on 
 | GB200 | 256K | 140 | 534.82 | 55.47 | 3342.87 | 18.026 |
 | GB200 | 1M | 48 | 270.93 | 50.55 | 1696.20 | 19.783 |
 | H200 | 256K | 42 | 124.94 | 50.75 | 422.92 | 19.703 |
+| H200 | 1M | 30 | 88.13 | 60.71 | 4309.32 | 16.470 |
 
 All six aggregate two-worker profiles are finalized on released Dynamo 1.4.0 with MNS 256. Each selected point passed the exact trace and is bracketed by a higher-load SLA failure.
 
