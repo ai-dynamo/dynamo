@@ -286,34 +286,26 @@ planner:
 
 sidecar:
   - 'lib/sidecar/**'
-  - '.github/workflows/shared-build-image.yml'
-  - '.github/actions/docker-remote-build/**'
   - '!**/*.md'
   - '!**/*.rst'
 
-# Engine-specific sidecar builds. Changes to common or to the shared image build
-# path exercise all three images; engine-local changes exercise only that image.
+# Engine-specific sidecar builds. Changes to common sidecar code exercise all
+# three images; engine-local changes exercise only that engine's image.
 vllm_sidecar:
   - 'lib/sidecar/common/**'
   - 'lib/sidecar/vllm/**'
-  - '.github/workflows/shared-build-image.yml'
-  - '.github/actions/docker-remote-build/**'
   - '!**/*.md'
   - '!**/*.rst'
 
 sglang_sidecar:
   - 'lib/sidecar/common/**'
   - 'lib/sidecar/sglang/**'
-  - '.github/workflows/shared-build-image.yml'
-  - '.github/actions/docker-remote-build/**'
   - '!**/*.md'
   - '!**/*.rst'
 
 trtllm_sidecar:
   - 'lib/sidecar/common/**'
   - 'lib/sidecar/trtllm/**'
-  - '.github/workflows/shared-build-image.yml'
-  - '.github/actions/docker-remote-build/**'
   - '!**/*.md'
   - '!**/*.rst'
 

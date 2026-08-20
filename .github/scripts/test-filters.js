@@ -142,13 +142,13 @@ const testCases = [
   },
   {
     file: '.github/workflows/shared-build-image.yml',
-    expect: { sidecar: true, vllm_sidecar: true, sglang_sidecar: true, trtllm_sidecar: true, core: true },
-    desc: 'shared image build workflow exercises all three sidecar container jobs'
+    expect: { sidecar: false, vllm_sidecar: false, sglang_sidecar: false, trtllm_sidecar: false, core: true },
+    desc: 'shared image build workflow does not trigger sidecar container jobs'
   },
   {
     file: '.github/actions/docker-remote-build/action.yml',
-    expect: { sidecar: true, vllm_sidecar: true, sglang_sidecar: true, trtllm_sidecar: true, core: true },
-    desc: 'shared remote build action exercises all three sidecar container jobs'
+    expect: { sidecar: false, vllm_sidecar: false, sglang_sidecar: false, trtllm_sidecar: false, core: true },
+    desc: 'shared remote build action does not trigger sidecar container jobs'
   },
 
   // Doc files should be excluded from core (negation patterns)
