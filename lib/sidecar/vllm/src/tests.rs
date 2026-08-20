@@ -612,7 +612,7 @@ fn oversized_logprob_counts_are_rejected() {
 }
 
 #[test]
-fn terminal_routed_experts_are_mapped_to_structured_engine_data() {
+fn terminal_routed_experts_are_mapped_to_native_numpy_engine_data() {
     let request = request();
     let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
     let mut response = sequence_response(true, true, None);
@@ -620,7 +620,6 @@ fn terminal_routed_experts_are_mapped_to_structured_engine_data() {
         data: vec![1, 2, 3, 4],
         shape: vec![2, 1, 2],
         dtype: "uint8".to_string(),
-        start: 3,
     });
 
     let output = state
@@ -632,12 +631,35 @@ fn terminal_routed_experts_are_mapped_to_structured_engine_data() {
             .engine_data
             .as_ref()
             .and_then(|data| data.get("routed_experts")),
-        Some(&json!({
-            "data": "AQIDBA==",
-            "shape": [2, 1, 2],
-            "start": 3,
-            "dtype": "uint8"
-        }))
+        Some(&json!(
+            "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoBAgME"
+        ))
+    );
+}
+
+#[test]
+fn terminal_uint16_routed_experts_preserve_numpy_dtype() {
+    let request = request();
+    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut response = sequence_response(true, true, None);
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::RoutedExperts {
+        data: vec![1, 0, 2, 0, 3, 0, 4, 0],
+        shape: vec![2, 1, 2],
+        dtype: "uint16".to_string(),
+    });
+
+    let output = state
+        .convert(response)
+        .expect("valid uint16 routed experts")
+        .expect("terminal output");
+    assert_eq!(
+        output
+            .engine_data
+            .as_ref()
+            .and_then(|data| data.get("routed_experts")),
+        Some(&json!(
+            "k05VTVBZAQB2AHsnZGVzY3InOiAnPHUyJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoBAAIAAwAEAA=="
+        ))
     );
 }
 
@@ -650,7 +672,6 @@ fn malformed_terminal_routed_experts_are_rejected() {
         data: vec![1],
         shape: vec![2, 1, 2],
         dtype: "uint8".to_string(),
-        start: 0,
     });
 
     let error = state
@@ -668,7 +689,6 @@ fn nonterminal_routed_experts_are_rejected() {
         data: vec![1],
         shape: vec![1, 1, 1],
         dtype: "uint8".to_string(),
-        start: 0,
     });
 
     let error = state
