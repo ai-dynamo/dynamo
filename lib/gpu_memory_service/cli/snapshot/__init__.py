@@ -5,19 +5,50 @@
 
 from __future__ import annotations
 
+import logging
+import subprocess
+import sys
+import time
 
-def has_device_argument(argv: list[str]) -> bool:
-    """Return True when argv names a single ``--device``.
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 
-    ``--device-type`` is not a device selector.
-    """
-    return any(
-        argument == "--device" or argument.startswith("--device=") for argument in argv
-    )
+logger = logging.getLogger(__name__)
 
 
-def should_fan_out_v1(argv: list[str]) -> bool:
-    """Fan out one V1 child per visible GPU unless the caller named a device."""
-    if any(argument in {"-h", "--help"} for argument in argv):
-        return False
-    return not has_device_argument(argv)
+def run_v1_per_device(module: str, argv: list[str], label: str) -> None:
+    init_vmm(VMMDeviceType.CUDA)
+    processes: list[subprocess.Popen] = []
+    try:
+        for device in get_vmm().list_devices():
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    module,
+                    *argv,
+                    "--device",
+                    str(device),
+                ]
+            )
+            logger.info(
+                "Started GMS V1 %s device=%d pid=%d", label, device, process.pid
+            )
+            processes.append(process)
+
+        pending = list(processes)
+        while pending:
+            for process in list(pending):
+                exit_code = process.poll()
+                if exit_code is None:
+                    continue
+                if exit_code:
+                    raise SystemExit(exit_code)
+                pending.remove(process)
+            if pending:
+                time.sleep(1)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+        for process in processes:
+            process.wait()
