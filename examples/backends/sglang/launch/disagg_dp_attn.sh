@@ -49,6 +49,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Parse arguments before installing the process-group cleanup trap so --help or
+# an invalid option cannot tear down the caller via kill 0.
 trap 'echo Cleaning up...; kill 0' EXIT
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
@@ -92,9 +94,8 @@ python3 -m dynamo.sglang \
   $GPU_MEM_ARGS &
 
 # Serialize model loading so the two shared-GPU workers do not race for peak
-# initialization memory. Continue after the bounded wait so normal deployment
-# readiness remains the authoritative failure signal.
-wait_for_ready "http://localhost:${DYN_SYSTEM_PORT1:-8081}/health" 120 || true
+# initialization memory. Decode must not start if prefill never becomes ready.
+wait_for_ready "http://localhost:${DYN_SYSTEM_PORT1:-8081}/health" 120
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 python3 -m dynamo.sglang \
