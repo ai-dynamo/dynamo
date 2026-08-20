@@ -17,9 +17,13 @@ class WorkflowExecutionError(RuntimeError):
 
 @dataclass(frozen=True)
 class StageContext:
-    """Attempt metadata available to a running stage."""
+    """Attempt metadata available to a running stage.
 
-    workflow_name: str
+    ``workflow_name`` is unavailable for remote stages until the transport
+    carries workflow lineage explicitly.
+    """
+
+    workflow_name: Optional[str]
     stage_id: str
     attempt_id: str
 
