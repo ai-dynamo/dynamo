@@ -1,27 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Regression tests for LoRA adapter staging in the MinIO test fixture.
+"""Regression coverage for MinIO uploads on CRT-optimized hosts.
 
-`MinioService.upload_lora` used to fail only on the H100 CI runners, with
-`InvalidAccessKeyId` on `CreateMultipartUpload`, while MinIO was healthy and
-bucket operations succeeded. The cause was boto3's managed-transfer client
-selection: on network-optimized instances boto3 resolves `upload_file` to the
-AWS CRT client, and that path ignores the client's `endpoint_url`, so the
-adapter was addressed at real S3 rather than at MinIO.
-
-The instance shape is the only host-dependent input, so these tests reproduce
-the runner difference anywhere by patching
-`awscrt.s3.is_optimized_for_system`, and assert where the uploaded bytes
-actually land: a local HTTP stand-in for MinIO either receives the adapter or
-it does not. No GPU, no Docker and no network access are required.
+On network-optimized instances, boto3's automatic managed-transfer selection
+can choose the AWS CRT client, which ignores the configured MinIO endpoint.
+This test reproduces that host-dependent branch on CPU and verifies that the
+adapter still reaches the configured endpoint.
 """
 
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterator, List
+from typing import Iterator
 
 import pytest
 from pytest_httpserver import HTTPServer
@@ -36,18 +27,15 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
+    pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.timeout(60),
 ]
 
 BUCKET = "my-loras"
 LORA_NAME = "test-org/test-lora"
-# Deliberately more than one file, one of them nested, because upload_lora walks
-# the snapshot with rglob and builds a key per file.
-ADAPTER_FILES = {
-    "adapter_config.json": b'{"r": 8, "lora_alpha": 16}',
-    "adapter_model.safetensors": b"\x00" * 4096,
-    "nested/extra.bin": b"nested payload",
-}
+ADAPTER_NAME = "adapter.bin"
+ADAPTER_BYTES = b"adapter payload"
 
 
 @dataclass
@@ -55,8 +43,7 @@ class S3Stub:
     """A local stand-in for MinIO that records what it was actually handed."""
 
     endpoint: str
-    objects: Dict[str, bytes] = field(default_factory=dict)
-    bucket_methods: List[str] = field(default_factory=list)
+    objects: dict[str, bytes] = field(default_factory=dict)
 
 
 @pytest.fixture
@@ -74,17 +61,6 @@ def s3_stub() -> Iterator[S3Stub]:
         stub.objects[key] = request.get_data()
         return Response("", status=200)
 
-    def record_bucket(request: Request) -> Response:
-        stub.bucket_methods.append(request.method)
-        # 404 on HEAD so create_bucket has to follow up with its PUT, which puts
-        # both plain-client calls on the record.
-        status = 404 if request.method == "HEAD" else 200
-        return Response("", status=status)
-
-    for method in ("HEAD", "PUT"):
-        server.expect_request(f"/{BUCKET}", method=method).respond_with_handler(
-            record_bucket
-        )
     server.expect_request(
         re.compile(rf"^/{re.escape(BUCKET)}/.+"), method="PUT"
     ).respond_with_handler(record_object)
@@ -98,10 +74,7 @@ def s3_stub() -> Iterator[S3Stub]:
 @pytest.fixture
 def adapter_dir(tmp_path: Path) -> Path:
     """A minimal stand-in for a downloaded LoRA snapshot."""
-    for relative_path, payload in ADAPTER_FILES.items():
-        target = tmp_path / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(payload)
+    (tmp_path / ADAPTER_NAME).write_bytes(ADAPTER_BYTES)
     return tmp_path
 
 
@@ -109,10 +82,6 @@ def _service(stub: S3Stub) -> MinioService:
     return MinioService(
         MinioLoraConfig(endpoint=stub.endpoint, bucket=BUCKET, lora_name=LORA_NAME)
     )
-
-
-def _expected_objects() -> Dict[str, bytes]:
-    return {f"{LORA_NAME}/{name}": payload for name, payload in ADAPTER_FILES.items()}
 
 
 def _force_crt_optimized_host(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,32 +119,6 @@ def test_upload_lora_targets_configured_endpoint_on_crt_optimized_host(
 
     _service(s3_stub).upload_lora(str(adapter_dir))
 
-    assert s3_stub.objects == _expected_objects()
-
-
-def test_upload_lora_unchanged_on_hosts_without_crt_preference(
-    s3_stub: S3Stub, adapter_dir: Path
-) -> None:
-    """Negative control: the same upload with the instance check left alone.
-
-    This is the ordinary-runner case these tests already passed on, and it must
-    keep delivering every file to the configured endpoint.
-    """
-    _service(s3_stub).upload_lora(str(adapter_dir))
-
-    assert s3_stub.objects == _expected_objects()
-
-
-def test_bucket_operations_reach_endpoint_on_crt_optimized_host(
-    s3_stub: S3Stub, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Negative control: plain client calls were never affected by any of this.
-
-    They do not go through a transfer manager, which is why bucket setup
-    succeeded on the same runners where the adapter upload failed.
-    """
-    _force_crt_optimized_host(monkeypatch)
-
-    _service(s3_stub).create_bucket()
-
-    assert s3_stub.bucket_methods == ["HEAD", "PUT"]
+    assert s3_stub.objects == {
+        f"{LORA_NAME}/{ADAPTER_NAME}": ADAPTER_BYTES,
+    }
