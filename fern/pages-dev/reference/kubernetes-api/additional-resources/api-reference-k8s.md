@@ -1772,7 +1772,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `componentKind` _[ComponentKind](#componentkind)_ | componentKind is the underlying resource kind (e.g. `PodClique`,<br />`Deployment`, `LeaderWorkerSet`). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
 | `componentNames` _string array_ | componentNames is the list of underlying Kubernetes resource names for<br />this Dynamo component. During normal operation this contains a single<br />name; during rolling updates it contains both old and new resource names. |  | Optional: \{\} <br /> |
-| `runtimeNamespace` _string_ | runtimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers and<br />Grove-backed workers use the base namespace. During rolling updates, worker<br />status keeps the old active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
+| `runtimeNamespace` _string_ | runtimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers<br />use the base namespace. During rolling updates, worker status keeps the old<br />active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the total number of non-terminated replicas. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | updatedReplicas is the number of replicas at the current/desired revision. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the number of ready replicas. Populated for<br />`PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for<br />`PodCliqueScalingGroup`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
