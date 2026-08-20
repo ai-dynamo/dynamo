@@ -2134,7 +2134,7 @@ or a `DiffusionEngine` (raw media pipeline). The request adapter is
 selected from the engine kind (``raw=isinstance(engine, RawEngine)``);
 ``WorkerConfig.model_input`` is validated against that kind.
 
-[`components/src/dynamo/common/backend/worker.py#L217`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L217)
+[`components/src/dynamo/common/backend/worker.py#L220`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L220)
 
 **Public methods**
 
@@ -2146,7 +2146,7 @@ __init__(engine: BaseEngine, config: WorkerConfig)
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L225)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L228)
 
 <h4 id="api-dynamo-common-backend-worker-worker-run">run</h4>
 
@@ -2156,7 +2156,7 @@ run() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L229)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L232)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-worker-workerconfig" title="WorkerConfig (class)">
@@ -2167,10 +2167,10 @@ from dynamo.common.backend import WorkerConfig
 ```
 
 ```python
-WorkerConfig(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', route_to_encoder: bool = False, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, kv_state_endpoint: Optional[str] = None, default_thinking_mode: Optional[str] = None) -> None
+WorkerConfig(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', route_to_encoder: bool = False, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, kv_state_endpoint: Optional[str] = None, default_thinking_mode: Optional[str] = None, response_plane: str = 'tcp') -> None
 ```
 
-[`components/src/dynamo/common/backend/worker.py#L101`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L101)
+[`components/src/dynamo/common/backend/worker.py#L102`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L102)
 
 **Public methods**
 
@@ -2182,12 +2182,12 @@ from_runtime_config(cls, runtime_cfg, model_name: str, served_model_name: Option
 
 Build from any object that carries DynamoRuntimeConfig fields.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L148)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L150)
 
 <h4 id="api-dynamo-common-backend-worker-workerconfig-init">__init__</h4>
 
 ```python
-__init__(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', route_to_encoder: bool = False, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, kv_state_endpoint: Optional[str] = None, default_thinking_mode: Optional[str] = None) -> None
+__init__(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', route_to_encoder: bool = False, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, kv_state_endpoint: Optional[str] = None, default_thinking_mode: Optional[str] = None, response_plane: str = 'tcp') -> None
 ```
 
 No summary available.
