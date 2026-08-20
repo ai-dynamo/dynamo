@@ -26,16 +26,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/rand"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/restmapper"
-	"k8s.io/client-go/scale"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -48,6 +44,9 @@ type AdmissionWebhooks struct {
 	// BypassUsers excludes named API users from validating admission.
 	// It is intended for seeding legacy states that current admission rejects.
 	BypassUsers []string
+	// MutatingBypassUsers excludes named API users from mutating admission.
+	// It is intended for seeding legacy states before exercising current defaulting.
+	MutatingBypassUsers []string
 }
 
 // WebhookSetupOptions contains the effective operator settings passed to SetupWebhooks.
@@ -229,6 +228,7 @@ func webhookInstallOptions(opts Options) (envtest.WebhookInstallOptions, error) 
 	}
 	install := envtest.WebhookInstallOptions{}
 	if opts.Admission.Mutating {
+		addMutatingBypassUsers(mutating, opts.Admission.MutatingBypassUsers)
 		install.MutatingWebhooks = mutating
 	}
 	if opts.Admission.Validating {
@@ -362,14 +362,10 @@ func (e *TestEnv) RuntimeConfig() *commoncontroller.RuntimeConfig {
 	return e.rt.runtimeConfig
 }
 
-// ScaleClient returns a scale client configured for this envtest API server.
-func (e *TestEnv) ScaleClient() (scale.ScalesGetter, error) {
-	return newScaleClient(e.rt.config)
-}
-
 // StartManager starts a namespace-scoped controller manager configured by setup.
 func (e *TestEnv) StartManager(setup func(ctrl.Manager) error) {
 	e.tb.Helper()
+	skipNameValidation := true
 	cacheOptions := cache.Options{
 		DefaultNamespaces: map[string]cache.Config{
 			e.namespace: {},
@@ -379,9 +375,10 @@ func (e *TestEnv) StartManager(setup func(ctrl.Manager) error) {
 		e.tb.Fatalf("configure Pod cache: %v", err)
 	}
 	mgr, err := ctrl.NewManager(e.rt.config, ctrl.Options{
-		Scheme:  e.rt.scheme,
-		Metrics: metricsserver.Options{BindAddress: "0"},
-		Cache:   cacheOptions,
+		Scheme:     e.rt.scheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Cache:      cacheOptions,
+		Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
 	})
 	if err != nil {
 		e.tb.Fatalf("create manager: %v", err)
@@ -476,21 +473,6 @@ func defaultRuntimeConfig(cfg *configv1alpha1.OperatorConfiguration) *commoncont
 	gate.Checkpoint = cfg.Checkpoint.Enabled
 	gate.GPUDiscovery = cfg.Namespace.Restricted == "" || ptr.Deref(cfg.GPU.DiscoveryEnabled, true)
 	return &commoncontroller.RuntimeConfig{Gate: gate}
-}
-
-func newScaleClient(config *rest.Config) (scale.ScalesGetter, error) {
-	kubeClient, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
-	return scale.NewForConfig(
-		config,
-		restMapper,
-		dynamic.LegacyAPIPathResolverFunc,
-		scale.NewDiscoveryScaleKindResolver(cachedDiscovery),
-	)
 }
 
 func crdDirectoryPaths(opts Options) []string {

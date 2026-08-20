@@ -3,8 +3,6 @@
 
 [workspace]
 members = [
-    "aisimulate/crates/core",
-    "aisimulate/crates/python",
     "lib/llm",
     "lib/rl",
     "lib/runtime",
@@ -54,8 +52,10 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
+# Published separately by https://github.com/ai-dynamo/aisimulate.
+aisimulate-core = { version = "=0.1.0-dev.1" }
+
 # Local crates
-aisimulate-core = { path = "aisimulate/crates/core", version = "0.1.0-dev.1" }
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
 dynamo-llm = { path = "lib/llm", version = "1.5.0" }
 dynamo-rl = { path = "lib/rl", version = "1.5.0" }

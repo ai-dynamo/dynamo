@@ -13,11 +13,12 @@ sweep configuration providers and `DynamoReplayRunnerFactory`.
 
 ## Install
 
-The supported prebuilt environment is the `dynamo-planner` image. The image builds AI Simulate and
-Dynamo from the same source revision and installs both wheels. The AI Simulate wheel remains inside
-the image and is not published as a release artifact.
+The supported prebuilt environment is the `dynamo-planner` image. The image stages and installs the
+published `aisimulate==0.1.0.dev1` wheel alongside the Dynamo wheels. Dynamo's Rust workspace
+resolves `aisimulate-core==0.1.0-dev.1` from crates.io.
 
-For source development, build the matching Dynamo bindings and install both source distributions:
+For Dynamo source development, install the published AI Simulate wheel and build the matching
+Dynamo bindings:
 
 ```bash
 python -m pip install pip "maturin[patchelf]"
@@ -25,7 +26,7 @@ cd lib/bindings/python
 maturin develop --uv --release --features aic-forward-pass
 cd ../../..
 python -m pip install --no-deps -e .
-python -m pip install -e ./aisimulate
+python -m pip install "aisimulate==0.1.0.dev1"
 python -m pip install -r container/deps/requirements.planner.txt
 ```
 
@@ -34,12 +35,7 @@ full AI Simulate and Replay refactor has a supported distribution path.
 
 ## Run a Dynamo Sweep
 
-```bash
-python aisimulate/examples/sweeper/tools/run_sweep.py \
-  --config aisimulate/examples/sweeper/configs/smart_sweep.yaml
-```
-
-Or compose the runtime directly:
+Compose the runtime directly:
 
 ```python
 from aisimulate.sweeper import SmartSearchConfig, Sweeper
