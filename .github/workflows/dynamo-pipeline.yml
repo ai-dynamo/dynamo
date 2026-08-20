@@ -52,9 +52,6 @@ on:
       cpu_parallel_test_markers:
         required: true
         type: string
-      cpu_sequential_test_markers:
-        required: true
-        type: string
       gpu_test_markers:
         required: true
         type: string
@@ -238,7 +235,7 @@ jobs:
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
-      cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
+      cpu_only_test_markers: 'pre_merge and not parallel and not defaulted and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_only_test_timeout_minutes: 45
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
