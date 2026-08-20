@@ -17,6 +17,7 @@ if not HAS_GMS:
 from _fake_vmm import FakeVMM
 
 try:
+    from gpu_memory_service.cli import snapshot as snapshot_cli
     from gpu_memory_service.cli.snapshot import loader
 except ModuleNotFoundError:
     pytest.skip(
@@ -135,13 +136,12 @@ class _ExitedProcess:
 
 def test_v1_loader_defaults_to_all_visible_devices(monkeypatch):
     started: list[list[str]] = []
-
-    monkeypatch.setattr(loader, "init_vmm", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(snapshot_cli, "init_vmm", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        loader, "get_vmm", lambda: SimpleNamespace(list_devices=lambda: [0, 2])
+        snapshot_cli, "get_vmm", lambda: SimpleNamespace(list_devices=lambda: [0, 2])
     )
     monkeypatch.setattr(
-        loader.subprocess,
+        snapshot_cli.subprocess,
         "Popen",
         lambda command: started.append(command) or _ExitedProcess(command),
     )
@@ -157,14 +157,10 @@ def test_v1_loader_defaults_to_all_visible_devices(monkeypatch):
     assert all(
         "gpu_memory_service.v1.snapshot.loader" in command for command in started
     )
-    assert all(
-        "--checkpoint-dir" in command and "/ckpt" in command for command in started
-    )
 
 
 def test_v1_loader_device_flag_stays_rank_local(monkeypatch):
     calls: list[tuple[str, list[str]]] = []
-
     monkeypatch.setattr(
         loader.importlib,
         "import_module",

@@ -14,12 +14,10 @@ import argparse
 import importlib
 import logging
 import os
-import subprocess
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from gpu_memory_service.cli.snapshot import should_fan_out_v1
+from gpu_memory_service.cli.snapshot import run_v1_per_device
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
@@ -33,48 +31,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
-def _run_v1_savers(argv: list[str]) -> None:
-    init_vmm(VMMDeviceType.CUDA)
-    devices = get_vmm().list_devices()
-    processes: list[subprocess.Popen] = []
-    try:
-        for device in devices:
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "gpu_memory_service.v1.snapshot.saver",
-                    *argv,
-                    "--device",
-                    str(device),
-                ]
-            )
-            logger.info(
-                "Started GMS V1 saver device=%d pid=%d",
-                device,
-                process.pid,
-            )
-            processes.append(process)
-
-        pending = list(processes)
-        while pending:
-            for process in list(pending):
-                exit_code = process.poll()
-                if exit_code is None:
-                    continue
-                if exit_code:
-                    raise SystemExit(exit_code)
-                pending.remove(process)
-            if pending:
-                time.sleep(1)
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
-        for process in processes:
-            process.wait()
 
 
 def _save_device(
@@ -170,11 +126,17 @@ def main(argv: list[str] | None = None) -> None:
     selector.add_argument("--use-v1", action="store_true")
     options, remaining = selector.parse_known_args(argv)
     if options.use_v1:
-        if should_fan_out_v1(remaining):
-            _run_v1_savers(remaining)
+        if any(argument in {"-h", "--help"} for argument in remaining) or any(
+            argument == "--device" or argument.startswith("--device=")
+            for argument in remaining
+        ):
+            importlib.import_module("gpu_memory_service.v1.snapshot.saver").main(
+                remaining
+            )
         else:
-            v1_saver = importlib.import_module("gpu_memory_service.v1.snapshot.saver")
-            v1_saver.main(remaining)
+            run_v1_per_device(
+                "gpu_memory_service.v1.snapshot.saver", remaining, "saver"
+            )
         return
 
     parser = _build_parser()

@@ -24,10 +24,7 @@ def _build_parser():
         "--device",
         type=int,
         default=0,
-        help=(
-            "CUDA-visible device ordinal. Omit this flag on the snapshot "
-            "wrapper CLI to run one child per visible device."
-        ),
+        help="CUDA-visible device ordinal. Wrapper CLIs fan out when omitted.",
     )
     return parser
 
