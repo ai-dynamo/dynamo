@@ -942,8 +942,15 @@ jobs:
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
-      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      # `defaulted` is applied by the repository-root conftest.py to any test that
+      # declared no lifecycle or hardware marker. It is routed here, not to the
+      # sequential job: sequential runs the fault-tolerance suite in one process
+      # and was OOM-killed (exit 137) once every unmarked test landed in it.
+      # NOTE: this job is `-n 0` today (cpu_parallel_mode: 'none'), so `defaulted`
+      # only picks the pod. Before enabling real xdist here, vet these tests for
+      # parallel-safety or split them into their own job -- unlike `parallel`,
+      # `defaulted` is not an author's claim that the test is parallel-safe.
+      cpu_parallel_test_markers: 'pre_merge and (parallel or defaulted) and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 
@@ -1272,6 +1279,8 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          # Sole writer of this vCluster name; every other caller recovers into it.
+          reset_existing: 'true'
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
@@ -1381,6 +1390,8 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          # Sole writer of this vCluster name; every other caller recovers into it.
+          reset_existing: 'true'
           vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1417,6 +1428,8 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          # Sole writer of this vCluster name; every other caller recovers into it.
+          reset_existing: 'true'
           vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1453,6 +1466,8 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          # Sole writer of this vCluster name; every other caller recovers into it.
+          reset_existing: 'true'
           vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-trtllm-dt
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
+from _thinking_parity import THINKING_PARITY_CASES
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
     assistant_response_format,
@@ -820,31 +821,42 @@ class TestReasoningParserMetadata:
     def test_no_reasoning_parser_returns_none(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
-        assert _build_reasoning_parser_metadata(
+        metadata = _build_reasoning_parser_metadata(
             None,
             object(),
             {},
             SimpleNamespace(include_reasoning=True),
             [1, 2, 3],
-        ) == (None, None)
+        )
 
-    def test_include_reasoning_false_marks_reasoning_ended(self):
+        assert metadata.engine_reasoning_ended is None
+        assert metadata.response_reasoning_ended is None
+        assert metadata.parser_kwargs is None
+
+    def test_include_reasoning_false_only_marks_engine_reasoning_ended(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
-        class ParserShouldNotBeBuilt:
-            def __init__(self, *args, **kwargs):
-                raise AssertionError("parser should not be constructed")
+        class FakeReasoningParser:
+            def __init__(self, tokenizer, *, chat_template_kwargs):
+                self.tokenizer = tokenizer
+                self.chat_template_kwargs = chat_template_kwargs
 
-        reasoning_ended, parser_kwargs = _build_reasoning_parser_metadata(
-            ParserShouldNotBeBuilt,
+            def is_reasoning_end(self, prompt_token_ids):
+                return prompt_token_ids == [9, 9]
+
+        metadata = _build_reasoning_parser_metadata(
+            FakeReasoningParser,
             object(),
             {"reasoning_effort": "low"},
             SimpleNamespace(include_reasoning=False),
             [1, 2, 3],
         )
 
-        assert reasoning_ended is True
-        assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "low"}}
+        assert metadata.engine_reasoning_ended is True
+        assert metadata.response_reasoning_ended is False
+        assert metadata.parser_kwargs == {
+            "chat_template_kwargs": {"reasoning_effort": "low"}
+        }
 
     def test_parser_receives_chat_template_kwargs(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
@@ -858,7 +870,7 @@ class TestReasoningParserMetadata:
                 return prompt_token_ids == [9, 9]
 
         tokenizer = object()
-        reasoning_ended, parser_kwargs = _build_reasoning_parser_metadata(
+        metadata = _build_reasoning_parser_metadata(
             FakeReasoningParser,
             tokenizer,
             {"reasoning_effort": "high"},
@@ -866,8 +878,11 @@ class TestReasoningParserMetadata:
             [9, 9],
         )
 
-        assert reasoning_ended is True
-        assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "high"}}
+        assert metadata.engine_reasoning_ended is True
+        assert metadata.response_reasoning_ended is True
+        assert metadata.parser_kwargs == {
+            "chat_template_kwargs": {"reasoning_effort": "high"}
+        }
 
     def test_kv_router_copies_reasoning_metadata_to_extra_args(self):
         from dynamo.frontend.vllm_processor import _inject_routing_metadata
@@ -1103,6 +1118,166 @@ async def test_generator_preserves_zero_top_logprobs(
         "Logprobs requested but not supported in distributed inference mode"
         in caplog.messages
     )
+
+
+@pytest.mark.asyncio
+async def test_include_reasoning_false_keeps_response_parser_active(
+    vllm_processor_module,
+    monkeypatch,
+):
+    class RequestForSampling(SimpleNamespace):
+        model_fields = frozenset()
+
+    class FakeReasoningParser:
+        engine_based_streaming = False
+
+        def __init__(self, tokenizer, *, chat_template_kwargs):
+            self.tokenizer = tokenizer
+            self.chat_template_kwargs = chat_template_kwargs
+            self.adjusted_prompt_token_ids = None
+
+        def is_reasoning_end(self, prompt_token_ids):
+            return False
+
+        def adjust_initial_state_from_prompt(self, prompt_token_ids):
+            self.adjusted_prompt_token_ids = prompt_token_ids
+
+        def extract_reasoning_streaming(
+            self,
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
+        ):
+            if "</think>" in delta_text:
+                return prepost_module.DeltaMessage(
+                    reasoning="hidden tail",
+                    content="visible answer",
+                )
+            return prepost_module.DeltaMessage(reasoning="hidden reasoning")
+
+        def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+            return 3 in delta_token_ids
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=RequestForSampling(
+                    max_completion_tokens=None,
+                    max_tokens=1,
+                    logprobs=None,
+                    top_logprobs=None,
+                    cache_salt=None,
+                    mm_processor_kwargs=None,
+                    include_reasoning=False,
+                ),
+                tool_parser=None,
+                chat_template_kwargs={"reasoning_effort": "low"},
+                engine_prompt={"prompt": "Hello"},
+                prompt_token_ids=[1],
+                guided_decoding=None,
+                uses_dynamo_json_tool_call_fallback=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        return SimpleNamespace(sampling_params=sampling_params, mm_features=None)
+
+    input_processor = SimpleNamespace(
+        generation_config_fields={},
+        renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
+        process_inputs=process_inputs,
+    )
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=input_processor,
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=FakeReasoningParser,
+        routed_engine=object(),
+    )
+    monkeypatch.setattr(
+        processor,
+        "_prepare_mm_routing",
+        AsyncMock(return_value=(None, [], False)),
+    )
+
+    captured = {}
+
+    async def capture_generate_and_stream(
+        request_id,
+        request,
+        dynamo_preproc,
+        tokens,
+        vllm_preproc,
+        post_processors,
+        *,
+        mm_routing_info,
+        context,
+    ):
+        captured["dynamo_preproc"] = dynamo_preproc
+        captured["post_processor"] = post_processors[0]
+        yield {"captured": True}
+
+    monkeypatch.setattr(
+        processor,
+        "_generate_and_stream",
+        capture_generate_and_stream,
+    )
+
+    results = [
+        item
+        async for item in processor._generator_inner(
+            {
+                "model": "test",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+    ]
+
+    assert results == [{"captured": True}]
+    assert captured["dynamo_preproc"]["reasoning_ended"] is True
+    post_processor = captured["post_processor"]
+    assert post_processor.reasoning_is_done is False
+    assert isinstance(post_processor.reasoning_parser, FakeReasoningParser)
+    assert post_processor.reasoning_parser.adjusted_prompt_token_ids == [1]
+
+    reasoning_choice = post_processor.process_output(
+        SimpleNamespace(
+            index=0,
+            text="<think>hidden reasoning",
+            token_ids=[2],
+            finish_reason=None,
+            logprobs={"tokens": ["hidden"]},
+        )
+    )
+    assert reasoning_choice is None
+
+    content_choice = post_processor.process_output(
+        SimpleNamespace(
+            index=0,
+            text="</think>visible answer",
+            token_ids=[3],
+            finish_reason="stop",
+            logprobs={"tokens": ["hidden", "visible"]},
+        )
+    )
+    assert content_choice == {
+        "index": 0,
+        "delta": {"role": "assistant", "content": "visible answer"},
+        "finish_reason": "stop",
+        "logprobs": None,
+    }
 
 
 def _make_processor(module, routed_engine):
@@ -2249,3 +2424,19 @@ def test_ensure_chat_template_preserves_existing_hf_template(
     vllm_processor_module._ensure_chat_template(tokenizer, str(tmp_path), None)
 
     assert tokenizer.chat_template == existing
+
+
+class TestThinkingControlParity:  # FRONTEND.10
+    # Keep vLLM's thinking kwargs aligned with the shared backend matrix.
+    @pytest.mark.parametrize("case", THINKING_PARITY_CASES, ids=lambda case: case.name)
+    def test_shared_thinking_policy(self, tokenizer, case):
+        _, _, kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                **case.request,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert kwargs == case.expected
