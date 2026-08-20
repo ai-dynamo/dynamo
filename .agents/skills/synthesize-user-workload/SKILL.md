@@ -24,7 +24,8 @@ not search for or select a recipe, deploy, benchmark, or propose tuning changes.
 Require:
 
 - the user's initial optimization request exactly as received;
-- the user-provided DGD as an attachment, local file path, or pasted YAML;
+- the user-provided DGD as an attachment, local file path, or pasted YAML, when one exists; otherwise the
+  ladder-confirmed baseline manifest handed over by `user-interviewer` with its confirmation record;
 - any attached workload descriptions, traces, or other local file paths;
 - an optional caller-supplied `EXP_ID` or `EXP_ROOT`; and
 - an existing `user_workload.yaml` only when the user is refining the interview before downstream work begins.
@@ -40,7 +41,8 @@ final YAML.
 
 Resolve these blocking fields:
 
-- one concrete user-provided YAML document containing a `DynamoGraphDeployment`;
+- one concrete baseline `DynamoGraphDeployment`: either user-provided, or produced by the baseline-source ladder
+  (`agents/user-interviewer/AGENTS.md`) and explicitly confirmed by the user;
 - workload profile name, type, and a concrete description of the serving traffic;
 - exact model source and revision when the user fixes one, plus the fallback policy when the requested revision
   may be unsupported by the available engine or weights (fall back to a named alternative and mark the target
@@ -110,12 +112,17 @@ Create the canonical baseline input:
 
 - When the user supplies a file, copy its bytes without editing the source or canonical copy.
 - When the user pastes YAML, materialize that YAML without changing its configuration.
+- When the baseline came from the ladder (rung 2 adapted recipe or rung 3 authored draft), materialize the exact
+  manifest the user confirmed - byte-for-byte as confirmed, including any user amendments - and record the
+  matching `origin` and `origin_source`.
 - Parse the canonical copy as YAML and require at least one mapping document whose `kind` is
   `DynamoGraphDeployment`.
 - Reject embedded secret values or Kubernetes `Secret` resources; references to pre-existing Secret names are allowed.
 - Reject a recipe directory, catalog choice, generated substitute, or inferred default in place of the user's DGD.
-  A specific manifest the user explicitly presents as their baseline is a user-provided DGD, whatever its origin;
-  the rejection targets substitutes the USER did not supply.
+  A specific manifest the user explicitly presents OR confirms as their baseline is a user-provided baseline,
+  whatever its origin; the rejection targets substitutes the user never confirmed. Record the provenance in the
+  contract: `deployment.origin` (`user`, `recipe-confirmed`, or `agent-authored`) and `deployment.origin_source`
+  per the schema.
 - Do not patch cluster compatibility or performance settings during capture.
 - Compute the canonical copy's SHA256 before writing the workload contract.
 - If the DGD contradicts an explicit workload constraint, return the contradiction as a blocking question; do not
@@ -136,7 +143,8 @@ Follow the schema and rules in `agent-docs/rules/execution/user-workload.md`.
 Before finalizing:
 
 1. Preserve all explicit user constraints without rounding or reinterpretation.
-2. Record the exact canonical DGD path and SHA256 under `deployment`.
+2. Record the exact canonical DGD path and SHA256 under `deployment`, plus `origin` and `origin_source`
+   (provenance of the confirmed baseline).
 2a. Record the user's stated budgets (GPU-hours, wall clock, failed-deploy limit) under `budgets`, verbatim;
     leave each `null` when the user declined to state one.
 3. Represent permitted unknowns as `null`, `""`, or `[]` according to the schema.

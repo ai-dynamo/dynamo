@@ -53,6 +53,8 @@ kubernetes:
 deployment:
   dgd_path: runs/<EXP_ID>/inputs/user_provided_dgd.yaml
   dgd_sha256: ""                    # SHA256 of the immutable canonical DGD copy
+  origin: "user"                    # user | recipe-confirmed | agent-authored (who produced the baseline the user confirmed)
+  origin_source: ""                 # recipe path (recipe-confirmed) or inputs/baseline-evidence.md (agent-authored); "" for user
 
 traffic:
   input_tokens: null               # optional rough/median input sequence length when known
