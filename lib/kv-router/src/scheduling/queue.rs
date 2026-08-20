@@ -2762,6 +2762,37 @@ policy_classes:
     }
 
     #[tokio::test]
+    async fn explicit_population_exact_pin_bypasses_and_still_closes() {
+        let (queue, slots) = make_explicit_population_queue();
+        let (mut request, response) = make_admission_request("population-pinned-affinity", 64);
+        let pinned = WorkerWithDpRank::new(0, 2);
+        request.pinned_worker = Some(pinned);
+        request.admission_population =
+            Some(AdmissionPopulationMember::new("pinned-population".to_string(), 0).unwrap());
+        let lease = enqueue_with_lease(&queue, request).await;
+
+        let selected = tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .expect("population-scoped affinity pin was held for a full-rank cohort")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.best_worker, pinned);
+        assert!(selected.admission_cohort.is_none());
+        assert_eq!(queue.pending_count(), 0);
+        queue
+            .close_admission_population(
+                "standard".to_string(),
+                AdmissionPopulationClose::new("pinned-population".to_string(), 1).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        drop(lease);
+        queue.update().await;
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test]
     async fn explicit_population_close_releases_partial_tail_through_actor() {
         let (queue, slots) = make_explicit_population_queue();
         let mut responses = Vec::new();

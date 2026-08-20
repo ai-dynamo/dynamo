@@ -52,12 +52,13 @@ impl PendingPopulation {
 /// Forms a full-DP population and assigns its ranks in one scheduler-owned
 /// transaction.
 ///
-/// Eligible requests remain deferred until a single worker can accept one
-/// member on every rank in `[0, cohort_size)`. In explicit-population mode,
-/// exact affinity placements may participate without being changed; a closed
-/// residual tail preserves its exact placement and carries no cohort metadata.
-/// Unscoped exact placements bypass for compatibility. No timeout is used to
-/// infer a population boundary.
+/// Unpinned requests remain deferred until a single worker can accept one
+/// member on every rank in `[0, cohort_size)`. Exact placements owned by the
+/// conversation-affinity layer are recorded in their explicit population but
+/// bypass cohort formation immediately; holding them for a matching rank set
+/// can stall a live conversation population even though their placement is
+/// already decided. A population close releases only the remaining unpinned
+/// tail. No timeout is used to infer a population boundary.
 pub struct RankBalancedCohortAdmissionPolicy {
     cohort_size: u32,
     namespace: u64,
@@ -339,10 +340,13 @@ impl PolicyClassAdmissionPolicy for RankBalancedCohortAdmissionPolicy {
                 population.index()
             ));
         }
+        if request.pinned_worker().is_some() {
+            return AdmissionDecision::Bypass;
+        }
         state.pending.push_back(PendingAdmission {
             id: request.id(),
             eligibility: request.worker_eligibility().clone(),
-            pinned_worker: request.pinned_worker(),
+            pinned_worker: None,
         });
         AdmissionDecision::Defer
     }
@@ -692,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_pinned_members_form_only_a_matching_full_rank_cohort() {
+    fn explicit_pinned_members_are_observed_but_bypass_cohort_formation() {
         let mut policy =
             RankBalancedCohortAdmissionPolicy::new_with_population_mode(4, 7, true).unwrap();
         for rank in [2, 0, 3, 1] {
@@ -706,28 +710,87 @@ mod tests {
                     vec![worker],
                     Some(worker),
                 ),
+                AdmissionDecision::Bypass
+            );
+        }
+        assert!(policy.on_event(AdmissionEvent::Reconcile).is_empty());
+        assert!(policy.populations["pinned"].pending.is_empty());
+        assert_eq!(policy.populations["pinned"].seen_indices.len(), 4);
+        assert!(
+            policy
+                .close_population(AdmissionPopulationClose::new("pinned".to_string(), 4).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!policy.populations.contains_key("pinned"));
+    }
+
+    #[test]
+    fn pinned_members_do_not_block_unpinned_cohort_or_closed_tail() {
+        let mut policy =
+            RankBalancedCohortAdmissionPolicy::new_with_population_mode(4, 7, true).unwrap();
+        let pinned = WorkerWithDpRank::new(11, 2);
+        assert_eq!(
+            admit_population_member(&mut policy, 0, "mixed", 0, vec![pinned], Some(pinned),),
+            AdmissionDecision::Bypass
+        );
+        for index in 1..6 {
+            assert_eq!(
+                admit_population_member(&mut policy, index, "mixed", index, full_worker(11), None,),
                 AdmissionDecision::Defer
             );
         }
-        let actions = policy.on_event(AdmissionEvent::Reconcile);
-        assert_eq!(actions.len(), 4);
-        let mut ranks = actions
-            .into_iter()
-            .map(|action| {
-                let AdmissionAction::MakeReady {
-                    placement: WorkerPlacement::Exact(worker),
-                    cohort: Some(cohort),
-                    ..
-                } = action
-                else {
-                    panic!("pinned population member lost its full-rank cohort")
-                };
-                assert_eq!(worker.dp_rank, cohort.index());
-                worker.dp_rank
-            })
-            .collect::<Vec<_>>();
-        ranks.sort_unstable();
-        assert_eq!(ranks, vec![0, 1, 2, 3]);
+        let cohort = policy.on_event(AdmissionEvent::Reconcile);
+        assert_eq!(cohort.len(), 4);
+        assert!(cohort.iter().all(|action| matches!(
+            action,
+            AdmissionAction::MakeReady {
+                cohort: Some(_),
+                ..
+            }
+        )));
+        let tail = policy
+            .close_population(AdmissionPopulationClose::new("mixed".to_string(), 6).unwrap())
+            .unwrap();
+        assert!(matches!(
+            tail.as_slice(),
+            [AdmissionAction::MakeReady {
+                placement: WorkerPlacement::Any,
+                cohort: None,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn close_before_late_pinned_member_releases_only_unpinned_tail() {
+        let mut policy =
+            RankBalancedCohortAdmissionPolicy::new_with_population_mode(4, 7, true).unwrap();
+        assert_eq!(
+            admit_population_member(&mut policy, 0, "late-pin", 0, full_worker(11), None),
+            AdmissionDecision::Defer
+        );
+        assert!(
+            policy
+                .close_population(AdmissionPopulationClose::new("late-pin".to_string(), 2).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        let pinned = WorkerWithDpRank::new(11, 1);
+        assert_eq!(
+            admit_population_member(&mut policy, 1, "late-pin", 1, vec![pinned], Some(pinned),),
+            AdmissionDecision::Bypass
+        );
+        let tail = policy.on_event(AdmissionEvent::Reconcile);
+        assert!(matches!(
+            tail.as_slice(),
+            [AdmissionAction::MakeReady {
+                placement: WorkerPlacement::Any,
+                cohort: None,
+                ..
+            }]
+        ));
+        assert!(!policy.populations.contains_key("late-pin"));
     }
 
     #[test]
