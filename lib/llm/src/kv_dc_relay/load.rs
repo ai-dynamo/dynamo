@@ -184,11 +184,16 @@ fn load_ranks_from_configs(
             .ok_or_else(|| {
                 anyhow::anyhow!("worker {worker_id} data-parallel rank range overflow")
             })?;
+        // vLLM's Ray data-parallel backend cannot propagate num_gpu_blocks to the
+        // registering process and publishes total_kv_blocks=0 in its place, so a zero
+        // total is "capacity unknown", not a zero-block worker. Advertising it as real
+        // capacity would put the ranks in kv_expected_ranks with an unreachable total.
+        let total_kv_blocks = config.total_kv_blocks.filter(|&total| total != 0);
         for dp_rank in config.data_parallel_start_rank..end {
             ranks.insert(
                 WorkerWithDpRank::new(worker_id, dp_rank),
                 LoadCapacity {
-                    total_kv_blocks: config.total_kv_blocks,
+                    total_kv_blocks,
                     max_num_batched_tokens: config.max_num_batched_tokens,
                 },
             );
@@ -262,6 +267,26 @@ mod tests {
         let snapshot = state.snapshot(producer());
         assert_eq!(snapshot.prefill_expected_ranks, 0);
         assert!(!snapshot.has_degraded_coverage());
+    }
+
+    #[test]
+    fn ray_dp_zero_kv_total_is_unknown_capacity_not_zero_blocks() {
+        let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
+            9,
+            config(0, 2, Some(0), Some(2_048)),
+        )]))
+        .unwrap();
+        let mut report = load(9, 0);
+        report.kv_used_blocks = Some(40);
+        report.active_prefill_tokens = Some(512);
+        assert!(state.observe(report));
+
+        let snapshot = state.snapshot(producer());
+        assert_eq!(snapshot.kv_expected_ranks, 0);
+        assert_eq!(snapshot.total_kv_blocks, 0);
+        assert_eq!(snapshot.kv_used_blocks, 0);
+        assert_eq!(snapshot.prefill_expected_ranks, 2);
+        assert_eq!(snapshot.active_prefill_tokens, 512);
     }
 
     #[test]
