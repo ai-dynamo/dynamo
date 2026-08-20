@@ -112,8 +112,8 @@ fn active_sequence_event_channel(
 /// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
 pub struct RuntimeSequencePublisher {
     event_sender: Option<ActiveSequenceEventSender>,
-    metrics_publisher: Option<Arc<EventPublisher>>,
-    worker_status_metrics: Option<Arc<RouterWorkerStatusMetrics>>,
+    metrics_publisher: Arc<EventPublisher>,
+    worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
 }
 
 impl SequencePublisher for RuntimeSequencePublisher {
@@ -125,10 +125,7 @@ impl SequencePublisher for RuntimeSequencePublisher {
     }
 
     fn publish_load(&self, load: ActiveLoad) {
-        let Some(publisher) = &self.metrics_publisher else {
-            return;
-        };
-        let publisher = publisher.clone();
+        let publisher = self.metrics_publisher.clone();
         tokio::spawn(async move {
             if let Err(e) = publisher.publish(&load).await {
                 tracing::trace!(
@@ -141,10 +138,7 @@ impl SequencePublisher for RuntimeSequencePublisher {
     }
 
     fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-        let Some(publisher) = &self.metrics_publisher else {
-            return;
-        };
-        let publisher = publisher.clone();
+        let publisher = self.metrics_publisher.clone();
         tokio::spawn(async move {
             for load in loads {
                 if let Err(e) = publisher.publish(&load).await {
@@ -165,9 +159,6 @@ impl SequencePublisher for RuntimeSequencePublisher {
         blocks: usize,
         tokens: usize,
     ) {
-        if self.metrics_publisher.is_none() {
-            return;
-        }
         WORKER_LOAD_METRICS.observe(
             worker.worker_id,
             worker.dp_rank,
@@ -178,15 +169,13 @@ impl SequencePublisher for RuntimeSequencePublisher {
     }
 
     fn observe_worker_registered(&self, worker: &WorkerWithDpRank, worker_type: &str) {
-        if let Some(metrics) = &self.worker_status_metrics {
-            metrics.set_registered(worker.worker_id, worker.dp_rank, worker_type);
-        }
+        self.worker_status_metrics
+            .set_registered(worker.worker_id, worker.dp_rank, worker_type);
     }
 
     fn observe_worker_removed(&self, worker: &WorkerWithDpRank, worker_type: &str) {
-        if let Some(metrics) = &self.worker_status_metrics {
-            metrics.remove_worker(worker.worker_id, worker.dp_rank, worker_type);
-        }
+        self.worker_status_metrics
+            .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
     }
 }
 
@@ -402,59 +391,6 @@ pub async fn create_multi_worker_sequences(
     worker_type: &'static str,
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
-    create_multi_worker_sequences_with_expiry(
-        endpoint,
-        block_size,
-        workers_with_configs,
-        replica_sync,
-        router_id,
-        worker_type,
-        cancellation_token,
-        true,
-        true,
-    )
-    .await
-}
-
-/// Create a multi-worker sequence tracker for builtin load routing.
-///
-/// Requests are released by their guard, so this tracker does not apply the KV scheduler's
-/// fixed-duration stale-request expiry. It preserves optional replica-sync events but does not
-/// publish KV load metrics for non-KV endpoints.
-pub async fn create_multi_worker_load_sequences(
-    endpoint: Endpoint,
-    block_size: usize,
-    workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
-    replica_sync: bool,
-    router_id: u64,
-    worker_type: &'static str,
-    cancellation_token: CancellationToken,
-) -> Result<Arc<ActiveSequencesMulti>> {
-    create_multi_worker_sequences_with_expiry(
-        endpoint,
-        block_size,
-        workers_with_configs,
-        replica_sync,
-        router_id,
-        worker_type,
-        cancellation_token,
-        false,
-        false,
-    )
-    .await
-}
-
-async fn create_multi_worker_sequences_with_expiry(
-    endpoint: Endpoint,
-    block_size: usize,
-    workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
-    replica_sync: bool,
-    router_id: u64,
-    worker_type: &'static str,
-    cancellation_token: CancellationToken,
-    expire_requests: bool,
-    publish_load_metrics: bool,
-) -> Result<Arc<ActiveSequencesMulti>> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
     let event_sender = if let Some((event_sender, event_rx)) = active_sequence_event_channel(
         replica_sync,
@@ -488,15 +424,9 @@ async fn create_multi_worker_sequences_with_expiry(
     } else {
         None
     };
-    let metrics_publisher = if publish_load_metrics {
-        Some(Arc::new(
-            EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?,
-        ))
-    } else {
-        None
-    };
-    let worker_status_metrics = publish_load_metrics
-        .then(|| RouterWorkerStatusMetrics::from_component(endpoint.component()));
+    let metrics_publisher =
+        Arc::new(EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?);
+    let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
     let publisher = RuntimeSequencePublisher {
         event_sender,
@@ -514,25 +444,14 @@ async fn create_multi_worker_sequences_with_expiry(
         })
         .collect();
 
-    let multi_worker = if expire_requests {
-        ActiveSequencesMultiWorker::new(
-            publisher,
-            block_size,
-            dp_range,
-            replica_sync,
-            router_id,
-            worker_type,
-        )
-    } else {
-        ActiveSequencesMultiWorker::new_without_expiry(
-            publisher,
-            block_size,
-            dp_range,
-            replica_sync,
-            router_id,
-            worker_type,
-        )
-    };
+    let multi_worker = ActiveSequencesMultiWorker::new(
+        publisher,
+        block_size,
+        dp_range,
+        replica_sync,
+        router_id,
+        worker_type,
+    );
 
     let arc = Arc::new(multi_worker);
 
@@ -552,9 +471,7 @@ async fn create_multi_worker_sequences_with_expiry(
         }
     }
 
-    if expire_requests {
-        arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());
-    }
+    arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());
 
     Ok(arc)
 }
