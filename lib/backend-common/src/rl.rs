@@ -37,25 +37,20 @@ impl RlWorkerMetadata {
     pub fn new(world_size: u32, admin_base_url: Option<String>) -> anyhow::Result<Self> {
         let world_size = NonZeroU32::new(world_size)
             .ok_or_else(|| anyhow::anyhow!("RL worker world size must be positive"))?;
-        let admin_base_url =
-            normalized_optional(admin_base_url, "RL admin base URL must not be blank")?;
+        let admin_base_url = admin_base_url
+            .map(|value| {
+                let value = value.trim();
+                if value.is_empty() {
+                    anyhow::bail!("RL admin base URL must not be blank");
+                }
+                Ok(value.to_string())
+            })
+            .transpose()?;
         Ok(Self {
             world_size,
             admin_base_url,
         })
     }
-}
-
-fn normalized_optional(value: Option<String>, error: &str) -> anyhow::Result<Option<String>> {
-    value
-        .map(|value| {
-            let value = value.trim();
-            if value.is_empty() {
-                anyhow::bail!(error.to_string());
-            }
-            Ok(value.to_string())
-        })
-        .transpose()
 }
 
 impl RlServeEndpoint {
