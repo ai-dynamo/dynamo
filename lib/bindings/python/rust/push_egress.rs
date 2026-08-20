@@ -651,6 +651,29 @@ mod tests {
         assert!(annotated.data.is_none(), "error frames carry no data");
     }
 
+    #[test]
+    fn owned_data_frame_encodes_without_python() {
+        let frame = PushFrame::owned(Annotated::from_data(serde_json::json!({
+            "token_ids": [10, 11],
+            "index": 0
+        })))
+        .expect("owned response must encode");
+
+        assert!(!frame.is_error);
+        let wrapper = decode(&frame.bytes, frame.codec);
+        let annotated = wrapper.data.expect("owned frame carries data");
+        assert_eq!(
+            annotated.data.expect("owned frame carries response data"),
+            rmpv::Value::Map(vec![
+                (rmpv::Value::from("index"), rmpv::Value::from(0)),
+                (
+                    rmpv::Value::from("token_ids"),
+                    rmpv::Value::Array(vec![10.into(), 11.into()])
+                ),
+            ])
+        );
+    }
+
     /// Matching codecs are the whole point: the bytes encoded under the GIL go
     /// out untouched, with no second serde pass.
     #[test]
