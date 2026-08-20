@@ -112,28 +112,28 @@ const testCases = [
   // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
   {
     file: 'lib/sidecar/common/src/lib.rs',
-    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'common sidecar source avoids unrelated build and E2E filters'
+    expect: { sidecar: true, vllm_sidecar: true, sglang_sidecar: true, trtllm_sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'common sidecar source triggers all sidecar images without backend E2E'
   },
   {
     file: 'lib/sidecar/vllm/proto/vllm_grpc.proto',
-    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'vllm sidecar proto triggers Rust checks without backend E2E'
+    expect: { sidecar: true, vllm_sidecar: true, sglang_sidecar: false, trtllm_sidecar: false, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'vllm sidecar proto triggers only the vLLM image and Rust checks'
   },
   {
     file: 'lib/sidecar/sglang/src/lib.rs',
-    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'sglang sidecar source avoids backend E2E'
+    expect: { sidecar: true, vllm_sidecar: false, sglang_sidecar: true, trtllm_sidecar: false, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sglang sidecar source triggers only the SGLang image and Rust checks'
   },
   {
     file: 'lib/sidecar/trtllm/src/lib.rs',
-    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
+    expect: { sidecar: true, vllm_sidecar: false, sglang_sidecar: false, trtllm_sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'trtllm sidecar source triggers only the TensorRT-LLM image and Rust checks'
   },
   {
     file: 'lib/sidecar/vllm/deploy/agg.yaml',
-    expect: { sidecar: true, rust: false, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'sidecar deployment config avoids Rust and E2E checks'
+    expect: { sidecar: true, vllm_sidecar: true, sglang_sidecar: false, trtllm_sidecar: false, rust: false, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'vLLM sidecar deployment config triggers only the vLLM image'
   },
   {
     file: 'lib/sidecar/README.md',
@@ -141,9 +141,9 @@ const testCases = [
     desc: 'sidecar README avoids container, Rust, Fern, and E2E checks'
   },
   {
-    file: '.github/workflows/shared-build-sidecars.yml',
-    expect: { sidecar: true, core: true },
-    desc: 'sidecar build workflow exercises the container job it defines'
+    file: '.github/workflows/shared-build-sidecar.yml',
+    expect: { sidecar: true, vllm_sidecar: true, sglang_sidecar: true, trtllm_sidecar: true, core: true },
+    desc: 'shared sidecar build workflow exercises all three container jobs'
   },
 
   // Doc files should be excluded from core (negation patterns)

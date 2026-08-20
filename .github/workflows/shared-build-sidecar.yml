@@ -1,13 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Shared Build Sidecars
+name: Shared Build Sidecar
 
 on:
   workflow_call:
     inputs:
       builder_name:
         description: 'BuildKit builder name'
+        required: true
+        type: string
+      sidecar:
+        description: 'Sidecar to build (vllm, sglang, or trtllm)'
         required: true
         type: string
       source_ref:
@@ -28,15 +32,11 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.sidecar }} sidecar
+    name: Build multi-arch
     runs-on: prod-builder-v3
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        sidecar: [vllm, sglang, trtllm]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -64,7 +64,7 @@ jobs:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           IMAGE_TAG_SUFFIX: ${{ inputs.image_tag_suffix }}
-          SIDECAR: ${{ matrix.sidecar }}
+          SIDECAR: ${{ inputs.sidecar }}
           SOURCE_SHA: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
         run: |
           set -euo pipefail

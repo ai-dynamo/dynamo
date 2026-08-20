@@ -329,12 +329,33 @@ jobs:
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
-  sidecar-build:
-    name: Sidecar containers
+  vllm-sidecar-build:
+    name: vllm-sidecar
     needs: [create-fresh-builder, resolve-source-sha]
-    uses: ./.github/workflows/shared-build-sidecars.yml
+    uses: ./.github/workflows/shared-build-sidecar.yml
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      sidecar: vllm
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+
+  sglang-sidecar-build:
+    name: sglang-sidecar
+    needs: [create-fresh-builder, resolve-source-sha]
+    uses: ./.github/workflows/shared-build-sidecar.yml
+    with:
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      sidecar: sglang
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+
+  trtllm-sidecar-build:
+    name: trtllm-sidecar
+    needs: [create-fresh-builder, resolve-source-sha]
+    uses: ./.github/workflows/shared-build-sidecar.yml
+    with:
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      sidecar: trtllm
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
 
@@ -1281,7 +1302,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, sidecar-build, dynamo-pipeline, operator-build, planner-build, frontend-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, create-fresh-builder]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-sidecar-build, sglang-sidecar-build, trtllm-sidecar-build, dynamo-pipeline, operator-build, planner-build, frontend-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -1303,7 +1324,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, sidecar-build, deploy-cleanup, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, vllm-sidecar-build, sglang-sidecar-build, trtllm-sidecar-build, deploy-cleanup, rust-tests]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs

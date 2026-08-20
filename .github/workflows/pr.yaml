@@ -40,7 +40,9 @@ jobs:
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
-      sidecar: ${{ steps.changes.outputs.sidecar }}
+      vllm_sidecar: ${{ steps.changes.outputs.vllm_sidecar }}
+      sglang_sidecar: ${{ steps.changes.outputs.sglang_sidecar }}
+      trtllm_sidecar: ${{ steps.changes.outputs.trtllm_sidecar }}
       efa: ${{ steps.changes.outputs.efa }}
       base_ref: ${{ steps.changes.outputs.base_ref }}
       merge_base_sha: ${{ steps.changes.outputs.merge_base_sha }}
@@ -159,7 +161,9 @@ jobs:
       - frontend-build
       - frontend-test
       - frontend-copy-to-acr
-      - sidecar-build
+      - vllm-sidecar-build
+      - sglang-sidecar-build
+      - trtllm-sidecar-build
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -342,13 +346,32 @@ jobs:
 # SIDECAR CONTAINERS
 # ============================================================================
 
-  sidecar-build:
-    name: Sidecar containers
+  vllm-sidecar-build:
+    name: vllm-sidecar
     needs: [changed-files]
-    if: needs.changed-files.outputs.sidecar == 'true'
-    uses: ./.github/workflows/shared-build-sidecars.yml
+    if: needs.changed-files.outputs.vllm_sidecar == 'true'
+    uses: ./.github/workflows/shared-build-sidecar.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      sidecar: vllm
+
+  sglang-sidecar-build:
+    name: sglang-sidecar
+    needs: [changed-files]
+    if: needs.changed-files.outputs.sglang_sidecar == 'true'
+    uses: ./.github/workflows/shared-build-sidecar.yml
+    with:
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      sidecar: sglang
+
+  trtllm-sidecar-build:
+    name: trtllm-sidecar
+    needs: [changed-files]
+    if: needs.changed-files.outputs.trtllm_sidecar == 'true'
+    uses: ./.github/workflows/shared-build-sidecar.yml
+    with:
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      sidecar: trtllm
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -1959,7 +1982,9 @@ jobs:
       - trtllm-multi-gpu-test
       - trtllm-efa-build
       - dynamo-pipeline
-      - sidecar-build
+      - vllm-sidecar-build
+      - sglang-sidecar-build
+      - trtllm-sidecar-build
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

@@ -16,11 +16,11 @@
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   examples -> recipe-check (Kustomize recipe generation and unit tests)
-#   sidecar  -> vLLM, SGLang, and TensorRT-LLM sidecar container builds
+#   vllm_sidecar / sglang_sidecar / trtllm_sidecar -> engine-specific sidecar image build
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   ignore
+#   ignore, sidecar
 
 all:
   - '**'
@@ -286,7 +286,31 @@ planner:
 
 sidecar:
   - 'lib/sidecar/**'
-  - '.github/workflows/shared-build-sidecars.yml'
+  - '.github/workflows/shared-build-sidecar.yml'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+# Engine-specific sidecar builds. Changes to common or to the reusable build
+# workflow exercise all three images; engine-local changes exercise only that
+# engine's image.
+vllm_sidecar:
+  - 'lib/sidecar/common/**'
+  - 'lib/sidecar/vllm/**'
+  - '.github/workflows/shared-build-sidecar.yml'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+sglang_sidecar:
+  - 'lib/sidecar/common/**'
+  - 'lib/sidecar/sglang/**'
+  - '.github/workflows/shared-build-sidecar.yml'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+trtllm_sidecar:
+  - 'lib/sidecar/common/**'
+  - 'lib/sidecar/trtllm/**'
+  - '.github/workflows/shared-build-sidecar.yml'
   - '!**/*.md'
   - '!**/*.rst'
 
