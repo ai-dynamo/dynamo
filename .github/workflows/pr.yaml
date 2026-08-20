@@ -40,6 +40,7 @@ jobs:
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
+      sidecar: ${{ steps.changes.outputs.sidecar }}
       efa: ${{ steps.changes.outputs.efa }}
       base_ref: ${{ steps.changes.outputs.base_ref }}
       merge_base_sha: ${{ steps.changes.outputs.merge_base_sha }}
@@ -158,6 +159,7 @@ jobs:
       - frontend-build
       - frontend-test
       - frontend-copy-to-acr
+      - sidecar-build
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -335,6 +337,18 @@ jobs:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test Helm chart
         run: make -C deploy/helm/charts/power-agent lint test
+
+# ============================================================================
+# SIDECAR CONTAINERS
+# ============================================================================
+
+  sidecar-build:
+    name: Sidecar containers
+    needs: [changed-files]
+    if: needs.changed-files.outputs.sidecar == 'true'
+    uses: ./.github/workflows/shared-build-sidecars.yml
+    with:
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -1945,6 +1959,7 @@ jobs:
       - trtllm-multi-gpu-test
       - trtllm-efa-build
       - dynamo-pipeline
+      - sidecar-build
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

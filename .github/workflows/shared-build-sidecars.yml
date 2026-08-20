@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Shared Build Sidecars
+
+on:
+  workflow_call:
+    inputs:
+      builder_name:
+        description: 'BuildKit builder name'
+        required: true
+        type: string
+      source_ref:
+        description: 'Full git SHA to checkout and use in image tags. Empty uses the caller SHA.'
+        required: false
+        type: string
+        default: ''
+      image_tag_suffix:
+        description: 'Suffix appended to immutable and floating image tags.'
+        required: false
+        type: string
+        default: ''
+      build_timeout_minutes:
+        description: 'Timeout in minutes for each sidecar build.'
+        required: false
+        type: number
+        default: 60
+
+jobs:
+  build:
+    name: ${{ matrix.sidecar }} sidecar
+    runs-on: prod-builder-v3
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        sidecar: [vllm, sglang, trtllm]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: general
+          arch: linux/amd64,linux/arm64
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+
+      - name: Build and push sidecar image
+        shell: bash
+        env:
+          BUILDER_NAME: ${{ inputs.builder_name }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG_SUFFIX: ${{ inputs.image_tag_suffix }}
+          SIDECAR: ${{ matrix.sidecar }}
+          SOURCE_SHA: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+        run: |
+          set -euo pipefail
+
+          case "${SIDECAR}" in
+            vllm|sglang|trtllm) ;;
+            *)
+              echo "::error::Unsupported sidecar: ${SIDECAR}"
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::source_ref must resolve to a full 40-character git SHA"
+            exit 1
+          fi
+          if [[ ! "${IMAGE_TAG_SUFFIX}" =~ ^(-[a-z0-9][a-z0-9._-]*)?$ ]]; then
+            echo "::error::Invalid image tag suffix: ${IMAGE_TAG_SUFFIX}"
+            exit 1
+          fi
+
+          IMAGE_URIS=(
+            "${ECR_REGISTRY}/${ECR_REPOSITORY}:${SOURCE_SHA}-${SIDECAR}-sidecar${IMAGE_TAG_SUFFIX}"
+          )
+          if [[ -n "${IMAGE_TAG_SUFFIX}" ]]; then
+            IMAGE_URIS+=(
+              "${ECR_REGISTRY}/${ECR_REPOSITORY}:${SIDECAR}-sidecar${IMAGE_TAG_SUFFIX}"
+            )
+          fi
+          TAG_FLAGS=()
+          for image_uri in "${IMAGE_URIS[@]}"; do
+            TAG_FLAGS+=(--tag "${image_uri}")
+          done
+
+          docker buildx build --builder "${BUILDER_NAME}" --push \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg "DOCKER_PROXY=${ECR_REGISTRY}/dockerhub/" \
+            "${TAG_FLAGS[@]}" \
+            --file "lib/sidecar/${SIDECAR}/Dockerfile" \
+            .
+
+          {
+            echo "### ${SIDECAR} sidecar image"
+            echo
+            echo "| Image URI |"
+            echo "|---|"
+            for image_uri in "${IMAGE_URIS[@]}"; do
+              echo "| \`${image_uri}\` |"
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"

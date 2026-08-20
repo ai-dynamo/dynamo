@@ -16,11 +16,11 @@
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   examples -> recipe-check (Kustomize recipe generation and unit tests)
-#   sidecar  -> classification only; source and proto files also match rust
+#   sidecar  -> vLLM, SGLang, and TensorRT-LLM sidecar container builds
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   examples, ignore, sidecar
+#   ignore
 
 all:
   - '**'
@@ -129,6 +129,10 @@ ignore:
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
+  # Sidecar docs are intentionally excluded from the Fern docs filter and do
+  # not affect the built sidecar images.
+  - 'lib/sidecar/**/*.md'
+  - 'lib/sidecar/**/*.rst'
 
 ci: &ci
   - '.github/workflows/**'
@@ -282,6 +286,9 @@ planner:
 
 sidecar:
   - 'lib/sidecar/**'
+  - '.github/workflows/shared-build-sidecars.yml'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'

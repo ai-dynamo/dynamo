@@ -7,7 +7,11 @@
 #
 #   docker build -f lib/sidecar/sglang/Dockerfile -t dynamo-sglang-sidecar:1.3.0 .
 
-FROM rust:1.96.1-bookworm AS builder
+# CI sets DOCKER_PROXY to the authenticated Docker Hub mirror. It remains empty
+# for the documented local build command.
+ARG DOCKER_PROXY=
+
+FROM ${DOCKER_PROXY}library/rust:1.96.1-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
         clang \
@@ -23,7 +27,7 @@ COPY . .
 RUN cargo build --release --locked -p dynamo-sglang-sidecar \
     && strip target/release/dynamo-sglang-sidecar
 
-FROM debian:bookworm-slim AS runtime
+FROM ${DOCKER_PROXY}library/debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
