@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: q32b-a4-rdma-4
+spec:
+  spec:
+    devices:
+      requests:
+        - name: rdma
+          exactly:
+            deviceClassName: mrdma.google.com
+            allocationMode: ExactCount
+            # Each worker uses four of the A4 node's eight GPU-aligned RDMA NICs.
+            count: 4
