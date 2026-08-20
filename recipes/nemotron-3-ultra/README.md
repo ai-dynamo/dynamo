@@ -68,16 +68,7 @@ The H200 and B200 disaggregated profiles use UCX/RDMA and request one `rdma/ib` 
 
 The B200 and GB200 256K 1P2D profiles use FlashInfer attention; the H200 256K 1P1D profile uses FlashAttention. These explicit backends are part of the qualified configurations.
 
-The following selected disaggregated reference points passed all three gates on the complete 3,541-row agentic trace: 50 output tok/s/user, 5,000 ms p50 TTFT, and 20 ms p50 ITL. H200 1M selects CC30; CC32 is its first valid TTFT failure.
-
-| GPU | Context | Concurrency | Output tok/s/GPU | Output tok/s/user | TTFT p50 (ms) | ITL p50 (ms) |
-|---|---:|---:|---:|---:|---:|---:|
-| B200 | 256K | 144 | 510.82 | 52.08 | 3680.71 | 19.200 |
-| B200 | 1M | 38 | 223.49 | 53.57 | 1293.55 | 18.668 |
-| GB200 | 256K | 140 | 534.82 | 55.47 | 3342.87 | 18.026 |
-| GB200 | 1M | 48 | 270.93 | 50.55 | 1696.20 | 19.783 |
-| H200 | 256K | 42 | 124.94 | 50.75 | 422.92 | 19.703 |
-| H200 | 1M | 30 | 88.13 | 60.71 | 4309.32 | 16.470 |
+The selected disaggregated reference concurrencies passed the complete trace and release SLA gates. H200 1M selects CC30; CC32 is its first rejected point. Detailed performance results are maintained outside this recipe PR.
 
 All six aggregate two-worker profiles are finalized on released Dynamo 1.4.0 with MNS 256. Each selected point passed the exact trace and is bracketed by a higher-load SLA failure.
 
