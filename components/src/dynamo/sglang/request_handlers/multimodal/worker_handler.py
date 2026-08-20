@@ -66,6 +66,9 @@ class EmbeddingsProcessorLike(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def release_embeddings(self, tensor_id: int) -> None:
+        ...
+
 
 class SglangUtils:
     """General SGLang utilities (not multimodal-specific)"""
@@ -346,63 +349,79 @@ async def _build_mm_items(
     if encoded_groups:
         embeddings, tensor_id = await embeddings_processor.process_embeddings(request)
 
-        grouped_grids: dict[str, list[Any]] = {"IMAGE": [], "VIDEO": []}
-        grouped_embeds: dict[str, list[torch.Tensor]] = {"IMAGE": [], "VIDEO": []}
-        video_second_per_grid_ts: list[float] = []
-        # SGLang expects one timestamp list per video in the grouped item.
-        video_timestamps: list[list[float]] = []
+        try:
+            grouped_grids: dict[str, list[Any]] = {"IMAGE": [], "VIDEO": []}
+            grouped_embeds: dict[str, list[torch.Tensor]] = {
+                "IMAGE": [],
+                "VIDEO": [],
+            }
+            video_second_per_grid_ts: list[float] = []
+            # SGLang expects one timestamp list per video in the grouped item.
+            video_timestamps: list[list[float]] = []
 
-        offset = 0
-        for (
-            modality,
-            grid_item,
-            token_count,
-            second_per_grid_ts,
-            timestamps,
-        ) in encoded_groups:
-            next_offset = offset + int(token_count)
-            if next_offset > embeddings.shape[0]:
-                raise ValueError("Encoded token counts exceed received embedding rows")
-            grouped_grids[modality].append(grid_item)
-            grouped_embeds[modality].append(embeddings[offset:next_offset])
-            if modality == "VIDEO":
-                if second_per_grid_ts is not None:
-                    video_second_per_grid_ts.append(second_per_grid_ts)
-                if timestamps is not None:
-                    video_timestamps.append(timestamps)
-            offset = next_offset
+            offset = 0
+            for (
+                modality,
+                grid_item,
+                token_count,
+                second_per_grid_ts,
+                timestamps,
+            ) in encoded_groups:
+                next_offset = offset + int(token_count)
+                if next_offset > embeddings.shape[0]:
+                    raise ValueError(
+                        "Encoded token counts exceed received embedding rows"
+                    )
+                grouped_grids[modality].append(grid_item)
+                grouped_embeds[modality].append(embeddings[offset:next_offset])
+                if modality == "VIDEO":
+                    if second_per_grid_ts is not None:
+                        video_second_per_grid_ts.append(second_per_grid_ts)
+                    if timestamps is not None:
+                        video_timestamps.append(timestamps)
+                offset = next_offset
 
-        if offset != embeddings.shape[0]:
-            raise ValueError("Encoded token counts do not match received embeddings")
-
-        if grouped_embeds["IMAGE"]:
-            image_mm_items.append(
-                embeddings_processor.create_multimodal_image_item(
-                    torch.cat(grouped_embeds["IMAGE"], dim=0),
-                    grouped_grids["IMAGE"],
-                )
-            )
-        if grouped_embeds["VIDEO"]:
-            video_group_count = len(grouped_grids["VIDEO"])
-            if (
-                video_second_per_grid_ts
-                and len(video_second_per_grid_ts) != video_group_count
-            ):
+            if offset != embeddings.shape[0]:
                 raise ValueError(
-                    "second_per_grid_ts must be present for every video group"
+                    "Encoded token counts do not match received embeddings"
                 )
-            if video_timestamps and len(video_timestamps) != video_group_count:
-                raise ValueError(
-                    "video_timestamps must be present for every video group"
+
+            if grouped_embeds["IMAGE"]:
+                image_mm_items.append(
+                    embeddings_processor.create_multimodal_image_item(
+                        torch.cat(grouped_embeds["IMAGE"], dim=0),
+                        grouped_grids["IMAGE"],
+                    )
                 )
-            video_data_items.append(
-                embeddings_processor.create_multimodal_video_item(
-                    torch.cat(grouped_embeds["VIDEO"], dim=0),
-                    grouped_grids["VIDEO"],
-                    second_per_grid_ts=video_second_per_grid_ts or None,
-                    video_timestamps=video_timestamps or None,
+            if grouped_embeds["VIDEO"]:
+                video_group_count = len(grouped_grids["VIDEO"])
+                if (
+                    video_second_per_grid_ts
+                    and len(video_second_per_grid_ts) != video_group_count
+                ):
+                    raise ValueError(
+                        "second_per_grid_ts must be present for every video group"
+                    )
+                if video_timestamps and len(video_timestamps) != video_group_count:
+                    raise ValueError(
+                        "video_timestamps must be present for every video group"
+                    )
+                video_data_items.append(
+                    embeddings_processor.create_multimodal_video_item(
+                        torch.cat(grouped_embeds["VIDEO"], dim=0),
+                        grouped_grids["VIDEO"],
+                        second_per_grid_ts=video_second_per_grid_ts or None,
+                        video_timestamps=video_timestamps or None,
+                    )
                 )
-            )
+        except BaseException:
+            try:
+                embeddings_processor.release_embeddings(tensor_id)
+            except BaseException:
+                logger.exception(
+                    "Failed to release multimodal embeddings allocation %s", tensor_id
+                )
+            raise
 
     return image_mm_items, video_data_items, embeddings, tensor_id
 
