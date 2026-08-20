@@ -655,7 +655,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhasePending, updated.Status.Phase)
-		assert.Contains(t, updated.Status.Message, "checkpoint functionality is disabled")
+		assert.Equal(t, checkpointDisabledMessage, updated.Status.Message)
 
 		jobs := &batchv1.JobList{}
 		require.NoError(t, r.List(ctx, jobs, client.InNamespace(testNamespace)))
@@ -939,7 +939,10 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod("worker-0", job))
 		r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
 
-		_, err := r.handleCreating(ctx, ckpt)
+		t.Log("Reconcile the Creating checkpoint with the Checkpoint gate disabled")
+		_, err := r.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
+		})
 		require.NoError(t, err)
 
 		var snaps snapshotv1alpha1.PodSnapshotList

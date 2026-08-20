@@ -51,7 +51,7 @@ import (
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-const checkpointDisabledMessage = "checkpoint functionality is disabled in the operator configuration"
+const checkpointDisabledMessage = "checkpoint functionality is unavailable; verify that it is enabled in the operator configuration and the PodSnapshot API is installed"
 
 var errCheckpointCleanupPending = errors.New("checkpoint cleanup pending")
 
@@ -121,6 +121,29 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
+	// Retry terminal Job cleanup before parking checkpoints while the feature is disabled.
+	if isTerminalCheckpointPhase(ckpt.Status.Phase) && ckpt.Status.JobName != "" {
+		if err := r.cleanupTerminalCheckpointJob(ctx, ckpt); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Report active checkpoints as disabled before accessing the external API.
+	if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		switch ckpt.Status.Phase {
+		case "", nvidiacomv1alpha1.DynamoCheckpointPhasePending, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating:
+			if ckpt.Status.Message == checkpointDisabledMessage {
+				return ctrl.Result{}, nil
+			}
+			ckpt.Status.Message = checkpointDisabledMessage
+			if err := r.Status().Update(ctx, ckpt); err != nil {
+				return ctrl.Result{}, err
+			}
+			r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", checkpointDisabledMessage)
+		}
+		return ctrl.Result{}, nil
+	}
+
 	checkpointID, err := checkpoint.CheckpointID(ckpt)
 	if err != nil {
 		logger.Error(err, "Failed to resolve checkpoint ID")
@@ -136,15 +159,6 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, err
 		}
 		if err := r.Get(ctx, req.NamespacedName, ckpt); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// A Failed phase, or Ready with the new success proof, is the durable record that permits
-	// deleting its Job. Do this before duplicate or artifact-version normalization can discard the
-	// retained Job reference.
-	if isTerminalCheckpointPhase(ckpt.Status.Phase) && ckpt.Status.JobName != "" {
-		if err := r.cleanupTerminalCheckpointJob(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -231,14 +245,6 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
-		if ckpt.Status.Message == checkpointDisabledMessage {
-			return ctrl.Result{}, nil
-		}
-		ckpt.Status.Message = checkpointDisabledMessage
-		r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", checkpointDisabledMessage)
-		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
-	}
 	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {
 		return r.failPendingCheckpoint(ctx, ckpt, "GMSPodTemplateNotPrepared", err)
 	}
@@ -378,15 +384,6 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		if failed, message := checkpointJobFailed(job); failed {
 			return r.failCreating(ctx, ckpt, "JobFailed", message)
 		}
-		if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
-			if ckpt.Status.Message == checkpointDisabledMessage {
-				return ctrl.Result{}, nil
-			}
-			ckpt.Status.Message = checkpointDisabledMessage
-			r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", checkpointDisabledMessage)
-			return ctrl.Result{}, r.Status().Update(ctx, ckpt)
-		}
-
 		pod, perr := r.findSourcePod(ctx, job)
 		if perr != nil {
 			if client.IgnoreNotFound(perr) == nil {
