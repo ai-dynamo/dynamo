@@ -783,11 +783,7 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub serve_indexer: bool,
 
-    /// Enable the session-aware logical prefix index. When true the router
-    /// keeps a per-session record of the block chains each session has matched,
-    /// which survives engine eviction of the underlying blocks. Off by default:
-    /// it costs memory proportional to tracked session lineage and nothing in
-    /// the routing decision consumes it yet.
+    /// Enable bounded per-session logical prefix tracking.
     #[serde(default, skip_serializing_if = "is_default")]
     pub enable_session_prefix_index: bool,
 
@@ -1971,8 +1967,6 @@ worker_selection:
     fn session_prefix_index_flag_defaults_off_and_survives_the_wire() {
         assert!(!KvRouterConfig::default().enable_session_prefix_index);
 
-        // Absent from the wire is the off state, so an older writer that never
-        // heard of the flag still deserializes into a working config.
         let from_legacy: KvRouterConfig = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(!from_legacy.enable_session_prefix_index);
 

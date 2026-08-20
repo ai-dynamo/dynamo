@@ -17,9 +17,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 )
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 
-# `dynamo._core` is the compiled pyo3 extension. It is present in a normal dev
-# build but absent from a pure-Python checkout, so guard it at collection rather
-# than letting the import error out mid-test.
+# Skip collection when the optional pyo3 extension is unavailable.
 KvRouterConfig = pytest.importorskip(
     "dynamo._core",
     reason="the compiled dynamo._core binding is not built in this environment",
@@ -217,16 +215,12 @@ def test_session_prefix_index_is_opt_in_and_reaches_the_binding() -> None:
     ).kv_router_kwargs()
     assert disabled_kwargs["enable_session_prefix_index"] is False
 
-    # The kwargs dict is unpacked straight into the Rust binding, so a name that
-    # does not match the pyo3 signature fails here rather than at serve time.
     KvRouterConfig(**enabled_kwargs)
 
 
 def test_session_prefix_index_environment_flows_to_binding_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The env var is consumed when the flag is registered, so it has to be set
-    # before the group builds its arguments.
     monkeypatch.setenv("DYN_ENABLE_SESSION_PREFIX_INDEX", "true")
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
@@ -234,7 +228,6 @@ def test_session_prefix_index_environment_flows_to_binding_kwargs(
     kwargs = KvRouterConfigBase.from_cli_args(parser.parse_args([])).kv_router_kwargs()
     assert kwargs["enable_session_prefix_index"] is True
 
-    # An explicit flag still wins over the environment.
     overridden = KvRouterConfigBase.from_cli_args(
         parser.parse_args(["--no-enable-session-prefix-index"])
     ).kv_router_kwargs()
