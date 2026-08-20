@@ -30,7 +30,7 @@ from tests.serve.multimodal_profiles.sglang import (
     SGLANG_MULTIMODAL_PROFILES,
     SGLANG_TOPOLOGY_SCRIPTS,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_image_payload_b64, make_multimodal_configs
 from tests.utils.payload_builder import (
@@ -57,6 +57,7 @@ from tests.utils.payloads import (
     ResponsesStreamPayload,
     VideoGenerationPayload,
 )
+from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
@@ -1044,13 +1045,40 @@ def sglang_config_test(request):
     return sglang_configs[request.param]
 
 
+@pytest.fixture
+def sglang_config_with_dist_ports(sglang_config_test):
+    """Give each DP-attention process a disjoint SGLang port block."""
+    if sglang_config_test.name != "disaggregated_dp_attention":
+        yield sglang_config_test
+        return
+
+    # SGLang PortArgs consumes the supplied distributed-init port and the next
+    # six ports, so reserve two independently contiguous seven-port blocks.
+    ports = allocate_contiguous_ports(
+        count=2,
+        block_size=7,
+        start_port=DynamoPortRange.SERVE.value,
+    )
+    try:
+        yield dataclasses.replace(
+            sglang_config_test,
+            env={
+                **sglang_config_test.env,
+                "SGLANG_PREFILL_DIST_INIT_ADDR": f"127.0.0.1:{ports[0]}",
+                "SGLANG_DECODE_DIST_INIT_ADDR": f"127.0.0.1:{ports[7]}",
+            },
+        )
+    finally:
+        deallocate_ports(ports)
+
+
 @pytest.mark.e2e
 @pytest.mark.sglang
 # Allocate 4 system ports: disaggregated_router runs 4 workers, while the
 # two-GPU DP-attention config uses ports 1/2 for metrics and 3/4 for NCCL.
 @pytest.mark.parametrize("num_system_ports", [4], indirect=True)
 def test_sglang_deployment(
-    sglang_config_test,
+    sglang_config_with_dist_ports,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
@@ -1063,7 +1091,8 @@ def test_sglang_deployment(
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     config = dataclasses.replace(
-        sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
+        sglang_config_with_dist_ports,
+        frontend_port=dynamo_dynamic_ports.frontend_port,
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
