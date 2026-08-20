@@ -54,14 +54,14 @@ uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
 pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
 
 # Pin a specific nightly wheel
-uv pip install --pre --extra-index-url https://pypi.nvidia.com/ "ai-dynamo[vllm]==1.4.0.dev20260803"
+uv pip install --pre --extra-index-url https://pypi.nvidia.com/ "ai-dynamo[vllm]==1.5.0.dev20260820"
 ```
 
 Backend extras such as `ai-dynamo[vllm]` and `ai-dynamo[sglang]` use the same flags. For TensorRT-LLM, use the nightly container rather than a PyPI extra.
 
 ## Backend Versions
 
-Nightlies track `main`, so the backend versions they ship change as `main` advances. To find which nightly or stable build ships a given backend version, and get the exact pull or install command, use the build selector in the [Kubernetes Quickstart](../../kubernetes/getting-started/quickstart.mdx#install-dynamo).
+Nightlies track `main`, so the backend versions they ship change as `main` advances. The build selector in [Install Dynamo](../../cli/installation/install-dynamo.mdx) lists the last three versions of each backend and the newest nightly that shipped each one, with the exact install command. For Kubernetes image variables, use the selector in the [Kubernetes Quickstart](../../kubernetes/getting-started/quickstart.mdx#install-dynamo).
 
 To confirm the exact versions a specific nightly shipped, read them from the pulled image:
 

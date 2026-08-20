@@ -10,7 +10,7 @@ import {
   CURRENT_VERSION,
   CURRENT_WHEEL,
   MAIN_TOT,
-  NIGHTLY_BUILDS,
+  NIGHTLY_BACKEND_BUILDS,
   RELEASES,
   type BackendPins,
 } from "./releases.data";
@@ -98,36 +98,25 @@ function stableEntries(backend: Backend): InstallEntry[] {
 }
 
 function nightlyEntries(backend: Backend): InstallEntry[] {
-  const backendVersion = pin(MAIN_TOT, backend.id);
-  if (!backendVersion) return [];
-
-  if (!backend.extra) {
-    return [
-      {
-        backend_version: backendVersion,
-        latest: true,
-        note: "Nightly TensorRT-LLM installs use the rolling runtime container; no pinned nightly wheel extra is published.",
-        commands: {
-          container: dockerCommand(`${backend.image}-runtime-nightly`, "latest"),
-        },
+  return NIGHTLY_BACKEND_BUILDS.filter((build) => build.backend === backend.id)
+    // Older backend versions are reachable only through their pinned wheel, so a
+    // backend with no wheel extra can offer nothing but the rolling container.
+    .filter((build) => backend.extra || build.latest)
+    .map((build) => ({
+      backend_version: build.backendVersion,
+      dynamo: build.dynamo,
+      date: build.date,
+      latest: build.latest,
+      note: build.latest
+        ? `Tip of main. The rolling ${backend.image}-runtime-nightly:latest container tracks this ${backend.label} version.`
+        : `Newest nightly that shipped ${backend.label} ${build.backendVersion}. Nightly containers are rolling only, so this version is wheel-pinned.`,
+      commands: {
+        ...(build.latest
+          ? { container: dockerCommand(`${backend.image}-runtime-nightly`, "latest") }
+          : {}),
+        ...(backend.extra ? { wheel: nightlyWheelCommand(backend, build.dynamo) } : {}),
       },
-    ];
-  }
-
-  return NIGHTLY_BUILDS.slice(0, 3).map((build, index) => ({
-    backend_version: backendVersion,
-    dynamo: build.version,
-    date: build.date,
-    latest: index === 0,
-    note:
-      index === 0
-        ? "Nightly containers are rolling latest tags; pinned versions apply to wheels."
-        : "Pinned nightly wheel build. Use latest for the rolling runtime container.",
-    commands: {
-      ...(index === 0 ? { container: dockerCommand(`${backend.image}-runtime-nightly`, "latest") } : {}),
-      wheel: nightlyWheelCommand(backend, build.version),
-    },
-  }));
+    }));
 }
 
 function sourceEntries(backend: Backend): InstallEntry[] {
