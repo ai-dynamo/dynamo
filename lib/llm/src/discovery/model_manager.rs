@@ -1320,7 +1320,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
-        self.models
+        self.catalog
+            .load()
+            .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_transcriptions_engine()
