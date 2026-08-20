@@ -12,4 +12,6 @@
 // github.com/ai-dynamo/snapshot's SnapshotJob CRD (tracked there as
 // RUN-39806) is the planned long-term replacement for this package once it
 // ships.
+//
+// (trivial touch to trigger DynamoCheckpoint CI on this branch)
 package checkpointjob
