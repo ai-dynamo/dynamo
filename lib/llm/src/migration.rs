@@ -206,10 +206,8 @@ where
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     ) -> Result<ManyOut<Annotated<Resp>>> {
-        if self.migration_limit == 0 {
-            return next.generate(request).await;
-        }
-
+        // NOTE: Keep the migration operator in the request path at limit zero. The limit controls
+        // replacement attempts; RetryManager continues to own the initial attempt uniformly.
         let (preprocessed_request, context) = request.transfer(());
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
@@ -363,30 +361,12 @@ where
                     self.metrics.inc_migration_ongoing_request(&self.model_name);
                     let migration_event =
                         MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
-                    if self.retries_left == 0 {
-                        self.record_migration_outcome(
-                            Some(&migration_event),
-                            frontend_service::migration_outcome::FAILURE,
-                        );
-                        self.track_response(&response);
-                        return Some(response);
-                    }
-                    match self.new_stream(Some(migration_event)).await {
-                        Ok(()) => continue,
-                        Err(err) => {
-                            tracing::warn!(error = ?err, "Cannot recreate stream");
-                            let terminal_error = err
-                                .chain()
-                                .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned())
-                                .unwrap_or_else(|| DynamoError::from(err.as_ref()));
-                            return Some(Annotated {
-                                data: None,
-                                id: None,
-                                event: Some("error".to_string()),
-                                comment: None,
-                                error: Some(terminal_error),
-                            });
-                        }
+                    // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
+                    // When no replacement is established, preserve the triggering stream error.
+                    if let Err(err) = self.new_stream(Some(migration_event)).await {
+                        tracing::warn!(error = ?err, "Cannot recreate stream");
+                    } else {
+                        continue;
                     }
                 }
                 self.track_response(&response);
@@ -464,7 +444,7 @@ where
                         frontend_service::migration_outcome::FAILURE
                     };
                 self.record_migration_outcome(migration_event.as_ref(), outcome);
-                Err(err)
+                Err(err) // should propagate original error if any
             }
             None => {
                 self.record_migration_outcome(
@@ -507,12 +487,10 @@ where
         if self.exceed_max_seq_len(output_len) {
             return;
         }
+        // NOTE: A zero remaining token budget is not retry-budget exhaustion. Backends remain
+        // authoritative for deciding how generation terminates at max_tokens.
         if let Some(max_tokens) = self.request.stop_conditions.max_tokens {
-            let remaining = max_tokens.saturating_sub(output_len);
-            self.request.stop_conditions.max_tokens = Some(remaining);
-            if remaining == 0 {
-                self.retries_left = 0;
-            }
+            self.request.stop_conditions.max_tokens = Some(max_tokens.saturating_sub(output_len));
         }
         if let Some(min_tokens) = self.request.stop_conditions.min_tokens {
             self.request.stop_conditions.min_tokens = Some(min_tokens.saturating_sub(output_len));
@@ -1180,44 +1158,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_migration_limit_passes_the_original_context_through() {
-        struct ContextIdentityEngine {
-            expected: Arc<dyn AsyncEngineContext>,
-        }
-
-        #[async_trait]
-        impl
-            AsyncEngine<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-                anyhow::Error,
-            > for ContextIdentityEngine
-        {
-            async fn generate(
-                &self,
-                request: SingleIn<PreprocessedRequest>,
-            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
-                let context = request.context();
-                assert!(Arc::ptr_eq(&context, &self.expected));
-                Ok(ResponseStream::new(
-                    Box::pin(stream::empty::<Annotated<BackendOutput>>()),
-                    context,
-                ))
-            }
-        }
-
-        let context_id = uuid::Uuid::new_v4().to_string();
-        let request =
-            Context::with_id_and_metadata(create_mock_request(1), context_id, BTreeMap::new());
-        let expected = request.context();
-        let engine = Arc::new(ContextIdentityEngine { expected });
-        let migration = Migration::new(0, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
-
-        let mut responses = migration.generate(request, engine).await.unwrap();
-        assert!(responses.next().await.is_none());
-    }
-
-    #[tokio::test]
     async fn maximum_migration_limit_does_not_overflow() {
         let context_id = uuid::Uuid::new_v4().to_string();
         let mock_engine = Arc::new(MockEngine::new(
@@ -1476,40 +1416,6 @@ mod tests {
         assert!(responses.iter().all(|response| response.error.is_none()));
     }
 
-    #[tokio::test]
-    async fn exhausted_token_budget_does_not_dispatch_a_replacement() {
-        let context_id = uuid::Uuid::new_v4().to_string();
-        let mock_engine = Arc::new(MockEngine::new(
-            MockBehavior::MidStreamFail { fail_after: 3 },
-            3,
-            100,
-            context_id.clone(),
-        ));
-        let calls = mock_engine.call_count.clone();
-        let request =
-            Context::with_id_and_metadata(create_mock_request(3), context_id, BTreeMap::new());
-        let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
-
-        let responses = migration
-            .generate(request, mock_engine)
-            .await
-            .unwrap()
-            .collect::<Vec<_>>()
-            .await;
-
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(responses.len(), 4);
-        assert!(
-            responses[..3]
-                .iter()
-                .all(|response| response.error.is_none())
-        );
-        assert_eq!(
-            responses[3].err().unwrap().error_type(),
-            ErrorType::Disconnected
-        );
-    }
-
     /// Test case 4: New request migration - indefinite failure
     /// Tests the scenario where a worker becomes unreachable for new requests indefinitely.
     /// The RetryManager should exhaust all retries and return the original error from the first attempt.
@@ -1563,9 +1469,8 @@ mod tests {
 
     /// Test case 5: Ongoing request migration - indefinite failure
     /// Tests the scenario where a worker fails mid-stream indefinitely during ongoing requests.
-    /// The RetryManager should exhaust all retries and return the final replacement error.
-    /// Expected behavior: Should receive some responses from the first stream, then the authoritative
-    /// error from the last failed replacement attempt.
+    /// The RetryManager should exhaust all retries and return the original stream disconnection error.
+    /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure() {
         dynamo_runtime::logging::init();
@@ -1614,12 +1519,10 @@ mod tests {
             }
         }
 
-        // The replacement attempts fail before producing a stream, so their CannotConnect
-        // result supersedes the original stream's Disconnected error.
+        // 4th response should be a Disconnected error after retries are exhausted
         let error_response = &responses[3];
         let err = error_response.err().expect("expected error response");
-        assert_eq!(err.error_type(), ErrorType::CannotConnect);
-        assert_eq!(err.message(), "no responders");
+        assert_eq!(err.error_type(), ErrorType::Disconnected);
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
