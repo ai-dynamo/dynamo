@@ -87,9 +87,20 @@ func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64)
 		if fileEntry.GetType() != fdinfo.FdTypes_UNIXSK || fileEntry.Usk == nil {
 			continue
 		}
-		if rewriteCloneConflictingUnixSocketAddress(fileEntry.Usk, restoreID) {
+		did := rewriteCloneConflictingUnixSocketAddress(fileEntry.Usk, restoreID)
+		if did {
 			rewritten = true
 		}
+		// DIAGNOSTIC, temporary. Clone-restore keeps failing on unix sockets
+		// whose address CRIU prints as empty, and the log alone cannot say
+		// which entries the predicate matched. Dump the raw shape of every
+		// unix socket so the ones that collide can be identified precisely
+		// rather than inferred from the symptom.
+		u := fileEntry.Usk
+		fmt.Fprintf(os.Stderr,
+			"DYNDBG unixsk id=%d ino=%d type=%d state=%d peer=%d namelen=%d name=%x rewritten=%v\n",
+			u.GetId(), u.GetIno(), u.GetType(), u.GetState(), u.GetPeer(),
+			len(u.GetName()), u.GetName(), did)
 	}
 	for _, rewrite := range tcpRewrites {
 		*rewrite.socket.SrcPort = rewrite.port
