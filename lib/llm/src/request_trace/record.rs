@@ -55,13 +55,12 @@ pub(crate) fn emit_request_end(
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
 ) {
-    let request_received_ms = tracker.request_received_epoch_ms();
-    let event_time_unix_ms = tracker
-        .total_time_ms()
-        .map_or_else(unix_time_ms, |elapsed| {
-            request_received_ms.saturating_add(elapsed.max(0.0).round() as u64)
-        });
     let timing = tracker.get_timing_info();
+    let event_time_unix_ms = timing.total_time_ms.map_or_else(unix_time_ms, |elapsed| {
+        timing
+            .request_received_ms
+            .saturating_add(elapsed.max(0.0).round() as u64)
+    });
     let worker = tracker
         .get_worker_info()
         .map(|worker| RequestTraceWorkerInfo {
