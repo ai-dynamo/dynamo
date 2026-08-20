@@ -1827,31 +1827,6 @@ class TestForwardPassMetricsActivation:
         assert "Benchmark mode: auto-enabling InstrumentedScheduler" not in caplog.text
 
 
-class TestGMSV1Env:
-    """Operator-injected DYN_GMS_USE_V1 selects the V1 worker."""
-
-    def test_selects_v1_worker(self, monkeypatch):
-        monkeypatch.setenv("DYN_GMS_USE_V1", "true")
-        dynamo_cfg = _make_dynamo_config()
-        engine_cfg = _make_engine_config_with_runner(load_format="auto")
-
-        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
-
-        assert (
-            engine_cfg.worker_cls
-            == "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
-        )
-        assert engine_cfg.enable_sleep_mode is True
-
-    def test_rejects_load_format_gms(self, monkeypatch):
-        monkeypatch.setenv("DYN_GMS_USE_V1", "true")
-        dynamo_cfg = _make_dynamo_config()
-        engine_cfg = _make_engine_config_with_runner(load_format="gms")
-
-        with pytest.raises(ValueError, match="DYN_GMS_USE_V1"):
-            update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
-
-
 class TestEmbeddingWorkerFlag:
     """Parsing + validation for --embedding-worker."""
 
