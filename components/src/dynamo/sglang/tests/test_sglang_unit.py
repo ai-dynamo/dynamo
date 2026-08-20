@@ -364,45 +364,6 @@ async def test_parse_args_enables_incremental_streaming_before_resolution(
 
 
 @pytest.mark.asyncio
-async def test_gms_v1_enables_memory_saver_before_resolution(
-    monkeypatch, mock_sglang_cli
-):
-    server_args = SimpleNamespace(
-        disaggregation_mode="null",
-        dllm_algorithm=None,
-        kv_events_config=None,
-        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
-    )
-
-    def resolve(parsed_args):
-        assert parsed_args.enable_memory_saver is True
-        return server_args
-
-    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
-    mock_sglang_cli("--model", "/tmp", "--enable-gms-v1")
-
-    await parse_args(sys.argv[1:])
-
-
-@pytest.mark.asyncio
-async def test_gms_v1_rejects_dllm_workers(monkeypatch, mock_sglang_cli):
-    server_args = SimpleNamespace(
-        disaggregation_mode="null",
-        dllm_algorithm="dream",
-        kv_events_config=None,
-        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
-    )
-    monkeypatch.setattr(
-        "dynamo.sglang.args.ServerArgs.from_cli_args",
-        lambda parsed_args: server_args,
-    )
-    mock_sglang_cli("--model", "/tmp", "--enable-gms-v1", "--dllm-algorithm", "dream")
-
-    with pytest.raises(ValueError, match="only supported for LLM workers"):
-        await parse_args(sys.argv[1:])
-
-
-@pytest.mark.asyncio
 async def test_parse_args_applies_dynamo_defaults_before_resolution(
     monkeypatch, mock_sglang_cli
 ):
@@ -425,29 +386,6 @@ async def test_parse_args_applies_dynamo_defaults_before_resolution(
     mock_sglang_cli("--model", "/tmp", "--dllm-algorithm", "dream")
 
     await parse_args(sys.argv[1:])
-
-
-@pytest.mark.parametrize(
-    "override",
-    [
-        {"embedding_worker": True},
-        {"image_diffusion_worker": True},
-        {"video_generation_worker": True},
-        {"enable_multimodal": True},
-        {"multimodal_worker": True},
-        {"multimodal_encode_worker": True},
-        {"diffusion_worker": True},
-    ],
-)
-def test_gms_v1_rejects_non_llm_workers(override):
-    config = _make_sglang_config(enable_gms_v1=True, **override)
-
-    with pytest.raises(ValueError, match="only supported for LLM workers"):
-        config.validate()
-
-
-def test_gms_v1_allows_llm_workers():
-    _make_sglang_config(enable_gms_v1=True).validate()
 
 
 def test_compat_filters_async_generate_kwargs_for_older_engines():

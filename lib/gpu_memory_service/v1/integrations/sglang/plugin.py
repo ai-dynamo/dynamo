@@ -72,47 +72,34 @@ def _adapter() -> GMSV1MemorySaverAdapter:
     return GMSV1MemorySaverAdapter()
 
 
-def _around_adapter_factory(_original_factory, *_args, **_kwargs):
-    return _adapter()
-
-
-def _after_initial_model_load(result, *args, **kwargs) -> None:
-    _adapter().observe_model(result.model)
-
-
-def _before_init_all_cuda_graphs(_scheduler: object) -> None:
-    # Publication rebinds non-Parameter tensors, so it must precede graph capture.
-    _adapter()._publish_weights()
-
-
-def _around_create_dsa_index_buffers(original, *args, **kwargs):
-    with _adapter().region("kv_cache"):
-        return original(*args, **kwargs)
-
-
 def register_gms_v1_plugin() -> None:
     """Register the GMS hooks in SGLang processes where Dynamo enabled them."""
     if os.environ.get("DYN_GMS_USE_V1") != "true":
         return
+
+    def around_create_dsa_index_buffers(original, *args, **kwargs):
+        with _adapter().region("kv_cache"):
+            return original(*args, **kwargs)
+
     HookRegistry.register(
         "sglang.srt.model_executor.model_runner_components.load_model_utils."
         "load_model_with_memory_saver",
-        _after_initial_model_load,
+        lambda result, *args, **kwargs: _adapter().observe_model(result.model),
         HookType.AFTER,
     )
     HookRegistry.register(
         "sglang.srt.managers.scheduler.Scheduler.init_all_cuda_graphs",
-        _before_init_all_cuda_graphs,
+        lambda _scheduler: _adapter()._publish_weights(),
         HookType.BEFORE,
     )
     HookRegistry.register(
         "sglang.srt.utils.torch_memory_saver_adapter.TorchMemorySaverAdapter.create",
-        _around_adapter_factory,
+        lambda _original, *_args, **_kwargs: _adapter(),
         HookType.AROUND,
     )
     HookRegistry.register(
         "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers",
-        _around_create_dsa_index_buffers,
+        around_create_dsa_index_buffers,
         HookType.AROUND,
     )
     # Layer-split DSA overrides the parent method, so the parent hook does not
@@ -120,6 +107,6 @@ def register_gms_v1_plugin() -> None:
     HookRegistry.register(
         "sglang.srt.mem_cache.dsa_cache_layer_split."
         "LayerSplitDSATokenToKVPool._create_index_buffers",
-        _around_create_dsa_index_buffers,
+        around_create_dsa_index_buffers,
         HookType.AROUND,
     )

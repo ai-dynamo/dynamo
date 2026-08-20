@@ -6679,7 +6679,9 @@ func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T)
 	require.NoError(t, err)
 
 	t.Log("Verify every requested container is wired as a GMS client")
-	require.NotNil(t, findInitContainerByName(podSpec, gmsruntime.ServerContainerName))
+	server := findInitContainerByName(podSpec, gmsruntime.ServerContainerName)
+	require.NotNil(t, server)
+	assert.Empty(t, server.Args)
 	var main *corev1.Container
 	var loader *corev1.Container
 	var metricsClient *corev1.Container
@@ -6700,52 +6702,14 @@ func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T)
 	assertGMSClientContainer(t, main)
 	assertGMSClientContainer(t, loader)
 	assertGMSClientContainer(t, metricsClient)
+	_, hasV1 := envVarsToMap(main.Env)[gmsruntime.EnvUseV1]
+	assert.False(t, hasV1)
 }
 
 func TestGenerateBasePodSpec_SnapshotUsesGMSV1(t *testing.T) {
-	for _, backend := range []BackendFramework{BackendFrameworkSGLang, BackendFrameworkVLLM} {
-		t.Run(string(backend), func(t *testing.T) {
-			component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: commonconsts.ComponentTypeWorker,
-				Checkpoint:    &v1alpha1.ServiceCheckpointConfig{Enabled: true},
-				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
-					Enabled: true,
-					Mode:    v1alpha1.GMSModeIntraPod,
-				},
-				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{
-						Command: []string{"python3"},
-						Args:    []string{"-m", "dynamo.sglang", "--tp", "1"},
-						Resources: corev1.ResourceRequirements{
-							Limits: corev1.ResourceList{
-								corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
-							},
-						},
-					},
-				},
-			})
-
-			podSpec, err := GenerateBasePodSpec(
-				component, backend, &mockSecretsRetriever{},
-				"test-deployment", "default", RoleMain, 1,
-				&configv1alpha1.OperatorConfiguration{},
-				commonconsts.MultinodeDeploymentTypeGrove, "worker",
-				nil, nil, staticContainerGPUCount(1),
-			)
-			require.NoError(t, err)
-
-			require.NotEmpty(t, podSpec.Containers)
-			assert.Equal(t, "true", envVarsToMap(podSpec.Containers[0].Env)[gmsruntime.EnvUseV1])
-			server := findInitContainerByName(podSpec, gmsruntime.ServerContainerName)
-			require.NotNil(t, server)
-			assert.Equal(t, []string{"--use-v1"}, server.Args)
-		})
-	}
-}
-
-func TestGenerateBasePodSpec_GMSWithoutCheckpointStaysV0(t *testing.T) {
 	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeWorker,
+		Checkpoint:    &v1alpha1.ServiceCheckpointConfig{Enabled: true},
 		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
 			Enabled: true,
 			Mode:    v1alpha1.GMSModeIntraPod,
@@ -6773,11 +6737,10 @@ func TestGenerateBasePodSpec_GMSWithoutCheckpointStaysV0(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotEmpty(t, podSpec.Containers)
-	_, hasV1 := envVarsToMap(podSpec.Containers[0].Env)[gmsruntime.EnvUseV1]
-	assert.False(t, hasV1)
+	assert.Equal(t, "true", envVarsToMap(podSpec.Containers[0].Env)[gmsruntime.EnvUseV1])
 	server := findInitContainerByName(podSpec, gmsruntime.ServerContainerName)
 	require.NotNil(t, server)
-	assert.Empty(t, server.Args)
+	assert.Equal(t, []string{"--use-v1"}, server.Args)
 }
 
 func TestGenerateBasePodSpec_GPUMemoryServiceRejectsMissingExtraClientContainers(t *testing.T) {

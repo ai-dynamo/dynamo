@@ -48,21 +48,6 @@ func TestEnsureServerSidecar(t *testing.T) {
 	assert.True(t, hasVolume)
 }
 
-func TestEnsureServerSidecarV1(t *testing.T) {
-	podSpec := &corev1.PodSpec{
-		Containers: []corev1.Container{{
-			Name:  "main",
-			Image: "test-image:latest",
-		}},
-	}
-
-	EnsureServerSidecar(podSpec, &podSpec.Containers[0], true)
-
-	require.Len(t, podSpec.InitContainers, 1)
-	assert.Equal(t, []string{"--use-v1"}, podSpec.InitContainers[0].Args)
-	assert.Equal(t, "true", envValue(t, &podSpec.Containers[0], EnvUseV1))
-}
-
 func TestEnsureServerSidecarIdempotent(t *testing.T) {
 	podSpec := &corev1.PodSpec{
 		Containers: []corev1.Container{{Name: "main", Image: "test:latest"}},

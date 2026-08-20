@@ -16,7 +16,6 @@ from dynamo.common.snapshot.restore_context import (
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
-from dynamo.sglang.backend_args import reject_gms_v1_for_non_llm
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,
@@ -43,7 +42,6 @@ async def worker(argv: list[str] | None = None):
     dump_config(config.dynamo_args.dump_config_to, config)
 
     enable_gms_v1 = config.dynamo_args.enable_gms_v1
-    reject_gms_v1_for_non_llm(config.dynamo_args)
     if config.server_args.load_format == "gms" and not enable_gms_v1:
         from gpu_memory_service.integrations.sglang import setup_gms
 

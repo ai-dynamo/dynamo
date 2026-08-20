@@ -35,11 +35,7 @@ from dynamo.common.snapshot.lifecycle import (
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import ensure_sglang_tensor_image_size
-from dynamo.sglang.backend_args import (
-    DynamoSGLangArgGroup,
-    DynamoSGLangConfig,
-    reject_gms_v1_for_non_llm,
-)
+from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -633,7 +629,6 @@ async def parse_args(args: list[str]) -> Config:
     dynamo_config.custom_jinja_template = expanded_template_path
     dynamo_config.diffusion_worker = diffusion_worker
     dynamo_config.use_kv_events = use_kv_events
-    reject_gms_v1_for_non_llm(dynamo_config)
 
     logging.debug(f"Dynamo configs: {dynamo_config}")
 
