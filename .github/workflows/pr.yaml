@@ -813,6 +813,7 @@ jobs:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["arm64"]'
+      models_dir: /models
       enable_coverage: true
       run_sanity_check: false
       gpu_test_platforms: '["arm64"]'
@@ -881,6 +882,7 @@ jobs:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["arm64"]'
+      models_dir: /models
       enable_coverage: true
       run_sanity_check: false
       gpu_test_platforms: '["arm64"]'
@@ -949,6 +951,7 @@ jobs:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["arm64"]'
+      models_dir: /models
       enable_coverage: true
       run_sanity_check: false
       gpu_test_platforms: '["arm64"]'
