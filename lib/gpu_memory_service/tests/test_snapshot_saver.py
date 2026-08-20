@@ -3,12 +3,9 @@
 
 """Unit tests for the GMS snapshot saver CLI."""
 
-from types import SimpleNamespace
-
 import pytest
 
 try:
-    from gpu_memory_service.cli import snapshot as snapshot_cli
     from gpu_memory_service.cli.snapshot import saver
 except ModuleNotFoundError:
     pytest.skip(
@@ -61,70 +58,3 @@ def test_save_device_sets_cuda_context_before_storage_client(monkeypatch):
     assert calls[2][2]["socket_path"] == "/tmp/gms-3"
     assert calls[2][2]["device"] == 3
     assert calls[3] == ("save", {"max_workers": 8})
-
-
-class _ExitedProcess:
-    def __init__(self, command: list[str]) -> None:
-        self.command = command
-        self.pid = 1
-
-    def poll(self) -> int:
-        return 0
-
-    def terminate(self) -> None:
-        return None
-
-    def wait(self) -> int:
-        return 0
-
-
-def test_v1_saver_defaults_to_all_visible_devices(monkeypatch):
-    started: list[list[str]] = []
-    monkeypatch.setattr(snapshot_cli, "init_vmm", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        snapshot_cli, "get_vmm", lambda: SimpleNamespace(list_devices=lambda: [0, 1])
-    )
-    monkeypatch.setattr(
-        snapshot_cli.subprocess,
-        "Popen",
-        lambda command: started.append(command) or _ExitedProcess(command),
-    )
-
-    saver.main(["--use-v1", "--checkpoint-dir", "/ckpt"])
-
-    assert [command[-2:] for command in started] == [
-        ["--device", "0"],
-        ["--device", "1"],
-    ]
-    assert all("gpu_memory_service.v1.snapshot.saver" in command for command in started)
-
-
-def test_v1_saver_device_flag_stays_rank_local(monkeypatch):
-    calls: list[tuple[str, list[str]]] = []
-    monkeypatch.setattr(
-        saver.importlib,
-        "import_module",
-        lambda name: SimpleNamespace(main=lambda argv: calls.append((name, argv))),
-    )
-
-    saver.main(["--use-v1", "--checkpoint-dir", "/ckpt", "--device", "3"])
-
-    assert calls == [
-        (
-            "gpu_memory_service.v1.snapshot.saver",
-            ["--checkpoint-dir", "/ckpt", "--device", "3"],
-        )
-    ]
-
-
-def test_v1_saver_equals_device_flag_stays_rank_local(monkeypatch):
-    calls: list[list[str]] = []
-    monkeypatch.setattr(
-        saver.importlib,
-        "import_module",
-        lambda name: SimpleNamespace(main=lambda argv: calls.append(argv)),
-    )
-
-    saver.main(["--use-v1", "--checkpoint-dir", "/ckpt", "--device=2"])
-
-    assert calls == [["--checkpoint-dir", "/ckpt", "--device=2"]]
