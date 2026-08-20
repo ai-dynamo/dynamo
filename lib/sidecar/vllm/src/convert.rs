@@ -1218,6 +1218,11 @@ impl ResponseState {
         } else {
             None
         };
+        let routed_experts = output
+            .routed_experts
+            .as_ref()
+            .map(routed_experts_to_json)
+            .transpose()?;
         let pb::SequenceOutput {
             text,
             num_tokens,
@@ -1247,6 +1252,11 @@ impl ResponseState {
         }
 
         let Some(finish) = finish_info else {
+            if routed_experts.is_some() {
+                return Err(client::protocol_error(
+                    "routed_experts are only valid on a terminal sequence output",
+                ));
+            }
             return if self.is_prefill || num_tokens == 0 {
                 Ok(None)
             } else {
@@ -1312,6 +1322,15 @@ impl ResponseState {
             );
         }
         self.attach_prompt_data(&mut mapped);
+        if let Some(routed_experts) = routed_experts {
+            let engine_data = mapped
+                .engine_data
+                .get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            let engine_data = engine_data.as_object_mut().ok_or_else(|| {
+                client::protocol_error("terminal engine_data is not a JSON object")
+            })?;
+            engine_data.insert("routed_experts".to_string(), routed_experts);
+        }
         Ok(Some(mapped))
     }
 
@@ -1363,6 +1382,62 @@ impl ResponseState {
         self.prompt_info = Some(prompt);
         Ok(())
     }
+}
+
+fn routed_experts_to_json(routed: &pb::RoutedExperts) -> Result<serde_json::Value, DynamoError> {
+    if routed.shape.len() != 3 {
+        return Err(client::protocol_error(format!(
+            "routed_experts shape must have rank 3, got {:?}",
+            routed.shape
+        )));
+    }
+    let (descriptor, item_size) = match routed.dtype.as_str() {
+        "uint8" => ("|u1", 1usize),
+        "uint16" => ("<u2", 2usize),
+        dtype => {
+            return Err(client::protocol_error(format!(
+                "routed_experts dtype must be uint8 or uint16, got {dtype:?}"
+            )));
+        }
+    };
+    let expected = routed
+        .shape
+        .iter()
+        .try_fold(1usize, |count, dimension| {
+            count.checked_mul(*dimension as usize)
+        })
+        .and_then(|count| count.checked_mul(item_size))
+        .ok_or_else(|| client::protocol_error("routed_experts byte length overflow"))?;
+    if routed.data.len() != expected {
+        return Err(client::protocol_error(format!(
+            "routed_experts byte length mismatch: expected {expected}, got {}",
+            routed.data.len()
+        )));
+    }
+    let dictionary = format!(
+        "{{'descr': '{descriptor}', 'fortran_order': False, 'shape': ({}, {}, {}), }}",
+        routed.shape[0], routed.shape[1], routed.shape[2]
+    );
+    const PREAMBLE_LEN: usize = 10;
+    const ARRAY_ALIGNMENT: usize = 64;
+    let padding = ARRAY_ALIGNMENT - ((PREAMBLE_LEN + dictionary.len() + 1) % ARRAY_ALIGNMENT);
+    let header_len = dictionary
+        .len()
+        .checked_add(padding)
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| client::protocol_error("routed_experts NumPy header length overflow"))?;
+    let header_len = u16::try_from(header_len).map_err(|_| {
+        client::protocol_error("routed_experts NumPy v1 header does not fit in uint16")
+    })?;
+
+    let mut encoded = Vec::with_capacity(PREAMBLE_LEN + usize::from(header_len) + expected);
+    encoded.extend_from_slice(b"\x93NUMPY\x01\x00");
+    encoded.extend_from_slice(&header_len.to_le_bytes());
+    encoded.extend_from_slice(dictionary.as_bytes());
+    encoded.resize(encoded.len() + padding, b' ');
+    encoded.push(b'\n');
+    encoded.extend_from_slice(&routed.data);
+    Ok(serde_json::Value::String(BASE64_STANDARD.encode(encoded)))
 }
 
 fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
