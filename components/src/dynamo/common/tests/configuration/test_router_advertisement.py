@@ -59,6 +59,16 @@ def test_kv_tuning_is_carried_not_reset():
     assert router_config.kv_router_config.overlap_score_credit == 2.5
 
 
+@pytest.mark.parametrize("mode", ["power-of-two", "least-loaded"])
+def test_load_tuning_is_carried_not_reset(mode):
+    config, _ = parse_worker_router_config(
+        ["--router-mode", mode, "--router-kv-overlap-score-credit", "2.5"]
+    )
+    router_config = build_router_config(config)
+    assert router_config is not None
+    assert router_config.kv_router_config.overlap_score_credit == 2.5
+
+
 def test_frontend_only_arguments_are_not_offered_to_workers():
     """Flags a worker card cannot carry must not appear on a worker."""
     flags = _router_flags()

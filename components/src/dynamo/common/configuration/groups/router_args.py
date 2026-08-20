@@ -410,9 +410,16 @@ def build_router_config(
         ) from error
 
     mode = getattr(RouterMode, mode_attr)
-    # Only KV routing consults KvRouterConfig; passing it for other modes would
-    # imply tuning that is never read.
+    # KV and first-party load-aware policies consume this configuration. Workers advertise the
+    # full configuration because their model card replaces the frontend's value wholesale.
     kv_router_config = (
-        KvRouterConfig(**config.kv_router_kwargs()) if mode == RouterMode.KV else None
+        KvRouterConfig(**config.kv_router_kwargs())
+        if mode
+        in (
+            RouterMode.KV,
+            RouterMode.PowerOfTwoChoices,
+            RouterMode.LeastLoaded,
+        )
+        else None
     )
     return RouterConfig(mode, kv_router_config, **config.router_kwargs())
