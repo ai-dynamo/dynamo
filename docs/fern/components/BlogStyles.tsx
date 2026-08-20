@@ -179,6 +179,17 @@ article:has(.dynamo-blog-home) > header {
 
 .dynamo-blog-art--indexer { background: linear-gradient(145deg, #25120b, #a43d13 52%, #180903); }
 
+.dynamo-blog-art--hillclimb { background: linear-gradient(145deg, #210d31, #6d2693 52%, #14051d); }
+
+.dynamo-blog-art__climb {
+  position: absolute;
+  z-index: 1;
+  inset: 12% 8% 14% 8%;
+  width: 84%;
+  height: 74%;
+  opacity: 0.92;
+}
+
 .dynamo-blog-art__grid {
   position: absolute;
   opacity: 0.72;

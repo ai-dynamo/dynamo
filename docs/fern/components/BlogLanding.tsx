@@ -12,7 +12,7 @@ const ARTICLES = [
     date: "August 20, 2026",
     readTime: "2 min read",
     category: "Agentic AI",
-    art: "agents",
+    art: "hillclimb",
   },
   {
     title: "DynoSim: Simulating the Pareto Frontier",
@@ -99,8 +99,30 @@ function ArticleArt({ variant }: { variant: string }) {
       <span className="dynamo-blog-art__grid" />
       <span className="dynamo-blog-art__orb dynamo-blog-art__orb--one" />
       <span className="dynamo-blog-art__orb dynamo-blog-art__orb--two" />
-      <span className="dynamo-blog-art__line dynamo-blog-art__line--one" />
-      <span className="dynamo-blog-art__line dynamo-blog-art__line--two" />
+      {variant === "hillclimb" ? (
+        <svg className="dynamo-blog-art__climb" viewBox="0 0 200 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path
+            d="M10 96 H40 V72 H68 V58 H96 V52 H128 V30 H176"
+            stroke="rgba(255,255,255,0.9)"
+            strokeWidth="2.4"
+            strokeLinecap="square"
+          />
+          <circle cx="40" cy="72" r="3.4" fill="#76b900" />
+          <circle cx="68" cy="58" r="3.4" fill="#76b900" />
+          <circle cx="96" cy="52" r="3.4" fill="#76b900" />
+          <circle cx="128" cy="30" r="3.4" fill="#76b900" />
+          <circle cx="150" cy="38" r="2.6" fill="rgba(255,255,255,0.45)" />
+          <circle cx="82" cy="80" r="2.6" fill="rgba(255,255,255,0.45)" />
+          <circle cx="176" cy="30" r="5.4" stroke="#76b900" strokeWidth="2" fill="none" />
+          <path d="M22 104 l6 6 m0 -6 l-6 6" stroke="rgba(255,130,130,0.85)" strokeWidth="2" strokeLinecap="round" />
+          <path d="M50 104 l6 6 m0 -6 l-6 6" stroke="rgba(255,130,130,0.85)" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      ) : (
+        <>
+          <span className="dynamo-blog-art__line dynamo-blog-art__line--one" />
+          <span className="dynamo-blog-art__line dynamo-blog-art__line--two" />
+        </>
+      )}
       <span className="dynamo-blog-art__mark">D</span>
     </div>
   );
