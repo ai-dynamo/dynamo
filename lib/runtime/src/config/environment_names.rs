@@ -327,6 +327,16 @@ pub mod llm {
     /// disabled.
     pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
 
+    /// Idle heartbeat interval, in milliseconds, for the forward-pass-metrics
+    /// *direct publisher* — the Rust publisher the mocker and the TensorRT-LLM
+    /// adapter start. It does not reach `FpmEventRelay`, which has no periodic
+    /// timer, nor the Python `_FpmPublisherThread` that carries the vLLM path's
+    /// own 1 s heartbeat. Accepted range is `1` through `300000` (five minutes);
+    /// unset, `0`, invalid, or above the maximum keeps the 1 s default that
+    /// matches the Python publisher. The value is read once, when the publisher
+    /// starts.
+    pub const DYN_FPM_HEARTBEAT_INTERVAL_MS: &str = "DYN_FPM_HEARTBEAT_INTERVAL_MS";
+
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
@@ -813,6 +823,17 @@ pub mod mocker {
     /// This path is race-prone during startup; prefer leaving it unset unless you are
     /// explicitly trying to reproduce the original behavior.
     pub const DYN_MOCKER_SYNC_DIRECT: &str = "DYN_MOCKER_SYNC_DIRECT";
+
+    /// Timer primitive backing the mocker's precise sleep: `auto` (default),
+    /// `timerfd`, or `time_driver`. `auto` keeps the platform default —
+    /// `timerfd` on Linux, the Tokio time driver everywhere else. Unrecognized
+    /// values warn and fall back to `auto`. Read once per process.
+    pub const DYN_MOCKER_SLEEP_BACKEND: &str = "DYN_MOCKER_SLEEP_BACKEND";
+
+    /// Truthy values record requested-vs-actual wake times for the mocker's
+    /// precise sleep into a per-backend drift histogram. Off by default; the
+    /// accounting costs an extra clock read per sleep. Read once per process.
+    pub const DYN_MOCKER_SLEEP_DRIFT: &str = "DYN_MOCKER_SLEEP_DRIFT";
 }
 
 /// Testing environment variables
@@ -960,6 +981,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             llm::request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
             llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
+            llm::DYN_FPM_HEARTBEAT_INTERVAL_MS,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -1007,6 +1029,8 @@ mod tests {
             // Mocker
             mocker::DYN_MOCKER_KV_CACHE_TRACE,
             mocker::DYN_MOCKER_SYNC_DIRECT,
+            mocker::DYN_MOCKER_SLEEP_BACKEND,
+            mocker::DYN_MOCKER_SLEEP_DRIFT,
             // Testing
             testing::DYN_QUEUED_UP_PROCESSING,
             testing::DYN_SOAK_RUN_DURATION,

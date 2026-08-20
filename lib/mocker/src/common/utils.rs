@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use aisimulate_core::engine::{WorkerType as EngineWorkerType, prefill_handoff_delay_ms};
@@ -75,6 +77,244 @@ pub fn compute_kv_transfer_delay(
     .map(|delay_ms| Duration::from_secs_f64(delay_ms / 1000.0))
 }
 
+/// Environment variable selecting which timer primitive backs the precise sleep.
+const SLEEP_BACKEND_ENV: &str = "DYN_MOCKER_SLEEP_BACKEND";
+
+/// Environment variable enabling sleep-drift accounting.
+const SLEEP_DRIFT_ENV: &str = "DYN_MOCKER_SLEEP_DRIFT";
+
+/// Which timer primitive serves a [`sleep_until_precise`] deadline.
+///
+/// The two concrete variants ride different Tokio drivers: `Timerfd` registers a
+/// `timerfd` file descriptor on the **IO driver**, while `TimeDriver` uses
+/// [`tokio::time::sleep_until`] and therefore the **time driver**. Which one a
+/// build used to be decided entirely by `#[cfg(target_os = "linux")]`, so the
+/// time-driver path — the only path macOS ever takes — was not compiled, let
+/// alone exercised, on Linux. Making the choice a runtime value is what lets a
+/// Linux host run the macOS path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SleepBackend {
+    /// Platform default: `Timerfd` on Linux, `TimeDriver` everywhere else.
+    Auto,
+    /// Linux `timerfd` on the IO driver. Resolves to `TimeDriver` on other
+    /// targets, and falls back to it at runtime if the timerfd cannot be created.
+    Timerfd,
+    /// Tokio's time driver.
+    TimeDriver,
+}
+
+impl SleepBackend {
+    /// Map to the concrete backend this target would use. Never returns `Auto`.
+    pub fn resolve(self) -> SleepBackend {
+        match self {
+            SleepBackend::TimeDriver => SleepBackend::TimeDriver,
+            SleepBackend::Auto | SleepBackend::Timerfd => {
+                if cfg!(target_os = "linux") {
+                    SleepBackend::Timerfd
+                } else {
+                    SleepBackend::TimeDriver
+                }
+            }
+        }
+    }
+
+    /// Stable label used on drift records and log lines.
+    pub fn label(self) -> &'static str {
+        match self {
+            SleepBackend::Auto => "auto",
+            SleepBackend::Timerfd => "timerfd",
+            SleepBackend::TimeDriver => "time_driver",
+        }
+    }
+
+    fn parse(value: &str) -> Option<SleepBackend> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Some(SleepBackend::Auto),
+            "timerfd" => Some(SleepBackend::Timerfd),
+            "time_driver" | "time-driver" | "timer_driver" | "timer-driver" => {
+                Some(SleepBackend::TimeDriver)
+            }
+            _ => None,
+        }
+    }
+}
+
+static CONFIGURED_SLEEP_BACKEND: LazyLock<SleepBackend> = LazyLock::new(|| {
+    let Ok(value) = std::env::var(SLEEP_BACKEND_ENV) else {
+        return SleepBackend::Auto;
+    };
+    match SleepBackend::parse(&value) {
+        Some(backend) => backend,
+        None => {
+            tracing::warn!(
+                env = SLEEP_BACKEND_ENV,
+                value,
+                "unrecognized sleep backend; using auto"
+            );
+            SleepBackend::Auto
+        }
+    }
+});
+
+static SLEEP_DRIFT_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| dynamo_truthy::env_is_truthy(SLEEP_DRIFT_ENV));
+
+/// The backend [`sleep_until_precise`] uses, resolved once from the environment.
+pub fn configured_sleep_backend() -> SleepBackend {
+    *CONFIGURED_SLEEP_BACKEND
+}
+
+/// Whether [`sleep_until_precise`] accounts drift into [`sleep_drift_stats`].
+///
+/// The default path must not pay for an extra `Instant::now()` per pass
+/// boundary: at high speedup ratios the scheduler crosses this function far more
+/// often than it crosses anything that would amortize the clock read.
+pub fn sleep_drift_enabled() -> bool {
+    *SLEEP_DRIFT_ENABLED
+}
+
+/// One measured wake: what was asked for, what was observed, and which backend served it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SleepDriftRecord {
+    /// Concrete backend that served the wake. Never `SleepBackend::Auto`.
+    pub backend: SleepBackend,
+    /// Time from the start of the call to the requested deadline.
+    pub requested: Duration,
+    /// Time actually spent in the call.
+    pub actual: Duration,
+    /// `actual - requested`, saturating at zero for an early wake.
+    pub drift: Duration,
+}
+
+/// Upper bucket bounds, in seconds, for the sleep-drift histogram.
+///
+/// The first ten mirror `EVENT_LOOP_DELAY_SECONDS` in `dynamo-runtime`'s tokio
+/// perf canary so the two can be read side by side. The last two extend past
+/// 1.0 s, because a histogram whose top bucket *is* the mode under
+/// investigation cannot distinguish "late by a second" from "later still".
+const DRIFT_BUCKET_BOUNDS_SECS: [f64; 12] = [
+    0.0, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0,
+];
+
+/// Cumulative per-backend drift histogram plus count, total, and max.
+struct DriftHistogram {
+    /// Cumulative counts: index `i` counts drift <= `DRIFT_BUCKET_BOUNDS_SECS[i]`.
+    buckets: [AtomicU64; DRIFT_BUCKET_BOUNDS_SECS.len()],
+    count: AtomicU64,
+    total_nanos: AtomicU64,
+    max_nanos: AtomicU64,
+}
+
+impl DriftHistogram {
+    const fn new() -> Self {
+        Self {
+            buckets: [const { AtomicU64::new(0) }; DRIFT_BUCKET_BOUNDS_SECS.len()],
+            count: AtomicU64::new(0),
+            total_nanos: AtomicU64::new(0),
+            max_nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Returns the number of observations recorded so far, this one included.
+    fn observe(&self, drift: Duration) -> u64 {
+        let secs = drift.as_secs_f64();
+        for (bucket, bound) in self.buckets.iter().zip(DRIFT_BUCKET_BOUNDS_SECS) {
+            if secs <= bound {
+                bucket.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+        let nanos = drift.as_nanos().min(u64::MAX as u128) as u64;
+        self.total_nanos.fetch_add(nanos, Ordering::Relaxed);
+        self.max_nanos.fetch_max(nanos, Ordering::Relaxed);
+        count
+    }
+
+    fn snapshot(&self, backend: SleepBackend) -> SleepDriftStats {
+        SleepDriftStats {
+            backend,
+            count: self.count.load(Ordering::Relaxed),
+            total: Duration::from_nanos(self.total_nanos.load(Ordering::Relaxed)),
+            max: Duration::from_nanos(self.max_nanos.load(Ordering::Relaxed)),
+            buckets: DRIFT_BUCKET_BOUNDS_SECS
+                .iter()
+                .zip(self.buckets.iter())
+                .map(|(bound, bucket)| (*bound, bucket.load(Ordering::Relaxed)))
+                .collect(),
+        }
+    }
+}
+
+static TIMERFD_DRIFT: DriftHistogram = DriftHistogram::new();
+static TIME_DRIVER_DRIFT: DriftHistogram = DriftHistogram::new();
+
+/// Aggregated sleep drift for one backend.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SleepDriftStats {
+    pub backend: SleepBackend,
+    /// Number of measured wakes. Expired deadlines are not counted; they never sleep.
+    pub count: u64,
+    pub total: Duration,
+    pub max: Duration,
+    /// `(upper bound in seconds, cumulative count at or below that bound)`. A
+    /// bucket count below `count` means observations landed past the last bound.
+    pub buckets: Vec<(f64, u64)>,
+}
+
+fn histogram_for(backend: SleepBackend) -> &'static DriftHistogram {
+    match backend.resolve() {
+        SleepBackend::Timerfd => &TIMERFD_DRIFT,
+        _ => &TIME_DRIVER_DRIFT,
+    }
+}
+
+/// Read the accumulated drift for one backend.
+pub fn sleep_drift_stats(backend: SleepBackend) -> SleepDriftStats {
+    let backend = backend.resolve();
+    histogram_for(backend).snapshot(backend)
+}
+
+/// Fold one measured wake into the process-wide histogram and log it.
+///
+/// The per-record log line is the readout for a bimodal distribution: the
+/// aggregate says how many wakes were late, the lines say which ones.
+pub fn record_sleep_drift(record: &SleepDriftRecord) {
+    let count = histogram_for(record.backend).observe(record.drift);
+    tracing::debug!(
+        backend = record.backend.label(),
+        requested_ms = record.requested.as_secs_f64() * 1_000.0,
+        actual_ms = record.actual.as_secs_f64() * 1_000.0,
+        drift_ms = record.drift.as_secs_f64() * 1_000.0,
+        "precise sleep drift"
+    );
+    if count.is_multiple_of(DRIFT_SUMMARY_EVERY) {
+        log_sleep_drift_summary(record.backend);
+    }
+}
+
+/// Observations between aggregate readouts, so a run that ends without anyone
+/// calling [`sleep_drift_stats`] still leaves the distribution in the log.
+const DRIFT_SUMMARY_EVERY: u64 = 1_000;
+
+/// Log one aggregate snapshot. The per-wake lines say which wakes were late;
+/// this says how many were, which is the question an ablation actually asks.
+fn log_sleep_drift_summary(backend: SleepBackend) {
+    let stats = sleep_drift_stats(backend);
+    let mean_ms = if stats.count == 0 {
+        0.0
+    } else {
+        stats.total.as_secs_f64() * 1_000.0 / stats.count as f64
+    };
+    tracing::info!(
+        backend = stats.backend.label(),
+        count = stats.count,
+        mean_ms,
+        max_ms = stats.max.as_secs_f64() * 1_000.0,
+        buckets = ?stats.buckets,
+        "precise sleep drift summary"
+    );
+}
+
 /// Sleep for the specified duration using timerfd on Linux for precision.
 pub async fn sleep_precise(duration: Duration) {
     sleep_until_precise(Instant::now() + duration).await;
@@ -85,27 +325,75 @@ pub async fn sleep_precise(duration: Duration) {
 /// Unlike `sleep_precise`, this accounts for time already elapsed since the
 /// deadline's reference point, making it suitable for simulation loops where
 /// computation time should be subtracted from the sleep.
+///
+/// The backend comes from `DYN_MOCKER_SLEEP_BACKEND` and drift accounting from
+/// `DYN_MOCKER_SLEEP_DRIFT`, both resolved once per process. Neither is set in
+/// normal operation, and with both unset this behaves exactly as it did before
+/// they existed.
 pub async fn sleep_until_precise(deadline: Instant) {
+    if sleep_drift_enabled() {
+        if let Some(record) =
+            sleep_until_precise_measured(deadline, configured_sleep_backend()).await
+        {
+            record_sleep_drift(&record);
+        }
+        return;
+    }
+    sleep_until_backend(deadline, configured_sleep_backend()).await;
+}
+
+/// Sleep until `deadline` on `backend`, measuring the wake.
+///
+/// Returns `None` for an already-expired deadline, which yields instead of
+/// sleeping and so has no backend and no drift to report.
+pub async fn sleep_until_precise_measured(
+    deadline: Instant,
+    backend: SleepBackend,
+) -> Option<SleepDriftRecord> {
+    let started = Instant::now();
+    let requested = deadline.saturating_duration_since(started);
+    let used = sleep_until_backend(deadline, backend).await?;
+    let actual = started.elapsed();
+    Some(SleepDriftRecord {
+        backend: used,
+        requested,
+        actual,
+        drift: actual.saturating_sub(requested),
+    })
+}
+
+/// Returns the backend that actually served the wake, or `None` if the deadline
+/// had already passed and no timer was armed.
+async fn sleep_until_backend(deadline: Instant, backend: SleepBackend) -> Option<SleepBackend> {
     // Scheduler work may consume the modeled delay, especially at high speedup ratios. Avoid
     // allocating and registering a timerfd when there is no remaining time to sleep. Preserve
     // the scheduler loop's cooperative yield so other tasks on the runtime can make progress.
     if deadline <= Instant::now() {
         tokio::task::yield_now().await;
-        return;
+        return None;
     }
 
     #[cfg(target_os = "linux")]
-    {
-        if let Ok(delay) = tokio_timerfd::Delay::new(deadline) {
-            let _ = delay.await;
-        } else {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    if backend.resolve() == SleepBackend::Timerfd {
+        // A timerfd may be unavailable (fd exhaustion, restricted sandbox), and an armed
+        // one may still fail on read. Either way the fallback is the time driver, which
+        // has to finish the sleep before the record can claim which backend served it.
+        let timerfd_served = match tokio_timerfd::Delay::new(deadline) {
+            Ok(delay) => delay.await.is_ok(),
+            Err(_) => false,
+        };
+        if timerfd_served {
+            return Some(SleepBackend::Timerfd);
         }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
         tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        return Some(SleepBackend::TimeDriver);
     }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = backend;
+
+    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    Some(SleepBackend::TimeDriver)
 }
 
 #[cfg(test)]
@@ -122,6 +410,175 @@ mod tests {
 
         assert!(matches!(first_poll, Poll::Pending));
         sleep.await;
+    }
+
+    /// The default cadence must not move: on Linux `auto` still means timerfd,
+    /// and the drift accounting stays off unless it is asked for.
+    ///
+    /// The expectation is a `#[cfg]`-gated literal, not a `cfg!(...)`
+    /// expression. An expression here would be a transcription of `resolve()`'s
+    /// own branch table and would keep agreeing with it after someone edited
+    /// it, which is precisely the assertion this test must not make. See
+    /// `test_default_backend_actually_sleeps_on_timerfd` for the same claim
+    /// driven through the production sleep body.
+    #[test]
+    fn test_auto_backend_keeps_platform_default() {
+        assert_eq!(configured_sleep_backend(), SleepBackend::Auto);
+        assert!(!sleep_drift_enabled());
+
+        #[cfg(target_os = "linux")]
+        let expected = SleepBackend::Timerfd;
+        #[cfg(not(target_os = "linux"))]
+        let expected = SleepBackend::TimeDriver;
+
+        assert_eq!(SleepBackend::Auto.resolve(), expected);
+        assert_eq!(SleepBackend::Timerfd.resolve(), expected);
+        assert_eq!(SleepBackend::TimeDriver.resolve(), SleepBackend::TimeDriver);
+    }
+
+    /// The default path, exercised rather than restated: a process with no
+    /// environment set asks for `Auto`, and on Linux the wake must be served by
+    /// the timerfd on the IO driver — the same primitive `main` reaches today.
+    ///
+    /// This goes through `sleep_until_precise_measured`, which is the body
+    /// `sleep_until_precise` runs, so it observes which primitive actually
+    /// served the sleep instead of asking `resolve()` what it would have
+    /// picked. An edit that left the branch table alone but changed which
+    /// backend the default path reaches — a differently-consulted
+    /// `configured_sleep_backend()`, a moved `resolve()` call — fails here and
+    /// nowhere else.
+    ///
+    /// A `TimeDriver` result would mean the timerfd could not be created (fd
+    /// exhaustion, a restricted sandbox) and the documented fallback fired.
+    /// That is a real difference in what the default path does on this host,
+    /// so it is asserted rather than tolerated.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_default_backend_actually_sleeps_on_timerfd() {
+        assert_eq!(configured_sleep_backend(), SleepBackend::Auto);
+
+        let record = sleep_until_precise_measured(
+            Instant::now() + Duration::from_millis(2),
+            SleepBackend::Auto,
+        )
+        .await
+        .expect("a 2ms deadline is not expired, so a timer is armed");
+
+        assert_eq!(
+            record.backend,
+            SleepBackend::Timerfd,
+            "the default path was served by {} on Linux, not timerfd",
+            record.backend.label()
+        );
+    }
+
+    #[test]
+    fn test_unrecognized_backend_falls_back_to_auto() {
+        assert_eq!(SleepBackend::parse("timerfd"), Some(SleepBackend::Timerfd));
+        assert_eq!(
+            SleepBackend::parse(" Time-Driver "),
+            Some(SleepBackend::TimeDriver)
+        );
+        assert_eq!(SleepBackend::parse(""), Some(SleepBackend::Auto));
+        assert_eq!(SleepBackend::parse("kqueue"), None);
+    }
+
+    /// A wake requested on one backend must be served by that backend, and must
+    /// not slide onto an unrelated one-second timer that happens to be armed on
+    /// the same runtime.
+    ///
+    /// The 1 s timer stands in for the fpm idle heartbeat in
+    /// `lib/llm/src/fpm_publisher.rs`, which is re-armed one second out on every
+    /// fire and is therefore, essentially always, the furthest entry in the time
+    /// driver's wheel — the shape a coalescing bug needs. The bound is 200 ms:
+    /// far above scheduling noise on a loaded CI box, and far below the ~1000 ms
+    /// mode under investigation, so it separates the two regimes without
+    /// flaking. `TimeDriver` is forced because it is the backend macOS always
+    /// takes and Linux otherwise never compiles.
+    ///
+    /// The heartbeat is polled once and reports back before the 2 ms deadline is
+    /// armed. Registration on the time driver happens on that first poll, and
+    /// spawning alone does not order it against this task on a two-worker
+    /// runtime — without the handshake the 1 s entry might not be in the wheel
+    /// at all when the short sleep is armed, and the interference the test is
+    /// named for would not be established.
+    ///
+    /// Which assertion has failure power, stated plainly so a later reader does
+    /// not over-trust this fixture: the backend-identity assertion is what fails
+    /// against pre-change behavior, where `#[cfg]` decided and a requested
+    /// `TimeDriver` was silently unanswerable on Linux. The 200 ms drift bound
+    /// is the discriminator for the ~1000 ms mode itself; it has never been
+    /// observed to fire on Linux, and it is not evidence about macOS.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_short_sleep_does_not_ride_the_one_second_timer() {
+        let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+        let heartbeat = tokio::spawn(async move {
+            let sleep = tokio::time::sleep(Duration::from_secs(1));
+            tokio::pin!(sleep);
+            assert!(
+                matches!(futures::poll!(sleep.as_mut()), Poll::Pending),
+                "a 1s timer must not be ready on its first poll"
+            );
+            let _ = registered_tx.send(());
+            sleep.await;
+        });
+        registered_rx
+            .await
+            .expect("heartbeat task registered its 1s deadline on the time driver");
+
+        let record = sleep_until_precise_measured(
+            Instant::now() + Duration::from_millis(2),
+            SleepBackend::TimeDriver,
+        )
+        .await
+        .expect("a 2ms deadline is not expired, so a timer is armed");
+
+        assert_eq!(
+            record.backend,
+            SleepBackend::TimeDriver,
+            "requested time_driver but the wake was served by {}",
+            record.backend.label()
+        );
+        assert!(
+            record.drift < Duration::from_millis(200),
+            "2ms sleep woke {:?} late (actual {:?}) on {}",
+            record.drift,
+            record.actual,
+            record.backend.label()
+        );
+
+        heartbeat.abort();
+    }
+
+    #[test]
+    fn test_drift_histogram_buckets_the_observation() {
+        let histogram = DriftHistogram::new();
+        histogram.observe(Duration::from_millis(3));
+        histogram.observe(Duration::from_millis(1_000));
+        histogram.observe(Duration::from_secs(30));
+
+        let stats = histogram.snapshot(SleepBackend::TimeDriver);
+        assert_eq!(stats.count, 3);
+        assert_eq!(stats.max, Duration::from_secs(30));
+        assert_eq!(stats.total, Duration::from_millis(31_003));
+
+        let cumulative = |bound: f64| {
+            stats
+                .buckets
+                .iter()
+                .find(|(b, _)| *b == bound)
+                .map(|(_, count)| *count)
+                .expect("bucket bound present")
+        };
+        assert_eq!(cumulative(0.001), 0, "3ms must not land in the 1ms bucket");
+        assert_eq!(cumulative(0.005), 1);
+        assert_eq!(cumulative(0.5), 1, "1s must not land below 1s");
+        assert_eq!(cumulative(1.0), 2);
+        assert_eq!(
+            cumulative(2.0),
+            2,
+            "30s exceeds every bound and is counted only in the total"
+        );
     }
 
     #[test]

@@ -51,6 +51,12 @@ mm-routing = ["dynamo-llm/mm-routing"]
 # builds enable this flag in container/templates/wheel_builder.Dockerfile so
 # `DYN_REQUEST_TRACE_SINKS=s3` works on shipped artifacts.
 request-trace-s3 = ["dynamo-llm/request-trace-s3"]
+# Serve the tokio-console instrumentation from a Python-hosted runtime, so task
+# and timer behavior can be inspected in a wheel build rather than only in a
+# Rust binary. `tokio_unstable` is already set for this crate in
+# lib/bindings/python/.cargo/config.toml, so this is a pure passthrough. Off by
+# default: console-subscriber adds a per-task recording cost.
+tokio-console = ["dynamo-runtime/tokio-console"]
 
 [dependencies]
 # AIC perf model: pure-Rust hot-path latency engine. Pinned to the matching
