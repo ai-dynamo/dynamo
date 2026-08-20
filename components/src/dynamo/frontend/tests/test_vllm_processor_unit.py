@@ -1128,6 +1128,8 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         model_fields = frozenset()
 
     class FakeReasoningParser:
+        engine_based_streaming = False
+
         def __init__(self, tokenizer, *, chat_template_kwargs):
             self.tokenizer = tokenizer
             self.chat_template_kwargs = chat_template_kwargs
@@ -1138,6 +1140,25 @@ async def test_include_reasoning_false_keeps_response_parser_active(
 
         def adjust_initial_state_from_prompt(self, prompt_token_ids):
             self.adjusted_prompt_token_ids = prompt_token_ids
+
+        def extract_reasoning_streaming(
+            self,
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
+        ):
+            if "</think>" in delta_text:
+                return prepost_module.DeltaMessage(
+                    reasoning="hidden tail",
+                    content="visible answer",
+                )
+            return prepost_module.DeltaMessage(reasoning="hidden reasoning")
+
+        def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+            return 3 in delta_token_ids
 
     monkeypatch.setattr(
         vllm_processor_module,
@@ -1229,6 +1250,33 @@ async def test_include_reasoning_false_keeps_response_parser_active(
     assert post_processor.reasoning_is_done is False
     assert isinstance(post_processor.reasoning_parser, FakeReasoningParser)
     assert post_processor.reasoning_parser.adjusted_prompt_token_ids == [1]
+
+    reasoning_choice = post_processor.process_output(
+        SimpleNamespace(
+            index=0,
+            text="<think>hidden reasoning",
+            token_ids=[2],
+            finish_reason=None,
+            logprobs={"tokens": ["hidden"]},
+        )
+    )
+    assert reasoning_choice is None
+
+    content_choice = post_processor.process_output(
+        SimpleNamespace(
+            index=0,
+            text="</think>visible answer",
+            token_ids=[3],
+            finish_reason="stop",
+            logprobs={"tokens": ["hidden", "visible"]},
+        )
+    )
+    assert content_choice == {
+        "index": 0,
+        "delta": {"role": "assistant", "content": "visible answer"},
+        "finish_reason": "stop",
+        "logprobs": None,
+    }
 
 
 def _make_processor(module, routed_engine):
