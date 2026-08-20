@@ -55,7 +55,9 @@ use crate::{
             classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
             images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-            rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            rerank::OpenAIRerankStreamingEngine,
+            transcriptions::OpenAITranscriptionsStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
     worker_type::WorkerType,
@@ -1312,6 +1314,16 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_transcriptions_models(&self) -> Vec<String> {
+        self.catalog
+            .load()
+            .models
+            .iter()
+            .filter(|(_, model)| model.has_transcriptions_engine())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     pub fn list_videos_models(&self) -> Vec<String> {
         self.catalog
             .load()
@@ -1379,6 +1391,8 @@ impl ModelManager {
                 || (model_type.contains(ModelType::Embedding) && model.has_embeddings_engine())
                 || (model_type.contains(ModelType::Images) && model.has_images_engine())
                 || (model_type.contains(ModelType::Audios) && model.has_audios_engine())
+                || (model_type.contains(ModelType::Transcriptions)
+                    && model.has_transcriptions_engine())
                 || (model_type.contains(ModelType::Videos) && model.has_videos_engine())
                 || (model_type.contains(ModelType::TensorBased) && model.has_tensor_engine())
                 || (model_type.contains(ModelType::Realtime) && model.has_realtime_engine())
@@ -1506,6 +1520,18 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_audios_engine()
+    }
+
+    pub fn get_transcriptions_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_transcriptions_engine()
     }
 
     pub fn get_realtime_engine(
@@ -1868,6 +1894,30 @@ impl ModelManager {
             Self::aggregated_local_card(),
         );
         ws.audios_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
+        Ok(())
+    }
+
+    pub fn add_transcriptions_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAITranscriptionsStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_transcriptions_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_transcriptions_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.transcriptions_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();
         Ok(())
@@ -4419,6 +4469,8 @@ mod tests {
             manager.add_images_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::Audios {
             manager.add_audios_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Transcriptions {
+            manager.add_transcriptions_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::Videos {
             manager.add_videos_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::TensorBased {
