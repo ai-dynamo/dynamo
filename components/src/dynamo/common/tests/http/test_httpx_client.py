@@ -69,6 +69,30 @@ async def test_fetch_bytes_returns_body_on_200() -> None:
     assert result == b"hello"
 
 
+async def test_fetch_bytes_aborts_when_stream_exceeds_limit() -> None:
+    response = MagicMock(spec=httpx.Response)
+    response.is_redirect = False
+    response.headers = {}
+    response.raise_for_status = MagicMock(return_value=None)
+    response.aclose = AsyncMock(return_value=None)
+
+    async def _chunks(*args, **kwargs):
+        yield b"too"
+        yield b" large"
+
+    response.aiter_bytes = _chunks
+    inner = MagicMock(spec=httpx.AsyncClient)
+    inner.is_closed = False
+    inner.build_request = MagicMock(
+        side_effect=lambda method, url, **kw: MagicMock(url=httpx.URL(url))
+    )
+    inner.send = MagicMock(side_effect=_async_returning(response))
+    client = _make_client_with_inner(inner)
+
+    with pytest.raises(mm_http.HttpBodyTooLargeError):
+        await client.fetch_bytes("https://h/x", 30.0, policy=_PERMISSIVE, max_bytes=4)
+
+
 async def test_fetch_bytes_maps_timeout() -> None:
     inner = MagicMock(spec=httpx.AsyncClient)
     inner.is_closed = False

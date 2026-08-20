@@ -10,6 +10,7 @@ from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
     VideoData,
+    VideoInputReference,
     VideoNvExt,
 )
 
@@ -106,6 +107,51 @@ class TestNvCreateVideoRequest:
         assert restored.stream is True
         assert restored.nvext.boundary_ratio == 0.3
 
+    def test_typed_references_round_trip(self):
+        req = NvCreateVideoRequest(
+            prompt="cat",
+            model="MiniMaxAI/MiniMax-H3",
+            input_references=[
+                VideoInputReference(type="image", source="https://example.com/a.png"),
+                VideoInputReference(type="audio", source="data:audio/wav;base64,AA=="),
+            ],
+            nvext=VideoNvExt(
+                task="ref2va",
+                duration=4.0,
+                audio_flow_shift=3.0,
+                start_time_seconds=[0.0],
+                num_outputs_per_prompt=2,
+                quality="high",
+            ),
+        )
+        restored = NvCreateVideoRequest.model_validate_json(req.model_dump_json())
+        assert [reference.type for reference in restored.input_references] == [
+            "image",
+            "audio",
+        ]
+        assert restored.nvext.task == "ref2va"
+        assert restored.nvext.duration == 4.0
+
+    def test_legacy_and_typed_references_are_mutually_exclusive(self):
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            NvCreateVideoRequest(
+                prompt="cat",
+                model="m",
+                input_reference="https://example.com/legacy.png",
+                input_references=[
+                    {"type": "image", "source": "https://example.com/new.png"}
+                ],
+            )
+
+    @pytest.mark.parametrize("duration", [3.99, 15.01])
+    def test_h3_duration_out_of_range(self, duration):
+        with pytest.raises(ValidationError, match="duration"):
+            VideoNvExt(task="t2va", duration=duration)
+
+    def test_h3_rejects_non_24_fps(self):
+        with pytest.raises(ValidationError, match="fixed at 24"):
+            VideoNvExt(task="t2va", fps=16)
+
 
 # ---------------------------------------------------------------------------
 # VideoData
@@ -141,10 +187,17 @@ class TestVideoData:
         assert d.output_format == "mp4"
 
     def test_json_round_trip(self):
-        d = VideoData(output_format="mp4", url="http://example.com/v.mp4")
+        d = VideoData(
+            output_format="mp4",
+            url="http://example.com/v.mp4",
+            fps=24,
+            audio_sample_rate=32000,
+        )
         restored = VideoData.model_validate_json(d.model_dump_json())
         assert restored.output_format == "mp4"
         assert restored.url == d.url
+        assert restored.fps == 24
+        assert restored.audio_sample_rate == 32000
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,12 @@ class OmniDiffusionKwargs:
     cache_config: Optional[str] = None
     enable_cache_dit_summary: bool = False
     enable_cpu_offload: bool = False
+    task_type: Optional[str] = None
+    diffusion_attention_backend: Optional[str] = None
+    diffusion_attention_config: Optional[str] = None
+    enable_distributed_layerwise_offload: bool = False
+    dlo_use_allgather: bool = True
+    dlo_resident_layers: int = 0
     enforce_eager: bool = False
 
 
@@ -183,6 +189,52 @@ class OmniArgGroup(ArgGroup):
             env_var="DYN_OMNI_ENABLE_CPU_OFFLOAD",
             default=False,
             help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
+        )
+        add_argument(
+            g,
+            flag_name="--task-type",
+            env_var="DYN_OMNI_TASK_TYPE",
+            default=None,
+            help=(
+                "Model-defined startup task partition. MiniMax-H3 accepts "
+                "'fl2va' or 'ref2va'; omit it to load both partitions."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--diffusion-attention-backend",
+            env_var="DYN_OMNI_DIFFUSION_ATTENTION_BACKEND",
+            default=None,
+            help="Default vLLM-Omni diffusion attention backend.",
+        )
+        add_argument(
+            g,
+            flag_name="--diffusion-attention-config",
+            env_var="DYN_OMNI_DIFFUSION_ATTENTION_CONFIG",
+            default=None,
+            help="vLLM-Omni diffusion attention configuration as JSON.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-distributed-layerwise-offload",
+            env_var="DYN_OMNI_ENABLE_DISTRIBUTED_LAYERWISE_OFFLOAD",
+            default=False,
+            help="Enable distributed layerwise DiT offload.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--dlo-use-allgather",
+            env_var="DYN_OMNI_DLO_USE_ALLGATHER",
+            default=True,
+            help="Reconstruct distributed offload shards with AllGather.",
+        )
+        add_argument(
+            g,
+            flag_name="--dlo-resident-layers",
+            env_var="DYN_OMNI_DLO_RESIDENT_LAYERS",
+            default=0,
+            arg_type=int,
+            help="Number of leading main-DiT blocks kept resident with DLO.",
         )
         add_negatable_bool_argument(
             g,
@@ -436,6 +488,8 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--text-encoder-tp-size must be > 0")
         if not (0 < self.diffusion.boundary_ratio <= 1):
             raise ValueError("--boundary-ratio must be in (0, 1]")
+        if self.diffusion.dlo_resident_layers < 0:
+            raise ValueError("--dlo-resident-layers must be >= 0")
         if self.stage_configs_path is None:
             if self.stage_id is not None:
                 raise ValueError("--stage-id requires --stage-configs-path")

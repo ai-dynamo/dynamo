@@ -3,15 +3,33 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 mod aggregator;
 mod nvext;
 
 pub use nvext::{NvExt, NvExtProvider};
 
+/// Media type for an ordered video-generation conditioning reference.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoInputReferenceType {
+    Image,
+    Video,
+    Audio,
+}
+
+/// Typed conditioning input for video generation.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VideoInputReference {
+    #[serde(rename = "type")]
+    pub reference_type: VideoInputReferenceType,
+    pub source: String,
+}
+
 /// Request for video generation (/v1/videos endpoint)
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[validate(schema(function = "validate_video_request"))]
 pub struct NvCreateVideoRequest {
     /// The text prompt for video generation
     pub prompt: String,
@@ -22,6 +40,10 @@ pub struct NvCreateVideoRequest {
     /// Optional image reference that guides generation (for I2V)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_reference: Option<String>,
+
+    /// Ordered typed image, video, and audio references
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_references: Option<Vec<VideoInputReference>>,
 
     /// Clip duration in seconds
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,6 +74,7 @@ pub struct NvCreateVideoRequest {
 
     /// NVIDIA extensions
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[validate(nested)]
     pub nvext: Option<NvExt>,
 }
 
@@ -68,6 +91,28 @@ pub struct VideoData {
     /// Base64-encoded video (if response_format is "b64_json")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub b64_json: Option<String>,
+
+    /// Actual video frame rate when reported by the model
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps: Option<i32>,
+
+    /// Muxed audio sample rate when the generated video contains audio
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_sample_rate: Option<i32>,
+}
+
+fn validate_video_request(request: &NvCreateVideoRequest) -> Result<(), ValidationError> {
+    if request.input_reference.is_some() && request.input_references.is_some() {
+        return Err(ValidationError::new("input_references_conflict"));
+    }
+    if request
+        .input_references
+        .as_ref()
+        .is_some_and(|references| references.is_empty())
+    {
+        return Err(ValidationError::new("input_references_empty"));
+    }
+    Ok(())
 }
 
 /// Response structure for video generation
@@ -206,6 +251,7 @@ mod tests {
             prompt: "cat".into(),
             model: "wan".into(),
             input_reference: None,
+            input_references: None,
             seconds: None,
             size: None,
             user: None,
@@ -232,6 +278,59 @@ mod tests {
         assert_eq!(req.output_format.as_deref(), Some("mp4"));
     }
 
+    #[test]
+    fn video_request_typed_references_round_trip() {
+        let json = r#"{
+            "prompt":"cat",
+            "model":"MiniMaxAI/MiniMax-H3",
+            "input_references":[
+                {"type":"image","source":"https://example.com/cat.png"},
+                {"type":"audio","source":"data:audio/wav;base64,AA=="}
+            ],
+            "nvext":{
+                "task":"ref2va",
+                "duration":4.0,
+                "audio_flow_shift":3.0,
+                "quality":"high"
+            }
+        }"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        let references = req.input_references.as_ref().unwrap();
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].reference_type, VideoInputReferenceType::Image);
+        assert_eq!(references[1].reference_type, VideoInputReferenceType::Audio);
+        assert!(req.validate().is_ok());
+
+        let out = serde_json::to_string(&req).unwrap();
+        assert!(out.contains("\"input_references\""));
+        assert!(out.contains("\"task\":\"ref2va\""));
+    }
+
+    #[test]
+    fn video_request_rejects_legacy_and_typed_references() {
+        let json = r#"{
+            "prompt":"cat",
+            "model":"h3",
+            "input_reference":"https://example.com/legacy.png",
+            "input_references":[
+                {"type":"image","source":"https://example.com/new.png"}
+            ]
+        }"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn video_request_rejects_invalid_h3_fps() {
+        let json = r#"{
+            "prompt":"cat",
+            "model":"h3",
+            "nvext":{"task":"t2va","fps":16}
+        }"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert!(req.validate().is_err());
+    }
+
     // --- VideoData ---
 
     #[test]
@@ -254,6 +353,8 @@ mod tests {
             output_format: "mp4".into(),
             url: None,
             b64_json: Some("abc==".into()),
+            fps: None,
+            audio_sample_rate: None,
         };
         let json = serde_json::to_string(&d).unwrap();
         assert!(!json.contains("url"));
@@ -266,11 +367,28 @@ mod tests {
             output_format: "webm".into(),
             url: Some("http://x/v.webm".into()),
             b64_json: None,
+            fps: None,
+            audio_sample_rate: None,
         };
         let json = serde_json::to_string(&d).unwrap();
         let d2: VideoData = serde_json::from_str(&json).unwrap();
         assert_eq!(d2.output_format, "webm");
         assert_eq!(d2.url.as_deref(), Some("http://x/v.webm"));
         assert!(d2.b64_json.is_none());
+    }
+
+    #[test]
+    fn video_data_round_trip_with_media_metadata() {
+        let d = VideoData {
+            output_format: "mp4".into(),
+            url: Some("http://x/v.mp4".into()),
+            b64_json: None,
+            fps: Some(24),
+            audio_sample_rate: Some(32000),
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        let d2: VideoData = serde_json::from_str(&json).unwrap();
+        assert_eq!(d2.fps, Some(24));
+        assert_eq!(d2.audio_sample_rate, Some(32000));
     }
 }
