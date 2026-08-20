@@ -1734,6 +1734,85 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    async fn builtin_direct_falls_back_on_worker_loss_without_affinity() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("builtin-direct-worker-loss".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let real_worker = client.wait_for_instances().await.unwrap()[0].id();
+        let stale_worker = real_worker.wrapping_add(1);
+
+        // Model the discovery race: selection still sees the old worker as routable, but its
+        // transport registration has already disappeared. The remaining worker is available
+        // for standalone Direct fallback.
+        client.override_instance_avail(vec![stale_worker, real_worker]);
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let inner = PushRouter::from_client_with_dispatch(
+            client,
+            RouterMode::Direct,
+            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        )
+        .await
+        .unwrap();
+        let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+            inner,
+            None,
+            Some(affinity.clone()),
+        )
+        .unwrap();
+
+        let mut standalone = request();
+        standalone.routing_mut().backend_instance_id = Some(stale_worker);
+        let mut stream = host.generate(Context::new(standalone)).await.unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[real_worker]
+        );
+
+        // A session binding is a hard pin. It must not take the standalone Direct fallback,
+        // even when another worker is free.
+        let session_id = SessionAffinityId::new("builtin-direct-worker-loss-affinity");
+        let AffinityAcquire::Initialize(initializer) =
+            affinity.acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("new affinity session must initialize");
+        };
+        drop(
+            initializer
+                .commit(AffinityTarget::new(stale_worker, None))
+                .unwrap(),
+        );
+        assert!(
+            host.generate(affinity_request(
+                "builtin-direct-worker-loss-affinity",
+                Some(stale_worker),
+            ))
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[real_worker]
+        );
+        assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
+
+        drop(host);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn builtin_load_affinity_rebinds_stale_rank_but_not_explicit_pin() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =

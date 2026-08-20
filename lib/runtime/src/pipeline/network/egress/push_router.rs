@@ -956,20 +956,9 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        // Fallback-enabled dispatch still honors a selected worker while it remains in
-        // discovery. Local inhibition only filters worker selection owned by this router;
-        // fallback is considered only if the selected worker disappears after this check.
-        if !self.client.instance_ids().contains(&instance_id) {
-            return Err(DynamoError::builder()
-                .error_type(ErrorType::CannotConnect)
-                .message(format!(
-                    "instance_id={instance_id} not found for endpoint {}",
-                    self.client.endpoint.id()
-                ))
-                .build()
-                .into());
-        }
-
+        // `resolve_transport` owns the unavailable-target decision. In particular, callers
+        // using a fallback policy must reach it when discovery has already dropped the selected
+        // worker; `TransportFallback::Deny` remains an exact-target error there.
         tracing::info!(
             router_mode = "direct",
             worker_id = instance_id,
