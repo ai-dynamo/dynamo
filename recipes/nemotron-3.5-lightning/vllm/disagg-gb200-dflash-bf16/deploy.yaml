@@ -4,31 +4,29 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: vllm-disagg-gb200-dspark-config
+  name: vllm-disagg-gb200-dflash-bf16-config
 data:
   speculative-config: |-
     {
-      "method": "dspark",
-      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark",
-      "num_speculative_tokens": 1,
-      "attention_backend": "TRITON_ATTN"
+      "method": "dflash",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DFlash",
+      "num_speculative_tokens": 7
     }
   speculative-config-synthetic: |-
     {
-      "method": "dspark",
-      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark",
-      "num_speculative_tokens": 1,
+      "method": "dflash",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DFlash",
+      "num_speculative_tokens": 7,
       "rejection_sample_method": "synthetic",
-      "synthetic_acceptance_length": 1.83,
-      "attention_backend": "TRITON_ATTN"
+      "synthetic_acceptance_length": 3.41
     }
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg-gb200-dspark
+  name: vllm-disagg-gb200-dflash-bf16
   labels:
-    app.kubernetes.io/name: vllm-disagg-gb200-dspark
+    app.kubernetes.io/name: vllm-disagg-gb200-dflash-bf16
     app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
@@ -135,21 +133,19 @@ spec:
           workingDir: /workspace/
           command:
           - python3
-          args:
           - -m
           - dynamo.vllm
+          args:
           - --model
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --served-model-name
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --trust-remote-code
           - --tensor-parallel-size
           - '1'
           - --max-num-seqs
           - '32'
           - --async-scheduling
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
@@ -160,7 +156,7 @@ spec:
           - float16
           - --enable-mamba-cache-stochastic-rounding
           - --mamba-cache-philox-rounds
-          - '5'
+          - '1'
           - --dyn-tool-call-parser
           - nemotron_nano
           - --dyn-reasoning-parser
@@ -196,7 +192,7 @@ spec:
           - name: SPECULATIVE_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: vllm-disagg-gb200-dspark-config
+                name: vllm-disagg-gb200-dflash-bf16-config
                 key: speculative-config # speculative-config-synthetic for benchmarking
           - name: VLLM_DISABLED_KERNELS
             value: FlashInferFP8ScaledMMLinearKernel
@@ -285,21 +281,19 @@ spec:
           workingDir: /workspace/
           command:
           - python3
-          args:
           - -m
           - dynamo.vllm
+          args:
           - --model
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --served-model-name
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --trust-remote-code
           - --tensor-parallel-size
           - '1'
           - --max-num-seqs
           - '32'
           - --async-scheduling
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
@@ -310,7 +304,7 @@ spec:
           - float16
           - --enable-mamba-cache-stochastic-rounding
           - --mamba-cache-philox-rounds
-          - '5'
+          - '1'
           - --dyn-tool-call-parser
           - nemotron_nano
           - --dyn-reasoning-parser
@@ -346,7 +340,7 @@ spec:
           - name: SPECULATIVE_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: vllm-disagg-gb200-dspark-config
+                name: vllm-disagg-gb200-dflash-bf16-config
                 key: speculative-config # speculative-config-synthetic for benchmarking
           - name: VLLM_DISABLED_KERNELS
             value: FlashInferFP8ScaledMMLinearKernel

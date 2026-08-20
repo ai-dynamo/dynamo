@@ -4,27 +4,31 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: vllm-disagg-h100-mtp-config
+  name: vllm-disagg-gb200-dspark-bf16-config
 data:
   speculative-config: |-
     {
-      "method": "mtp",
-      "num_speculative_tokens": 5
+      "method": "dspark",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark",
+      "num_speculative_tokens": 1,
+      "attention_backend": "TRITON_ATTN"
     }
   speculative-config-synthetic: |-
     {
-      "method": "mtp",
-      "num_speculative_tokens": 5,
+      "method": "dspark",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark",
+      "num_speculative_tokens": 1,
       "rejection_sample_method": "synthetic",
-      "synthetic_acceptance_length": 3.421
+      "synthetic_acceptance_length": 1.83,
+      "attention_backend": "TRITON_ATTN"
     }
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg-h100-mtp
+  name: vllm-disagg-gb200-dspark-bf16
   labels:
-    app.kubernetes.io/name: vllm-disagg-h100-mtp
+    app.kubernetes.io/name: vllm-disagg-gb200-dspark-bf16
     app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
@@ -36,6 +40,16 @@ spec:
       spec:
         imagePullSecrets:
         - name: your-image-pull-secret
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
@@ -90,11 +104,21 @@ spec:
                 - key: nvidia.com/gpu.product
                   operator: In
                   values:
-                  - NVIDIA-H100-80GB-HBM3
+                  - NVIDIA-GB200
         tolerations:
         - key: nvidia.com/gpu
           operator: Equal
           value: 'true'
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+        - key: dedicated
+          operator: Exists
+          effect: NoSchedule
+        - key: skyhook.nvidia.com
+          operator: Exists
           effect: NoSchedule
         volumes:
         - name: shared-model-cache
@@ -115,29 +139,19 @@ spec:
           - -m
           - dynamo.vllm
           - --model
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --served-model-name
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --trust-remote-code
           - --tensor-parallel-size
           - '1'
           - --max-num-seqs
           - '32'
-          - --max-num-batched-tokens
-          - '32768'
           - --async-scheduling
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
           - --no-disable-hybrid-kv-cache-manager
-          - --dyn-tool-call-parser
-          - nemotron_nano
-          - --dyn-reasoning-parser
-          - nemotron_nano
-          - --reasoning-parser
-          - nemotron_v3
           - --mamba-backend
           - flashinfer
           - --mamba-ssm-cache-dtype
@@ -145,10 +159,15 @@ spec:
           - --enable-mamba-cache-stochastic-rounding
           - --mamba-cache-philox-rounds
           - '5'
-          - --speculative-config
-          - $(SPECULATIVE_CONFIG)
+          - --dyn-tool-call-parser
+          - nemotron_nano
+          - --dyn-reasoning-parser
+          - nemotron_nano
+          - --reasoning-parser
+          - nemotron_v3
+          - --speculative-config=$(SPECULATIVE_CONFIG)
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           - --disaggregation-mode
           - prefill
           env:
@@ -168,45 +187,37 @@ spec:
             value: /tmp/vllm-config
           - name: VLLM_CACHE_ROOT
             value: /tmp/vllm-cache
+          - name: VLLM_OMNI_USE_QUACK_FP8
+            value: "0"
+          - name: VLLM_WORKER_MULTIPROC_METHOD
+            value: "spawn"
           - name: SPECULATIVE_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: vllm-disagg-h100-mtp-config
-                key: speculative-config
+                name: vllm-disagg-gb200-dspark-bf16-config
+                key: speculative-config # speculative-config-synthetic for benchmarking
+          - name: VLLM_DISABLED_KERNELS
+            value: FlashInferFP8ScaledMMLinearKernel
           - name: NCCL_IB_DISABLE
-            value: '1'
+            value: '0'
           - name: NIXL_LOG_LEVEL
             value: INFO
-          # Assumes AWS EFA userspace is present in the image or installed by cluster bootstrap.
-          # If EFA is unpacked under /opt/amazon/efa without ldconfig registration,
-          # add PATH and LD_LIBRARY_PATH entries for that location here.
-          # This manifest does not download or install EFA packages at pod startup.
-          - name: FI_PROVIDER
-            value: efa
-          - name: FI_EFA_USE_DEVICE_RDMA
-            value: '1'
-          - name: FI_EFA_FORK_SAFE
-            value: '1'
-          - name: FI_EFA_ENABLE_SHM_TRANSFER
-            value: '0'
-          - name: FI_HMEM_CUDA_USE_DMABUF
-            value: '1'
-          - name: NIXL_LIBFABRIC_USE_DEVICE_RDMA
-            value: '1'
-          - name: UCX_RCACHE_MAX_UNRELEASED
-            value: '1024'
           - name: VLLM_SSM_CONV_STATE_LAYOUT
             value: DS
           - name: PYTHONHASHSEED
             value: '0'
+          - name: UCX_TLS
+            value: ^cuda_ipc
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_MAX_RNDV_RAILS
+            value: '4'
           resources:
             requests:
               memory: 128Gi
               nvidia.com/gpu: '1'
-              vpc.amazonaws.com/efa: '4'
             limits:
               nvidia.com/gpu: '1'
-              vpc.amazonaws.com/efa: '4'
           securityContext:
             runAsUser: 0
             capabilities:
@@ -241,11 +252,21 @@ spec:
                 - key: nvidia.com/gpu.product
                   operator: In
                   values:
-                  - NVIDIA-H100-80GB-HBM3
+                  - NVIDIA-GB200
         tolerations:
         - key: nvidia.com/gpu
           operator: Equal
           value: 'true'
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+        - key: dedicated
+          operator: Exists
+          effect: NoSchedule
+        - key: skyhook.nvidia.com
+          operator: Exists
           effect: NoSchedule
         volumes:
         - name: shared-model-cache
@@ -266,29 +287,19 @@ spec:
           - -m
           - dynamo.vllm
           - --model
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --served-model-name
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --trust-remote-code
           - --tensor-parallel-size
           - '1'
           - --max-num-seqs
           - '32'
-          - --max-num-batched-tokens
-          - '32768'
           - --async-scheduling
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
           - --no-disable-hybrid-kv-cache-manager
-          - --dyn-tool-call-parser
-          - nemotron_nano
-          - --dyn-reasoning-parser
-          - nemotron_nano
-          - --reasoning-parser
-          - nemotron_v3
           - --mamba-backend
           - flashinfer
           - --mamba-ssm-cache-dtype
@@ -296,10 +307,15 @@ spec:
           - --enable-mamba-cache-stochastic-rounding
           - --mamba-cache-philox-rounds
           - '5'
-          - --speculative-config
-          - $(SPECULATIVE_CONFIG)
+          - --dyn-tool-call-parser
+          - nemotron_nano
+          - --dyn-reasoning-parser
+          - nemotron_nano
+          - --reasoning-parser
+          - nemotron_v3
+          - --speculative-config=$(SPECULATIVE_CONFIG)
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           - --disaggregation-mode
           - decode
           env:
@@ -319,45 +335,37 @@ spec:
             value: /tmp/vllm-config
           - name: VLLM_CACHE_ROOT
             value: /tmp/vllm-cache
+          - name: VLLM_OMNI_USE_QUACK_FP8
+            value: "0"
+          - name: VLLM_WORKER_MULTIPROC_METHOD
+            value: "spawn"
           - name: SPECULATIVE_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: vllm-disagg-h100-mtp-config
+                name: vllm-disagg-gb200-dspark-bf16-config
                 key: speculative-config # speculative-config-synthetic for benchmarking
+          - name: VLLM_DISABLED_KERNELS
+            value: FlashInferFP8ScaledMMLinearKernel
           - name: NCCL_IB_DISABLE
-            value: '1'
+            value: '0'
           - name: NIXL_LOG_LEVEL
             value: INFO
-          # Assumes AWS EFA userspace is present in the image or installed by cluster bootstrap.
-          # If EFA is unpacked under /opt/amazon/efa without ldconfig registration,
-          # add PATH and LD_LIBRARY_PATH entries for that location here.
-          # This manifest does not download or install EFA packages at pod startup.
-          - name: FI_PROVIDER
-            value: efa
-          - name: FI_EFA_USE_DEVICE_RDMA
-            value: '1'
-          - name: FI_EFA_FORK_SAFE
-            value: '1'
-          - name: FI_EFA_ENABLE_SHM_TRANSFER
-            value: '0'
-          - name: FI_HMEM_CUDA_USE_DMABUF
-            value: '1'
-          - name: NIXL_LIBFABRIC_USE_DEVICE_RDMA
-            value: '1'
-          - name: UCX_RCACHE_MAX_UNRELEASED
-            value: '1024'
           - name: VLLM_SSM_CONV_STATE_LAYOUT
             value: DS
           - name: PYTHONHASHSEED
             value: '0'
+          - name: UCX_TLS
+            value: ^cuda_ipc
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_MAX_RNDV_RAILS
+            value: '4'
           resources:
             requests:
               memory: 128Gi
               nvidia.com/gpu: '1'
-              vpc.amazonaws.com/efa: '4'
             limits:
               nvidia.com/gpu: '1'
-              vpc.amazonaws.com/efa: '4'
           securityContext:
             runAsUser: 0
             capabilities:

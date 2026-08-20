@@ -4,29 +4,31 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: vllm-disagg-gb200-dflash-config
+  name: vllm-disagg-b200-dspark-bf16-config
 data:
   speculative-config: |-
     {
-      "method": "dflash",
-      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DFlash",
-      "num_speculative_tokens": 7
+      "method": "dspark",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark",
+      "num_speculative_tokens": 1,
+      "attention_backend": "TRITON_ATTN"
     }
   speculative-config-synthetic: |-
     {
-      "method": "dflash",
-      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DFlash",
-      "num_speculative_tokens": 7,
+      "method": "dspark",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark",
+      "num_speculative_tokens": 1,
       "rejection_sample_method": "synthetic",
-      "synthetic_acceptance_length": 3.41
+      "synthetic_acceptance_length": 1.83,
+      "attention_backend": "TRITON_ATTN"
     }
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg-gb200-dflash
+  name: vllm-disagg-b200-dspark-bf16
   labels:
-    app.kubernetes.io/name: vllm-disagg-gb200-dflash
+    app.kubernetes.io/name: vllm-disagg-b200-dspark-bf16
     app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
@@ -38,16 +40,6 @@ spec:
       spec:
         imagePullSecrets:
         - name: your-image-pull-secret
-        nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-GB200
-        tolerations:
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
-        - key: kubernetes.io/arch
-          operator: Equal
-          value: arm64
-          effect: NoSchedule
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
@@ -102,21 +94,11 @@ spec:
                 - key: nvidia.com/gpu.product
                   operator: In
                   values:
-                  - NVIDIA-GB200
+                  - NVIDIA-B200
         tolerations:
         - key: nvidia.com/gpu
           operator: Equal
           value: 'true'
-          effect: NoSchedule
-        - key: kubernetes.io/arch
-          operator: Equal
-          value: arm64
-          effect: NoSchedule
-        - key: dedicated
-          operator: Exists
-          effect: NoSchedule
-        - key: skyhook.nvidia.com
-          operator: Exists
           effect: NoSchedule
         volumes:
         - name: shared-model-cache
@@ -133,21 +115,20 @@ spec:
           workingDir: /workspace/
           command:
           - python3
+          args:
           - -m
           - dynamo.vllm
-          args:
           - --model
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --served-model-name
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --trust-remote-code
           - --tensor-parallel-size
           - '1'
           - --max-num-seqs
-          - '32'
+          - '80'
           - --async-scheduling
-          - --quantization
-          - modelopt_fp4
+          - --no-enable-flashinfer-autotune
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
@@ -158,7 +139,7 @@ spec:
           - float16
           - --enable-mamba-cache-stochastic-rounding
           - --mamba-cache-philox-rounds
-          - '1'
+          - '5'
           - --dyn-tool-call-parser
           - nemotron_nano
           - --dyn-reasoning-parser
@@ -187,14 +168,10 @@ spec:
             value: /tmp/vllm-config
           - name: VLLM_CACHE_ROOT
             value: /tmp/vllm-cache
-          - name: VLLM_OMNI_USE_QUACK_FP8
-            value: "0"
-          - name: VLLM_WORKER_MULTIPROC_METHOD
-            value: "spawn"
           - name: SPECULATIVE_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: vllm-disagg-gb200-dflash-config
+                name: vllm-disagg-b200-dspark-bf16-config
                 key: speculative-config # speculative-config-synthetic for benchmarking
           - name: VLLM_DISABLED_KERNELS
             value: FlashInferFP8ScaledMMLinearKernel
@@ -216,8 +193,10 @@ spec:
             requests:
               memory: 128Gi
               nvidia.com/gpu: '1'
+              rdma/ib: '1'
             limits:
               nvidia.com/gpu: '1'
+              rdma/ib: '1'
           securityContext:
             runAsUser: 0
             capabilities:
@@ -252,21 +231,11 @@ spec:
                 - key: nvidia.com/gpu.product
                   operator: In
                   values:
-                  - NVIDIA-GB200
+                  - NVIDIA-B200
         tolerations:
         - key: nvidia.com/gpu
           operator: Equal
           value: 'true'
-          effect: NoSchedule
-        - key: kubernetes.io/arch
-          operator: Equal
-          value: arm64
-          effect: NoSchedule
-        - key: dedicated
-          operator: Exists
-          effect: NoSchedule
-        - key: skyhook.nvidia.com
-          operator: Exists
           effect: NoSchedule
         volumes:
         - name: shared-model-cache
@@ -283,21 +252,20 @@ spec:
           workingDir: /workspace/
           command:
           - python3
+          args:
           - -m
           - dynamo.vllm
-          args:
           - --model
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --served-model-name
-          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
           - --trust-remote-code
           - --tensor-parallel-size
           - '1'
           - --max-num-seqs
-          - '32'
+          - '80'
           - --async-scheduling
-          - --quantization
-          - modelopt_fp4
+          - --no-enable-flashinfer-autotune
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
@@ -308,7 +276,7 @@ spec:
           - float16
           - --enable-mamba-cache-stochastic-rounding
           - --mamba-cache-philox-rounds
-          - '1'
+          - '5'
           - --dyn-tool-call-parser
           - nemotron_nano
           - --dyn-reasoning-parser
@@ -337,14 +305,10 @@ spec:
             value: /tmp/vllm-config
           - name: VLLM_CACHE_ROOT
             value: /tmp/vllm-cache
-          - name: VLLM_OMNI_USE_QUACK_FP8
-            value: "0"
-          - name: VLLM_WORKER_MULTIPROC_METHOD
-            value: "spawn"
           - name: SPECULATIVE_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: vllm-disagg-gb200-dflash-config
+                name: vllm-disagg-b200-dspark-bf16-config
                 key: speculative-config # speculative-config-synthetic for benchmarking
           - name: VLLM_DISABLED_KERNELS
             value: FlashInferFP8ScaledMMLinearKernel
@@ -366,8 +330,10 @@ spec:
             requests:
               memory: 128Gi
               nvidia.com/gpu: '1'
+              rdma/ib: '1'
             limits:
               nvidia.com/gpu: '1'
+              rdma/ib: '1'
           securityContext:
             runAsUser: 0
             capabilities:
