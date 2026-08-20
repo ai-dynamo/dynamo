@@ -6,8 +6,8 @@
 Emits ``docs/fern/components/nightly-selector-data.generated.ts``: for each
 backend, the ``NIGHTLY_VERSIONS_BACK`` most recent backend versions a nightly
 shipped, each paired with the newest nightly that shipped it. The module is
-gitignored and rebuilt by the docs workflow, so the site never serves a pin that
-a human forgot to refresh.
+gitignored and rebuilt by the docs workflow on every publish, so the site never
+serves a pin that a human forgot to refresh.
 
 Data sources (all authoritative and anonymous):
   * which nightlies exist, and the commit each was built from -- the dated
@@ -292,7 +292,7 @@ def as_ts(rows: list[dict]) -> str:
         " *",
         " * GENERATED FILE - DO NOT EDIT.",
         " * Written by docs/fern/scripts/gen_nightly_selector.py and gitignored;",
-        " * the Fern docs workflow rebuilds it on every publish and on a daily cron.",
+        " * the Fern docs workflow rebuilds it on every publish.",
         " */",
         "",
         "export interface NightlyBackendBuild {",
