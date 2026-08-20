@@ -132,7 +132,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Framework               | vllm, trtllm, sglang                                             | Which backend the test runs against. Pair with a component marker. |
 | Component               | core, multimodal, router, kvbm, kvbm_concurrency, fault_tolerance, planner | Which part of the backend the test exercises. Pick exactly one of {core, multimodal, router, kvbm, fault_tolerance} per framework-tagged test (disjoint); use `kvbm_concurrency` additionally for KVBM stress tests. `planner` is its own component used by the planner test suite. |
 | Infrastructure          | k8s, deploy                                                      | Infrastructure/environment needs   |
-| Execution               | parallel, gpu_parallel_exclusive                                 | `parallel` enables pytest-xdist for CPU tests. `gpu_parallel_exclusive` reserves a whole GPU in the custom GPU scheduler for startup-sensitive tests; use only with measured evidence that packed startup is unreliable. |
+| Execution               | parallel, gpu_parallel_exclusive                                 | `parallel` enables pytest-xdist for CPU tests. `gpu_parallel_exclusive` reserves a GPU from other VRAM-consuming tests during startup while allowing zero-VRAM tests to continue; use only with measured evidence that packed startup is unreliable. |
 | Dependency add-ons      | lmcache                                                          | Optional dependency required by the test (paired with a framework marker, e.g. `vllm + lmcache`). |
 | Selector-only           | none                                                             | Defined in `pyproject.toml` for CI selector expressions (e.g. `pre_merge and none and gpu_1` to target tests with no framework marker). Not applied to individual tests. |
 | Other                   | slow, skip, xfail, custom_build, model, aiconfigurator           | Special handling                   |
@@ -226,9 +226,10 @@ GPU tests run concurrently via a custom VRAM-aware scheduler (`tests/utils/pytes
    - **TRT-LLM**: `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS = N` → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON (from `requested_trtllm_kv_tokens` marker). Token-based cap is deterministic and parallel-safe. Uses `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate function because TRT-LLM requires JSON merging).
 
 Tests with measured startup contention can add `gpu_parallel_exclusive`. The
-scheduler runs such a test alone on one GPU and reserves a busy GPU to drain
-rather than admitting more work. Keep `profiled_vram_gib` at the measured peak;
-do not inflate it to force exclusivity.
+scheduler reserves one GPU from other VRAM-consuming tests and lets a busy GPU
+drain rather than admitting more GPU work. Zero-VRAM tests may continue on that
+GPU. Keep `profiled_vram_gib` at the measured peak; do not inflate it to force
+exclusivity.
 
 ```bash
 # Dry-run: preview which tests fit and the GPU plan

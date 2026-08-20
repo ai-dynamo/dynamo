@@ -102,7 +102,7 @@ class _TentativeGpu:
 
 @dataclass
 class _GpuState:
-    """Per-GPU bookkeeping for VRAM budget tracking."""
+    """Per-GPU bookkeeping for VRAM-consuming test processes."""
 
     index: int
     total_gib: float
@@ -269,6 +269,23 @@ _RETRYABLE_INIT_MARKERS = [
     "exited with code -9 while waiting for health check",  # SIGKILL (OOM killer) during init
 ]
 _MAX_RETRIES = 3
+_SCHEDULER_STALL_TIMEOUT_S = 60.0
+
+
+def _update_scheduler_stall(
+    blocked_since: float | None,
+    now: float,
+    *,
+    has_pending: bool,
+    running_count: int,
+    launch_count: int,
+) -> tuple[float | None, bool]:
+    """Track a no-progress interval and report when its timeout expires."""
+    if not has_pending or running_count > 0 or launch_count > 0:
+        return None, False
+    if blocked_since is None:
+        return now, False
+    return blocked_since, now - blocked_since >= _SCHEDULER_STALL_TIMEOUT_S
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -360,8 +377,9 @@ def _select_launches(
 
       * ``num_slots`` -- global cap on concurrently running subprocesses.
       * GPU exclusivity -- a test marked ``gpu_parallel_exclusive`` runs only on
-        an idle GPU, blocks all backfill on that GPU, and reserves one busy GPU
-        to drain when none is idle.
+        an idle GPU, blocks other VRAM-consuming tests on that GPU, and reserves
+        one scheduler-busy GPU to drain when none is idle. Zero-VRAM fillers may
+        continue because they do not create GPU startup contention.
       * Per-GPU VRAM budget with two independent gates (same as before): a test
         fits only if BOTH the reserved-budget sum AND the actual nvidia-smi
         usage leave room under the cap. The cap is the full card for the first
@@ -375,8 +393,8 @@ def _select_launches(
         tests may still backfill that GPU, but only up to ``cap - required`` so
         that once the current occupants free, the reserved test is guaranteed to
         fit (the backfill we add now can never sum past the space it needs).
-        Zero-VRAM fillers bypass the normal budget gates (they allocate no
-        memory), but still honor exclusive GPUs and drain reservations.
+        Zero-VRAM fillers bypass the budget and exclusivity gates because they
+        allocate no GPU memory and do not participate in engine startup.
     """
     tentative = {
         gi: _TentativeGpu(
@@ -407,8 +425,8 @@ def _select_launches(
 
         if test.gpu_parallel_exclusive:
             # Exclusive tests may start only on a completely idle GPU. Once
-            # selected, mark the tentative GPU exclusive so nothing else in
-            # this scheduling pass can be packed beside it.
+            # selected, mark the tentative GPU exclusive so no other
+            # VRAM-consuming test in this pass can be packed beside it.
             candidates = []
             for gi, gs in gpu_states.items():
                 ts = tentative[gi]
@@ -435,7 +453,8 @@ def _select_launches(
             drain_candidates = [
                 gi
                 for gi in gpu_states
-                if not tentative[gi].exclusive
+                if tentative[gi].count > 0
+                and not tentative[gi].exclusive
                 and gi not in reserved_req
                 and gi not in exclusive_reserved
             ]
@@ -447,19 +466,11 @@ def _select_launches(
                 exclusive_reserved.add(gi)
             continue
 
-        # Zero-VRAM filler: no budget impact, just needs a non-exclusive slot.
-        # Place on the least-loaded eligible GPU for balance.
+        # Zero-VRAM filler: no budget impact and no engine startup, so it may
+        # share an exclusive or draining GPU. Place it on the least-loaded GPU.
         if test.profiled_gib <= 0:
-            candidates = [
-                gi
-                for gi in gpu_states
-                if not tentative[gi].exclusive and gi not in exclusive_reserved
-            ]
-            if not candidates:
-                continue
-            gi = min(candidates, key=lambda g: tentative[g].count)
+            gi = min(gpu_states, key=lambda g: tentative[g].count)
             to_launch.append((idx, gi))
-            tentative[gi].count += 1
             continue
 
         # VRAM test: best-fit on the GPU with the most free budget that passes
@@ -725,6 +736,7 @@ def run_parallel(
     t0 = time.monotonic()
     pending = list(tests)
     running: dict[int, _RunningTest] = {}
+    blocked_since: float | None = None
     next_status = t0 + 10
     # vLLM needs a stagger because --gpu-memory-utilization triggers a memory
     # profiling step that snapshots free memory — concurrent launches corrupt
@@ -840,6 +852,7 @@ def run_parallel(
 
     while pending or running:
         now = time.monotonic()
+        launch_count = 0
 
         # Check for completed subprocesses
         for w_id in list(running.keys()):
@@ -871,7 +884,8 @@ def run_parallel(
                         )
                         if gi is not None:
                             gpu_states[gi].budget_used -= test.profiled_gib
-                            gpu_states[gi].running_count -= 1
+                            if test.profiled_gib > 0:
+                                gpu_states[gi].running_count -= 1
                             if test.gpu_parallel_exclusive:
                                 gpu_states[gi].exclusive_running = False
                         del running[w_id]
@@ -919,7 +933,8 @@ def run_parallel(
 
                 if gi is not None:
                     gpu_states[gi].budget_used -= test.profiled_gib
-                    gpu_states[gi].running_count -= 1
+                    if test.profiled_gib > 0:
+                        gpu_states[gi].running_count -= 1
                     if test.gpu_parallel_exclusive:
                         gpu_states[gi].exclusive_running = False
                 completed.append(
@@ -970,6 +985,7 @@ def run_parallel(
                 entry.assigned_gpu = assigned_gpu
                 batch.append(entry)
             batch.reverse()
+            launch_count = len(batch)
 
             for entry in batch:
                 w_id = entry.w_id
@@ -989,7 +1005,8 @@ def run_parallel(
                         time.sleep(wait)
 
                 gpu_states[gi].budget_used += entry.profiled_gib
-                gpu_states[gi].running_count += 1
+                if entry.profiled_gib > 0:
+                    gpu_states[gi].running_count += 1
                 if entry.gpu_parallel_exclusive:
                     gpu_states[gi].exclusive_running = True
                 run_info = _launch_test(entry, env_base)
@@ -1017,6 +1034,27 @@ def run_parallel(
                     for ln in lines:
                         _print(ln)
                     next_status = now + 10
+
+        blocked_since, scheduler_stalled = _update_scheduler_stall(
+            blocked_since,
+            time.monotonic(),
+            has_pending=bool(pending),
+            running_count=len(running),
+            launch_count=launch_count,
+        )
+        if scheduler_stalled:
+            usage = ", ".join(
+                f"GPU{gi}={_get_gpu_used_gib(gi):.1f}/{gs.total_gib:.1f} GiB"
+                for gi, gs in sorted(gpu_states.items())
+            )
+            queued = ", ".join(test.name for test in pending)
+            _print(
+                f"ERROR: GPU scheduler made no progress for "
+                f"{_SCHEDULER_STALL_TIMEOUT_S:.0f}s with no tests running. "
+                f"External GPU usage or an unsatisfiable memory request may be "
+                f"blocking queued tests. Usage: {usage}. Queued: {queued}"
+            )
+            return 1
 
         # Periodic status (print even when waiting for VRAM to free up)
         if now >= next_status and (running or pending):

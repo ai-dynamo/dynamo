@@ -19,8 +19,10 @@ import pytest
 from tests.utils.pytest_parallel_gpu import (
     _GpuState,
     _priority_key,
+    _SCHEDULER_STALL_TIMEOUT_S,
     _select_launches,
     _TestEntry,
+    _update_scheduler_stall,
 )
 from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN, write_test_meta
 
@@ -201,7 +203,7 @@ def test_actual_usage_gate_blocks_when_live_vram_exceeds_budget():
 # --------------------------------------------------------------------------- #
 # _select_launches: GPU-exclusive tests
 # --------------------------------------------------------------------------- #
-def test_gpu_exclusive_test_blocks_same_gpu_backfill():
+def test_gpu_exclusive_test_blocks_vram_backfill_but_allows_filler():
     gpus = {0: _gpu(0, 80.0)}
     pending = [
         _t("exclusive", 3.9, exclusive=True),
@@ -211,10 +213,10 @@ def test_gpu_exclusive_test_blocks_same_gpu_backfill():
 
     launches = _select(pending, gpus, num_slots=8)
 
-    assert launches == [(0, 0)]
+    assert launches == [(0, 0), (2, 0)]
 
 
-def test_gpu_exclusive_test_reserves_busy_gpu_to_drain():
+def test_gpu_exclusive_test_reserves_busy_gpu_but_allows_filler():
     gpus = {0: _gpu(0, 80.0, budget_used=3.9, running_count=1)}
     pending = [
         _t("exclusive", 3.9, exclusive=True),
@@ -224,10 +226,21 @@ def test_gpu_exclusive_test_reserves_busy_gpu_to_drain():
 
     launches = _select(pending, gpus, num_slots=8, running_count=1)
 
-    assert launches == []
+    assert launches == [(2, 0)]
 
 
-def test_running_gpu_exclusive_test_blocks_all_other_tests():
+def test_gpu_exclusive_test_can_start_while_zero_vram_filler_is_running():
+    # running_count is the global slot count; the per-GPU VRAM process count
+    # remains zero because the existing subprocess is a zero-VRAM filler.
+    gpus = {0: _gpu(0, 80.0, running_count=0)}
+    pending = [_t("exclusive", 3.9, exclusive=True)]
+
+    launches = _select(pending, gpus, num_slots=8, running_count=1)
+
+    assert launches == [(0, 0)]
+
+
+def test_running_gpu_exclusive_test_blocks_vram_test_but_allows_filler():
     gpus = {
         0: _gpu(
             0,
@@ -241,7 +254,38 @@ def test_running_gpu_exclusive_test_blocks_all_other_tests():
 
     launches = _select(pending, gpus, num_slots=8, running_count=1)
 
-    assert launches == []
+    assert launches == [(1, 0)]
+
+
+def test_scheduler_stall_timeout_is_bounded_and_resets_on_progress():
+    blocked_since, stalled = _update_scheduler_stall(
+        None,
+        100.0,
+        has_pending=True,
+        running_count=0,
+        launch_count=0,
+    )
+    assert blocked_since == 100.0
+    assert stalled is False
+
+    blocked_since, stalled = _update_scheduler_stall(
+        blocked_since,
+        100.0 + _SCHEDULER_STALL_TIMEOUT_S,
+        has_pending=True,
+        running_count=0,
+        launch_count=0,
+    )
+    assert stalled is True
+
+    blocked_since, stalled = _update_scheduler_stall(
+        blocked_since,
+        100.0 + _SCHEDULER_STALL_TIMEOUT_S,
+        has_pending=True,
+        running_count=1,
+        launch_count=0,
+    )
+    assert blocked_since is None
+    assert stalled is False
 
 
 def test_gpu_exclusive_reservation_allows_other_gpu_to_make_progress():

@@ -237,8 +237,8 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "gpu_parallel_exclusive: reserves a whole GPU for startup-sensitive tests "
-        "in the custom GPU-parallel scheduler",
+        "gpu_parallel_exclusive: reserves a GPU from other VRAM-consuming tests "
+        "during startup in the custom GPU-parallel scheduler",
     )
 
     models_dir = config.getoption("--models-dir", default=None)
