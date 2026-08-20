@@ -141,7 +141,10 @@ func GetDCDKubeAnnotations(dcd *v1beta1.DynamoComponentDeployment) map[string]st
 	maps.Copy(annotations, GetDCDPreservedAlphaAnnotations(dcd))
 	maps.Copy(annotations, GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec))
 	AddBaseModelAnnotation(annotations, dcd.Spec.ModelRef)
+
+	// Keep controller-owned resource annotations out of generated pod metadata.
 	delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
+	delete(annotations, commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped)
 	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
 		delete(annotations, annotationKey)
 	}

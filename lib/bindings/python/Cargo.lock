@@ -50,6 +50,8 @@ dependencies = [
 [[package]]
 name = "aisimulate-core"
 version = "0.1.0-dev.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ec4febc5409e1597811a8ac6abbe2d193eb71bf2f9757c401a3813b48ac715e"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1813,6 +1815,7 @@ dependencies = [
  "futures-util",
  "galil-seiferas",
  "hf-hub 0.4.3",
+ "http-body-util",
  "image",
  "ipnet",
  "json-five",

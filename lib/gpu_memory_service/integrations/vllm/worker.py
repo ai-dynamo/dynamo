@@ -495,11 +495,9 @@ class GMSWorker(Worker):
         """Fire the NixlConnector KV-cache registration after deferred KV swap.
 
         During scratch phase the patches.patch_register_kv_caches gate intercepts
-        register_kv_caches(dict) and stashes the dict on the connector as
-        self._scratch_kv_pending. We replay that here, NOT
-        self.model_runner.kv_caches — the latter is the list-of-tensors view
-        set by vLLM, and NixlConnector.register_kv_caches does kv_caches.values()
-        which requires the dict form.
+        either register_kv_caches(dict) or register_cross_layers_kv_cache(...)
+        and stashes the original arguments on the connector. We replay those
+        arguments here after the real KV backing has been remapped.
 
         Imports from the package root (vllm.distributed.kv_transfer) — the
         kv_connector.v1.base re-exports were unreliable across vLLM versions
@@ -516,20 +514,30 @@ class GMSWorker(Worker):
             return
         group = get_kv_transfer_group()
         pending = getattr(group, "_scratch_kv_pending", None)
-        if not pending:
+        pending_cross_layers = getattr(group, "_scratch_cross_layers_kv_pending", None)
+        if pending is not None and pending_cross_layers is not None:
+            raise RuntimeError(
+                "NIXL connector deferred both normal and cross-layer KV registration"
+            )
+        if pending is None and pending_cross_layers is None:
             # Nothing was stashed — either no deferred registration, or a
             # non-NixlConnector connector that didn't hit the patched path.
             return
-        group.register_kv_caches(pending)
-        # Drop the stash so a second call is a no-op.
-        try:
+        if pending is not None:
+            group.register_kv_caches(pending)
             delattr(group, "_scratch_kv_pending")
-        except AttributeError:
-            pass
-        logger.info(
-            "[GMS] Registered %d kv_cache tensors with KV transfer group",
-            len(pending),
-        )
+            logger.info(
+                "[GMS] Registered %d kv_cache tensors with KV transfer group",
+                len(pending),
+            )
+        else:
+            assert pending_cross_layers is not None
+            kv_cache, attn_backend = pending_cross_layers
+            group.register_cross_layers_kv_cache(kv_cache, attn_backend)
+            delattr(group, "_scratch_cross_layers_kv_pending")
+            logger.info(
+                "[GMS] Registered cross-layer kv_cache tensor with KV transfer group"
+            )
 
     def _maybe_get_memory_pool_context(self, tag: str):
         """Route tag-scoped runtime allocations to the right allocator.
