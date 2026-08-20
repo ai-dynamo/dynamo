@@ -5,13 +5,14 @@ use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
+use dynamo_kv_router::scheduling::{
+    AdmissionDecision, AdmissionRequest, PolicyClassAdmissionPolicies, PolicyClassAdmissionPolicy,
+    PolicyProfile, RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS, RANK_BALANCED_COHORT_POLICY_TYPE,
+    RankBalancedCohortAdmissionPolicy,
+};
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
     SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
-};
-use dynamo_kv_router::scheduling::{
-    PolicyClassAdmissionPolicies, PolicyProfile, RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS,
-    RANK_BALANCED_COHORT_POLICY_TYPE, RankBalancedCohortAdmissionPolicy,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -46,6 +47,17 @@ where
     queue_metric_indices: HashMap<String, usize>,
 }
 
+/// A disaggregated frontend shares one policy profile between its prefill and
+/// decode choosers. Keep the rank-cohort class structurally present for decode
+/// while making admission a no-op there.
+struct NonPrefillBypassAdmissionPolicy;
+
+impl PolicyClassAdmissionPolicy for NonPrefillBypassAdmissionPolicy {
+    fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        AdmissionDecision::Bypass
+    }
+}
+
 fn install_builtin_admission_policies(
     profile: &PolicyProfile,
     worker_type: &str,
@@ -61,22 +73,26 @@ fn install_builtin_admission_policies(
             continue;
         }
         rank_balanced_configured = true;
-        if worker_type != "prefill" {
-            return Err(KvSchedulerError::InitFailed(format!(
-                "rank-balanced cohort admission is only valid for prefill workers, got {worker_type:?}"
-            )));
-        }
         if admission_policies.contains_key(&class.name) {
             return Err(KvSchedulerError::InitFailed(format!(
                 "admission policy for policy class {:?} is registered twice",
                 class.name
             )));
         }
-        let policy = RankBalancedCohortAdmissionPolicy::from_config(config, router_id)
-            .map_err(KvSchedulerError::InitFailed)?;
-        admission_policies.insert(class.name.clone(), Box::new(policy));
+        let policy: Box<dyn PolicyClassAdmissionPolicy> = if worker_type == "prefill" {
+            Box::new(
+                RankBalancedCohortAdmissionPolicy::from_config(config, router_id)
+                    .map_err(KvSchedulerError::InitFailed)?,
+            )
+        } else {
+            Box::new(NonPrefillBypassAdmissionPolicy)
+        };
+        admission_policies.insert(class.name.clone(), policy);
     }
     if !rank_balanced_configured {
+        return Ok(());
+    }
+    if worker_type != "prefill" {
         return Ok(());
     }
 
@@ -488,7 +504,12 @@ fn update_queue_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::{config::RouterQueuePolicy, scheduling::RouterPolicyConfig};
+    use dynamo_kv_router::{
+        config::RouterQueuePolicy,
+        scheduling::{
+            AdmissionId, RouterPolicyConfig, WorkerEligibility, WorkerEligibilitySnapshot,
+        },
+    };
     use dynamo_runtime::component::Component;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
@@ -562,15 +583,24 @@ policy_classes:
     }
 
     #[test]
-    fn rank_balanced_builtin_rejects_decode_scheduler() {
-        let error = install_builtin_admission_policies(
+    fn rank_balanced_builtin_is_noop_for_decode_scheduler() {
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        install_builtin_admission_policies(
             &rank_balanced_profile(true),
             "decode",
             7,
-            &mut PolicyClassAdmissionPolicies::new(),
+            &mut policies,
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("only valid for prefill workers"));
+        .unwrap();
+        let mut policy = policies.remove("standard").unwrap();
+        let eligibility = WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([]));
+        let decision = policy.admit(AdmissionRequest::new(
+            AdmissionId::new(0),
+            None,
+            1,
+            eligibility,
+        ));
+        assert_eq!(decision, AdmissionDecision::Bypass);
     }
 
     #[test]
