@@ -14,7 +14,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/scale"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -31,7 +30,6 @@ type DynamoComponentDeploymentSetupOptions struct {
 type DynamoGraphDeploymentSetupOptions struct {
 	SetupOptions
 	DockerSecretRetriever DockerSecretRetriever
-	ScaleClient           scale.ScalesGetter
 	RBACManager           RBACManager
 	SSHKeyManager         *secret.SSHKeyManager
 }
@@ -92,7 +90,6 @@ func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetu
 		RuntimeConfig:         opts.RuntimeConfig,
 		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: opts.DockerSecretRetriever,
-		ScaleClient:           opts.ScaleClient,
 		SSHKeyManager:         opts.SSHKeyManager,
 		RBACManager:           opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {

@@ -165,7 +165,9 @@ jobs:
         HOME: /__w/dynamo/dynamo
         USER: dynamo
         # Datadog Test Optimization scoping (settings are per service+env).
+        DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
+        DD_TAGS: 'team:dynamo'
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
         DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
         # dynamo tests run product code in subprocesses, so ddtrace's in-process
@@ -202,7 +204,7 @@ jobs:
         with:
           languages: python
           api_key: ${{ secrets.DD_API_KEY }}
-          site: us3.datadoghq.com
+          site: datadoghq.com
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash

@@ -5,11 +5,6 @@ title: Sweeper Configuration
 subtitle: Core fields and optional adapter-owned search spaces
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/configuration.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 > [!WARNING]
 > **Experimental.** Sweeper's configuration schema may change without a standard deprecation period.
 
