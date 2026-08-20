@@ -604,10 +604,7 @@ where
         };
         drop(route_guard);
         let selected_target = route_target(selection.worker);
-        let stream = match self
-            .dispatch_selection(request, selection, guard, operation.is_some())
-            .await
-        {
+        let stream = match self.dispatch_selection(request, selection, guard).await {
             Ok(stream) => stream,
             Err(error) => {
                 invalidate_on_non_cancellation(&mut operation, &error);

@@ -782,7 +782,6 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
                 failed_request,
                 failed_selection,
                 failed_dispatch_guard,
-                true,
             )
             .await
             .is_err()
