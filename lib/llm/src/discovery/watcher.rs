@@ -50,9 +50,11 @@ use crate::{
             chat_completions::{
                 NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             },
+            classify::{NvCreateClassifyRequest, NvCreateClassifyResponse},
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
             images::{NvCreateImageRequest, NvImagesResponse},
+            pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse},
             videos::{NvCreateVideoRequest, NvVideosResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
@@ -262,6 +264,8 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Realtime,
+    ModelType::Classify,
+    ModelType::Pooling,
 ];
 
 /// Returns true if no models in the manager support the given model type.
@@ -282,9 +286,33 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_tensor_models().is_empty()
     } else if model_type == ModelType::Realtime {
         manager.list_realtime_models().is_empty()
+    } else if model_type == ModelType::Classify {
+        manager.list_classify_models().is_empty()
+    } else if model_type == ModelType::Pooling {
+        manager.list_pooling_models().is_empty()
     } else {
         true
     }
+}
+
+fn removed_model_cards(
+    manager: &ModelManager,
+    card: &ModelDeploymentCard,
+) -> Vec<ModelDeploymentCard> {
+    ALL_MODEL_TYPES
+        .iter()
+        .filter_map(|model_type| {
+            if card.model_type.intersects(*model_type)
+                && is_model_type_list_empty(manager, *model_type)
+            {
+                let mut removed_card = card.clone();
+                removed_card.model_type = *model_type;
+                Some(removed_card)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// RAII guard that removes a key from a `DashSet` on drop and wakes any tasks
@@ -1181,12 +1209,8 @@ impl ModelWatcher {
         }
 
         if let Some(tx) = &self.model_update_tx {
-            for model_type in ALL_MODEL_TYPES {
-                if card.model_type.intersects(*model_type)
-                    && is_model_type_list_empty(&self.manager, *model_type)
-                {
-                    tx.send(ModelUpdate::Removed(card.clone())).await.ok();
-                }
+            for removed_card in removed_model_cards(&self.manager, &card) {
+                tx.send(ModelUpdate::Removed(removed_card)).await.ok();
             }
         }
 
@@ -1893,27 +1917,44 @@ impl ModelWatcher {
                     card.name()
                 );
             }
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
-            // Case: Text + Embeddings
-            let push_router = PushRouter::<
-                NvCreateEmbeddingRequest,
-                Annotated<NvCreateEmbeddingResponse>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
-            .await?;
-            worker_set.embeddings_engine = Some(Arc::new(push_router));
-        }
-        // Case: Text + (Images, Audio, Videos)
-        // Must come before the plain Text+Chat / Text+Completions branches because
-        // diffusion models often set both Images and Chat flags. The branch below
-        // handles the chat registration internally when supports_chat() is true.
-        else if card.model_input == ModelInput::Text
-            && (card.model_type.supports_images()
-                || card.model_type.supports_audios()
-                || card.model_type.supports_videos())
-        {
-            // Image/Audio/Video models can also support chat completions (vLLM omni way)
+        } else if card.model_input == ModelInput::Text {
+            // Text workers tokenize in the backend and can advertise multiple
+            // OpenAI surfaces. Build each declared surface independently:
+            // ModelType is a bitflag, so choosing one mutually-exclusive branch
+            // would silently omit engines for mixed-capability cards.
+            if card.model_type.supports_embedding() {
+                let push_router = PushRouter::<
+                    NvCreateEmbeddingRequest,
+                    Annotated<NvCreateEmbeddingResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.embeddings_engine = Some(Arc::new(push_router));
+            }
+
+            if card.model_type.supports_classify() {
+                let push_router = PushRouter::<
+                    NvCreateClassifyRequest,
+                    Annotated<NvCreateClassifyResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.classify_engine = Some(Arc::new(push_router));
+            }
+
+            if card.model_type.supports_pooling() {
+                let push_router = PushRouter::<
+                    NvCreatePoolingRequest,
+                    Annotated<NvCreatePoolingResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.pooling_engine = Some(Arc::new(push_router));
+            }
+
             if card.model_type.supports_chat() {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
@@ -1923,6 +1964,17 @@ impl ModelWatcher {
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
+            }
+
+            if card.model_type.supports_completions() {
+                let completions_router = PushRouter::<
+                    NvCreateCompletionRequest,
+                    Annotated<NvCreateCompletionResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.completions_engine = Some(Arc::new(completions_router));
             }
 
             if card.model_type.supports_images() {
@@ -1953,25 +2005,30 @@ impl ModelWatcher {
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
             }
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
-            // Case: Text + Chat (pure text-to-text, no diffusion)
-            let push_router =
-                PushRouter::<
-                    NvCreateChatCompletionRequest,
-                    Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_monitor(client, router_config.router_mode, None)
+
+            if card.model_type.supports_realtime() {
+                // `Text` is overloaded for Realtime; its I/O passes through.
+                let realtime_router = PushRouter::<
+                    RealtimeClientEvent,
+                    Annotated<RealtimeServerEvent>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
                 .await?;
-            worker_set.chat_engine = Some(Arc::new(push_router));
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
-            // Case: Text + Completions
-            let push_router = PushRouter::<
-                NvCreateCompletionRequest,
-                Annotated<NvCreateCompletionResponse>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
-            .await?;
-            worker_set.completions_engine = Some(Arc::new(push_router));
+                worker_set.realtime_engine = Some(Arc::new(realtime_router));
+            }
+
+            if card.model_type.is_empty() {
+                tracing::info!(
+                    model_name = card.name(),
+                    "Topology-only worker (empty model_type), registering for serving readiness only"
+                );
+            } else if !worker_set.has_any_serving_engine() {
+                anyhow::bail!(
+                    "Unsupported model configuration: {} with Text input",
+                    card.model_type
+                );
+            }
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
             // Create preprocessing pipeline similar to Backend
@@ -2015,17 +2072,6 @@ impl ModelWatcher {
             )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_realtime() {
-            // Case 7: Text + Realtime
-            // 'Text' is being overloaded here, it simply means the I/O will be passed through
-            let realtime_router = PushRouter::<
-                RealtimeClientEvent,
-                Annotated<RealtimeServerEvent>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
-            .await?;
-            worker_set.realtime_engine = Some(Arc::new(realtime_router));
         } else if card.model_type.is_empty() {
             // No OpenAI surface declared: a topology-only worker that exists
             // purely for serving-readiness accounting — e.g. a surface-less
@@ -2044,7 +2090,7 @@ impl ModelWatcher {
             // prefill is routed off `worker_type`.)
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Realtime), \
+                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Classify|Pooling|Realtime), \
                 Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
@@ -2229,6 +2275,8 @@ fn seed_lora_state_from_card(
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
+    use dynamo_runtime::engine::AsyncEngine;
+    use dynamo_runtime::pipeline::Error;
 
     fn test_endpoint_id(name: &str) -> EndpointId {
         EndpointId {
@@ -2400,6 +2448,50 @@ mod tests {
         assert_eq!(released_base_engine.strong_count(), 0);
         runtime.shutdown();
     }
+
+    #[tokio::test]
+    async fn text_pooling_family_preserves_chat_engine() {
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let watcher = ModelWatcher::new(
+            drt,
+            manager.clone(),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new_with_prefix(Some(
+                "watcher_mixed_text_test".to_string(),
+            ))),
+        );
+        let mcid = ModelCardInstanceId {
+            namespace: "mixed-text-ns".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 1,
+            model_suffix: None,
+        };
+        let mut card = ModelDeploymentCard::with_name_only("mixed-text-model");
+        card.model_input = ModelInput::Text;
+        card.model_type = ModelType::Chat | ModelType::Classify | ModelType::Pooling;
+        card.worker_type = Some(WorkerType::Aggregated);
+
+        watcher
+            .do_worker_set_registration(&mcid, &mut card)
+            .await
+            .unwrap();
+
+        let model = manager.get_model(card.name()).unwrap();
+        assert!(model.has_chat_engine());
+        assert!(model.has_classify_engine());
+        assert!(model.has_pooling_engine());
+    }
     #[test]
     fn base_card_with_capacity_seeds_idle_lora_capable_worker() {
         // jh-nv (watcher base-card seeding): a base worker card (lora=None) carrying
@@ -2565,6 +2657,33 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
+        assert!(is_model_type_list_empty(&mm, ModelType::Classify));
+        assert!(is_model_type_list_empty(&mm, ModelType::Pooling));
+    }
+
+    #[test]
+    fn removal_cards_contain_only_the_empty_model_type() {
+        let mm = ModelManager::new();
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.model_type = ModelType::Classify | ModelType::Pooling;
+
+        let removed_cards = removed_model_cards(&mm, &card);
+        assert_eq!(removed_cards.len(), 2);
+        assert!(
+            removed_cards
+                .iter()
+                .any(|card| card.model_type == ModelType::Classify)
+        );
+        assert!(
+            removed_cards
+                .iter()
+                .any(|card| card.model_type == ModelType::Pooling)
+        );
+        assert!(
+            removed_cards
+                .iter()
+                .all(|card| card.model_type.bits().count_ones() == 1)
+        );
     }
 
     #[test]
@@ -2573,6 +2692,84 @@ mod tests {
         let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
         mm.add_realtime_model("rt-echo", "0", engine).unwrap();
         assert!(!is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    /// Stand-in engine for registration-only tests; never invoked.
+    struct UncalledEngine;
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreatePoolingRequest>,
+            ManyOut<Annotated<NvCreatePoolingResponse>>,
+            Error,
+        > for UncalledEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<NvCreatePoolingRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreatePoolingResponse>>, Error> {
+            anyhow::bail!("engine is never invoked by this test")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreateClassifyRequest>,
+            ManyOut<Annotated<NvCreateClassifyResponse>>,
+            Error,
+        > for UncalledEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<NvCreateClassifyRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreateClassifyResponse>>, Error> {
+            anyhow::bail!("engine is never invoked by this test")
+        }
+    }
+
+    /// Removing one model of a type must not retract the endpoint for the
+    /// models of that type that are still registered: the frontend maps a
+    /// `ModelUpdate::Removed` card onto process-wide endpoint flags, so an
+    /// over-eager removal card would 404 the surviving models' endpoint.
+    #[test]
+    fn removing_one_model_keeps_the_endpoint_for_surviving_models() {
+        let mm = ModelManager::new();
+        mm.add_pooling_model("model-a", "ck-a", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+        mm.add_pooling_model("model-b", "ck-b", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+        mm.add_classify_model("model-a", "ck-a", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+        mm.add_classify_model("model-b", "ck-b", std::sync::Arc::new(UncalledEngine))
+            .unwrap();
+
+        let mut card = ModelDeploymentCard::with_name_only("model-a");
+        card.model_type = ModelType::Classify | ModelType::Pooling;
+
+        // Mirrors `handle_delete`, which drops the model from the manager
+        // before computing the removal cards.
+        mm.remove_model("model-a");
+        assert!(
+            removed_model_cards(&mm, &card).is_empty(),
+            "removing model-a must emit no removal card while model-b is still registered"
+        );
+
+        // The last model of each type going away must still retract both.
+        mm.remove_model("model-b");
+        let removed = removed_model_cards(&mm, &card);
+        assert_eq!(removed.len(), 2);
+        assert!(
+            removed
+                .iter()
+                .any(|card| card.model_type == ModelType::Classify)
+        );
+        assert!(
+            removed
+                .iter()
+                .any(|card| card.model_type == ModelType::Pooling)
+        );
     }
 
     #[test]

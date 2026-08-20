@@ -78,6 +78,11 @@ def _load_vllm_main() -> ModuleType:
         (True, dynamo_llm.ModelType.Prefill, 3),
         (True, dynamo_llm.ModelType.Chat, 3),
         (True, dynamo_llm.ModelType.Embedding, None),
+        (
+            True,
+            dynamo_llm.ModelType.Classify | dynamo_llm.ModelType.Pooling,
+            None,
+        ),
         (False, dynamo_llm.ModelType.Prefill, None),
     ],
 )
@@ -1306,6 +1311,7 @@ def _make_dynamo_config(**overrides):
         "use_kv_events": False,
         "enable_local_indexer": True,
         "embedding_worker": False,
+        "classify_worker": False,
         "headless": False,
         "enable_multimodal": False,
         "fpm_trace": False,
@@ -1338,6 +1344,44 @@ def _make_engine_config_with_runner(runner="auto", **overrides):
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
+
+
+class TestPoolingWorkerPrefixCachingDefault:
+    """Pooling-family workers must not default prefix caching on: pooling
+    engines never decode, and force-enabling it crashes hybrid-attention
+    models (e.g. ModernBERT: "HybridKVCacheCoordinator requires at least two
+    attention groups") that bare `vllm serve` runs fine.
+    """
+
+    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    def test_pooling_family_defaults_to_disabled(self, role):
+        dynamo_cfg = _make_dynamo_config(**{role: True})
+        engine_cfg = _make_engine_config_with_runner(
+            runner="pooling", enable_prefix_caching=None
+        )
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is False
+
+    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    def test_explicit_enable_is_preserved(self, role):
+        dynamo_cfg = _make_dynamo_config(**{role: True})
+        engine_cfg = _make_engine_config_with_runner(
+            runner="pooling", enable_prefix_caching=True
+        )
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is True
+
+    def test_generative_worker_still_defaults_to_enabled(self):
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(enable_prefix_caching=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is True
 
 
 class TestRunnerPreservation:
@@ -1505,6 +1549,7 @@ class TestForwardPassMetricsActivation:
         ("overrides", "role"),
         [
             ({"embedding_worker": True}, "embedding"),
+            ({"classify_worker": True}, "classify"),
             ({"headless": True}, "headless"),
             (
                 {"disaggregation_mode": DisaggregationMode.ENCODE},
