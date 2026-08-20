@@ -132,13 +132,7 @@ _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
         "weight_version",
     }
 )
-# Marks a worker whose weight version nobody has declared yet. Dynamo only
-# observes weight updates that traverse its own /engine routes, so a caller
-# loading weights by another path leaves the tracked version untouched. This is
-# a bare object rather than a string so it cannot collide with any value a
-# caller can put in body["weight_version"] — a string sentinel such as
-# "initial" is itself a legal caller-supplied tag, which made "never declared"
-# and "declared to be initial" the same response.
+# An object sentinel cannot collide with a caller-supplied version.
 _WEIGHT_VERSION_UNDECLARED: Final = object()
 
 
@@ -1759,25 +1753,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return {"status": "error", "message": str(e)}
 
     def _declare_weight_version(self, version: Any) -> None:
-        """Record the weight version a caller has declared for this worker.
-
-        The single writer for the tracked version: the set_weight_version
-        declaration route and both /engine weight-update routes come through
-        here. The update routes call it only when the request carried a
-        weight_version, so an update that declares nothing leaves the surface
-        undeclared rather than recording the placeholder they respond with.
-        """
         self._weight_version = version
 
     async def get_weight_version(self, body: dict) -> dict:
-        """Report the current weight version tag and whether it was declared.
-
-        ``version_declared`` is false when no weight version has ever been
-        declared to this worker, in which case ``version`` is null. Dynamo
-        cannot observe a weight load that bypasses its /engine routes, so a
-        caller that loads weights itself must declare the version through
-        set_weight_version for this surface to be meaningful.
-        """
         if body is None:
             body = {}
         elif not isinstance(body, dict):
@@ -1794,12 +1772,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     async def set_weight_version(self, body: dict) -> dict:
-        """Declare the weight version without loading any weights.
-
-        For callers that load weights by a path Dynamo does not mediate (a
-        direct engine ``collective_rpc``, say): this records what they loaded so
-        get_weight_version stops reporting an undeclared version.
-        """
         if body is None:
             body = {}
         elif not isinstance(body, dict):
@@ -1811,7 +1783,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return {"status": "error", "message": "Missing 'weight_version' in body"}
         version = body["weight_version"]
         self._declare_weight_version(version)
-        logger.info(f"[RL] Weight version declared (version={version})")
+        logger.info("[RL] Weight version declared (version=%s)", version)
         return {"status": "ok", "version": version}
 
     async def update_weights_from_disk(self, body: dict) -> dict:
@@ -1851,10 +1823,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # weights is now stale and must not be reused. Invalidate it
                 # while still holding _pause_lock (generation is paused).
                 await self.engine_client.reset_prefix_cache()
-                # Only a caller-supplied tag counts as a declaration. The
-                # "unknown" default is a response placeholder, not something a
-                # caller declared, and recording it would make version_declared
-                # true while get_weight_version reports a version nobody chose.
                 if "weight_version" in body:
                     self._declare_weight_version(version)
                 logger.info(
@@ -1919,8 +1887,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Weights changed: stale prefix/KV cache must be invalidated
                     # before resume so it is not reused under the new weights.
                     await self.engine_client.reset_prefix_cache()
-                # See update_weights_from_disk: the "unknown" default is a
-                # response placeholder, not a declaration.
                 if "weight_version" in body:
                     self._declare_weight_version(version)
                 logger.info(

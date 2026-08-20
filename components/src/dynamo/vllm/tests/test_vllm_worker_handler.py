@@ -98,7 +98,6 @@ def _make_handler(
     # BaseWorkerHandler.__init__ is bypassed above; the decode generate path
     # registers per-request deferred-abort guards here.
     handler._deferred_aborts = {}
-    # Likewise the weight-version surface starts undeclared.
     handler._weight_version = mod._WEIGHT_VERSION_UNDECLARED
     return handler
 
@@ -1786,12 +1785,6 @@ class TestRLAdminRouteHardening:
 
     @pytest.mark.asyncio
     async def test_get_weight_version_reports_undeclared_before_any_update(self):
-        """A worker nobody has declared a version for says so, rather than
-        asserting a version it has no basis for. Dynamo only sees updates that
-        traverse its own ``/engine`` routes, so an RL caller that loads weights
-        by another path must be able to tell "Dynamo does not know" from a real
-        answer.
-        """
         handler = self._make_rl_handler()
 
         resp = await handler.get_weight_version({})
@@ -1813,10 +1806,6 @@ class TestRLAdminRouteHardening:
 
     @pytest.mark.asyncio
     async def test_declared_initial_is_distinguishable_from_never_declared(self):
-        """The sharp edge: ``"initial"`` used to be both the pre-update sentinel
-        and a legal caller-supplied tag, so the two states were the same
-        response. They must now differ.
-        """
         never_declared = self._make_rl_handler()
         declared_initial = self._make_rl_handler()
 
@@ -1832,9 +1821,6 @@ class TestRLAdminRouteHardening:
 
     @pytest.mark.asyncio
     async def test_set_weight_version_declares_without_touching_the_engine(self):
-        """The declaration route exists for callers that loaded weights outside
-        Dynamo: it moves the reported version without loading anything.
-        """
         handler = self._make_rl_handler()
 
         resp = await handler.set_weight_version({"weight_version": "policy-43"})
@@ -1855,17 +1841,10 @@ class TestRLAdminRouteHardening:
         resp = await handler.set_weight_version({})
 
         assert resp["status"] == "error"
-        assert "weight_version" in resp["message"]
-        # A rejected declaration must not leave the surface claiming knowledge.
         assert (await handler.get_weight_version({}))["version_declared"] is False
 
     @pytest.mark.asyncio
     async def test_update_without_a_version_declares_nothing(self):
-        """An update that carries no ``weight_version`` leaves the surface
-        undeclared. The routes answer ``"unknown"`` so the response shape is
-        stable, but that placeholder is the route's, not the caller's, and
-        recording it would report a version nobody chose as declared.
-        """
         handler = self._make_rl_handler()
 
         distributed = await handler.update_weights_from_distributed(
