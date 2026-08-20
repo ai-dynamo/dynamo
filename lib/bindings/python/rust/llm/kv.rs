@@ -51,9 +51,9 @@ type RsRoutingHost = RoutingHost;
 #[cfg(feature = "custom-policy")]
 type RsRoutingHost = RoutingHost<WorkerSelectionPolicy>;
 #[cfg(not(feature = "custom-policy"))]
-type RsKvRouter = llm_rs::kv_router::KvRouter;
+type RsKvRoutingGraph = llm_rs::kv_router::KvRoutingGraph;
 #[cfg(feature = "custom-policy")]
-type RsKvRouter = llm_rs::kv_router::KvRouter<WorkerSelectionPolicy>;
+type RsKvRoutingGraph = llm_rs::kv_router::KvRoutingGraph<WorkerSelectionPolicy>;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -1687,11 +1687,12 @@ mod metric_worker_type_tests {
 /// Custom policies use the discovered model card's typed worker role for selection.
 async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
+    client: rs::component::Client,
     block_size: usize,
     kv_router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
-) -> Result<Arc<RsKvRouter>, PyErr> {
+) -> Result<RsKvRoutingGraph, PyErr> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let endpoint_id = endpoint.inner.id();
@@ -1715,7 +1716,14 @@ async fn create_kv_router_from_endpoint(
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
     let needs_policy_role = worker_selection_policy_factory.is_some();
-    let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role) = {
+    let (
+        model_name,
+        policy_model_name,
+        enable_eagle,
+        worker_role,
+        policy_worker_role,
+        load_source,
+    ) = {
         let maybe_card = if needs_model_name || needs_policy_role {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
                 .ok()
@@ -1769,6 +1777,10 @@ async fn create_kv_router_from_endpoint(
                     card.runtime_config.enable_eagle,
                     worker_role,
                     policy_worker_role,
+                    llm_rs::kv_router::RouterLoadSource::from_worker_type(
+                        card.effective_worker_type(),
+                    )
+                    .map_err(to_pyerr)?,
                 )
             }
             None => {
@@ -1783,24 +1795,53 @@ async fn create_kv_router_from_endpoint(
                     endpoint = %endpoint_id.name,
                     "No model card found in discovery; defaulting to non-Eagle routing semantics"
                 );
-                (None, None, false, None, None)
+                (
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    if metric_worker_type
+                        == llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
+                    {
+                        llm_rs::kv_router::RouterLoadSource::Prefill
+                    } else {
+                        llm_rs::kv_router::RouterLoadSource::Aggregated
+                    },
+                )
             }
         }
     };
     #[cfg(not(feature = "custom-policy"))]
     let _ = (policy_model_name, policy_worker_role);
 
+    let graph = llm_rs::kv_router::TypedRoutingGraph::start(
+        client.clone(),
+        load_source,
+        llm_rs::discovery::LoadThresholdHandle::new(Default::default()),
+        &endpoint.inner.component().drt().child_token(),
+        None,
+    )
+    .await
+    .map_err(to_pyerr)?;
+
     #[cfg(not(feature = "custom-policy"))]
     let kv_router = model_manager
-        .kv_chooser_for_with_worker_role(
-            &endpoint.inner,
+        .kv_chooser_for_with_selector_and_client(
+            client,
             block_size as u32,
+            dynamo_kv_router::DefaultWorkerSelector::new(
+                kv_router_config.clone(),
+                metric_worker_type,
+            ),
             kv_router_config,
             prefill_load_estimator,
             worker_role,
             metric_worker_type,
             model_name,
             enable_eagle,
+            graph.scheduler_load_sender(),
+            graph.cancellation_token(),
         )
         .await
         .map_err(to_pyerr)?;
@@ -1825,8 +1866,8 @@ async fn create_kv_router_from_endpoint(
             },
         );
         model_manager
-            .kv_chooser_for_with_selector(
-                &endpoint.inner,
+            .kv_chooser_for_with_selector_and_client(
+                client,
                 block_size as u32,
                 selector,
                 kv_router_config,
@@ -1835,12 +1876,14 @@ async fn create_kv_router_from_endpoint(
                 metric_worker_type,
                 model_name,
                 enable_eagle,
+                graph.scheduler_load_sender(),
+                graph.cancellation_token(),
             )
             .await
             .map_err(to_pyerr)?
     };
 
-    Ok(kv_router)
+    Ok(llm_rs::kv_router::KvRoutingGraph::new(graph, kv_router))
 }
 
 #[pyclass]
@@ -2030,22 +2073,10 @@ impl KvRouter {
             runtime.block_on(async move {
                 let client = endpoint.inner.client().await.map_err(to_pyerr)?;
 
-                // Create PushRouter with KV router mode
-                let push_router = rs::pipeline::PushRouter::<
-                    llm_rs::protocols::common::preprocessor::PreprocessedRequest,
-                    rs::protocols::annotated::Annotated<
-                        llm_rs::protocols::common::llm_backend::LLMEngineOutput,
-                    >,
-                >::from_client(
-                    client,
-                    rs::pipeline::network::egress::push_router::RouterMode::KV,
-                )
-                .await
-                .map_err(to_pyerr)?;
-
                 // Create KvRouter using helper function (ensures etcd registration)
-                let kv_router = create_kv_router_from_endpoint(
+                let kv_graph = create_kv_router_from_endpoint(
                     endpoint,
+                    client,
                     block_size,
                     Some(kv_router_config),
                     prefill_load_estimator,
@@ -2053,9 +2084,22 @@ impl KvRouter {
                 )
                 .await?;
 
+                let push_router = rs::pipeline::PushRouter::<
+                    llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+                    rs::protocols::annotated::Annotated<
+                        llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+                    >,
+                >::from_client(
+                    kv_graph.owner().client().clone(),
+                    rs::pipeline::network::egress::push_router::RouterMode::KV,
+                )
+                .await
+                .map_err(to_pyerr)?;
+
                 let routing_host = RsRoutingHost::new(
                     push_router,
-                    kv_router,
+                    kv_graph.router().clone(),
+                    kv_graph.owner().clone(),
                     session_affinity_ttl_secs.map(Duration::from_secs),
                 )
                 .map_err(to_pyerr)?;

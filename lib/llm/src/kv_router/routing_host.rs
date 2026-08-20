@@ -195,6 +195,7 @@ where
     affinity: Option<AffinityCoordinator>,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
+    _graph: Arc<crate::kv_router::TypedRoutingGraph>,
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
@@ -210,18 +211,22 @@ where
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter<Sel>>,
+        graph: Arc<crate::kv_router::TypedRoutingGraph>,
         session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
             .map(AffinityCoordinator::new)
             .transpose()?;
 
-        Ok(Self::new_with_coordinator(inner, kv_router, affinity))
+        Ok(Self::new_with_coordinator(
+            inner, kv_router, graph, affinity,
+        ))
     }
 
     pub(crate) fn new_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter<Sel>>,
+        graph: Arc<crate::kv_router::TypedRoutingGraph>,
         affinity: Option<AffinityCoordinator>,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
@@ -237,25 +242,29 @@ where
             affinity,
             hosted_occupancy: None,
             lora: None,
+            _graph: graph,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn new_builtin(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        graph: Arc<crate::kv_router::TypedRoutingGraph>,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, None, None)
+        Self::new_builtin_with_capabilities(inner, graph, None, None)
     }
 
     pub(crate) fn new_builtin_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        graph: Arc<crate::kv_router::TypedRoutingGraph>,
         affinity: Option<AffinityCoordinator>,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, affinity, None)
+        Self::new_builtin_with_capabilities(inner, graph, affinity, None)
     }
 
     pub(crate) fn new_builtin_with_capabilities(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        graph: Arc<crate::kv_router::TypedRoutingGraph>,
         affinity: Option<AffinityCoordinator>,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     ) -> Result<Self, Error> {
@@ -312,6 +321,7 @@ where
                     load_estimator,
                     selector,
                 }),
+            _graph: graph,
         })
     }
 

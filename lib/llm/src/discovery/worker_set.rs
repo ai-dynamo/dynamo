@@ -15,7 +15,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::{KvWorkerMonitor, allocator::AllocatorTrimOnDrop},
+    discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
     kv_router::{EncoderRouter, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
@@ -159,8 +159,8 @@ pub struct WorkerSet {
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
-    /// Worker monitor for load-based rejection
-    pub(crate) worker_monitor: Option<KvWorkerMonitor>,
+    /// Shared configuration handle for this typed routing graph's load monitor.
+    pub(crate) load_thresholds: Option<LoadThresholdHandle>,
 
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
@@ -201,7 +201,7 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
-            worker_monitor: None,
+            load_thresholds: None,
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
@@ -435,7 +435,7 @@ impl WorkerSet {
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
             generate_engine,
-            worker_monitor: self.worker_monitor.clone(),
+            load_thresholds: self.load_thresholds.clone(),
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),

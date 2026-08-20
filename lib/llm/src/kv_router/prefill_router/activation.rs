@@ -14,7 +14,7 @@ use dynamo_kv_router::{
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
-    component::{Client, Endpoint},
+    component::Endpoint,
     discovery::DiscoveryQuery,
     pipeline::{PushRouter, RouterMode},
     prelude::DistributedRuntimeProvider,
@@ -23,8 +23,10 @@ use dynamo_runtime::{
 
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
 use crate::{
-    discovery::ModelManager,
-    kv_router::{KvRouter, RoutingHost, WorkerSelectorFactory},
+    discovery::{LoadThresholdHandle, ModelManager},
+    kv_router::{
+        KvRouter, RouterLoadSource, RoutingHost, TypedRoutingGraph, WorkerSelectorFactory,
+    },
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
@@ -127,7 +129,8 @@ impl PrefillRouter<DefaultWorkerSelector> {
         session_affinity_ttl_secs: Option<u64>,
         model_name: String,
         namespace: String,
-        worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+        load_thresholds: LoadThresholdHandle,
+        parent_token: tokio_util::sync::CancellationToken,
     ) -> Arc<Self> {
         Self::new_with_selector_factory(
             Some(activation_rx),
@@ -146,7 +149,8 @@ impl PrefillRouter<DefaultWorkerSelector> {
             session_affinity_ttl_secs,
             model_name,
             namespace,
-            worker_monitor,
+            load_thresholds,
+            parent_token,
             None,
         )
     }
@@ -198,10 +202,11 @@ where
         session_affinity_ttl_secs: Option<u64>,
         model_name: String,
         namespace: String,
-        worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+        load_thresholds: LoadThresholdHandle,
+        parent_token: tokio_util::sync::CancellationToken,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Arc<Self> {
-        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let cancel_token = parent_token.child_token();
         let (target_tx, target_rx) = watch::channel(None);
         let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
         let conditional_disagg_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
@@ -250,7 +255,7 @@ where
                 drive_cancel_token,
                 kv_cache_block_size,
                 kv_router_config,
-                worker_monitor,
+                load_thresholds,
             )
             .await;
         });
@@ -286,8 +291,9 @@ where
         endpoint: Endpoint,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-    ) -> Result<(PrefillBinding<Sel>, Client)> {
+    ) -> Result<PrefillBinding<Sel>> {
         let endpoint_id = endpoint.id();
+        let client = endpoint.client().await?;
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
         // This must be done before creating the router so bootstrap info is available
@@ -309,6 +315,14 @@ where
         let prefill_session_affinity_ttl = advertisement
             .session_affinity_ttl
             .unwrap_or(context.session_affinity_ttl);
+        let graph = TypedRoutingGraph::start(
+            client.clone(),
+            RouterLoadSource::Prefill,
+            context.load_thresholds.clone(),
+            &context.parent_token,
+            context.task_guard.clone(),
+        )
+        .await?;
 
         // A prefill card that declares a mode may declare KV tuning alongside it;
         // honoring only half of its `RouterConfig` would be a trap. Whichever
@@ -339,7 +353,7 @@ where
             "Activating prefill router"
         );
 
-        let (router, prefill_client) = if prefill_router_mode.is_kv_routing() {
+        let router = if prefill_router_mode.is_kv_routing() {
             // Create KV chooser using the endpoint (this is a prefill router)
             let effective_kv_router_config = prefill_kv_config.clone().unwrap_or_default();
             let selector = (context.worker_selector_factory)(
@@ -349,8 +363,8 @@ where
             );
             let kv_chooser = context
                 .model_manager
-                .kv_chooser_for_with_selector(
-                    &endpoint,
+                .kv_chooser_for_with_selector_and_client(
+                    client.clone(),
                     prefill_block_size,
                     selector,
                     prefill_kv_config,
@@ -359,14 +373,13 @@ where
                     WORKER_TYPE_PREFILL,
                     Some(context.model_name.clone()),
                     advertisement.is_eagle,
+                    graph.scheduler_load_sender(),
+                    graph.cancellation_token(),
                 )
                 .await?;
 
-            // Extract client from kv_chooser to ensure shared state
-            let client = kv_chooser.client().clone();
             let affinity =
                 create_affinity_coordinator(prefill_session_affinity_ttl, client.clone()).await?;
-            let prefill_client = client.clone();
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -376,20 +389,15 @@ where
             )
             .await?;
 
-            (
-                Arc::new(RoutingHost::new_with_coordinator(
-                    push_router,
-                    kv_chooser,
-                    affinity,
-                )),
-                prefill_client,
-            )
+            Arc::new(RoutingHost::new_with_coordinator(
+                push_router,
+                kv_chooser,
+                graph.clone(),
+                affinity,
+            ))
         } else {
-            // Create the cache-free routing client.
-            let client = endpoint.client().await?;
             let affinity =
                 create_affinity_coordinator(prefill_session_affinity_ttl, client.clone()).await?;
-            let prefill_client = client.clone();
 
             // Create the transport and discovery layer for the builtin policy.
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
@@ -401,21 +409,18 @@ where
             )
             .await?;
 
-            let router = Arc::new(RoutingHost::<Sel>::new_builtin_with_coordinator(
+            Arc::new(RoutingHost::<Sel>::new_builtin_with_coordinator(
                 push_router,
+                graph.clone(),
                 affinity,
-            )?);
-            (router, prefill_client)
+            )?)
         };
 
-        Ok((
-            PrefillBinding {
-                endpoint_id,
-                router,
-                prefill_router_mode,
-            },
-            prefill_client,
-        ))
+        Ok(PrefillBinding {
+            endpoint_id,
+            router,
+            prefill_router_mode,
+        })
     }
 
     /// Fetch the prefill worker set's own cards and resolve how the prefill hop
@@ -461,25 +466,13 @@ where
             .with_context(|| format!("prefill endpoint {endpoint_id}"))
     }
 
-    /// Attach the freshly-created prefill `Client` to this WorkerSet's monitor (handed in
-    /// at construction). The monitor then publishes the overloaded set to the prefill pool
-    /// and watches the prefill endpoint for metric cleanup. No-op for a disabled router.
-    fn attach_prefill_client(
-        worker_monitor: Option<&crate::discovery::KvWorkerMonitor>,
-        client: &Client,
-    ) {
-        if let Some(monitor) = worker_monitor {
-            monitor.attach_prefill_client(client.clone());
-        }
-    }
-
     async fn drive_target(
         router: std::sync::Weak<Self>,
         mut target_rx: watch::Receiver<Option<Endpoint>>,
         cancel_token: tokio_util::sync::CancellationToken,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+        load_thresholds: LoadThresholdHandle,
     ) {
         loop {
             let target = target_rx.borrow_and_update().clone();
@@ -527,6 +520,9 @@ where
                 prefill_load_estimator: router_ref.prefill_load_estimator.clone(),
                 session_affinity_ttl: router_ref.session_affinity_ttl,
                 model_name: router_ref.model_name.clone(),
+                load_thresholds: load_thresholds.clone(),
+                parent_token: cancel_token.child_token(),
+                task_guard: router_ref.task_guard.clone(),
             };
             drop(router_ref);
             let build = Self::build_binding(
@@ -551,12 +547,11 @@ where
                 return;
             };
             match result {
-                Ok((binding, prefill_client)) => {
+                Ok(binding) => {
                     let current_target = router_ref.target.lock();
                     if current_target.as_ref() != Some(&endpoint_id) {
                         continue;
                     }
-                    Self::attach_prefill_client(worker_monitor.as_ref(), &prefill_client);
                     router_ref.binding.store(Some(Arc::new(binding)));
                     router_ref
                         .lifecycle

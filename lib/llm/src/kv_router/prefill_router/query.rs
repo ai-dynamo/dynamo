@@ -107,13 +107,14 @@ mod tests {
             RouterMode, SingleIn, StreamingDispatch, context::Controller,
         },
         storage::kv,
+        traits::DistributedRuntimeProvider,
     };
     use futures::{StreamExt, future::join_all};
 
     use super::*;
     use crate::{
         discovery::ModelManager,
-        kv_router::RoutingHost,
+        kv_router::{RouterLoadSource, RoutingHost, TypedRoutingGraph},
         protocols::common::{
             FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
         },
@@ -290,11 +291,21 @@ mod tests {
         .expect("all four workers must be discovered");
         let mut workers = instances.iter().map(Instance::id).collect::<Vec<_>>();
         workers.sort_unstable();
+        let graph = TypedRoutingGraph::start(
+            client.clone(),
+            RouterLoadSource::Prefill,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            &client.endpoint.drt().child_token(),
+            None,
+        )
+        .await
+        .unwrap();
         let push_router = PushRouter::from_client_with_dispatch(client, mode, dispatch)
             .await
             .unwrap();
-        let shared =
-            Arc::new(RoutingHost::new_builtin_with_coordinator(push_router, None).unwrap());
+        let shared = Arc::new(
+            RoutingHost::new_builtin_with_coordinator(push_router, graph, None).unwrap(),
+        );
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
