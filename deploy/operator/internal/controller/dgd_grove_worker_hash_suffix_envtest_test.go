@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -83,14 +84,17 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	require.NoError(t, err)
 	waitForGroveWorkerHash(t, ctx, env, current, initialWorkerHash)
 
-	t.Log("Read the legacy DGD for the frontend-only update")
-	require.NoError(t, env.Client().Get(ctx, key, current))
-
 	t.Log("Apply a frontend-only update")
-	frontend := current.GetComponentByName("frontend")
-	frontend.PodTemplate.Spec.Containers[0].Env = append(frontend.PodTemplate.Spec.Containers[0].Env,
-		corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
-	require.NoError(t, env.Client().Update(ctx, current))
+	require.NoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current = &nvidiacomv1beta1.DynamoGraphDeployment{}
+		if err := env.Client().Get(ctx, key, current); err != nil {
+			return err
+		}
+		frontend := current.GetComponentByName("frontend")
+		frontend.PodTemplate.Spec.Containers[0].Env = append(frontend.PodTemplate.Spec.Containers[0].Env,
+			corev1.EnvVar{Name: "FRONTEND_CONFIG_REVISION", Value: "2"})
+		return env.Client().Update(ctx, current)
+	}))
 
 	t.Log("Verify the frontend update preserves the legacy worker hash state")
 	require.NoError(t, env.Client().Get(ctx, key, current))
@@ -99,10 +103,15 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	waitForGroveWorkerHash(t, ctx, env, current, initialWorkerHash)
 
 	t.Log("Apply a worker update and verify it starts the suffix migration")
-	require.NoError(t, env.Client().Get(ctx, key, current))
-	prefill := current.GetComponentByName("prefill")
-	prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
-	require.NoError(t, env.Client().Update(ctx, current))
+	require.NoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current = &nvidiacomv1beta1.DynamoGraphDeployment{}
+		if err := env.Client().Get(ctx, key, current); err != nil {
+			return err
+		}
+		prefill := current.GetComponentByName("prefill")
+		prefill.PodTemplate.Spec.Containers[0].Env[0].Value = "8192"
+		return env.Client().Update(ctx, current)
+	}))
 	t.Log("Read the updated DGD and wait for its PCS suffix and hash commit")
 	require.NoError(t, env.Client().Get(ctx, key, current))
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
