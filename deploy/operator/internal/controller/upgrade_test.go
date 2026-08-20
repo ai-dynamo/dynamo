@@ -98,6 +98,16 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 						SubComponentType: commonconsts.ComponentTypeDecode,
 						DynamoNamespace:  &dynamoNamespace,
 						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							PodSpec: &corev1.PodSpec{
+								TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+									MaxSkew:           1,
+									TopologyKey:       corev1.LabelHostname,
+									WhenUnsatisfiable: corev1.DoNotSchedule,
+									LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+										commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+									}},
+								}},
+							},
 							MainContainer: &corev1.Container{
 								Name:    commonconsts.MainContainerName,
 								Image:   "test-image:latest",
@@ -137,6 +147,13 @@ spec:
         nvidia.com/metrics-enabled: "true"
         nvidia.com/selector: qwen-decode-db6b6891
     spec:
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            nvidia.com/dynamo-component-type: worker
       volumes:
       - name: shared-memory
         emptyDir:
@@ -293,6 +310,16 @@ spec:
 						SubComponentType: commonconsts.ComponentTypeDecode,
 						DynamoNamespace:  &dynamoNamespace,
 						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							PodSpec: &corev1.PodSpec{
+								TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+									MaxSkew:           1,
+									TopologyKey:       corev1.LabelHostname,
+									WhenUnsatisfiable: corev1.DoNotSchedule,
+									LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+										commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+									}},
+								}},
+							},
 							MainContainer: &corev1.Container{
 								Name:    commonconsts.MainContainerName,
 								Image:   "test-image:latest",
@@ -332,6 +359,13 @@ spec:
           nvidia.com/metrics-enabled: "true"
           role: leader
       spec:
+        topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              nvidia.com/dynamo-component-type: worker
         volumes:
         - name: shared-memory
           emptyDir:
@@ -439,6 +473,13 @@ spec:
           nvidia.com/metrics-enabled: "true"
           role: worker
       spec:
+        topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              nvidia.com/dynamo-component-type: worker
         volumes:
         - name: shared-memory
           emptyDir:
@@ -805,9 +846,10 @@ spec:
 						&controller_common.RuntimeConfig{},
 						nil,
 					)
-					pcs, err := renderer.Render(ctx, dgd, nil, nil)
+					renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 					require.NoError(t, err)
-					renderDGD := groveRenderDeployment(dgd, pcs)
+					pcs := renderedPCS.desired
+					renderDGD := renderedPCS.renderDeployment
 
 					t.Log("generate the decode service selector from the same prepared Grove component")
 					decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
@@ -871,6 +913,9 @@ spec:
 			t.Log("compare old and new child specs; a change here would trigger a rollout")
 			require.Equal(t, specHash(t, oldChild), specHash(t, newChild), "upgrade should not change the child spec hash")
 
+			t.Log("confirm the legacy child is not enrolled in generation-scoped topology management")
+			require.NotContains(t, newChild.GetAnnotations(), commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped)
+
 			t.Log("assert worker pod labels keep the legacy worker identity")
 			for site, subComponentType := range tt.expectedWorkerSites {
 				oldLabels, ok := oldPodLabels[site]
@@ -930,9 +975,10 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	desired, err := renderer.Render(ctx, dgd, nil, nil)
+	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 	require.NoError(t, err)
-	renderDGD := groveRenderDeployment(dgd, desired)
+	desired := renderedPCS.desired
+	renderDGD := renderedPCS.renderDeployment
 
 	t.Log("assert the native prefill component stays prefill instead of legacy worker")
 	prefillComponent := renderDGD.GetComponentByName("prefill")
