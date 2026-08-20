@@ -67,16 +67,15 @@ VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
-# 2x the minimum TinyLlama cache for max_model_len=1024.
 DISAGG_KV_CACHE_MEMORY_BYTES = 331_801_000
 
-# Fixed sizing avoids racy device-wide profiling on shared GPU 0.
+# Avoid device-wide profiling across the two prefill workers on GPU 0.
 VLLM_ARGS_DISAGG: Dict[str, Any] = {
     "block_size": BLOCK_SIZE,
     "model": MODEL_NAME,
     "kv_cache_memory_bytes": DISAGG_KV_CACHE_MEMORY_BYTES,
-    "max_model_len": 1024,  # Limit context length to reduce KV cache size
-    "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
+    "max_model_len": 1024,
+    "enforce_eager": True,
 }
 
 
