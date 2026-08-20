@@ -12,10 +12,12 @@ import pytest
 import egress_experiments.e2e_worker as e2e_worker
 from egress_experiments.costs import Costs
 from egress_experiments.e2e_worker import (
+    RuntimeRustEgressWorkerHandler,
     RuntimeTrtllmWorkerHandler,
     StatsSampler,
     _interrupt_for_shutdown,
     _validate_push_runtime,
+    _validate_rust_runtime,
     adapt_runtime_request,
     parse_args,
     response_path_costs,
@@ -84,6 +86,11 @@ def test_parse_args_rejects_invalid_positive_float(value):
         parse_args(["--iteration-ms", value])
 
 
+def test_parse_args_selects_python_or_rust_response_path():
+    assert parse_args([]).response_path == "python"
+    assert parse_args(["--response-path", "rust"]).response_path == "rust"
+
+
 def test_response_path_costs_do_not_change_request_path_work():
     baseline = Costs()
     control = response_path_costs(0.0)
@@ -108,6 +115,14 @@ def test_validate_push_runtime_requires_real_decorator(monkeypatch):
 
     with pytest.raises(RuntimeError, match="real push_egress_capable"):
         _validate_push_runtime()
+
+
+def test_validate_rust_runtime_requires_owned_processor_binding():
+    class CoreWithoutOwnedProcessor:
+        pass
+
+    with pytest.raises(RuntimeError, match="OwnedTokenEgress"):
+        _validate_rust_runtime(CoreWithoutOwnedProcessor)
 
 
 def test_sigterm_interrupts_worker_for_graceful_cleanup():
@@ -187,3 +202,90 @@ def test_runtime_handler_runs_response_work_on_one_loop_and_preserves_output():
         for thread_name in result.handle_response_threads
     }
     assert result_threads == {threading.current_thread().name}
+
+
+def test_rust_handler_processes_batches_off_loop_and_wakes_once_per_request():
+    class RecordingProcessor:
+        def __init__(self):
+            self.registrations = []
+            self.batches = []
+            self.frames_sent = 0
+            self.responses_processed = 0
+
+        def register(
+            self,
+            client_id,
+            prompt_tokens,
+            num_choices,
+            response_sender,
+            calibrated_work_us,
+        ):
+            self.registrations.append(
+                (
+                    client_id,
+                    prompt_tokens,
+                    num_choices,
+                    response_sender,
+                    calibrated_work_us,
+                )
+            )
+
+        def process_mock_batch(self, responses):
+            self.batches.append(responses)
+            self.responses_processed += len(responses)
+            self.frames_sent += sum(len(response["new_token_ids"]) for response in responses)
+            return [
+                response["client_id"]
+                for response in responses
+                if response["is_final"] or response.get("error_msg")
+            ]
+
+        def cancel(self, _client_id):
+            return False
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        engine_config = EngineConfig(
+            batch=BatchConfig(total=1),
+            iteration=ConstantIteration(1.0),
+            max_tokens=3,
+        )
+        llm = FakeLLM(engine_config, costs=Costs().with_scale(0.0))
+        processor = RecordingProcessor()
+        handler = RuntimeRustEgressWorkerHandler(
+            llm, processor=processor, costs=Costs().with_scale(0.0)
+        )
+        sender = object()
+        llm.start(loop)
+        try:
+            chunks = [
+                chunk
+                async for chunk in handler.generate(
+                    {
+                        "token_ids": [11, 12],
+                        "stop_conditions": {"max_tokens": 3},
+                        "sampling_options": {"n": 1},
+                    },
+                    context=None,
+                    response_sender=sender,
+                )
+            ]
+            return chunks, llm, handler, processor, sender
+        finally:
+            llm.shutdown()
+
+    chunks, llm, handler, processor, sender = asyncio.run(run())
+
+    assert chunks == []
+    assert len(processor.registrations) == 1
+    assert processor.registrations[0][3] is sender
+    assert processor.responses_processed == llm.responses_dispatched == 3
+    assert handler.responses_yielded == processor.frames_sent == 3
+    assert llm.notify_many_calls == 0
+    assert llm.native_completion_notify_calls == 1
+    result_threads = {
+        thread_name
+        for result in handler.completed_results
+        for thread_name in result.handle_response_threads
+    }
+    assert result_threads == set()
