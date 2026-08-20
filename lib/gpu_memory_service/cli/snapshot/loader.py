@@ -133,9 +133,7 @@ def _list_checkpoint_devices(
     devices = vmm.list_devices()
     if device is not None:
         if device not in devices:
-            raise RuntimeError(
-                f"--device {device} is not visible: visible={devices}"
-            )
+            raise RuntimeError(f"--device {device} is not visible: visible={devices}")
         if checkpoint_dir:
             path = Path(checkpoint_dir) / f"device-{device}"
             if not path.is_dir():
