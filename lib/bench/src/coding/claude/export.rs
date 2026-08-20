@@ -1776,23 +1776,32 @@ mod tests {
             .iter()
             .map(|row| (row.request_id.as_str(), row))
             .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(
-            by_id["claude:root-session:0"].branches,
-            vec!["claude:child-agent:0"]
-        );
-        assert_eq!(
-            by_id["claude:child-agent:0"].request_kind.as_deref(),
-            Some("background_agent")
-        );
-        assert_eq!(
-            by_id["claude:root-session:1"].wait_for,
-            vec!["claude:root-session:0"]
+        assert!(
+            by_id["claude:child-agent:0"]
+                .dependencies
+                .iter()
+                .any(|edge| {
+                    edge.request_id == "claude:root-session:0"
+                        && edge.relation == dynamo_data_gen::AgenticDependencyRelation::Spawn
+                })
         );
         assert!(
-            by_id["claude:root-session:2"]
-                .wait_for
-                .contains(&"claude:child-agent:0".to_string())
+            by_id["claude:root-session:1"]
+                .dependencies
+                .iter()
+                .any(|edge| {
+                    edge.request_id == "claude:root-session:0"
+                        && edge.relation == dynamo_data_gen::AgenticDependencyRelation::Sequence
+                })
         );
-        assert_eq!(by_id["claude:root-session:2"].tool_wait_ms, Some(100.0));
+        assert!(
+            !by_id["claude:root-session:2"]
+                .dependencies
+                .iter()
+                .any(|edge| {
+                    edge.request_id == "claude:child-agent:0"
+                        && edge.relation == dynamo_data_gen::AgenticDependencyRelation::Join
+                })
+        );
     }
 }

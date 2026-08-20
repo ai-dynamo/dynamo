@@ -177,13 +177,19 @@ pub(crate) fn simulate_concurrency_workload(
 pub(crate) fn simulate_agentic_trace_workload(
     config: OnlineReplayConfig,
     trace: AgenticTrace,
+    agentic_lanes: Option<usize>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     let engine_block_size = config.args.block_size;
-    let total_turns = trace.turns.len();
+    let include_replay_hashes = config.router_mode == ReplayRouterMode::KvRouter;
+    let total_turns = trace.node_count();
     let (report, _) = run_live_workload_runtime(
         config,
-        trace.into_trace_driver_with_block_size(engine_block_size)?,
+        trace.into_trace_driver_with_options(
+            engine_block_size,
+            include_replay_hashes,
+            agentic_lanes,
+        )?,
         total_turns,
         LiveReplayMode::Trace,
         CancellationToken::new(),

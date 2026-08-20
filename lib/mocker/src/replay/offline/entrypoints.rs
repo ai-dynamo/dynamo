@@ -594,15 +594,16 @@ pub(crate) fn simulate_agentic_trace_workload(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    let driver = match router_mode {
-        ReplayRouterMode::RoundRobin => {
-            WorkloadDriver::new_agentic_trace_without_replay_hashes(trace, args.block_size)?
-        }
-        ReplayRouterMode::KvRouter => trace.into_trace_driver_with_block_size(args.block_size)?,
-    };
+    let driver = trace.into_trace_driver_with_options(
+        args.block_size,
+        router_mode == ReplayRouterMode::KvRouter,
+        agentic_lanes,
+    )?;
     run_aggregated(
         args,
         router_config,
@@ -612,7 +613,39 @@ pub(crate) fn simulate_agentic_trace_workload(
         None,
         router_mode,
         record_per_request,
+        max_sim_time_ms,
+        sla,
         None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn simulate_agentic_trace_workload_disagg(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<ReplayKvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    let driver = trace.into_trace_driver_with_options(
+        config.prefill_args.block_size,
+        router_mode == ReplayRouterMode::KvRouter,
+        agentic_lanes,
+    )?;
+    run_disaggregated(
+        config,
+        router_config,
+        prefill_load_estimator,
+        ReplayRuntimeInput::Workload(driver),
+        None,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
         sla,
         None,
     )

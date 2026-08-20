@@ -1711,6 +1711,7 @@ name = "dynamo-data-gen"
 version = "1.5.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "dynamo-kv-hashing",
  "flate2",
  "rustc-hash 2.1.2",
