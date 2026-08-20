@@ -260,7 +260,7 @@ impl ProcessorCore {
 
             outcome.responses_processed += 1;
             self.responses_processed.fetch_add(1, Ordering::Relaxed);
-            let terminal = response.is_final || response.error_msg.is_some();
+            let mut terminal = response.is_final || response.error_msg.is_some();
             let mut request = request
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -276,6 +276,7 @@ impl ProcessorCore {
                     finish_reasons: response.finish_reasons,
                     stop_reasons: response.stop_reasons,
                 });
+                let mut sink_failed = false;
                 for frame in frames {
                     let _send_nvtx = dynamo_nvtx_range!("rust_egress.send");
                     match request.sink.send(Annotated::from_data(frame)) {
@@ -285,11 +286,13 @@ impl ProcessorCore {
                         }
                         Err(error) => {
                             request.sink.close_with_error(error);
+                            sink_failed = true;
+                            terminal = true;
                             break;
                         }
                     }
                 }
-                if response.is_final {
+                if response.is_final && !sink_failed {
                     request.sink.close();
                 }
             }
