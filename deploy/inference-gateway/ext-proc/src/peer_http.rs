@@ -66,6 +66,17 @@ fn listener_addr(pod_ip: IpAddr, port: u16) -> SocketAddr {
     }
 }
 
+/// True when the indexer snapshot contains a per-model `{"error": ...}`
+/// entry, which happens when one model's indexer failed to dump. The
+/// recovery consumer deserializes each entry as `DumpEntry` (`block_size`
+/// plus `events`), so an error entry would make the whole body unparseable;
+/// the dump handler fails such snapshots with a non-success status.
+fn snapshot_has_failed_dump(snapshot: &serde_json::Value) -> bool {
+    snapshot
+        .as_object()
+        .is_some_and(|entries| entries.values().any(|entry| entry.get("error").is_some()))
+}
+
 async fn dump(State(state): State<AppState>, Query(query): Query<DumpQuery>) -> Response {
     // Do not serve a snapshot until local recovery/bootstrap has finished: the
     // index is empty during recovery, and an early /dump could let a sibling
@@ -78,6 +89,19 @@ async fn dump(State(state): State<AppState>, Query(query): Query<DumpQuery>) -> 
             .into_response();
     }
     let snapshot = state.service.indexer_snapshot().await;
+    // A per-model indexer dump failure is surfaced as an `{"error": ...}`
+    // entry inside the snapshot. The recovery consumer expects `DumpEntry`
+    // values and cannot parse that shape, so fail the whole dump with a
+    // non-success status instead of returning a 200 body the consumer would
+    // reject (and then fall back to an empty index on).
+    if snapshot_has_failed_dump(&snapshot) {
+        tracing::warn!("Peer KV-index snapshot contains an indexer dump failure");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "peer KV-index snapshot generation failed",
+        )
+            .into_response();
+    }
     let bytes = match serde_json::to_vec(&snapshot) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -240,6 +264,34 @@ mod tests {
             listener_addr("2001:db8::1".parse().unwrap(), 9093),
             "[::]:9093".parse().unwrap()
         );
+    }
+
+    #[test]
+    fn snapshot_with_failed_indexer_dump_is_detected() {
+        // A per-model indexer dump failure surfaces as `{"error": ...}`; the
+        // recovery consumer expects `DumpEntry` values, so such snapshots must
+        // be rejected as a whole.
+        let failed = serde_json::json!({
+            "model:default": {"error": "indexer dump failed"},
+        });
+        assert!(snapshot_has_failed_dump(&failed));
+
+        let mixed = serde_json::json!({
+            "model:a": {"block_size": 16, "events": []},
+            "model:b": {"error": "boom"},
+        });
+        assert!(snapshot_has_failed_dump(&mixed));
+    }
+
+    #[test]
+    fn snapshot_without_failed_indexer_dump_is_accepted() {
+        let healthy = serde_json::json!({
+            "model:default": {"block_size": 16, "events": []},
+        });
+        assert!(!snapshot_has_failed_dump(&healthy));
+
+        let empty = serde_json::json!({});
+        assert!(!snapshot_has_failed_dump(&empty));
     }
 
     #[tokio::test]
