@@ -92,6 +92,8 @@ class HttpClient(abc.ABC):
         if max_bytes is not None and max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
         if policy is None:
+            if max_bytes is None:
+                return await self._fetch_simple(url, timeout)
             return await self._fetch_simple(url, timeout, max_bytes=max_bytes)
         return await self._fetch_with_revalidation(
             url, timeout, policy, max_bytes=max_bytes
@@ -113,9 +115,12 @@ class HttpClient(abc.ABC):
             await validate_url(current, policy)
             visited.append(current)
 
-            body, redirect_to = await self._fetch_body_or_redirect(
-                current, timeout, max_bytes=max_bytes
-            )
+            if max_bytes is None:
+                body, redirect_to = await self._fetch_body_or_redirect(current, timeout)
+            else:
+                body, redirect_to = await self._fetch_body_or_redirect(
+                    current, timeout, max_bytes=max_bytes
+                )
 
             if redirect_to is None:
                 if body is None:
