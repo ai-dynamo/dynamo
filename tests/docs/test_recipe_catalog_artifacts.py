@@ -429,6 +429,34 @@ def test_recipe_image_validation_allows_retroactive_open_start(
     assert errors == []
 
 
+def test_recipe_image_validation_rejects_closed_period_for_deployed_image(
+    tmp_path: Path,
+) -> None:
+    image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-still-deployed-dev.1"
+    deploy = tmp_path / "deploy.yaml"
+    deploy.write_text(f"image: {image}\n")
+    artifacts = {
+        "recipe_specific_images": [],
+        "recipe_specific_image_periods": [
+            {
+                "image": image,
+                "effective_from": "2026-01-01",
+                "effective_to": "2026-02-01",
+                "source_revision": "a" * 40,
+            }
+        ],
+    }
+
+    errors = catalog_validate._image_attribution.recipe_image_errors(
+        artifacts, [deploy], "still-deployed"
+    )
+
+    assert any(
+        "deployed recipe-specific image must have an open ownership period" in error
+        for error in errors
+    )
+
+
 def test_recipe_image_validation_allows_github_release_provenance_without_current_deploy_asset() -> (
     None
 ):

@@ -141,6 +141,7 @@ def _period_evidence(period, label):
 
 def _period_sets(periods, label):
     errors = []
+    tracked_images = set()
     open_images = set()
     release_images = set()
     for period in periods:
@@ -148,21 +149,31 @@ def _period_sets(periods, label):
             period, label
         )
         errors.extend(period_errors)
-        if isinstance(image, str) and is_open:
-            open_images.add(image)
-        if isinstance(image, str) and release_complete:
-            release_images.add(image)
-    return errors, open_images, release_images
+        if isinstance(image, str):
+            tracked_images.add(image)
+            if is_open:
+                open_images.add(image)
+            if release_complete:
+                release_images.add(image)
+    return errors, tracked_images, open_images, release_images
 
 
-def _deploy_evidence_errors(current_images, release_images, deploy_paths, label):
+def _deploy_evidence_errors(
+    current_images, tracked_images, open_images, release_images, deploy_paths, label
+):
     deployed_images = _deploy_images(deploy_paths)
-    return [
+    errors = [
         "[%s] recipe-specific image is not referenced by a deploy asset or "
         "complete GitHub release provenance: %s" % (label, image)
         for image in current_images
         if image not in deployed_images and image not in release_images
     ]
+    errors.extend(
+        "[%s] deployed recipe-specific image must have an open ownership period: %s"
+        % (label, image)
+        for image in sorted(deployed_images & tracked_images - open_images)
+    )
+    return errors
 
 
 def recipe_image_errors(artifacts, deploy_paths, label) -> list[str]:
@@ -177,10 +188,19 @@ def recipe_image_errors(artifacts, deploy_paths, label) -> list[str]:
             "[%s] artifacts.recipe_specific_image_periods must be an array" % label
         )
         periods = []
-    period_errors, open_images, release_images = _period_sets(periods, label)
+    period_errors, tracked_images, open_images, release_images = _period_sets(
+        periods, label
+    )
     errors.extend(period_errors)
     errors.extend(
-        _deploy_evidence_errors(current_images, release_images, deploy_paths, label)
+        _deploy_evidence_errors(
+            current_images,
+            tracked_images,
+            open_images,
+            release_images,
+            deploy_paths,
+            label,
+        )
     )
     current_set = {image for image in current_images if isinstance(image, str)}
     if current_set != open_images:
