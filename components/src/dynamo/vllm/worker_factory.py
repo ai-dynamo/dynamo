@@ -661,7 +661,11 @@ class WorkerFactory:
 
         if config.transcription_worker:
             await self._create_transcription_worker(
-                runtime, config, shutdown_event, shutdown_endpoints
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine=snapshot_engine,
             )
             return
 
@@ -861,17 +865,29 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
+        snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
         shutdown_endpoints[:] = [generate_endpoint]
 
-        engine_client, vllm_config, _, _, _ = self.setup_vllm_engine(
-            config,
-            None,
-            fpm_worker_id=str(generate_endpoint.connection_id()),
-        )
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        if snapshot_engine is not None:
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                _prometheus_temp_dir,
+                _component_gauges,
+            ) = snapshot_engine
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+        else:
+            engine_client, vllm_config, _, _, _ = self.setup_vllm_engine(
+                config,
+                None,
+                fpm_worker_id=fpm_worker_id,
+            )
         handler = TranscriptionWorkerHandler(
             runtime=runtime,
             engine=engine_client,

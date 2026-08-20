@@ -797,9 +797,26 @@ class TestCreate:
         self, factory: WorkerFactory
     ) -> None:
         config = _make_config(transcription_worker=True)
-        await factory.create(Mock(), config, asyncio.Event(), [])
+        runtime = Mock()
+        shutdown_event = asyncio.Event()
+        shutdown_endpoints = []
+        snapshot_engine = Mock()
 
-        factory._create_transcription_worker.assert_called_once()  # type: ignore[union-attr]
+        await factory.create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+
+        factory._create_transcription_worker.assert_awaited_once_with(  # type: ignore[union-attr]
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
         factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
 
     async def test_embedding_worker_takes_priority(
@@ -1169,3 +1186,58 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
     else:
         assert lifecycle_names.isdisjoint(endpoints)
         assert len(shutdown_endpoints) == 3
+
+
+@pytest.mark.asyncio
+async def test_transcription_worker_reuses_snapshot_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = Mock()
+    endpoint.connection_id.return_value = "worker-1"
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    engine_client = Mock()
+    vllm_config = Mock()
+    snapshot_engine: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        None,
+        Mock(),
+    )
+    setup_vllm_engine = Mock()
+    register_vllm_model = AsyncMock()
+    factory = _make_factory(
+        setup_vllm_engine_fn=setup_vllm_engine,
+        register_vllm_model_fn=register_vllm_model,
+    )
+    handler = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.TranscriptionWorkerHandler",
+        Mock(return_value=handler),
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory.register_model_taint_route", Mock())
+    monkeypatch.setenv("DYN_FPM_WORKER_ID", "snapshot")
+    config = SimpleNamespace(
+        namespace="ns",
+        component="worker",
+        endpoint="generate",
+        served_model_name="whisper",
+        model="openai/whisper-tiny",
+    )
+
+    await factory._create_transcription_worker(
+        runtime,
+        config,
+        asyncio.Event(),
+        [],
+        snapshot_engine=snapshot_engine,
+    )
+
+    setup_vllm_engine.assert_not_called()
+    assert register_vllm_model.await_args.args[4] is engine_client
+    assert register_vllm_model.await_args.args[5] is vllm_config
+    endpoint.serve_endpoint.assert_awaited_once()
+    handler.cleanup.assert_called_once()

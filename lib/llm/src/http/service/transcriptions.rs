@@ -95,6 +95,13 @@ impl TranscriptionForm {
                 "Unsupported response_format `{response_format}`; expected `json` or `verbose_json`"
             )));
         }
+        if self.temperature.is_some_and(|temperature| {
+            !temperature.is_finite() || !(0.0..=1.0).contains(&temperature)
+        }) {
+            return Err(ErrorMessage::bad_request(
+                "temperature must be a finite number between 0 and 1",
+            ));
+        }
         if self
             .timestamp_granularities
             .iter()
@@ -102,6 +109,11 @@ impl TranscriptionForm {
         {
             return Err(ErrorMessage::bad_request(
                 "timestamp_granularities must contain only `word` or `segment`",
+            ));
+        }
+        if !self.timestamp_granularities.is_empty() && response_format != "verbose_json" {
+            return Err(ErrorMessage::bad_request(
+                "timestamp_granularities requires response_format `verbose_json`",
             ));
         }
 
@@ -255,16 +267,39 @@ mod tests {
             audio_b64: Some("YXVkaW8=".to_string()),
             filename: Some("sample.wav".to_string()),
             language: Some("en".to_string()),
+            response_format: Some("verbose_json".to_string()),
             timestamp_granularities: vec!["word".to_string()],
             ..Default::default()
         };
         let request = form.into_request().unwrap();
         assert_eq!(request.filename, "sample.wav");
         assert_eq!(request.audio_b64, "YXVkaW8=");
-        assert_eq!(request.response_format.as_deref(), Some("json"));
+        assert_eq!(request.response_format.as_deref(), Some("verbose_json"));
         assert_eq!(
             request.timestamp_granularities,
             Some(vec!["word".to_string()])
         );
+    }
+
+    #[test]
+    fn rejects_invalid_temperatures() {
+        for temperature in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let form = TranscriptionForm {
+                audio_b64: Some("AQ==".to_string()),
+                temperature: Some(temperature),
+                ..Default::default()
+            };
+            assert_eq!(form.into_request().unwrap_err().0, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn rejects_timestamp_granularities_without_verbose_json() {
+        let form = TranscriptionForm {
+            audio_b64: Some("AQ==".to_string()),
+            timestamp_granularities: vec!["word".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(form.into_request().unwrap_err().0, StatusCode::BAD_REQUEST);
     }
 }
