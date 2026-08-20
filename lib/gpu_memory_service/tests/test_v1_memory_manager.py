@@ -215,8 +215,12 @@ def test_client_slabs_pack_reuse_coalesce_and_remap(tmp_path, monkeypatch) -> No
         assert client.owns(small)
 
         client.unmap_all_vas()
+        with pytest.raises(RuntimeError, match="slabs are unmapped"):
+            client.create_mapping(65)
         client.disconnect()
         client.connect(RequestedLockType.RW)
+        with pytest.raises(RuntimeError, match="slabs are unmapped"):
+            client.create_mapping(65)
         client.reallocate_all_handles()
         client.remap_all_vas()
         assert len(client.mappings) == 1

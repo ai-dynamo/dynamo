@@ -103,6 +103,8 @@ class GMSClientMemoryManager:
             self._require_rw()
             if size <= 0:
                 raise ValueError("allocation size must be positive")
+            if any(not mapping.handle for mapping in self._ordered_mappings()):
+                raise RuntimeError("cannot create a mapping while GMS slabs are unmapped")
             aligned_size = self._align(size)
             try:
                 for mapping in self._ordered_mappings():
