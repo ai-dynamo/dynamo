@@ -271,10 +271,13 @@ where
         }
     }
 
-    pub(crate) fn peek_next_worker(&self) -> Option<u64> {
+    pub(crate) fn peek_next_worker(&self) -> Result<Option<AffinityTarget>, Error> {
         match &self.plane {
-            RoutingPlane::Builtin(_) => self.inner.peek_next_worker(),
-            RoutingPlane::Kv(_) => None,
+            RoutingPlane::Builtin(_) => match &self.load_state {
+                Some(load_state) => Ok(Some(route_target(load_state.peek(&self.inner)?))),
+                None => Ok(self.inner.peek_next_worker().map(AffinityTarget::worker)),
+            },
+            RoutingPlane::Kv(_) => Ok(None),
         }
     }
 
@@ -1162,7 +1165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_load_selection_ignores_routable_workers_without_configs() {
+    async fn builtin_load_selection_and_peek_ignore_routable_workers_without_configs() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -1180,8 +1183,9 @@ mod tests {
             .unwrap();
         client.override_discovered_instances(vec![1, 2]);
         client.override_instance_avail(vec![1, 2]);
-        let (_workers_tx, workers) =
-            watch::channel(HashMap::from([(1, ModelRuntimeConfig::default())]));
+        let mut config = ModelRuntimeConfig::default();
+        config.data_parallel_start_rank = 3;
+        let (_workers_tx, workers) = watch::channel(HashMap::from([(2, config)]));
         let load_state = RoutingLoadState::start(
             endpoint,
             16,
@@ -1191,16 +1195,25 @@ mod tests {
         )
         .await
         .unwrap();
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_load(
+            inner,
+            Some(load_state.clone()),
+        )
+        .unwrap();
         let request = request();
         let first = load_state
-            .select_and_reserve(&inner, "request-1", &request, Some((1, None)))
+            .select_and_reserve(&host.inner, "request-1", &request, Some((2, None)))
             .unwrap();
         let second = load_state
-            .select_and_reserve(&inner, "request-2", &request, None)
+            .select_and_reserve(&host.inner, "request-2", &request, None)
             .unwrap();
 
-        assert_eq!(first.worker().worker_id, 1);
-        assert_eq!(second.worker().worker_id, 1);
+        assert_eq!(first.worker().worker_id, 2);
+        assert_eq!(second.worker().worker_id, 2);
+        assert_eq!(
+            host.peek_next_worker().unwrap(),
+            Some(AffinityTarget::new(2, Some(3)))
+        );
     }
 
     #[tokio::test]

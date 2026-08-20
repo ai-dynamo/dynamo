@@ -43,12 +43,12 @@ where
         match &binding.router {
             InnerPrefillRouter::RoutingHost(router) => {
                 let Some(kv_router) = router.kv_router_if_enabled() else {
-                    let worker_id = router
-                        .peek_next_worker()
+                    let target = router
+                        .peek_next_worker()?
                         .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
                     return Ok(PrefillQueryOutcome::Routed {
-                        worker_id,
-                        dp_rank: None,
+                        worker_id: target.worker_id,
+                        dp_rank: target.dp_rank,
                     });
                 };
                 let outcome = kv_router
