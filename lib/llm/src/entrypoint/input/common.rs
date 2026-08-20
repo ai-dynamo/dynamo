@@ -164,7 +164,6 @@ fn preprocessed_backend_engine<Sel>(
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter<Sel>>>,
     model_manager: &Arc<crate::discovery::ModelManager>,
-    endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
     graph: Arc<TypedRoutingGraph>,
     load_state: Option<Arc<RoutingLoadState>>,
@@ -191,9 +190,10 @@ where
             ))
         }
         _ => {
+            let endpoint_id = graph.client().endpoint.id();
             let lora = model_manager
-                .lora_filter_for(endpoint_id)
-                .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
+                .lora_filter_for(&endpoint_id)
+                .map(|filter| (filter, model_manager.lora_load_estimator_for(&endpoint_id)));
             Arc::new(RoutingHost::<Sel>::new_builtin_with_capabilities(
                 router, graph, load_state, affinity, lora,
             )?)
@@ -268,8 +268,6 @@ where
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
-    let endpoint_id = router_client.endpoint.id();
-
     let affinity = create_affinity_coordinator(
         session_affinity_ttl_secs.map(Duration::from_secs),
         router_client.clone(),
@@ -288,7 +286,6 @@ where
                 kv_cache_block_size,
                 workers,
                 kv_router_config,
-                crate::protocols::common::timing::WORKER_TYPE_DECODE,
                 graph.scheduler_load_sender(),
                 graph.cancellation_token(),
             )
@@ -341,7 +338,6 @@ where
         router_mode,
         chooser,
         &model_manager,
-        &endpoint_id,
         affinity,
         graph,
         load_state,

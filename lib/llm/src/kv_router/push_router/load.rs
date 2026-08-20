@@ -51,7 +51,6 @@ impl RoutingLoadState {
         block_size: u32,
         workers: RuntimeConfigWatch,
         config: KvRouterConfig,
-        worker_type: &'static str,
         scheduler_load: SchedulerLoadSender,
         parent_token: CancellationToken,
     ) -> Result<Arc<Self>> {
@@ -64,7 +63,6 @@ impl RoutingLoadState {
             initial_workers.clone(),
             config.router_replica_sync,
             router_id,
-            worker_type,
             scheduler_load,
             cancellation_token.child_token(),
         )

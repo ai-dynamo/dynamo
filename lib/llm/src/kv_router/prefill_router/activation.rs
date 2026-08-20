@@ -341,7 +341,6 @@ where
                         kv_cache_block_size,
                         workers,
                         kv_router_config.unwrap_or_default(),
-                        WORKER_TYPE_PREFILL,
                         graph.scheduler_load_sender(),
                         graph.cancellation_token(),
                     )
@@ -350,15 +349,14 @@ where
             } else {
                 None
             };
-            let router = InnerPrefillRouter::RoutingHost(Arc::new(
+            InnerPrefillRouter::RoutingHost(Arc::new(
                 RoutingHost::<Sel>::new_builtin_with_coordinator(
                     push_router,
                     graph.clone(),
                     load_state,
                     affinity,
                 )?,
-            ));
-            router
+            ))
         };
 
         Ok(PrefillBinding {

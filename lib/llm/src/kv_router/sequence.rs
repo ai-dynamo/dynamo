@@ -368,10 +368,10 @@ pub async fn create_multi_worker_sequences(
     workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
     replica_sync: bool,
     router_id: u64,
-    worker_type: &'static str,
     scheduler_load: SchedulerLoadSender,
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
+    let worker_type = scheduler_load.metric_label();
     let transport_kind = endpoint.drt().default_event_transport_kind();
     let event_sender = if let Some((event_sender, event_rx)) = active_sequence_event_channel(
         replica_sync,
@@ -463,7 +463,11 @@ mod tests {
     use tokio::time::Instant;
 
     fn scheduler_load_sender() -> SchedulerLoadSender {
-        super::super::routing_graph::scheduler_load_channel(CancellationToken::new()).0
+        super::super::routing_graph::scheduler_load_channel(
+            super::super::RouterLoadSource::Decode,
+            CancellationToken::new(),
+        )
+        .0
     }
 
     fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
@@ -782,7 +786,6 @@ mod tests {
             workers.clone(),
             true,
             1,
-            crate::discovery::WORKER_TYPE_DECODE,
             scheduler_load_sender(),
             cancel.child_token(),
         )
@@ -793,7 +796,6 @@ mod tests {
             workers.clone(),
             true,
             3,
-            crate::discovery::WORKER_TYPE_DECODE,
             scheduler_load_sender(),
             cancel.child_token(),
         )
@@ -804,7 +806,6 @@ mod tests {
             workers,
             true,
             2,
-            crate::discovery::WORKER_TYPE_DECODE,
             scheduler_load_sender(),
             cancel.child_token(),
         )
@@ -884,7 +885,6 @@ mod tests {
             workers_with_configs.clone(),
             true,
             1,
-            crate::discovery::WORKER_TYPE_DECODE,
             scheduler_load_sender(),
             CancellationToken::new(),
         )
@@ -895,7 +895,6 @@ mod tests {
             workers_with_configs,
             true,
             2,
-            crate::discovery::WORKER_TYPE_DECODE,
             scheduler_load_sender(),
             CancellationToken::new(),
         )
@@ -1042,7 +1041,6 @@ mod tests {
             workers_with_configs.clone(),
             true,
             1,
-            crate::discovery::WORKER_TYPE_DECODE,
             scheduler_load_sender(),
             CancellationToken::new(),
         )
@@ -1053,7 +1051,6 @@ mod tests {
             workers_with_configs,
             true,
             2,
-            crate::discovery::WORKER_TYPE_DECODE,
             scheduler_load_sender(),
             CancellationToken::new(),
         )
