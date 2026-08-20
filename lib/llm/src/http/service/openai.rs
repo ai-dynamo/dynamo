@@ -177,6 +177,18 @@ fn unavailable_error_type() -> String {
         .to_string()
 }
 
+/// `error_type` for a genuine 500 (unhandled panic, bug, misconfiguration)
+/// that is not a load-shed rejection. Same reasoning as `unavailable_error_type`:
+/// `map_error_code_to_error_type` checks `code == overload_status_code()`
+/// first, and an operator can configure `DYN_HTTP_OVERLOAD_STATUS_CODE=500`,
+/// which would otherwise relabel every internal error as "Overloaded".
+fn internal_error_type() -> String {
+    StatusCode::INTERNAL_SERVER_ERROR
+        .canonical_reason()
+        .expect("500 is IANA-registered")
+        .to_string()
+}
+
 /// Classify error for metrics based on status code and message
 fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
     // Same reason as `map_error_code_to_error_type`: the configured overload
@@ -348,18 +360,21 @@ impl ErrorMessage {
     /// Return this error when the service encounters an internal error.
     /// We should return a generic message to the client instead of the real error.
     /// Internal Services errors are the result of misconfiguration or bugs in the service.
+    /// Always reports the plain "Internal Server Error" type and
+    /// `ErrorType::Internal`, even when `DYN_HTTP_OVERLOAD_STATUS_CODE` is
+    /// configured to 500 — see [`internal_error_type`] for why
+    /// `map_error_code_to_error_type` cannot be reused here.
     pub fn internal_server_error(msg: &str) -> ErrorResponse {
         tracing::error!("Internal server error: {msg}");
         let code = StatusCode::INTERNAL_SERVER_ERROR;
-        let error_type = map_error_code_to_error_type(code);
         (
             code,
             Json(ErrorMessage {
                 message: msg.to_string(),
-                error_type,
+                error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
-                metric_error_type: None,
+                metric_error_type: Some(ErrorType::Internal),
             }),
         )
     }
@@ -369,21 +384,23 @@ impl ErrorMessage {
     /// Use this whenever the detail could carry an anyhow chain, JoinError
     /// debug output, or anything else that may leak file paths, library
     /// versions, or other internal implementation details.
+    ///
+    /// See [`Self::internal_server_error`] for why `error_type` and
+    /// `metric_error_type` are set directly rather than derived from `code`.
     pub fn internal_server_error_with_details(
         public_msg: &str,
         details: impl std::fmt::Display,
     ) -> ErrorResponse {
         tracing::error!("Internal server error: {public_msg}: {details}");
         let code = StatusCode::INTERNAL_SERVER_ERROR;
-        let error_type = map_error_code_to_error_type(code);
         (
             code,
             Json(ErrorMessage {
                 message: public_msg.to_string(),
-                error_type,
+                error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
-                metric_error_type: None,
+                metric_error_type: Some(ErrorType::Internal),
             }),
         )
     }
@@ -403,12 +420,14 @@ impl ErrorMessage {
         } else {
             tracing::debug!(status = %status, "{err}: {details}");
         }
-        // SanitizedError::Unavailable and SanitizedError::Overloaded both
-        // carry StatusCode::SERVICE_UNAVAILABLE when the configured overload
-        // status is 503 (see `unavailable_error_type`), so the variant, not
+        // SanitizedError::Unavailable/Internal and SanitizedError::Overloaded
+        // can carry the same StatusCode once an operator points
+        // DYN_HTTP_OVERLOAD_STATUS_CODE at 503 or 500 (see
+        // `unavailable_error_type`/`internal_error_type`), so the variant, not
         // just the status, decides error_type/metric_error_type here.
         let (error_type, metric_error_type) = match err {
             SanitizedError::Unavailable => (unavailable_error_type(), Some(ErrorType::Unavailable)),
+            SanitizedError::Internal => (internal_error_type(), Some(ErrorType::Internal)),
             _ => (map_error_code_to_error_type(status), None),
         };
         (
@@ -6976,6 +6995,28 @@ mod tests {
             extract_error_type_from_response(&response),
             ErrorType::Internal
         );
+    }
+
+    /// `internal_server_error` and `internal_server_error_with_details` set
+    /// `error_type`/`metric_error_type` directly, the same as
+    /// `_service_unavailable` does for 503. If they instead derived those
+    /// from `map_error_code_to_error_type(StatusCode::INTERNAL_SERVER_ERROR)`,
+    /// an operator who set `DYN_HTTP_OVERLOAD_STATUS_CODE=500` would see every
+    /// genuine internal error reported and counted as "Overloaded", though it
+    /// has nothing to do with load shedding.
+    #[test]
+    fn test_internal_server_error_ignores_configured_overload() {
+        let plain = ErrorMessage::internal_server_error("boom");
+        assert_eq!(plain.1.error_type, "Internal Server Error");
+        assert_eq!(plain.1.metric_error_type, Some(ErrorType::Internal));
+
+        let with_details = ErrorMessage::internal_server_error_with_details("boom", "cause");
+        assert_eq!(with_details.1.error_type, "Internal Server Error");
+        assert_eq!(with_details.1.metric_error_type, Some(ErrorType::Internal));
+
+        let sanitized = ErrorMessage::sanitized_with_details(SanitizedError::Internal, "cause");
+        assert_eq!(sanitized.1.error_type, "Internal Server Error");
+        assert_eq!(sanitized.1.metric_error_type, Some(ErrorType::Internal));
     }
 
     #[test]
