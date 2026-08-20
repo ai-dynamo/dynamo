@@ -25,15 +25,11 @@ impl Default for JsonlSinkOptions {
     }
 }
 
-/// Channel-backed handle for a buffered JSONL sink. Wraps a `Recorder<T>`,
-/// which appends records to disk on its own background task.
+/// Channel-backed buffered JSONL sink.
 ///
-/// Drop cancels the recorder, but cannot wait for its final flush and abandons
-/// whatever is still queued. Call [`Self::shutdown`] or [`Self::close`] when
-/// every accepted record must reach the file.
+/// Drop may abandon queued records; use [`Self::shutdown`] to drain them.
 pub struct JsonlWriter<T> {
     tx: Option<mpsc::Sender<T>>,
-    // Holding the recorder keeps its background task alive; its Drop cancels.
     recorder: Option<Recorder<T>>,
 }
 
@@ -65,13 +61,11 @@ where
     pub async fn send(&self, rec: T) -> Result<(), mpsc::error::SendError<T>> {
         match &self.tx {
             Some(tx) => tx.send(rec).await,
-            // After shutdown the sink behaves exactly like a closed channel.
             None => Err(mpsc::error::SendError(rec)),
         }
     }
 
-    /// Stop accepting records and wait for every already-accepted record to be
-    /// written and flushed. Idempotent: a second call is a no-op.
+    /// Stops accepting records, drains the queue, and flushes. Calls are idempotent.
     pub async fn shutdown(&mut self) -> anyhow::Result<()> {
         self.tx.take();
         if let Some(recorder) = self.recorder.take() {
@@ -80,7 +74,7 @@ where
         Ok(())
     }
 
-    /// Consuming form of [`Self::shutdown`].
+    /// Drains and consumes the writer.
     pub async fn close(mut self) -> anyhow::Result<()> {
         self.shutdown().await
     }
@@ -103,16 +97,13 @@ mod tests {
         name: String,
     }
 
-    /// Two-way handshake used to park the recorder's writer task inside
-    /// `Serialize` for as long as the test needs, with no sleeping on either
-    /// side: the writer announces it is parked, then blocks until released.
+    /// Parks the recorder inside `Serialize` without timing assumptions.
     struct BarrierGate {
         parked_tx: tokio::sync::mpsc::UnboundedSender<()>,
         release_rx: Mutex<std::sync::mpsc::Receiver<()>>,
     }
 
-    /// Test record whose serialization blocks on a [`BarrierGate`] when one is
-    /// attached. The gate is never serialized, so the on-disk shape is `{"id":N}`.
+    /// Record that can block during serialization.
     #[derive(Clone, Deserialize)]
     struct BarrierRecord {
         id: u64,
@@ -177,13 +168,6 @@ mod tests {
         );
     }
 
-    /// Every record accepted by `send` must reach the file once `shutdown`
-    /// returns, even when the writer task is still busy with an earlier record
-    /// and a queue has built up behind it.
-    ///
-    /// The buffer is 1 MiB and the flush interval 60s, so neither a size-based
-    /// flush nor a timer tick can rescue the queued records: only the drain on
-    /// channel close can.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_drains_records_queued_behind_a_busy_writer() {
         const RECORDS: u64 = 32;
@@ -208,7 +192,6 @@ mod tests {
             release_rx: Mutex::new(release_rx),
         });
 
-        // Record 1 parks the writer task inside its own serialization.
         writer
             .send(BarrierRecord {
                 id: 1,
@@ -218,7 +201,6 @@ mod tests {
             .unwrap();
         parked_rx.recv().await.expect("writer task parked");
 
-        // Records 2..=N are accepted into the channel while the writer is stuck.
         for id in 2..=RECORDS {
             writer
                 .send(BarrierRecord { id, gate: None })
