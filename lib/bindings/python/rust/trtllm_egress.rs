@@ -441,6 +441,26 @@ mod tests {
         errors: Mutex<Vec<String>>,
     }
 
+    #[derive(Default)]
+    struct FailingSink {
+        errors: Mutex<Vec<String>>,
+    }
+
+    impl OwnedFrameSink for FailingSink {
+        fn send(&self, _frame: Annotated<serde_json::Value>) -> Result<(), String> {
+            Err("consumer disconnected".to_string())
+        }
+
+        fn close(&self) {}
+
+        fn close_with_error(&self, message: String) {
+            self.errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(message);
+        }
+    }
+
     impl OwnedFrameSink for RecordingSink {
         fn send(&self, frame: Annotated<serde_json::Value>) -> Result<(), String> {
             self.frames
@@ -628,6 +648,28 @@ mod tests {
                 .contains("engine failed")
         );
         assert!(sink.closed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn processor_completes_request_when_response_sink_disconnects() {
+        let processor = ProcessorCore::default();
+        let sink = Arc::new(FailingSink::default());
+        processor
+            .register(35, 0, 1, sink.clone(), 0.0)
+            .expect("register client 35");
+
+        let outcome =
+            processor.process_batch(vec![MockEngineResponse::tokens(35, vec![vec![1]], false)]);
+
+        assert_eq!(outcome.completed_client_ids, vec![35]);
+        assert_eq!(processor.active_requests(), 0);
+        assert_eq!(
+            sink.errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["consumer disconnected"]
+        );
     }
 
     #[test]
