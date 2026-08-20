@@ -21,6 +21,7 @@
 mod anthropic;
 pub mod metadata;
 mod openai;
+mod transcriptions;
 
 pub mod busy_threshold;
 pub mod disconnect;
