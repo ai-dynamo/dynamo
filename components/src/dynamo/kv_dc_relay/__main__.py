@@ -62,9 +62,7 @@ def _handle_relay_shutdown(health: Mapping[str, object]) -> None:
     raise SystemExit(1)
 
 
-async def _shutdown_relay(
-    relay: KvDcRelay, *, classify_host_failure: bool
-) -> None:
+async def _shutdown_relay(relay: KvDcRelay, *, classify_host_failure: bool) -> None:
     try:
         await relay.shutdown()
     except BaseException:
@@ -159,9 +157,7 @@ async def worker(runtime: DistributedRuntime) -> None:
         for task in (relay_shutdown, *endpoint_tasks):
             task.cancel()
         await asyncio.gather(relay_shutdown, *endpoint_tasks, return_exceptions=True)
-        await _shutdown_relay(
-            relay, classify_host_failure=classify_host_failure
-        )
+        await _shutdown_relay(relay, classify_host_failure=classify_host_failure)
         logger.info("KV DC Relay stopped")
 
 

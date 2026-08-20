@@ -32,9 +32,7 @@ async def test_late_host_failure_is_classified_after_shutdown() -> None:
             return {"host_last_error": self.host_last_error}
 
     with pytest.raises(SystemExit) as error:
-        await relay_main._shutdown_relay(
-            LateFailureRelay(), classify_host_failure=True
-        )
+        await relay_main._shutdown_relay(LateFailureRelay(), classify_host_failure=True)
 
     assert error.value.code == 1
 
@@ -48,6 +46,4 @@ async def test_endpoint_failure_is_not_masked_by_late_host_failure() -> None:
         async def health(self) -> dict[str, object]:
             return {"host_last_error": "secondary host failure"}
 
-    await relay_main._shutdown_relay(
-        LateFailureRelay(), classify_host_failure=False
-    )
+    await relay_main._shutdown_relay(LateFailureRelay(), classify_host_failure=False)
