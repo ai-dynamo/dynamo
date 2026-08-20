@@ -17,6 +17,10 @@ EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "Error: --model requires a model name." >&2
+                exit 2
+            fi
             MODEL="$2"
             shift 2
             ;;

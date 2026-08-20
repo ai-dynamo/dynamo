@@ -1239,3 +1239,58 @@ async def test_embedding_worker_registration_and_cleanup(
     assert register_vllm_model.await_args.args[0] == expected_model_input
     assert cleanup_order == ["handler", "client", "resource"]
     assert shutdown_endpoints == [endpoint]
+
+
+@pytest.mark.asyncio
+async def test_transcription_worker_reuses_snapshot_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = Mock()
+    endpoint.connection_id.return_value = "worker-1"
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    engine_client = Mock()
+    vllm_config = Mock()
+    snapshot_engine: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        None,
+        Mock(),
+    )
+    setup_vllm_engine = Mock()
+    register_vllm_model = AsyncMock()
+    factory = _make_factory(
+        setup_vllm_engine_fn=setup_vllm_engine,
+        register_vllm_model_fn=register_vllm_model,
+    )
+    handler = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.TranscriptionWorkerHandler",
+        Mock(return_value=handler),
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory.register_model_taint_route", Mock())
+    monkeypatch.setenv("DYN_FPM_WORKER_ID", "snapshot")
+    config = SimpleNamespace(
+        namespace="ns",
+        component="worker",
+        endpoint="generate",
+        served_model_name="whisper",
+        model="openai/whisper-tiny",
+    )
+
+    await factory._create_transcription_worker(
+        runtime,
+        config,
+        asyncio.Event(),
+        [],
+        snapshot_engine=snapshot_engine,
+    )
+
+    setup_vllm_engine.assert_not_called()
+    assert register_vllm_model.await_args.args[4] is engine_client
+    assert register_vllm_model.await_args.args[5] is vllm_config
+    endpoint.serve_endpoint.assert_awaited_once()
+    handler.cleanup.assert_called_once()
