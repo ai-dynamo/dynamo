@@ -20,6 +20,7 @@ Text-to-video generation runs a vLLM-Omni worker with `--output-modalities video
 |---|---|
 | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | Default model (1 GPU) |
 | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` | |
+| `MiniMaxAI/MiniMax-H3` | Joint 24-FPS video and 32-kHz stereo audio; 4 GPUs recommended |
 
 To run a non-default model, pass `--model` to the launch script:
 
@@ -52,6 +53,71 @@ curl -s http://localhost:8000/v1/videos \
 ```
 
 The response returns a video URL or base64 data depending on `response_format` (e.g. `{"object": "video", "status": "completed", "data": [{"url": "file:///tmp/dynamo_media/videos/req-abc123.mp4"}]}`).
+
+## MiniMax-H3
+
+MiniMax-H3 is served by one aggregated diffusion worker. With no `--task-type`,
+the worker loads the FL2VA and Ref2VA DiT partitions and switches between them
+per request; the encoder and VAEs remain shared. Dynamo's standard image stays
+on its VP9-only media stack, so build the opt-in H3 overlay to mux H.264 video
+and AAC audio:
+
+```bash
+docker build \
+  --build-arg BASE_IMAGE=<dynamo-vllm-local-dev-image> \
+  -f examples/backends/vllm/omni/minimax_h3.Dockerfile \
+  -t dynamo-vllm-minimax-h3 .
+```
+
+Launch the combined four-GPU profile. For the qualification script's local
+references, authorize its asset directory before the worker starts:
+
+```bash
+export DYN_H3_QUAL_DIR=/dynamo-tmp/logs/08-19/minimax-h3
+mkdir -p "$DYN_H3_QUAL_DIR/assets"
+export DYN_MM_LOCAL_PATH="$DYN_H3_QUAL_DIR/assets"
+bash examples/backends/vllm/launch/agg_omni_minimax_h3.sh
+```
+
+HTTPS and data URLs do not need local-path access. Plain HTTP remains disabled
+unless `DYN_MM_ALLOW_INTERNAL=1`. Run the supplied end-to-end qualification
+against the same worker to exercise T2VA, first/last-frame FL2VA,
+image-plus-audio Ref2VA, and two-video Ref2VA:
+
+```bash
+export DYN_H3_QUAL_DIR=/dynamo-tmp/logs/08-19/minimax-h3
+bash examples/backends/vllm/launch/validate_omni_minimax_h3.sh
+```
+
+Typed references use an ordered `input_references` list. Do not combine it with
+the legacy single-image `input_reference` field.
+
+```json
+{
+  "model": "MiniMaxAI/MiniMax-H3",
+  "prompt": "A subject speaks in sync with the reference audio.",
+  "size": "448x256",
+  "input_references": [
+    {"type": "image", "source": "https://example.com/subject.png"},
+    {"type": "audio", "source": "https://example.com/voice.wav"}
+  ],
+  "nvext": {
+    "task": "ref2va",
+    "duration": 4.0,
+    "fps": 24,
+    "flow_shift": 12.0,
+    "audio_flow_shift": 3.0,
+    "aspect_ratio": "16:9",
+    "num_inference_steps": 50,
+    "seed": 42
+  }
+}
+```
+
+H3 supports `t2va`, `fl2va`, and `ref2va`; 4–15 second clips; up to 9
+images, 3 videos, 3 standalone audio references, and 12 references total.
+FL2VA accepts `frame_indices` of `[0]`, `[-1]`, or `[0, -1]`. Generated
+responses report `fps` and `audio_sample_rate` for each MP4.
 
 ## Request Parameters (`nvext`)
 

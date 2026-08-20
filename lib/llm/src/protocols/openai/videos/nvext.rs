@@ -10,6 +10,13 @@ pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
 }
 
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum StartTimeSeconds {
+    Scalar(f32),
+    List(Vec<f32>),
+}
+
 /// NVIDIA extensions to the OpenAI Videos API
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
@@ -60,6 +67,56 @@ pub struct NvExt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub guidance_scale_2: Option<f32>,
+
+    /// MiniMax-H3 task routed to its FL2VA or Ref2VA transformer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub task: Option<String>,
+
+    /// Requested MiniMax-H3 duration in seconds (4 through 15).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub duration: Option<f32>,
+
+    /// MiniMax-H3 video sigma shift.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub flow_shift: Option<f32>,
+
+    /// MiniMax-H3 audio sigma shift.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub audio_flow_shift: Option<f32>,
+
+    /// MiniMax-H3 output aspect ratio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub aspect_ratio: Option<String>,
+
+    /// MiniMax-H3 output canvas short edge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub short_edge: Option<i32>,
+
+    /// FL2VA keyframe positions: [0], [-1], or [0, -1].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub frame_indices: Option<Vec<i32>>,
+
+    /// Start offset for one reference video, or one offset per video.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub start_time_seconds: Option<StartTimeSeconds>,
+
+    /// Number of generated videos (MiniMax-H3 supports 1 through 10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub num_outputs_per_prompt: Option<i32>,
+
+    /// MiniMax-H3 request-scoped quality policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub quality: Option<String>,
 }
 
 impl Default for NvExt {
@@ -74,7 +131,36 @@ impl NvExt {
     }
 }
 
-fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
+fn validate_nv_ext(nv_ext: &NvExt) -> Result<(), ValidationError> {
+    if nv_ext
+        .task
+        .as_deref()
+        .is_some_and(|task| !matches!(task, "t2va" | "fl2va" | "ref2va"))
+    {
+        return Err(ValidationError::new("invalid_h3_task"));
+    }
+    if nv_ext
+        .duration
+        .is_some_and(|duration| !duration.is_finite() || !(4.0..=15.0).contains(&duration))
+    {
+        return Err(ValidationError::new("invalid_h3_duration"));
+    }
+    if nv_ext
+        .num_outputs_per_prompt
+        .is_some_and(|count| !(1..=10).contains(&count))
+    {
+        return Err(ValidationError::new("invalid_h3_output_count"));
+    }
+    if nv_ext.task.is_some() && nv_ext.fps.is_some_and(|fps| fps != 24) {
+        return Err(ValidationError::new("invalid_h3_fps"));
+    }
+    if nv_ext
+        .quality
+        .as_deref()
+        .is_some_and(|quality| !matches!(quality, "lossless" | "high"))
+    {
+        return Err(ValidationError::new("invalid_h3_quality"));
+    }
     Ok(())
 }
 

@@ -44,6 +44,7 @@ def _make_handler(stage_types=("diffusion",)):
     config.model = "test-model"
     config.served_model_name = None
     config.output_modalities = ["text"]
+    config.default_video_fps = 16
     config.enable_lora = False  # Disable LoRA for tests unless explicitly set
     config.engine_args = SimpleNamespace(enable_lora=False)
     handler.config = config
@@ -242,6 +243,96 @@ class TestI2VEngineInputs:
         empty = VideoNvExt()
         assert empty.boundary_ratio is None
         assert empty.guidance_scale_2 is None
+
+
+class TestMiniMaxH3EngineInputs:
+    @pytest.mark.asyncio
+    async def test_h3_request_maps_references_and_extra_args(self):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a talking cat",
+            model="MiniMaxAI/MiniMax-H3",
+            response_format="b64_json",
+            output_format="mp4",
+            nvext=VideoNvExt(
+                task="ref2va",
+                duration=4.0,
+                flow_shift=12.0,
+                audio_flow_shift=3.0,
+                aspect_ratio="16:9",
+                short_edge=768,
+                start_time_seconds=[0.5],
+                num_outputs_per_prompt=2,
+                quality="lossless",
+                num_inference_steps=50,
+                seed=7,
+            ),
+        )
+        references = {
+            "image": ["/tmp/cat.png"],
+            "video": ["/tmp/motion.mp4"],
+            "audio": ["/tmp/voice.wav"],
+        }
+
+        result = await handler.build_engine_inputs(
+            req,
+            RequestType.VIDEO_GENERATION,
+            multi_modal_data=references,
+        )
+
+        assert result.prompt["multi_modal_data"] == references
+        assert result.fps == 24
+        assert result.response_format == "b64_json"
+        assert result.output_format == "mp4"
+        sp = result.sampling_params_list[0]
+        assert sp.width is None
+        assert sp.height is None
+        assert sp.num_frames == 96
+        assert sp.num_inference_steps == 50
+        assert sp.num_outputs_per_prompt == 2
+        assert sp.quality == "lossless"
+        assert sp.extra_args == {
+            "task": "ref2va",
+            "duration": 4.0,
+            "flow_shift": 12.0,
+            "audio_flow_shift": 3.0,
+            "aspect_ratio": "16:9",
+            "short_edge": 768,
+            "start_time_seconds": [0.5],
+        }
+
+    @pytest.mark.asyncio
+    async def test_h3_fl2va_forwards_frame_indices(self):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="transition",
+            model="MiniMaxAI/MiniMax-H3",
+            nvext=VideoNvExt(task="fl2va", duration=4, frame_indices=[0, -1]),
+        )
+
+        result = await handler.build_engine_inputs(
+            req,
+            RequestType.VIDEO_GENERATION,
+            multi_modal_data={"image": ["/tmp/first.png", "/tmp/last.png"]},
+        )
+
+        assert result.sampling_params_list[0].extra_args["frame_indices"] == [0, -1]
+
+    @pytest.mark.asyncio
+    async def test_h3_uses_native_defaults_without_generic_overrides(self):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a speaking astronaut",
+            model="MiniMaxAI/MiniMax-H3",
+            nvext=VideoNvExt(task="t2va"),
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert result.fps == 24
+        assert sp.fps == 24
+        assert sp.num_frames is None
 
 
 class TestBuildSamplingParamsList:

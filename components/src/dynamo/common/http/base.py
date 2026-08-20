@@ -47,6 +47,15 @@ class HttpStatusError(HttpError):
         self.url = url
 
 
+class HttpBodyTooLargeError(HttpError):
+    """Response body exceeded a caller-provided byte limit."""
+
+    def __init__(self, limit: int, url: str) -> None:
+        super().__init__(f"Response body for {url} exceeds {limit} bytes")
+        self.limit = limit
+        self.url = url
+
+
 class HttpClient(abc.ABC):
     """Backend-neutral HTTP client.
 
@@ -66,6 +75,7 @@ class HttpClient(abc.ABC):
         timeout: float,
         *,
         policy: Optional[UrlValidationPolicy] = None,
+        max_bytes: Optional[int] = None,
     ) -> bytes:
         """Fetch ``url`` and return the response body.
 
@@ -79,15 +89,21 @@ class HttpClient(abc.ABC):
         This is the SSRF-safe path; raises :class:`UrlValidationError`
         if any hop fails or the chain exceeds ``_MAX_REDIRECTS``.
         """
+        if max_bytes is not None and max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
         if policy is None:
-            return await self._fetch_simple(url, timeout)
-        return await self._fetch_with_revalidation(url, timeout, policy)
+            return await self._fetch_simple(url, timeout, max_bytes=max_bytes)
+        return await self._fetch_with_revalidation(
+            url, timeout, policy, max_bytes=max_bytes
+        )
 
     async def _fetch_with_revalidation(
         self,
         url: str,
         timeout: float,
         policy: UrlValidationPolicy,
+        *,
+        max_bytes: Optional[int] = None,
     ) -> bytes:
         """Manual redirect loop with per-hop SSRF validation (backend-neutral)."""
         current = url
@@ -97,7 +113,9 @@ class HttpClient(abc.ABC):
             await validate_url(current, policy)
             visited.append(current)
 
-            body, redirect_to = await self._fetch_body_or_redirect(current, timeout)
+            body, redirect_to = await self._fetch_body_or_redirect(
+                current, timeout, max_bytes=max_bytes
+            )
 
             if redirect_to is None:
                 if body is None:
@@ -115,12 +133,14 @@ class HttpClient(abc.ABC):
             current = redirect_to
 
     @abc.abstractmethod
-    async def _fetch_simple(self, url: str, timeout: float) -> bytes:
+    async def _fetch_simple(
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
+    ) -> bytes:
         """Backend's native redirect-following GET (no SSRF policy applied)."""
 
     @abc.abstractmethod
     async def _fetch_body_or_redirect(
-        self, url: str, timeout: float
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
     ) -> tuple[bytes | None, str | None]:
         """Single hop with redirects disabled.
 

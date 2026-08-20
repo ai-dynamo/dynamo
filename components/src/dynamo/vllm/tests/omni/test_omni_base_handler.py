@@ -108,6 +108,29 @@ class TestDiffusionParallelConfigCoverage:
 
         assert kwargs["output_modalities"] == ["image"]
 
+    def test_h3_startup_fields_forwarded_to_async_omni(self):
+        config = _make_config()
+        config.diffusion = dataclasses.replace(
+            OmniDiffusionKwargs(),
+            task_type="ref2va",
+            diffusion_attention_backend="TRTLLM_ATTN",
+            diffusion_attention_config='{"default":{"backend":"TRTLLM_ATTN"}}',
+            enable_distributed_layerwise_offload=True,
+            dlo_use_allgather=False,
+            dlo_resident_layers=2,
+        )
+
+        kwargs = _build_kwargs(config)
+
+        assert kwargs["task_type"] == "ref2va"
+        assert kwargs["diffusion_attention_backend"] == "TRTLLM_ATTN"
+        assert kwargs["diffusion_attention_config"] == (
+            '{"default":{"backend":"TRTLLM_ATTN"}}'
+        )
+        assert kwargs["enable_distributed_layerwise_offload"] is True
+        assert kwargs["dlo_use_allgather"] is False
+        assert kwargs["dlo_resident_layers"] == 2
+
     def test_lora_disabled_resolves_no_capacity(self):
         config = _make_config()
         handler = BaseOmniHandler.__new__(BaseOmniHandler)

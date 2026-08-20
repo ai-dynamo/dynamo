@@ -8,9 +8,19 @@ to ensure compatibility with the Dynamo HTTP frontend.
 """
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+
+
+class VideoInputReference(BaseModel):
+    """Typed conditioning input for video generation."""
+
+    type: Literal["image", "video", "audio"]
+    """Reference media type."""
+
+    source: str
+    """HTTP(S), data, file URL, or an allowed local path."""
 
 
 class VideoNvExt(BaseModel):
@@ -46,6 +56,51 @@ class VideoNvExt(BaseModel):
     guidance_scale_2: Optional[float] = None
     """CFG scale for the low-noise expert (vLLM-Omni I2V dual-guidance)."""
 
+    task: Optional[Literal["t2va", "fl2va", "ref2va"]] = None
+    """MiniMax-H3 task routed to its FL2VA or Ref2VA transformer."""
+
+    duration: Optional[float] = None
+    """Requested MiniMax-H3 duration in seconds (4 through 15)."""
+
+    flow_shift: Optional[float] = None
+    """MiniMax-H3 video sigma shift."""
+
+    audio_flow_shift: Optional[float] = None
+    """MiniMax-H3 audio sigma shift."""
+
+    aspect_ratio: Optional[str] = None
+    """MiniMax-H3 output aspect ratio."""
+
+    short_edge: Optional[int] = None
+    """MiniMax-H3 output canvas short edge."""
+
+    frame_indices: Optional[list[int]] = None
+    """FL2VA keyframe positions: [0], [-1], or [0, -1]."""
+
+    start_time_seconds: Optional[Union[float, list[float]]] = None
+    """Start offset for one reference video, or one offset per video."""
+
+    num_outputs_per_prompt: Optional[int] = None
+    """Number of generated videos (MiniMax-H3 supports 1 through 10)."""
+
+    quality: Optional[Literal["lossless", "high"]] = None
+    """MiniMax-H3 request-scoped quality policy."""
+
+    @model_validator(mode="after")
+    def validate_h3_fields(self) -> "VideoNvExt":
+        if self.duration is not None and not 4 <= self.duration <= 15:
+            raise ValueError("duration must be between 4 and 15 seconds")
+        if self.num_outputs_per_prompt is not None and not (
+            1 <= self.num_outputs_per_prompt <= 10
+        ):
+            raise ValueError("num_outputs_per_prompt must be between 1 and 10")
+        if self.task is not None and self.fps is not None and self.fps != 24:
+            raise ValueError("MiniMax-H3 fps is fixed at 24")
+        if self.task == "fl2va" and self.frame_indices is not None:
+            if self.frame_indices not in ([0], [-1], [0, -1]):
+                raise ValueError("FL2VA frame_indices must be [0], [-1], or [0, -1]")
+        return self
+
 
 class NvCreateVideoRequest(BaseModel):
     """Request for video generation (/v1/videos endpoint).
@@ -63,6 +118,9 @@ class NvCreateVideoRequest(BaseModel):
     # Optional fields
     input_reference: Optional[str] = None
     """Optional image reference that guides generation (for I2V)."""
+
+    input_references: Optional[list[VideoInputReference]] = None
+    """Ordered typed image, video, and audio references."""
 
     seconds: Optional[int] = None
     """Clip duration in seconds."""
@@ -87,6 +145,16 @@ class NvCreateVideoRequest(BaseModel):
     nvext: Optional[VideoNvExt] = None
     """NVIDIA extensions."""
 
+    @model_validator(mode="after")
+    def validate_input_references(self) -> "NvCreateVideoRequest":
+        if self.input_reference is not None and self.input_references is not None:
+            raise ValueError(
+                "input_reference and input_references are mutually exclusive"
+            )
+        if self.input_references is not None and not self.input_references:
+            raise ValueError("input_references must not be empty")
+        return self
+
 
 class VideoData(BaseModel):
     """Video data in response.
@@ -102,6 +170,12 @@ class VideoData(BaseModel):
 
     b64_json: Optional[str] = None
     """Base64-encoded video (if response_format is 'b64_json')."""
+
+    fps: Optional[int] = None
+    """Actual video frame rate when reported by the model."""
+
+    audio_sample_rate: Optional[int] = None
+    """Muxed audio sample rate when the generated video contains audio."""
 
 
 class NvVideosResponse(BaseModel):

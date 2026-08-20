@@ -4212,6 +4212,7 @@ async fn videos(
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
+    validate_video_fields_generic(&request)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -4333,6 +4334,7 @@ async fn video_stream(
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
+    validate_video_fields_generic(&request)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -4468,6 +4470,16 @@ async fn video_stream(
                 format!("{e}"),
             )
         })
+}
+
+/// Validates a video-generation request and returns an OpenAI-compatible error.
+fn validate_video_fields_generic(request: &NvCreateVideoRequest) -> Result<(), ErrorResponse> {
+    validator::Validate::validate(request).map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    })
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Videos endpoint

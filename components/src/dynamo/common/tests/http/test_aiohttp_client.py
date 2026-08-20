@@ -42,12 +42,22 @@ class _FakeResponse:
         self.headers = headers or {}
         self.url = url
         self._body = body
+        self.content = _FakeContent(body)
 
     def raise_for_status(self) -> None:
         return None
 
     async def read(self) -> bytes:
         return self._body
+
+
+class _FakeContent:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    async def iter_chunked(self, size: int):
+        for offset in range(0, len(self._body), size):
+            yield self._body[offset : offset + size]
 
 
 def _cm_returning(response):
@@ -121,6 +131,17 @@ async def test_fetch_bytes_returns_body_on_200() -> None:
     client = _make_client_with_session(session)
     result = await client.fetch_bytes("https://h/x", 30.0)
     assert result == b"hello"
+
+
+async def test_fetch_bytes_aborts_when_stream_exceeds_limit() -> None:
+    response = _FakeResponse(status=200, body=b"too large")
+    session = MagicMock(spec=aiohttp.ClientSession)
+    session.closed = False
+    session.get = _cm_returning(response)
+    client = _make_client_with_session(session)
+
+    with pytest.raises(mm_http.HttpBodyTooLargeError):
+        await client.fetch_bytes("https://h/x", 30.0, max_bytes=4)
 
 
 async def test_fetch_bytes_maps_timeout() -> None:
