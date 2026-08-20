@@ -3122,17 +3122,30 @@ impl OpenAIPreprocessor {
         // is gone, so it falls back to `Basic`, which cannot read the
         // `to=self<|message|>` grammar — and the tool jail. auto/none only; a forced
         // tool_choice keeps the guided-decode + jail path (that emits guided JSON,
-        // not the native markup the unified parser reads). Runs regardless of
-        // has_tools: muse owns reasoning and strips its markers even with zero tools.
+        // not the native markup the unified parser reads), and a structural-tag
+        // request is excluded for the SAME reason by a different flag. `none` routes
+        // here so the markers are still stripped, but its calls are suppressed below.
+        // Runs regardless of has_tools: muse owns reasoning and strips its markers
+        // even with zero tools.
+        //
+        // KNOWN GAP: this returns before `defer_reasoning_for_nonempty_content` is
+        // computed, so a `force_nonempty_content=true` request whose turn produced only
+        // reasoning streams empty `content` while the aggregator surfaces the reasoning
+        // AS content for the identical request. Closing it needs the per-choice
+        // buffering + EOF flush that `parse_reasoning_content_from_stream_inner` has;
+        // it is a follow-up, not a guard tweak. `stream_can_defer_all_output` already
+        // reports false for muse so nothing claims a deferral that does not happen.
         // (`tool_parser_v2` is imported below; a `use` is in scope for the whole body.)
         if let Some(family) = tool_parser_v2::unified_family(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
-        ) && matches!(
-            request.inner.tool_choice.as_ref(),
-            None | Some(ChatCompletionToolChoiceOption::Auto)
-                | Some(ChatCompletionToolChoiceOption::None)
-        ) {
+        ) && !uses_tool_call_structural_tag
+            && matches!(
+                request.inner.tool_choice.as_ref(),
+                None | Some(ChatCompletionToolChoiceOption::Auto)
+                    | Some(ChatCompletionToolChoiceOption::None)
+            )
+        {
             let tool_definitions = request.inner.tools.as_ref().map(|tools| {
                 tools
                     .iter()
@@ -3143,9 +3156,20 @@ impl OpenAIPreprocessor {
                     })
                     .collect()
             });
-            let unified: Pin<Box<dyn Stream<Item = _> + Send>> = Box::pin(
-                tool_parser_v2::apply_unified_stream(stream, tool_definitions, family),
+            // `none` routes here for the split and the stripping, but a caller that
+            // disabled tools must not get `tool_calls` back — every other family
+            // reaches that via `should_apply_tool_jail` returning false.
+            let emit_tool_calls = !matches!(
+                request.inner.tool_choice.as_ref(),
+                Some(ChatCompletionToolChoiceOption::None)
             );
+            let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
+                Box::pin(tool_parser_v2::apply_unified_stream(
+                    stream,
+                    tool_definitions,
+                    family,
+                    emit_tool_calls,
+                ));
             return Ok(unified);
         }
 
@@ -4168,7 +4192,7 @@ impl OpenAIPreprocessor {
                 | Some("minimax-m3-nom")
                 | Some("inkling")
                 | Some("muse_glimmer")
-                | Some("muse-glimmer")
+                | Some("muse")
         ) || matches!(
             reasoning_parser,
             Some("gemma4")
@@ -4182,7 +4206,7 @@ impl OpenAIPreprocessor {
                 | Some("minimax-m3")
                 | Some("inkling")
                 | Some("muse_glimmer")
-                | Some("muse-glimmer")
+                | Some("muse")
         )
     }
 
@@ -4268,6 +4292,17 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
+        // Muse streams through the unified parser, which withholds nothing, so a
+        // muse request never defers all output. Claiming otherwise switched SSE
+        // keep-alive frames on for a stream that has no buffering to cover.
+        if crate::protocols::openai::chat_completions::tool_parser_v2::unified_family(
+            None,
+            reasoning_parser,
+        )
+        .is_some()
+        {
+            return false;
+        }
         reasoning_parser.is_some()
             && Self::wants_reasoning_as_content_when_empty(chat_template_args)
             && !Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args)
@@ -6058,10 +6093,10 @@ mod tests {
                 "muse_glimmer reasoning-name only → required",
             ),
             (
-                Some("muse-glimmer"),
+                Some("muse"),
                 None,
                 true,
-                "muse-glimmer hyphen alias (tool) → required",
+                "muse (SGLang's registered name, tool) → required",
             ),
             (None, None, false, "no parsers → not required"),
         ];

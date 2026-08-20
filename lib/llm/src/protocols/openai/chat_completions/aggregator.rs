@@ -403,7 +403,13 @@ impl DeltaAggregator {
                     match super::tool_parser_v2::parse_complete_unified(&choice.text, None, family)
                     {
                         Ok((calls, reasoning, content)) => {
-                            if !calls.is_empty() {
+                            // Same rule the streaming path applies: `none` still gets the
+                            // reasoning/content split and the marker stripping, but a
+                            // caller that disabled tools must not receive `tool_calls`.
+                            // `experimental_v2_batch_eligible` is set from the request's
+                            // tool_choice by `batch_tool_choice_eligible`, which admits
+                            // unset/auto only, so it is exactly that gate.
+                            if !calls.is_empty() && parsing_options.experimental_v2_batch_eligible {
                                 choice.tool_calls = Some(
                                     calls
                                         .into_iter()

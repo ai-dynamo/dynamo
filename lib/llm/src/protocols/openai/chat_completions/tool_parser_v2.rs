@@ -70,7 +70,12 @@ pub(crate) fn supports_family(family: &str) -> bool {
 /// `get_reasoning_parser_from_name` falls back to `Basic`, which cannot read the
 /// `to=self<|message|>` grammar), so the unified pass is the only correct path.
 /// Strings match dynamo's parser names.
-pub(crate) const UNIFIED_FAMILIES: &[&str] = &["muse_glimmer", "muse-glimmer"];
+/// The two names the FRAMEWORKS register, so a card written against either engine
+/// selects the same parser here: vLLM ships `--reasoning-parser muse_glimmer` and
+/// `--tool-call-parser muse_glimmer`, SGLang registers the family as `muse` in both
+/// its reasoning and function-call registries. A hyphenated spelling matches neither
+/// engine, so it is not accepted.
+pub(crate) const UNIFIED_FAMILIES: &[&str] = &["muse_glimmer", "muse"];
 
 /// The parser names that route through the muse unified pass. Public accessor for
 /// [`UNIFIED_FAMILIES`] so the Python bindings can add muse to the selectable
@@ -183,7 +188,8 @@ pub(crate) fn parse_complete_unified(
                 function: CalledFunction {
                     name,
                     // `UnifiedEvent` carries a typed `Value`; the wire wants a string.
-                    arguments: serde_json::to_string(&arguments).unwrap_or_default(),
+                    arguments: serde_json::to_string(&arguments)
+                        .unwrap_or_else(|_| "{}".to_string()),
                 },
             }),
         }
@@ -568,10 +574,15 @@ where
 /// `finish()` runs on a choice's terminating chunk (and again at stream end as a
 /// backstop) so open reasoning is promoted and a value truncated at EOF is
 /// dropped instead of leaking markup.
+/// `emit_tool_calls=false` keeps the reasoning/content split and the marker
+/// stripping while dropping the parsed calls, which is what `tool_choice=none`
+/// needs: the family has no v1 reasoning parser, so it must route here to be read
+/// at all, but a caller that disabled tools must not receive `tool_calls`.
 pub(crate) fn apply_unified_stream<S>(
     stream_in: S,
     tool_definitions: Option<Vec<ToolDefinition>>,
     family: String,
+    emit_tool_calls: bool,
 ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -659,6 +670,10 @@ where
 
                 if parsed_any {
                     let (reasoning, out_text, calls) = fold_unified_deltas(deltas);
+                    // Dropped BEFORE `emit_chunks` so the index state never advances on a
+                    // call the client will not see, and so `tool_emitted` stays empty and
+                    // the finish_reason is not flipped to `ToolCalls`.
+                    let calls = if emit_tool_calls { calls } else { Vec::new() };
                     let tool_calls = state.emit_chunks(calls);
                     if tool_calls.is_some() {
                         tool_emitted.insert(choice.index);
@@ -666,8 +681,16 @@ where
                     // The parser consumed the text input, so replace every channel
                     // from its output — raw markup must never reach the client. Role
                     // and logprobs are preserved as-is.
-                    choice.delta.reasoning_content =
-                        (!reasoning.is_empty()).then_some(reasoning);
+                    //
+                    // Reasoning is the exception: only FILL it, never clear it. A
+                    // topology-A worker splits the markup itself and sends
+                    // `reasoning_content` already populated, and this pass sees only
+                    // `Text` events for that chunk. Assigning unconditionally replaced
+                    // the worker's reasoning with `None` and lost the channel. The
+                    // batch path in `aggregator.rs` guards it the same way.
+                    if !reasoning.is_empty() {
+                        choice.delta.reasoning_content = Some(reasoning);
+                    }
                     choice.delta.content = (!out_text.is_empty())
                         .then_some(ChatCompletionMessageContent::Text(out_text));
                     choice.delta.tool_calls = tool_calls;
@@ -1140,7 +1163,7 @@ mod tests {
         chunks.push(chunk("", true));
 
         let out: Vec<_> =
-            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string())
+            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string(), true)
                 .collect::<Vec<_>>()
                 .await;
 
@@ -1172,7 +1195,7 @@ mod tests {
         let chunks = vec![chunk(truncated, false), chunk("", true)];
 
         let out: Vec<_> =
-            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string())
+            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string(), true)
                 .collect::<Vec<_>>()
                 .await;
 
@@ -1207,7 +1230,7 @@ mod tests {
         chunks.push(usage_chunk());
 
         let out: Vec<_> =
-            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string())
+            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string(), true)
                 .collect::<Vec<_>>()
                 .await;
 
@@ -1256,7 +1279,7 @@ mod tests {
         let chunks = vec![chunk(&turn, false), chunk("", false)];
 
         let out: Vec<_> =
-            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string())
+            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string(), true)
                 .collect::<Vec<_>>()
                 .await;
 
@@ -1271,9 +1294,44 @@ mod tests {
         );
     }
 
+    // `emit_tool_calls=false` is what `tool_choice=none` routes with: the reasoning /
+    // content split and the marker stripping still happen, the parsed call does NOT
+    // surface, and the terminal reason is not rewritten to `ToolCalls` because nothing
+    // was emitted.
+    #[tokio::test]
+    async fn muse_unified_suppresses_calls_when_not_emitting() {
+        let turn = format!(
+            "{}{}{}",
+            "<|start|>assistant to=self<|message|>Look it up.<|eom|>",
+            "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\">\
+<atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>",
+            "<|start|>assistant to=user<|message|>It's 18C.<|eot|>"
+        );
+        let chunks = vec![chunk(&turn, false), chunk("", true)];
+
+        let out: Vec<_> = apply_unified_stream(
+            stream::iter(chunks),
+            None,
+            "muse_glimmer".to_string(),
+            false,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let (calls, content, reasoning) = reassemble_unified(&out);
+        assert!(calls.is_empty(), "calls must be suppressed, got {calls:?}");
+        assert_eq!(reasoning, "Look it up.", "the split must still happen");
+        assert_eq!(content, "It's 18C.", "markers must still be stripped");
+        assert_ne!(
+            final_finish_reason(&out),
+            Some(FinishReason::ToolCalls),
+            "no calls were emitted, so a Stop must not be rewritten to ToolCalls"
+        );
+    }
+
     #[test]
     fn unified_family_default_on_and_alias() {
-        for parser in ["muse_glimmer", "muse-glimmer"] {
+        for parser in ["muse_glimmer", "muse"] {
             assert_eq!(
                 unified_family(Some(parser), None).as_deref(),
                 Some("muse_glimmer"),
@@ -1395,7 +1453,7 @@ mod tests {
             two_choice_chunk("", "", true),
         ];
         let out: Vec<_> =
-            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string())
+            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string(), true)
                 .collect::<Vec<_>>()
                 .await;
 

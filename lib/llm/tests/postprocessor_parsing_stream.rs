@@ -4567,6 +4567,35 @@ async fn postprocessor_parsing_stream_muse_required_does_not_route_to_unified() 
         "Required must NOT route to unified; reasoning_content must stay empty, got {:?}",
         out.reasoning
     );
+    // Empty reasoning alone also passes if the unified parser ran and dropped it, so
+    // assert the POSITIVE signal of the jail path: it does not strip muse markers.
+    assert!(
+        out.content.contains("<|start|>"),
+        "the jail path leaves muse markup in content; got {:?}",
+        out.content
+    );
+    assert!(
+        out.tool_calls
+            .iter()
+            .all(|(name, _)| name.as_deref() != Some("get_weather")),
+        "the unified parser must not produce a native-markup call here: {:?}",
+        out.tool_calls
+    );
+}
+
+/// `unified_family` keys on EITHER parser name, so a card that sets only
+/// `--dyn-reasoning-parser muse_glimmer` must route the stream to unified as well.
+/// The batch path pins this (`test_muse_unified_batch_finalize_routes_on_reasoning_name_only`);
+/// streaming had no equivalent.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_reasoning_name_only_routes_to_unified() {
+    let preprocessor = build_preprocessor(Some("muse_glimmer"), None);
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(out.reasoning, "Look it up.");
+    assert_eq!(out.content, "It's 18C.");
 }
 
 /// Explicit `tool_choice=None` must route to unified like auto — the guard's
@@ -4596,4 +4625,12 @@ async fn postprocessor_parsing_stream_muse_none_routes_to_unified() {
             out.reasoning
         );
     }
+    // Routing here is for the split and the stripping ONLY. The caller disabled tool
+    // calling, so the parsed call must be dropped rather than surfaced — the contract
+    // every other family gets from `should_apply_tool_jail` returning false for `none`.
+    assert!(
+        out.tool_calls.is_empty(),
+        "tool_choice=None must not return tool_calls, got {:?}",
+        out.tool_calls
+    );
 }

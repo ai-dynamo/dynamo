@@ -213,3 +213,4 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
