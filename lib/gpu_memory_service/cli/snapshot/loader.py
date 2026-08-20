@@ -12,7 +12,6 @@ restored engine on weight load.
 from __future__ import annotations
 
 import argparse
-import importlib
 import logging
 import os
 import time
@@ -164,17 +163,7 @@ def main(argv: list[str] | None = None) -> None:
     selector.add_argument("--use-v1", action="store_true")
     options, remaining = selector.parse_known_args(argv)
     if options.use_v1:
-        if any(argument in {"-h", "--help"} for argument in remaining) or any(
-            argument == "--device" or argument.startswith("--device=")
-            for argument in remaining
-        ):
-            importlib.import_module("gpu_memory_service.v1.snapshot.loader").main(
-                remaining
-            )
-        else:
-            run_v1_per_device(
-                "gpu_memory_service.v1.snapshot.loader", remaining, "loader"
-            )
+        run_v1_per_device("gpu_memory_service.v1.snapshot.loader", remaining)
         return
 
     parser = _build_parser()

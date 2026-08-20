@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Snapshot saver/loader CLI helpers."""
-
 from __future__ import annotations
 
+import importlib
 import logging
 import subprocess
 import sys
@@ -15,26 +14,33 @@ from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 logger = logging.getLogger(__name__)
 
 
-def run_v1_per_device(module: str, argv: list[str], label: str) -> None:
-    init_vmm(VMMDeviceType.CUDA)
-    processes: list[subprocess.Popen] = []
-    try:
-        for device in get_vmm().list_devices():
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    module,
-                    *argv,
-                    "--device",
-                    str(device),
-                ]
-            )
-            logger.info(
-                "Started GMS V1 %s device=%d pid=%d", label, device, process.pid
-            )
-            processes.append(process)
+def _v1_scoped(argv: list[str]) -> bool:
+    return any(
+        a in {"-h", "--help"} or a == "--device" or a.startswith("--device=")
+        for a in argv
+    )
 
+
+def start_v1_per_device(
+    module: str, argv: list[str], devices: list[int]
+) -> list[subprocess.Popen]:
+    targets: list[int | None] = [None] if _v1_scoped(argv) else list(devices)
+    processes = []
+    for device in targets:
+        extra = [] if device is None else ["--device", str(device)]
+        process = subprocess.Popen([sys.executable, "-m", module, *argv, *extra])
+        logger.info("Started %s device=%s pid=%d", module, device, process.pid)
+        processes.append(process)
+    return processes
+
+
+def run_v1_per_device(module: str, argv: list[str]) -> None:
+    if _v1_scoped(argv):
+        importlib.import_module(module).main(argv)
+        return
+    init_vmm(VMMDeviceType.CUDA)
+    processes = start_v1_per_device(module, argv, get_vmm().list_devices())
+    try:
         pending = list(processes)
         while pending:
             for process in list(pending):

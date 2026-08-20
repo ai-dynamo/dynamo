@@ -214,8 +214,8 @@ start one rank-local child directly:
 gpu-memory-service --use-v1 --device 0
 ```
 
-Save or load every visible device. Artifacts land under
-`<checkpoint-dir>/device-<ordinal>`:
+Save or load every visible device (pass `--device N` for one GPU). Artifacts
+land under `<checkpoint-dir>/device-<ordinal>`:
 
 ```text
 python -m gpu_memory_service.cli.snapshot.saver --use-v1 \
@@ -223,35 +223,15 @@ python -m gpu_memory_service.cli.snapshot.saver --use-v1 \
 python -m gpu_memory_service.cli.snapshot.loader --use-v1 \
   --checkpoint-dir /checkpoints/run/versions/1 \
   --transfer-backend nixl-gds
-```
-
-Pass `--device` to scope save or load to one GPU:
-
-```text
-python -m gpu_memory_service.cli.snapshot.saver --use-v1 \
-  --checkpoint-dir /checkpoints/run/versions/1 --device 0
-python -m gpu_memory_service.cli.snapshot.loader --use-v1 \
-  --checkpoint-dir /checkpoints/run/versions/1 --device 0 \
-  --transfer-backend nixl-gds
-```
-
-Restore while starting the servers. `--enable-loader` takes the rest of the
-command line, including `--checkpoint-dir`, and forwards it to each loader.
-Add `--device` in that remainder to load only one GPU:
-
-```text
 python3 -m gpu_memory_service.cli.server --use-v1 --enable-loader \
   --checkpoint-dir /checkpoints/run/versions/1 \
   --transfer-backend nixl-gds
-python3 -m gpu_memory_service.cli.server --use-v1 --enable-loader \
-  --checkpoint-dir /checkpoints/run/versions/1 \
-  --transfer-backend nixl-gds --device 0
 ```
 
 The loader also accepts `nixl` and `sharded-ssd`, the existing sharded SSD root
 and queue flags, and repeatable `--posix-backend-param KEY=VALUE` overrides.
 Start the restored worker with `GMS_SOCKET_DIR`. Only the `weights` socket is
-used by artifact transfer.
+used by artifact transfer. `--enable-loader` must come last among server flags.
 
 Select the worker while retaining vLLM's normal load format:
 
