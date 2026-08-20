@@ -589,6 +589,10 @@ async def parse_args(args: list[str]) -> Config:
         # --nccl-port CLI value on the lightweight diffusion config so the init
         # path can map a test-allocated port into torch.distributed.
         server_args.nccl_port = getattr(parsed_args, "nccl_port", None)
+        # _diffusion_generator_kwargs forwards dist_timeout to DiffGenerator;
+        # without this copy the stub never carries it and --dist-timeout is
+        # silently dropped for diffusion workers.
+        server_args.dist_timeout = getattr(parsed_args, "dist_timeout", None)
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False
