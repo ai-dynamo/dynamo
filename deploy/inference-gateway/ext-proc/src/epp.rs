@@ -20,10 +20,14 @@ use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, NvExt, request_cache_salt};
+use dynamo_llm::protocols::common::extensions::{
+    HEADER_TENANT_ID, NvExt, request_cache_salt, routing_constraints_to_kv,
+};
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::Prompt;
-use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
+use dynamo_runtime::discovery::{
+    DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
+};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
@@ -32,6 +36,10 @@ use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+
+/// `(token_ids, cache_namespace, priority_jump, strict_priority, routing_constraints)`,
+/// as returned by [`Router::tokenize`] and its chat/completion helpers.
+type TokenizeResult = (Vec<u32>, Option<String>, f64, u32, RoutingConstraints);
 
 fn validate_kube_discovery_mode() -> Result<()> {
     match std::env::var(DYN_KUBE_DISCOVERY_MODE) {
@@ -45,15 +53,7 @@ fn validate_kube_discovery_mode() -> Result<()> {
 
 fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<()> {
     match mode {
-        None | Some("pod") => Ok(()),
-        Some("container") => {
-            // TODO(epp-container-discovery): Resolve container-level discovery IDs to pod
-            // endpoints, including non-main worker containers, then remove this restriction.
-            anyhow::bail!(
-                "Rust EPP does not support {DYN_KUBE_DISCOVERY_MODE}=container because it resolves \
-                 worker endpoints by pod identity; use {DYN_KUBE_DISCOVERY_MODE}=pod"
-            )
-        }
+        None | Some("pod") | Some("container") => Ok(()),
         Some(mode) => anyhow::bail!(
             "Invalid {DYN_KUBE_DISCOVERY_MODE} value {mode:?}; valid values are 'pod' and 'container'"
         ),
@@ -222,27 +222,29 @@ impl Router {
         &self.served_model
     }
 
-    /// Tokenize a JSON request body and extract router queue priorities.
+    /// Tokenize a JSON request body and extract router queue priorities and
+    /// routing constraints.
     ///
-    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority)`.
-    /// Priorities default to zero when absent. Supports both
-    /// `/v1/chat/completions` and `/v1/completions` bodies; the request kind is
-    /// discriminated by a non-empty `messages` array (chat) versus a `prompt`
-    /// (completions), mirroring the removed Go EPP `BuildOpenAIRequest`.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
+    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority,
+    /// routing_constraints)`. Priorities default to zero and constraints
+    /// default to empty when absent. Supports both `/v1/chat/completions` and
+    /// `/v1/completions` bodies; the request kind is discriminated by a
+    /// non-empty `messages` array (chat) versus a `prompt` (completions),
+    /// mirroring the removed Go EPP `BuildOpenAIRequest`.
+    pub async fn tokenize(&self, request_json: &str) -> Result<TokenizeResult> {
         let value: serde_json::Value = serde_json::from_str(request_json)?;
         let has_messages = value
             .get("messages")
             .and_then(|m| m.as_array())
             .is_some_and(|messages| !messages.is_empty());
         if !has_messages && value.get("prompt").is_some() {
-            return self.tokenize_completion(request_json);
+            return self.tokenize_completion(request_json).await;
         }
         self.tokenize_chat(request_json)
     }
 
     /// Tokenize a `/v1/chat/completions` body via the chat template.
-    fn tokenize_chat(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
+    fn tokenize_chat(&self, request_json: &str) -> Result<TokenizeResult> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
@@ -251,6 +253,7 @@ impl Router {
 
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
+        let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
         let encoding = match self.preprocessor.apply_template(&request)? {
@@ -262,6 +265,7 @@ impl Router {
             cache_namespace,
             priority_jump,
             strict_priority,
+            routing_constraints,
         ))
     }
 
@@ -269,39 +273,53 @@ impl Router {
     ///
     /// Mirrors the removed Go EPP `addCompletionPrompt`: pre-tokenized
     /// (integer) prompts route directly on their token IDs, while text prompts
-    /// are wrapped as a single user message and run through the chat template
-    /// so routing reuses the same tokenization path as chat requests. Batched
-    /// prompts route on the first entry, since KV prefix locality is computed
-    /// per prompt.
-    fn tokenize_completion(
-        &self,
-        request_json: &str,
-    ) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
+    /// are tokenized as a raw completion prompt (no chat template) via the
+    /// same [`OpenAIPreprocessor::gather_tokens`] path the backend uses for a
+    /// live `/v1/completions` request, so the tokens computed here for
+    /// routing/injection are identical to what the backend would compute on
+    /// its own. Batched prompts route on the first entry, since KV prefix
+    /// locality is computed per prompt.
+    async fn tokenize_completion(&self, request_json: &str) -> Result<TokenizeResult> {
         let request: NvCreateCompletionRequest = serde_json::from_str(request_json)?;
 
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
+        let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
         let tokens = match completion_prompt_token_ids(&request.inner.prompt) {
             Some(ids) => ids,
             None => {
-                self.tokenize_text_as_user(&completion_prompt_routing_text(&request.inner.prompt))?
+                self.tokenize_completion_text(&completion_prompt_routing_text(
+                    &request.inner.prompt,
+                ))
+                .await?
             }
         };
 
-        Ok((tokens, cache_namespace, priority_jump, strict_priority))
+        Ok((
+            tokens,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            routing_constraints,
+        ))
     }
 
-    /// Wrap `text` as a single user chat message and tokenize it through the
-    /// chat template, matching the Go EPP's legacy chat-shaped completion path.
-    fn tokenize_text_as_user(&self, text: &str) -> Result<Vec<u32>> {
-        let chat_json = serde_json::json!({
+    /// Tokenize `text` as a raw `/v1/completions` prompt — no chat template —
+    /// via [`OpenAIPreprocessor::gather_tokens`], the same tokenization path
+    /// the backend runs for a live completions request. Keeps the
+    /// `nvext.token_data` injected downstream identical to what the backend
+    /// would have tokenized itself, so preempting backend tokenization does
+    /// not change the generated output.
+    async fn tokenize_completion_text(&self, text: &str) -> Result<Vec<u32>> {
+        let completion_json = serde_json::json!({
             "model": "default",
-            "messages": [{"role": "user", "content": text}],
+            "prompt": text,
         })
         .to_string();
-        let (tokens, _, _, _) = self.tokenize_chat(&chat_json)?;
+        let request: NvCreateCompletionRequest = serde_json::from_str(&completion_json)?;
+        let (tokens, _annotations) = self.preprocessor.gather_tokens(&request, None, None).await?;
         Ok(tokens)
     }
 
@@ -310,10 +328,7 @@ impl Router {
     /// Port is read from the pod's Dynamo HTTP container port.
     pub fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
         for pod in self.pod_store.state() {
-            let Some(pod_name) = pod.metadata.name.as_deref() else {
-                continue;
-            };
-            if hash_pod_name(pod_name) == worker_id {
+            if pod_worker_ids(&pod).any(|id| id == worker_id) {
                 return pod_endpoint_address(&pod);
             }
         }
@@ -334,10 +349,7 @@ impl Router {
     /// we never resolve a backend outside the requested subset.
     fn resolve_any_worker_endpoint_in_subset(&self, allowed: &HashSet<u64>) -> Option<String> {
         for pod in self.pod_store.state() {
-            let Some(pod_name) = pod.metadata.name.as_deref() else {
-                continue;
-            };
-            if allowed.contains(&hash_pod_name(pod_name))
+            if pod_worker_ids(&pod).any(|id| allowed.contains(&id))
                 && let Some(addr) = pod_endpoint_address(&pod)
             {
                 return Some(addr);
@@ -358,15 +370,12 @@ impl Router {
         let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
         let mut ids = HashSet::new();
         for pod in self.pod_store.state() {
-            let Some(pod_name) = pod.metadata.name.as_deref() else {
-                continue;
-            };
             let Some(addr_port) = pod_endpoint_address(&pod) else {
                 continue;
             };
             let ip = addr_port.split(':').next().unwrap_or("");
             if candidates.contains(addr_port.as_str()) || candidates.contains(ip) {
-                ids.insert(hash_pod_name(pod_name));
+                ids.extend(pod_worker_ids(&pod));
             }
         }
         ids
@@ -375,7 +384,10 @@ impl Router {
     /// Route a prefill request. Returns (worker_id, dp_rank).
     ///
     /// Queue priorities are forwarded to the prefill scheduler. `priority_jump`
-    /// adjusts the policy score, while `strict_priority` selects the primary tier.
+    /// adjusts the policy score, while `strict_priority` selects the primary
+    /// tier. `routing_constraints` carries the request's required/preferred
+    /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
+    /// mismatch excludes a worker from selection.
     pub async fn route_prefill(
         &self,
         tokens: &[u32],
@@ -383,6 +395,7 @@ impl Router {
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(u64, Option<u32>)> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
@@ -400,7 +413,7 @@ impl Router {
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
-                RoutingConstraints::default(),
+                routing_constraints,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
@@ -421,7 +434,11 @@ impl Router {
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
     ///
     /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
-    /// adjusts the policy score, while `strict_priority` selects the primary tier.
+    /// adjusts the policy score, while `strict_priority` selects the primary
+    /// tier. `routing_constraints` carries the request's required/preferred
+    /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
+    /// mismatch excludes a worker from selection.
+    #[allow(clippy::too_many_arguments)]
     pub async fn route_decode(
         &self,
         tokens: &[u32],
@@ -430,6 +447,7 @@ impl Router {
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(WorkerWithDpRank, u32)> {
         if let Some(ref ids) = allowed_worker_ids {
             self.decode_router.register_workers(ids);
@@ -450,7 +468,7 @@ impl Router {
                 strict_priority,
                 None,
                 allowed_worker_ids,
-                RoutingConstraints::default(),
+                routing_constraints,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))
@@ -573,6 +591,22 @@ fn extract_strict_priority(nvext: Option<&NvExt>) -> u32 {
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.strict_priority)
         .unwrap_or(0)
+}
+
+/// Extract the router's `RoutingConstraints` from a request's
+/// `nvext.routing_constraints`.
+///
+/// A request carrying `required_taints` must reach the same hard
+/// placement check the replaced shared/FFI preprocessing applied
+/// (`lib/llm/src/preprocessor.rs`); dropping this here would let a request
+/// with a hard constraint land on a worker that does not satisfy it.
+/// Returns an empty (no-op) `RoutingConstraints` when absent. Shared by the
+/// chat and completion paths since both carry the same `nvext` block.
+fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
+    nvext
+        .and_then(|n| n.routing_constraints.clone())
+        .map(routing_constraints_to_kv)
+        .unwrap_or_default()
 }
 
 /// Token IDs for a pre-tokenized completion prompt.
@@ -763,6 +797,34 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
         .find(|p| p.name.as_deref() == Some(DYNAMO_CONTAINER_PORT_NAME))
         .map(|p| p.container_port)?;
     Some(format!("{ip}:{port}"))
+}
+
+/// All worker instance IDs `pod` is currently known under: its pod-level
+/// identity, plus — under `DYN_KUBE_DISCOVERY_MODE=container` (e.g. intra-pod
+/// GMS failover, where each engine container registers under its own
+/// container name) — the per-container identity of each currently `Ready`
+/// container. Mirrors the runtime's own `extract_ready_containers`, so a
+/// container that has stopped being `Ready` (a demoted or crashed engine) is
+/// never matched against a worker_id, and the "main" container name (which
+/// collapses to the pod-level identity) never double-counts.
+///
+/// A pod's HTTP inference endpoint stays pod-level regardless (resolved
+/// separately by [`pod_endpoint_address`]): the failover engine containers
+/// only expose their internal system/health ports, and traffic still lands
+/// on the pod's single OpenAI-compatible port (typically a `sidecar-frontend`
+/// container, untouched by failover's container cloning).
+fn pod_worker_ids(pod: &k8s_openapi::api::core::v1::Pod) -> impl Iterator<Item = u64> + '_ {
+    let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
+    let pod_id = (!pod_name.is_empty()).then(|| hash_pod_name(pod_name));
+    let container_ids = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+        .into_iter()
+        .flatten()
+        .filter(|cs| cs.ready)
+        .map(move |cs| hash_container_name(pod_name, &cs.name));
+    pod_id.into_iter().chain(container_ids)
 }
 
 /// Start a background pod reflector that watches worker pods matching the
@@ -1023,9 +1085,10 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, body_cache_namespace, priority_jump, strict_priority) = self
-            .tokenize(body_str)
-            .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
+        let (tokens, body_cache_namespace, priority_jump, strict_priority, routing_constraints) =
+            self.tokenize(body_str)
+                .await
+                .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
         let cache_namespace =
             cache_namespace_with_header_override(&req.headers, body_cache_namespace);
 
@@ -1040,6 +1103,7 @@ impl EndpointPicker for Router {
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids.clone(),
+                routing_constraints.clone(),
             )
             .await;
 
@@ -1066,6 +1130,7 @@ impl EndpointPicker for Router {
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
@@ -1214,6 +1279,7 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::api::core::v1::Pod;
 
     #[test]
     fn tenant_header_overrides_body_cache_namespace() {
@@ -1309,6 +1375,143 @@ mod tests {
         assert_eq!(extract_strict_priority(request.nvext.as_ref()), 7);
     }
 
+    /// Proves the hard-constraint feature: `nvext.routing_constraints.
+    /// required_taints` lifts into a non-empty `RoutingConstraints`, and
+    /// absence collapses to the empty default. If this regresses, a request
+    /// with `required_taints` can land on a worker that does not satisfy its
+    /// hard placement requirement.
+    #[test]
+    fn routing_constraints_lifted_from_nvext() {
+        let with_constraints: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "nvext": {"routing_constraints": {"required_taints": ["gpu=h100"]}}
+                }"#,
+            )
+            .unwrap();
+        let constraints = extract_routing_constraints(with_constraints.nvext.as_ref());
+        assert!(constraints.has_hard_constraints());
+        assert!(constraints.required_taints.contains("gpu=h100"));
+
+        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }"#,
+            )
+            .unwrap();
+        assert!(extract_routing_constraints(without_nvext.nvext.as_ref()).is_empty());
+    }
+
+    /// A `/v1/completions` request carries the same `nvext` block as chat, so
+    /// `required_taints` must be lifted from it too, not silently dropped to
+    /// `RoutingConstraints::default()`.
+    #[test]
+    fn routing_constraints_lifted_from_completion_nvext() {
+        let request: NvCreateCompletionRequest = serde_json::from_str(
+            r#"{
+                "model": "test",
+                "prompt": "hello world",
+                "nvext": {"routing_constraints": {"required_taints": ["zone=us-east-1a"]}}
+            }"#,
+        )
+        .unwrap();
+        let constraints = extract_routing_constraints(request.nvext.as_ref());
+        assert!(constraints.required_taints.contains("zone=us-east-1a"));
+    }
+
+    /// Regression test for a text `/v1/completions` prompt: the tokens
+    /// `Router::tokenize_completion_text` computes for routing/injection must
+    /// be byte-identical to what `OpenAIPreprocessor::gather_tokens` produces
+    /// for a real client-shaped completions request with the same prompt —
+    /// i.e. ext-proc must reuse the backend's raw completion tokenization,
+    /// not substitute a different one. It must also differ from the old
+    /// (buggy) chat-template tokenization of the same text: injecting
+    /// chat-shaped tokens as `nvext.token_data` for a completions request
+    /// changes the literal prompt the model generates from, not just routing.
+    #[tokio::test]
+    async fn text_completion_tokens_match_backend_raw_completion_tokenization() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
+            ),
+            None,
+        )
+        .expect("load fixture model card");
+        let preprocessor =
+            OpenAIPreprocessor::new(mdc).expect("build preprocessor from fixture card");
+
+        let text = "The capital of France is";
+
+        // Mirrors the minimal request `Router::tokenize_completion_text` builds
+        // internally before calling `gather_tokens`.
+        let ext_proc_request: NvCreateCompletionRequest = serde_json::from_str(
+            &serde_json::json!({"model": "default", "prompt": text}).to_string(),
+        )
+        .unwrap();
+        let (ext_proc_tokens, _) = preprocessor
+            .gather_tokens(&ext_proc_request, None, None)
+            .await
+            .expect("gather_tokens on ext-proc's minimal completion request");
+
+        // A real client-shaped `/v1/completions` request for the same prompt,
+        // tokenized via the same path the backend runs on a live request.
+        let backend_request: NvCreateCompletionRequest = serde_json::from_str(
+            &serde_json::json!({
+                "model": "test-model",
+                "prompt": text,
+                "max_tokens": 16,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (backend_tokens, _) = preprocessor
+            .gather_tokens(&backend_request, None, None)
+            .await
+            .expect("gather_tokens on a real completions request");
+
+        assert!(!ext_proc_tokens.is_empty());
+        assert_eq!(
+            ext_proc_tokens, backend_tokens,
+            "ext-proc's routed tokens must match the backend's own raw completion tokenization"
+        );
+
+        // The old, buggy path wrapped the prompt as a chat user message and ran
+        // it through the chat template — assert that no longer happens.
+        let chat_wrapped: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                &serde_json::json!({
+                    "model": "default",
+                    "messages": [{"role": "user", "content": text}],
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let chat_tokens = match preprocessor
+            .apply_template(&chat_wrapped)
+            .expect("apply_template on chat-wrapped request")
+        {
+            Some(rendered) => preprocessor
+                .tokenize_rendered_prompt(&rendered)
+                .expect("tokenize rendered chat prompt")
+                .token_ids()
+                .to_vec(),
+            None => preprocessor
+                .tokenize("")
+                .expect("tokenize empty prompt")
+                .token_ids()
+                .to_vec(),
+        };
+        assert_ne!(
+            ext_proc_tokens, chat_tokens,
+            "raw completion tokenization must differ from chat-template tokenization"
+        );
+    }
+
     /// Pre-tokenized `/v1/completions` prompts route directly on their token
     /// IDs, matching the Go EPP `addCompletionPrompt` token path.
     #[test]
@@ -1349,5 +1552,117 @@ mod tests {
             completion_prompt_routing_text(&batched.inner.prompt),
             "first"
         );
+    }
+
+    #[test]
+    fn discovery_mode_accepts_pod_and_container_rejects_unknown() {
+        assert!(validate_kube_discovery_mode_value(None).is_ok());
+        assert!(validate_kube_discovery_mode_value(Some("pod")).is_ok());
+        assert!(
+            validate_kube_discovery_mode_value(Some("container")).is_ok(),
+            "container mode (e.g. intra-pod GMS failover) must be accepted, not rejected at startup"
+        );
+        assert!(validate_kube_discovery_mode_value(Some("bogus")).is_err());
+    }
+
+    /// Builds a pod shaped like an intra-pod GMS failover worker: two engine
+    /// containers with per-container readiness plus an optional
+    /// sidecar-frontend exposing the pod's stable OpenAI-compatible port.
+    fn failover_pod(engine_ready: &[(&str, bool)], with_sidecar_frontend: bool) -> Pod {
+        use k8s_openapi::api::core::v1::{
+            Container, ContainerPort, ContainerStatus, PodSpec, PodStatus,
+        };
+        use kube::api::ObjectMeta;
+
+        let mut containers: Vec<Container> = engine_ready
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| Container {
+                name: name.to_string(),
+                ports: Some(vec![ContainerPort {
+                    name: Some(format!("system-{i}")),
+                    container_port: 9090 + i as i32,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            })
+            .collect();
+        if with_sidecar_frontend {
+            containers.push(Container {
+                name: "sidecar-frontend".to_string(),
+                ports: Some(vec![ContainerPort {
+                    name: Some(DYNAMO_CONTAINER_PORT_NAME.to_string()),
+                    container_port: 8000,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            });
+        }
+
+        Pod {
+            metadata: ObjectMeta {
+                name: Some("worker-0".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers,
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                pod_ip: Some("10.0.0.1".to_string()),
+                container_statuses: Some(
+                    engine_ready
+                        .iter()
+                        .map(|(name, ready)| ContainerStatus {
+                            name: name.to_string(),
+                            ready: *ready,
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// Only currently-`Ready` engine containers contribute a live worker_id;
+    /// a demoted/crashed standby must never be matched, and the pod-level
+    /// identity is always present alongside per-container ones.
+    #[test]
+    fn pod_worker_ids_includes_pod_and_ready_containers_only() {
+        let pod = failover_pod(&[("engine-0", true), ("engine-1", false)], true);
+        let ids: HashSet<u64> = pod_worker_ids(&pod).collect();
+
+        assert!(ids.contains(&hash_pod_name("worker-0")));
+        assert!(ids.contains(&hash_container_name("worker-0", "engine-0")));
+        assert!(
+            !ids.contains(&hash_container_name("worker-0", "engine-1")),
+            "the not-ready standby engine must not be a live worker_id"
+        );
+        assert_eq!(ids.len(), 2);
+    }
+
+    /// The pod's HTTP inference endpoint is resolved independently of which
+    /// engine container is currently active: it stays pinned to the
+    /// sidecar-frontend's `http`-named port, which failover's container
+    /// cloning never touches.
+    #[test]
+    fn pod_endpoint_address_resolves_sidecar_regardless_of_engine_containers() {
+        let pod = failover_pod(&[("engine-0", true), ("engine-1", false)], true);
+        assert_eq!(
+            pod_endpoint_address(&pod),
+            Some("10.0.0.1:8000".to_string())
+        );
+    }
+
+    /// Without a sidecar-frontend, the engine containers only expose
+    /// internal system ports (no port named `http`), so resolution correctly
+    /// returns `None` rather than guessing a port — this is a pre-existing,
+    /// orthogonal limitation of aggregated (no-sidecar) failover workers, not
+    /// something container-mode discovery introduces.
+    #[test]
+    fn pod_endpoint_address_none_without_an_http_named_port() {
+        let pod = failover_pod(&[("engine-0", true), ("engine-1", false)], false);
+        assert_eq!(pod_endpoint_address(&pod), None);
     }
 }

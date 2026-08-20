@@ -21,10 +21,17 @@ dynamo:
     # is a STEM; the licenses stage appends -${TARGETARCH}.cdx.json so each arch
     # of a multi-arch build subtracts its own-arch floor (the @<digest8> is the
     # shared multi-arch index digest).
-  epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.2
+  # `dynamo/dynamo-epp:latest` is the local tag produced by
+  # `make -C deploy/inference-gateway/ext-proc all` (the native Rust EPP). It has no
+  # published registry counterpart, so real builds should still pass an explicit
+  # `--build-arg EPP_IMAGE=<tag>` (see container/README.md); this default only exists
+  # to satisfy render.py's strict Jinja context and must never fall back to the
+  # upstream Go EPP (k8s-staging-images/gateway-api-inference-extension/epp) that the
+  # Rust EPP replaces as Dynamo's default.
+  epp_image: dynamo/dynamo-epp:latest
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
   # Self-baseline of the ubuntu frontend base; the licenses stage subtracts it so
-  # frontend NOTICES attribute only what dynamo (+ EPP's Go modules) add on top.
+  # frontend NOTICES attribute only what dynamo (+ the Rust EPP) add on top.
   frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
   planner_build_image_tag: 3.12-slim

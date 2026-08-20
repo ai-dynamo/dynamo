@@ -42,7 +42,7 @@
 #     This secret is required only for gated models; the public model used below
 #     does not require it.
 #
-# Replace `dynamo/dynamo-rust-epp:dev` before applying this manifest unless that
+# Replace `dynamo/dynamo-epp:dev` before applying this manifest unless that
 # image is already available to the cluster.
 #
 # Apply with: kubectl apply -n <ns> -f agg.yaml
@@ -224,7 +224,7 @@ spec:
       serviceAccountName: dynamo-epp
       containers:
         - name: epp
-          image: dynamo/dynamo-rust-epp:dev
+          image: dynamo/dynamo-epp:dev
           imagePullPolicy: IfNotPresent
           env:
             # Standalone mode: runtime-free selector in-process (no Dynamo

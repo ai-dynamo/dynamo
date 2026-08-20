@@ -387,9 +387,6 @@
 
 # === epp  (@ai-dynamo/dynamo-epp-codeowners) ===
 /deploy/inference-gateway/                                                   @ai-dynamo/dynamo-epp-codeowners
-/deploy/inference-gateway/epp/                                               @ai-dynamo/dynamo-epp-codeowners
-/deploy/inference-gateway/epp/cmd/                                           @ai-dynamo/dynamo-epp-codeowners
-/deploy/inference-gateway/epp/pkg/                                           @ai-dynamo/dynamo-epp-codeowners
 /deploy/inference-gateway/scripts/                                           @ai-dynamo/dynamo-epp-codeowners
 
 # === tokenspeed  (@ai-dynamo/dynamo-tokenspeed-codeowners) ===
@@ -668,7 +665,6 @@
 /components/src/dynamo/vllm/multimodal_handlers/                             @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /benchmarks/frontend/scripts/sweep_k8s/metrics.py                            @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/common/utils/prometheus.py                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
-/deploy/inference-gateway/epp/pkg/plugins/disagg/                            @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/common/backend/publisher.py                           @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/common/backend/telemetry.py                           @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/common/utils/image_utils.py                           @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
@@ -690,7 +686,6 @@
 /components/src/dynamo/common/recv_forward_pass_metrics.py                   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/request_handlers/multimodal/                   @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/profiler/utils/dgdr_v1beta1_types.py                  @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
-/deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer/                  @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/planner/monitoring/planner_metrics.py                 @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/planner/monitoring/traffic_metrics.py                 @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-observability-codeowners
 /deploy/observability/grafana-planner-dashboard-configmap.yaml               @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-planner-codeowners

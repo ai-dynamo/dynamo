@@ -456,9 +456,6 @@ areas:
   github_team: '@ai-dynamo/dynamo-epp-codeowners'
   path_globs:
   - deploy/inference-gateway/
-  - deploy/inference-gateway/epp/
-  - deploy/inference-gateway/epp/cmd/
-  - deploy/inference-gateway/epp/pkg/
   - deploy/inference-gateway/scripts/
 - label: tokenspeed
   github_team: '@ai-dynamo/dynamo-tokenspeed-codeowners'
@@ -751,14 +748,6 @@ shared:
   owners:
   - backend-vllm
   - observability
-- glob: deploy/inference-gateway/epp/pkg/plugins/disagg/
-  owners:
-  - epp
-  - router
-- glob: deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer/
-  owners:
-  - epp
-  - router
 - glob: deploy/operator/config/prometheus/monitor.yaml
   owners:
   - operator

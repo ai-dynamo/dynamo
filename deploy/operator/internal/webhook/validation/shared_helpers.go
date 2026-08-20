@@ -28,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -44,8 +45,6 @@ const (
 
 	runtimeVersionOverrideRequiredMessage = "is required when the specified main container image has no parseable semantic-version tag"
 )
-
-var nativeRustEPPMinRuntimeVersion = runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}
 
 // runtimeVersionValidationSource identifies the API representation whose field
 // paths must be used for runtime-version validation errors.
@@ -137,7 +136,7 @@ func eppRuntimeCompatibilityError(
 		return nil
 	}
 
-	if version.Compare(nativeRustEPPMinRuntimeVersion) >= 0 {
+	if runtimefeatures.NativeRustEPP.Enabled(&version) {
 		if hasEPPConfig {
 			return field.Forbidden(
 				eppConfigPath,

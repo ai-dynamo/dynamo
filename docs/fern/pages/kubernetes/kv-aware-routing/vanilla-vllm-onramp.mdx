@@ -81,7 +81,7 @@ Standalone mode is not available in a published Dynamo image yet. From the repos
 the Rust EPP from the current source revision and push it to your container registry:
 
 ```bash
-export EPP_IMAGE=registry.example.com/your-project/dynamo-rust-epp:standalone
+export EPP_IMAGE=registry.example.com/your-project/dynamo-epp:standalone
 
 make -C deploy/inference-gateway/ext-proc \
   IMAGE_TAG="$EPP_IMAGE" \
@@ -184,7 +184,7 @@ creates the workload layer in `$NAMESPACE`:
 Apply the manifest from the repository root using the image you pushed:
 
 ```bash
-sed "s#dynamo/dynamo-rust-epp:dev#$EPP_IMAGE#" \
+sed "s#dynamo/dynamo-epp:dev#$EPP_IMAGE#" \
   deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml |
   kubectl apply -n "$NAMESPACE" -f -
 ```
@@ -520,7 +520,7 @@ operator-generated resource contract; that contract does not configure standalon
 
 | Symptom | Check |
 |---|---|
-| EPP exits with `standalone is not yet supported` | The image predates the standalone implementation. Build or select the required `dynamo-rust-epp` revision. |
+| EPP exits with `standalone is not yet supported` | The image predates the standalone implementation. Build or select the required `dynamo-epp` revision. |
 | EPP stays not ready | Confirm the pool exists, its selector is valid, at least one matching pod is Ready, and EPP RBAC can watch all three resource types. |
 | EPP reports no schedulable workers | Set `DYN_EPP_MAX_NUM_BATCHED_TOKENS` to the vLLM `--max-num-batched-tokens` value when queueing is enabled. |
 | Route has no accepted parent | Confirm `parentRefs[].namespace` names the Gateway namespace, `sectionName` names its listener, and the listener allows routes from the workload namespace. |

@@ -14,4 +14,13 @@ var (
 		Name:              "CanaryHealthChecks",
 		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 4, Patch: 0},
 	}
+
+	// NativeRustEPP gates the native Rust EPP requirement: runtime versions at
+	// or above this threshold must not carry the legacy Go EPP's eppConfig,
+	// and versions below it still require it. Introduced for Dynamo runtime
+	// 1.5.0, the first release shipping the native Rust EPP image.
+	NativeRustEPP = Gate{
+		Name:              "NativeRustEPP",
+		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
+	}
 )

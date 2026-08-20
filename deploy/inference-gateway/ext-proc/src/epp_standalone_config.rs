@@ -32,6 +32,10 @@ pub const STANDALONE_MODE: &str = "standalone";
 /// `DYN_EPP_MODE` value selecting the Dynamo runtime.
 pub const DYNAMO_RUNTIME_MODE: &str = "dynamo";
 
+/// Mirrors `DYN_KUBE_DISCOVERY_MODE` in `dynamo_runtime::discovery`; read
+/// directly here because standalone mode has no Dynamo runtime to read it for.
+const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+
 /// Reads an environment variable, matching the injectable getter used in tests.
 type EnvGet<'a> = dyn Fn(&str) -> Option<String> + 'a;
 
@@ -142,6 +146,7 @@ pub struct EppStandaloneConfig {
 impl EppStandaloneConfig {
     /// Build and validate the standalone contract from the process environment.
     pub fn from_env() -> anyhow::Result<Self> {
+        reject_unsupported_container_discovery(&|k| std::env::var(k).ok())?;
         let config = Self::parse(&|k| std::env::var(k).ok())?;
         config.validate_config()?;
         Ok(config)
@@ -184,6 +189,39 @@ impl EppStandaloneConfig {
     pub fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))
+    }
+}
+
+/// Reject `DYN_KUBE_DISCOVERY_MODE=container` (e.g. intra-pod GMS failover)
+/// in standalone mode. Deferred, not a permanent restriction — see
+/// TODO(epp-standalone-container-discovery) below for what unblocks it.
+///
+/// Unlike `DYN_EPP_MODE=dynamo` (which already resolves per-container worker
+/// identities; see `hash_container_name` / `pod_worker_ids` in `epp.rs`),
+/// standalone has no Dynamo runtime worker registration to fall back on:
+/// `pod_discovery.rs` selects workers purely from the K8s Pod's own aggregate
+/// `Ready` condition. An intra-pod failover pod never satisfies that
+/// condition in steady state — each engine container gets its own readiness
+/// probe, and the standby engine is intentionally `NotReady` while armed —
+/// so the whole pod, including the healthy active engine, would be silently
+/// excluded from every worker index rather than just failing to fail over.
+/// Reject it at startup instead of shipping that silent malfunction.
+///
+/// TODO(epp-standalone-container-discovery): replace `pod_discovery.rs`'s
+/// pod-aggregate `pod_is_ready()` gate with a per-named-container readiness
+/// check (mirroring dynamo mode's `pod_worker_ids`) so a `WorkerIndex` entry
+/// is keyed on an individual container's own `Ready` status, not the pod's.
+/// Once that lands, lift this rejection.
+fn reject_unsupported_container_discovery(get: &EnvGet) -> anyhow::Result<()> {
+    match trimmed(get(DYN_KUBE_DISCOVERY_MODE)).as_deref() {
+        Some("container") => anyhow::bail!(
+            "standalone EPP ({STANDALONE_MODE} mode) does not yet support \
+             {DYN_KUBE_DISCOVERY_MODE}=container (e.g. intra-pod GMS failover): pod discovery \
+             selects workers from the Pod's aggregate Ready condition, which a pod with an \
+             intentionally-standby engine container never satisfies; use \
+             {DYN_EPP_MODE}={DYNAMO_RUNTIME_MODE} instead, or disable intra-pod failover for this worker"
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -275,6 +313,28 @@ mod tests {
     fn mode_rejects_unknown_value() {
         // An unknown value must fail fast, not silently boot full-dynamo mode.
         assert!(parse_mode(&[("DYN_EPP_MODE", "nonsense-mode")]).is_err());
+    }
+
+    #[test]
+    fn container_discovery_mode_rejected_for_standalone() {
+        assert!(
+            reject_unsupported_container_discovery(&getter(&[(
+                "DYN_KUBE_DISCOVERY_MODE",
+                "container"
+            )]))
+            .is_err(),
+            "intra-pod failover's container discovery must fail fast in standalone mode, \
+             not silently exclude every pod from the worker index"
+        );
+    }
+
+    #[test]
+    fn pod_discovery_mode_and_unset_are_fine_for_standalone() {
+        assert!(reject_unsupported_container_discovery(&getter(&[])).is_ok());
+        assert!(
+            reject_unsupported_container_discovery(&getter(&[("DYN_KUBE_DISCOVERY_MODE", "pod")]))
+                .is_ok()
+        );
     }
 
     #[test]
