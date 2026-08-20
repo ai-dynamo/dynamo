@@ -1207,6 +1207,34 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_tool_call_arguments_accepts_integral_json_numbers() {
+        for arguments in [r#"{"value":1.0}"#, r#"{"value":2.0e1}"#] {
+            validate_weather_arguments(
+                arguments,
+                json!({
+                    "type": "object",
+                    "properties": {"value": {"type": "integer"}}
+                }),
+            )
+            .unwrap_or_else(|error| panic!("integral number should validate: {error}"));
+        }
+
+        let error = validate_weather_arguments(
+            r#"{"value":1.5}"#,
+            json!({
+                "type": "object",
+                "properties": {"value": {"type": "integer"}}
+            }),
+        )
+        .expect_err("a fractional number must not validate as an integer")
+        .to_string();
+        assert!(
+            error.contains("must be of type \"integer\", got number"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn test_validate_tool_call_arguments_rejects_wrong_property_types() {
         for (value, actual_type) in [
             (json!(123), "number"),
@@ -1266,6 +1294,47 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_tool_call_arguments_checks_prefix_items() {
+        let parameters = json!({
+            "type": "object",
+            "properties": {
+                "coordinates": {
+                    "type": "array",
+                    "prefixItems": [
+                        {"type": "string"},
+                        {"type": "integer"}
+                    ],
+                    "items": false
+                }
+            }
+        });
+
+        validate_weather_arguments(r#"{"coordinates":["Seattle",2.0]}"#, parameters.clone())
+            .expect("prefix items should validate against their corresponding schemas");
+
+        let wrong_type =
+            validate_weather_arguments(r#"{"coordinates":["Seattle","two"]}"#, parameters.clone())
+                .expect_err("a prefix item with the wrong type must be rejected")
+                .to_string();
+        assert!(
+            wrong_type.contains(
+                "`messages[1].tool_calls[0].function.arguments.coordinates[1]` must be of type \"integer\", got string"
+            ),
+            "unexpected error: {wrong_type}"
+        );
+
+        let extra = validate_weather_arguments(r#"{"coordinates":["Seattle",2,3]}"#, parameters)
+            .expect_err("items: false must reject elements after prefixItems")
+            .to_string();
+        assert!(
+            extra.contains(
+                "`messages[1].tool_calls[0].function.arguments.coordinates[2]` is not allowed by the tool parameters schema"
+            ),
+            "unexpected error: {extra}"
+        );
+    }
+
+    #[test]
     fn test_validate_tool_call_arguments_checks_required_and_additional_properties() {
         let parameters = json!({
             "type": "object",
@@ -1290,6 +1359,37 @@ mod tests {
             unexpected
                 .contains("`messages[1].tool_calls[0].function.arguments.units` is not allowed"),
             "unexpected error: {unexpected}"
+        );
+    }
+
+    #[test]
+    fn test_validate_tool_call_arguments_checks_pattern_properties() {
+        let parameters = json!({
+            "type": "object",
+            "patternProperties": {"^x-": {"type": "string"}},
+            "additionalProperties": false
+        });
+
+        validate_weather_arguments(r#"{"x-label":"weather"}"#, parameters.clone())
+            .expect("a matching pattern property with the right type should validate");
+
+        let wrong_type = validate_weather_arguments(r#"{"x-label":123}"#, parameters.clone())
+            .expect_err("a matching pattern property must validate its value")
+            .to_string();
+        assert!(
+            wrong_type.contains(
+                "`messages[1].tool_calls[0].function.arguments.x-label` must be of type \"string\", got number"
+            ),
+            "unexpected error: {wrong_type}"
+        );
+
+        let unmatched = validate_weather_arguments(r#"{"other":"weather"}"#, parameters)
+            .expect_err("an unmatched additional property must be rejected")
+            .to_string();
+        assert!(
+            unmatched
+                .contains("`messages[1].tool_calls[0].function.arguments.other` is not allowed"),
+            "unexpected error: {unmatched}"
         );
     }
 

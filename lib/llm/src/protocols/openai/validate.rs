@@ -589,20 +589,49 @@ fn validate_basic_json_schema(
         let properties = schema
             .get("properties")
             .and_then(serde_json::Value::as_object);
+        let pattern_properties = schema
+            .get("patternProperties")
+            .and_then(serde_json::Value::as_object)
+            .map(|patterns| {
+                patterns
+                    .iter()
+                    .map(|(pattern, property_schema)| {
+                        regex::Regex::new(pattern)
+                            .map(|regex| (regex, property_schema))
+                            .map_err(|error| {
+                                anyhow::anyhow!(
+                                    "`{field}` has invalid patternProperties pattern {pattern:?}: {error}"
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
         for (property, property_value) in object {
+            let mut matched_schema = false;
             if let Some(property_schema) = properties.and_then(|values| values.get(property)) {
                 validate_basic_json_schema(
                     property_value,
                     property_schema,
                     &format!("{field}.{property}"),
                 )?;
-                continue;
+                matched_schema = true;
             }
 
-            // A basic validator cannot determine whether a property matches a
-            // regular-expression schema. Leave that case to a future complete
-            // JSON Schema implementation instead of rejecting valid input.
-            if schema.contains_key("patternProperties") {
+            for (pattern, property_schema) in &pattern_properties {
+                if pattern.is_match(property) {
+                    validate_basic_json_schema(
+                        property_value,
+                        property_schema,
+                        &format!("{field}.{property}"),
+                    )?;
+                    matched_schema = true;
+                }
+            }
+
+            if matched_schema {
                 continue;
             }
 
@@ -622,11 +651,23 @@ fn validate_basic_json_schema(
         }
     }
 
-    if let Some(array) = value.as_array()
-        && let Some(item_schema) = schema.get("items")
-    {
-        for (index, item) in array.iter().enumerate() {
-            validate_basic_json_schema(item, item_schema, &format!("{field}[{index}]"))?;
+    if let Some(array) = value.as_array() {
+        let prefix_len = if let Some(prefix_items) = schema
+            .get("prefixItems")
+            .and_then(serde_json::Value::as_array)
+        {
+            for (index, (item, item_schema)) in array.iter().zip(prefix_items.iter()).enumerate() {
+                validate_basic_json_schema(item, item_schema, &format!("{field}[{index}]"))?;
+            }
+            prefix_items.len()
+        } else {
+            0
+        };
+
+        if let Some(item_schema) = schema.get("items") {
+            for (index, item) in array.iter().enumerate().skip(prefix_len) {
+                validate_basic_json_schema(item, item_schema, &format!("{field}[{index}]"))?;
+            }
         }
     }
 
@@ -654,7 +695,13 @@ fn matches_json_type(value: &serde_json::Value, expected: &str) -> bool {
         "object" => value.is_object(),
         "array" => value.is_array(),
         "number" => value.is_number(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "integer" => {
+            value.as_i64().is_some()
+                || value.as_u64().is_some()
+                || value
+                    .as_f64()
+                    .is_some_and(|number| number.is_finite() && number.fract() == 0.0)
+        }
         "string" => value.is_string(),
         // Unknown type names belong to schema validation, not argument
         // validation. Ignoring them preserves compatibility with extensions.
