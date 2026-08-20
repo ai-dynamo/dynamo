@@ -112,8 +112,6 @@ def test_snapshot_and_rollback_track_the_admission_epoch():
 
 
 def test_rollback_clears_a_wait_event_the_resume_had_set():
-    """Restoring PAUSED alongside an already-set Event would let the session's
-    next turn through with no capacity check."""
     table = ProgramTable()
     table.begin_request("p1")
     table.end_request("p1", prompt_tokens=100, completion_tokens=10)
@@ -126,7 +124,6 @@ def test_rollback_clears_a_wait_event_the_resume_had_set():
     assert snapshot is not None
     table.begin_request("p1", estimated_prompt_tokens=500)
 
-    # A tick resumes the program the instant the turn is cancelled.
     resumed_event = program.waiting
     assert resumed_event is not None
     program.lifecycle = ProgramLifecycle.ACTIVE

@@ -424,13 +424,6 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
 @pytest.mark.fault_tolerance
 @pytest.mark.asyncio
 async def test_cancelled_admission_of_new_program_leaves_no_trace():
-    """A cancelled first-turn admission must not outlive the request.
-
-    The parked program is small and the program holding the worker is large, so
-    a tick after the blocker is released has room to resume the phantom -- which
-    is what makes the phantom's absence, rather than a lucky capacity shortage,
-    the reason nothing is assigned to it.
-    """
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=1000.0,
         resume_timeout_seconds=0.5,
@@ -509,7 +502,6 @@ async def test_cancelled_admission_of_existing_program_restores_prior_turn():
     with pytest.raises(asyncio.CancelledError):
         await waiter
 
-    # Session history survives: the cancelled turn is undone, not the program.
     assert router._table.programs["p1"] is program
     assert program.lifecycle == ProgramLifecycle.PAUSED
     assert program.status == ProgramStatus.ACTING
@@ -525,9 +517,6 @@ async def test_cancelled_admission_of_existing_program_restores_prior_turn():
 @pytest.mark.fault_tolerance
 @pytest.mark.asyncio
 async def test_cancelled_admission_does_not_strand_a_concurrent_waiter():
-    """Two turns of one session share a program, so one cancelling must not
-    delete it out from under the other: the survivor is parked on the program's
-    Event and only a resume of that program can wake it."""
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=1000.0,
         resume_timeout_seconds=5.0,
@@ -573,8 +562,6 @@ async def test_cancelled_admission_does_not_strand_a_concurrent_waiter():
 @pytest.mark.fault_tolerance
 @pytest.mark.asyncio
 async def test_cancelled_admission_does_not_undo_a_later_turn():
-    """Both turns mutate the same Program object, so object identity alone
-    cannot tell the cancelled turn's mutations from the live turn's."""
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=1000.0,
         resume_timeout_seconds=5.0,
@@ -605,8 +592,6 @@ async def test_cancelled_admission_does_not_undo_a_later_turn():
     with pytest.raises(asyncio.CancelledError):
         await cancelled
 
-    # The later turn's admission is still in force; restoring the cancelled
-    # turn's snapshot would have put token_total back to 110 and step_count to 1.
     assert router._table.programs["p1"] is program
     assert program.token_total == 777
     assert program.step_count == 3
@@ -620,8 +605,6 @@ async def test_cancelled_admission_does_not_undo_a_later_turn():
 @pytest.mark.fault_tolerance
 @pytest.mark.asyncio
 async def test_rollback_completes_when_cancellation_is_redelivered():
-    """A scheduler tick holds the lock across awaits, so the rollback's
-    acquisition can block long enough to be cancelled a second time."""
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=1000.0,
         resume_timeout_seconds=5.0,
