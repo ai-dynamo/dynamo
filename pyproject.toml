@@ -175,6 +175,11 @@ path = "hatch_build.py"
 packages = [
     "components/src/dynamo",
 ]
+# Spawned SGLang scheduler children re-import sglang and never run Dynamo
+# entrypoints. This site .pth installs the snapshot NIXL manager when
+# DYN_SNAPSHOT_CONTROL_DIR is set.
+[tool.hatch.build.targets.wheel.force-include]
+"components/src/dynamo_snapshot.pth" = "dynamo_snapshot.pth"
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -

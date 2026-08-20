@@ -572,6 +572,7 @@ status:
 - **Admission is create-only**: with DGD `startupPolicy: Immediate`, only Pods created after a checkpoint is `Ready` are restore-shaped. Existing Pods cold-started before checkpoint readiness keep running as-is.
 - **Restore admission must be installed**: DGD restores rely on the snapshot Pod mutating webhook, so upgrade the snapshot chart/webhook configuration along with the operator and CRDs when enabling these features.
 - **Network state is sensitive**: restore is sensitive to live TCP socket state. Loopback bootstrap/control sockets are the most reliable path today.
+- **P/D disagg NIXL is rebuilt on restore**: CRIU cannot restore IB/UCX queue pairs. vLLM and SGLang workers mint a new NIXL identity from the restore `incarnation_id` so a restored decode worker can reconnect to a live prefill worker. TensorRT-LLM P/D rebind is not implemented. In-flight KV transfers at dump time are not recovered.
 - **Privileged DaemonSet required**: `snapshot-agent` must run privileged to execute CRIU and `cuda-checkpoint`. Workload pods do not need to be privileged.
 
 ## Troubleshooting

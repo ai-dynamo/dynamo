@@ -1,0 +1,1 @@
+import dynamo.common.snapshot.autoinstall; dynamo.common.snapshot.autoinstall.install_snapshot_backends()
