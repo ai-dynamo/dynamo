@@ -1406,10 +1406,7 @@ where
             .filter(|worker_id| is_load_eligible(*worker_id))
             .collect::<Vec<_>>();
         if candidates.is_empty() {
-            anyhow::bail!(
-                "no caller-owned-load-eligible instances for endpoint {}",
-                self.client.endpoint.id()
-            );
+            return Err(self.empty_free_pool_error(&routing_instances));
         }
 
         self.picker()?
@@ -2496,6 +2493,14 @@ mod tests {
                 .unwrap(),
             3
         );
+        let error = router
+            .select_target_with_load(None, |_| false, |_| 0)
+            .unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[]
+        ));
         rt.shutdown();
     }
 
