@@ -47,13 +47,8 @@ use dynamo_runtime::transports::event_plane::MsgpackCodec;
 // if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 
-// Worker-load snapshots are queued separately from replica-sync events so the two publication
-// paths can be sized independently. Same admission policy: lifecycle callers enqueue without
-// awaiting, and the newest snapshot is dropped when the queue is full.
 const WORKER_LOAD_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 
-// A saturated load queue sheds one snapshot per lifecycle mutation, so per-drop logging would
-// flood at request rate. Drops are counted and reported at most once per interval instead.
 const WORKER_LOAD_DROP_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,10 +138,6 @@ impl WorkerLoadDropLog {
     }
 }
 
-/// Bounded admission point for worker-load snapshots.
-///
-/// Publication is best-effort: a snapshot that cannot be admitted is dropped rather than
-/// queued or awaited, so a stalled event transport cannot block or fail a lifecycle mutation.
 struct WorkerLoadEventSender {
     load_tx: mpsc::Sender<ActiveLoad>,
     cancellation_token: CancellationToken,
@@ -169,7 +160,6 @@ impl WorkerLoadEventSender {
         )
     }
 
-    /// Admit `load` for publication without blocking. Returns `false` when it was dropped.
     fn enqueue(&self, load: ActiveLoad) -> bool {
         match self.load_tx.try_send(load) {
             Ok(()) => true,
@@ -216,8 +206,6 @@ impl WorkerLoadEventSender {
 pub struct RuntimeSequencePublisher {
     event_sender: Option<ActiveSequenceEventSender>,
     load_sender: WorkerLoadEventSender,
-    /// Dropping the publisher aborts the load publisher task; it also stops on its own once
-    /// the queue closes or the cancellation token fires.
     _load_publisher_task: AbortOnDropHandle<()>,
     worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
 }
@@ -234,9 +222,7 @@ impl SequencePublisher for RuntimeSequencePublisher {
         self.load_sender.enqueue(load);
     }
 
-    // `publish_load_batch` is deliberately not overridden: the trait default enqueues each
-    // snapshot through the same queue, so batch and single publications share one FIFO and the
-    // capacity bound counts snapshots rather than variable-length batches.
+    // The default batch method routes every snapshot through this FIFO.
 
     fn observe_load(
         &self,
@@ -334,8 +320,6 @@ async fn run_worker_load_publisher<P: LoadEventPublisher>(
                 None => break,
             },
         };
-        // Load publication is best-effort, so cancellation drops an in-flight publish rather
-        // than delaying shutdown on transport backpressure.
         let publish_result = tokio::select! {
             _ = cancellation_token.cancelled() => break,
             result = publisher.publish_load_event(&load) => result,
@@ -830,8 +814,6 @@ mod tests {
             .expect("singleton publisher task should not panic");
     }
 
-    /// `worker_id` identifies the snapshot; `blocking` marks the ones the fake publisher holds
-    /// pending, standing in for a stalled event transport.
     fn active_load(worker_id: u64, blocking: bool) -> ActiveLoad {
         ActiveLoad {
             worker_id,
@@ -919,8 +901,7 @@ mod tests {
         for worker_id in (capacity as u64 + 1)..=(capacity as u64 + 3) {
             assert!(!sender.enqueue(active_load(worker_id, false)));
         }
-        // Let any concurrent publication run before asserting on it: exactly one publish may be
-        // in flight, so nothing queued behind the pending one may be attempted yet.
+        // Give a concurrent publish time to violate the single-in-flight invariant.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(
             attempted_rx.try_recv().is_err(),
