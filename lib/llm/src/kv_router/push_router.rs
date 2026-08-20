@@ -563,7 +563,6 @@ where
         request: SingleIn<PreprocessedRequest>,
         selection: WorkerSelection,
         mut guard: RequestGuard<Sel>,
-        exact: bool,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
@@ -598,17 +597,9 @@ where
         let updated_request = context.map(|_| backend_input);
         guard.record_prefill_start();
 
-        let dispatch = async {
-            if exact {
-                self.inner
-                    .dispatch_exact(updated_request, selection.worker.worker_id)
-                    .await
-            } else {
-                self.inner
-                    .direct(updated_request, selection.worker.worker_id)
-                    .await
-            }
-        };
+        let dispatch = self
+            .inner
+            .dispatch_kv_admitted(updated_request, selection.worker.worker_id);
         let dispatch_result = cancel_on_stop(
             request_context.as_ref(),
             dispatch.instrument(tracing::info_span!(
@@ -989,10 +980,7 @@ where
             }
         };
         drop(route_guard);
-        let stream = match self
-            .dispatch_selection(request, selection, guard, true)
-            .await
-        {
+        let stream = match self.dispatch_selection(request, selection, guard).await {
             Ok(stream) => stream,
             Err(error) => {
                 invalidate_on_non_cancellation(&mut operation, &error);
@@ -1133,10 +1121,7 @@ where
         };
         drop(route_guard);
         let selected_target = route_target(selection.worker);
-        let stream = match self
-            .dispatch_selection(request, selection, guard, operation.is_some())
-            .await
-        {
+        let stream = match self.dispatch_selection(request, selection, guard).await {
             Ok(stream) => stream,
             Err(error) => {
                 invalidate_on_non_cancellation(&mut operation, &error);
