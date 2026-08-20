@@ -65,9 +65,9 @@ first callback failure.
 V1 reuses the existing
 `gpu_memory_service.client.torch.extensions._allocator_ext` native shim
 unchanged and permits one V1 allocator/backend owner per process. The default
-V0 and `--use-v1` launch profiles are mutually exclusive. Mixed initialization
-is unsupported by contract and prevented by launch/process topology; no runtime
-cross-profile arbitration is provided or needed.
+V0 and `DYN_GMS_USE_V1=true` launch profiles are mutually exclusive. Mixed
+initialization is unsupported by contract and prevented by launch/process
+topology; no runtime cross-profile arbitration is provided or needed.
 
 Both client domains use the same `GMSClientMemoryManager` class and the same
 V0-style operations:
@@ -111,7 +111,7 @@ rank-local socket is the control-plane trust boundary.
 
 ## Cold weight storage
 
-The checkpoint saver with `--use-v1` connects RO to the rank-local `weights`
+The checkpoint saver with `DYN_GMS_USE_V1=true` connects RO to the rank-local `weights`
 socket, enumerates the committed allocation IDs and aligned sizes, temporarily
 imports them, and writes raw shard bytes through
 `snapshot.disk.write_device_shards`. Its manifest contains only a version and,
@@ -122,7 +122,7 @@ artifact directory. With sharded roots, files are distributed across the
 per-device roots using the existing V0 directory convention and the manifest
 records their absolute paths.
 
-On restore, the checkpoint loader with `--use-v1` connects RW to a fresh
+On restore, the checkpoint loader with `DYN_GMS_USE_V1=true` connects RW to a fresh
 `weights` socket, recreates the exact IDs and sizes, and builds generic
 `FileTransferSource` and `GMSTransferTarget` records. Backend selection goes
 through `snapshot.transfer.create_transfer_backend`; `nixl`, `nixl-gds`, and
@@ -204,26 +204,26 @@ model-specific layouts, or implement SGLang integration.
 Start one V1 child per visible device:
 
 ```text
-python3 -m gpu_memory_service.cli.server --use-v1
+DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server
 ```
 
 The supervisor discovers the visible devices and monitors the children. To
 start one rank-local child directly:
 
 ```text
-gpu-memory-service --use-v1 --device 0
+DYN_GMS_USE_V1=true gpu-memory-service --device 0
 ```
 
 Save or load every visible device (pass `--device N` for one GPU). Artifacts
 land under `<checkpoint-dir>/device-<ordinal>`:
 
 ```text
-python -m gpu_memory_service.cli.snapshot.saver --use-v1 \
+DYN_GMS_USE_V1=true python -m gpu_memory_service.cli.snapshot.saver \
   --checkpoint-dir /checkpoints/run/versions/1
-python -m gpu_memory_service.cli.snapshot.loader --use-v1 \
+DYN_GMS_USE_V1=true python -m gpu_memory_service.cli.snapshot.loader \
   --checkpoint-dir /checkpoints/run/versions/1 \
   --transfer-backend nixl-gds
-python3 -m gpu_memory_service.cli.server --use-v1 --enable-loader \
+DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server --enable-loader \
   --checkpoint-dir /checkpoints/run/versions/1 \
   --transfer-backend nixl-gds
 ```

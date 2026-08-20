@@ -329,6 +329,9 @@ func EnsureIntraPodGPUMemoryService(
 	gms.EnsureServerSidecar(podSpec, targetContainers[0], useV1)
 	for _, container := range targetContainers {
 		gms.EnsureClient(podSpec, container)
+		if useV1 {
+			gms.EnableV1(container)
+		}
 	}
 	for _, name := range extraClientContainerNames {
 		var container *corev1.Container
@@ -342,5 +345,8 @@ func EnsureIntraPodGPUMemoryService(
 			continue
 		}
 		gms.EnsureClient(podSpec, container)
+		if useV1 {
+			gms.EnableV1(container)
+		}
 	}
 }

@@ -6740,7 +6740,8 @@ func TestGenerateBasePodSpec_SnapshotUsesGMSV1(t *testing.T) {
 	assert.Equal(t, "true", envVarsToMap(podSpec.Containers[0].Env)[gmsruntime.EnvUseV1])
 	server := findInitContainerByName(podSpec, gmsruntime.ServerContainerName)
 	require.NotNil(t, server)
-	assert.Equal(t, []string{"--use-v1"}, server.Args)
+	assert.Empty(t, server.Args)
+	assert.Equal(t, "true", envVarsToMap(server.Env)[gmsruntime.EnvUseV1])
 }
 
 func TestGenerateBasePodSpec_GPUMemoryServiceRejectsMissingExtraClientContainers(t *testing.T) {
