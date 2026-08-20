@@ -114,6 +114,7 @@ class _SnapshotRuntimeProxy:
         self._snapshot_config = snapshot_config
         self._argv = list(argv) if argv is not None else None
         self._runtime: Any | None = None
+        self._failover_lock: Any | None = None
 
     async def snapshot_before_endpoint(self, engine: Any, config: Any) -> None:
         if self._runtime is not None:
@@ -148,12 +149,15 @@ class _SnapshotRuntimeProxy:
             config,
             self._argv,
         )
-        await pause_controller.resume()
-        pause_controller.mark_resumed()
         self._runtime, _ = _create_runtime(
             discovery_backend=config.discovery_backend,
             request_plane=config.request_plane,
             event_plane=config.event_plane,
+        )
+        from dynamo.common.snapshot.lifecycle import wake_restored_engine
+
+        self._failover_lock = await wake_restored_engine(
+            pause_controller, self._runtime
         )
         logging.info("Dynamo runtime created after TRT-LLM snapshot restore")
 

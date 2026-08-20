@@ -743,14 +743,13 @@ class TestCreate:
         shutdown_event = asyncio.Event()
         shutdown_endpoints = []
         snapshot_engine = Mock()
-        snapshot_controller = Mock(engine=snapshot_engine)
 
         await factory.create(
             runtime,
             config,
             shutdown_event,
             shutdown_endpoints,
-            snapshot_controller=snapshot_controller,
+            snapshot_engine=snapshot_engine,
         )
 
         factory._create_realtime_worker.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -776,7 +775,7 @@ class TestCreate:
         factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
 
-    async def test_passes_snapshot_controller(self, factory: WorkerFactory) -> None:
+    async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
         config = _make_config(enable_multimodal=True)
         runtime = Mock()
         shutdown_event = asyncio.Event()
@@ -788,14 +787,13 @@ class TestCreate:
             "/tmp/prometheus",
             Mock(),
         )
-        snapshot_controller = Mock(engine=snapshot_engine)
 
         await factory.create(
             runtime,
             config,
             shutdown_event,
             shutdown_endpoints,
-            snapshot_controller=snapshot_controller,
+            snapshot_engine=snapshot_engine,
         )
 
         factory._create_decode_worker.assert_called_once_with(  # type: ignore[union-attr]
@@ -803,7 +801,7 @@ class TestCreate:
             config,
             shutdown_event,
             shutdown_endpoints,
-            snapshot_controller=snapshot_controller,
+            snapshot_engine=snapshot_engine,
         )
 
 

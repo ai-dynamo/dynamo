@@ -22,7 +22,6 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
-from dynamo.common.snapshot.lifecycle import EngineSnapshotController
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -35,13 +34,11 @@ from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
-from .engine_monitor import VllmEngineMonitor
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
     EmbeddingWorkerHandler,
     PrefillWorkerHandler,
-    VllmEnginePauseController,
     get_dp_range_for_worker,
 )
 from .health_check import (
@@ -68,7 +65,6 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
-_SnapshotController = EngineSnapshotController[EngineSetupResult]
 
 
 def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
@@ -599,9 +595,6 @@ class WorkerFactory:
         self.register_vllm_model = register_vllm_model_fn
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
-        # The active flock is intentionally process-scoped. The worker factory
-        # lives for the duration of endpoint serving, and process exit releases it.
-        self._failover_lock: Any | None = None
 
     async def create(
         self,
@@ -609,13 +602,9 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
-        snapshot_controller: _SnapshotController | None = None,
+        snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
-
-        snapshot_engine = (
-            snapshot_controller.engine if snapshot_controller is not None else None
-        )
 
         if config.realtime:
             await self._create_realtime_worker(
@@ -651,10 +640,6 @@ class WorkerFactory:
                 runtime, config, shutdown_event, shutdown_endpoints
             )
         elif config.disaggregation_mode == DisaggregationMode.PREFILL:
-            if snapshot_controller is not None and config.gms_shadow_mode:
-                raise ValueError(
-                    "snapshot-backed shadow failover requires aggregated or decode mode"
-                )
             await self._create_prefill_worker(
                 runtime,
                 config,
@@ -669,7 +654,7 @@ class WorkerFactory:
                 config,
                 shutdown_event,
                 shutdown_endpoints,
-                snapshot_controller=snapshot_controller,
+                snapshot_engine=snapshot_engine,
             )
         return
 
@@ -1026,17 +1011,17 @@ class WorkerFactory:
 
     async def _maybe_wait_for_failover_lock(
         self,
-        pause_controller,
+        handler,
         runtime: DistributedRuntime,
         config: Config,
         failover_metrics=None,
     ) -> bool:
-        """Elect one shadow, retain its process lock, and wake its engine."""
+        # Shadow mode: sleep → probe → block on lock → wake. True only for a real
+        # (contended) failover, not the initial bootup.
         if config.gms_shadow_mode is not True:
             return False
 
-        if not pause_controller.is_paused:
-            await pause_controller.pause(1)
+        await handler._pause_controller.pause(1)
         if failover_metrics is not None:
             failover_metrics.set_state("standby")
 
@@ -1051,7 +1036,6 @@ class WorkerFactory:
         engine_id = os.environ.get("ENGINE_ID", "0")
         lock = FlockFailoverLock(lock_path)
         await lock.acquire(engine_id=f"engine-{engine_id}")
-        self._failover_lock = lock
         was_failover = lock.was_contended
         logger.info("[Shadow] Lock acquired, waking engine")
         if failover_metrics is not None:
@@ -1060,15 +1044,8 @@ class WorkerFactory:
                 # Only a contended acquire is a failover; a bootup is not a switch.
                 failover_metrics.record_switch_attempt()
 
-        try:
-            await pause_controller.resume()
-            pause_controller.mark_resumed()
-        except BaseException:
-            logger.critical(
-                "[Shadow] Engine wake failed after lock acquisition; "
-                "terminating process while retaining the lock"
-            )
-            os._exit(1)
+        await handler._pause_controller.resume()
+        handler._pause_controller.mark_resumed()
         logger.info("[Shadow] Engine awake, registering with discovery")
         return was_failover
 
@@ -1078,7 +1055,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_controller: _SnapshotController | None = None,
+        snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """
         Instantiate and serve
@@ -1089,7 +1066,7 @@ class WorkerFactory:
                 config,
                 shutdown_event,
                 shutdown_endpoints,
-                snapshot_controller=snapshot_controller,
+                snapshot_engine=snapshot_engine,
                 lifecycle=lifecycle,
             )
 
@@ -1099,14 +1076,11 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_controller: _SnapshotController | None,
+        snapshot_engine: Optional[EngineSetupResult],
         lifecycle: _DecodeWorkerLifecycle,
     ) -> None:
         """Initialize and serve a decode worker."""
 
-        snapshot_engine = (
-            snapshot_controller.engine if snapshot_controller is not None else None
-        )
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
@@ -1183,25 +1157,6 @@ class WorkerFactory:
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
         lifecycle.engine_client = engine_client
         lifecycle.vllm_config = vllm_config
-
-        engine_monitor = None
-        pause_controller = None
-        if config.gms_shadow_mode is True:
-            engine_monitor = VllmEngineMonitor(runtime, engine_client, shutdown_event)
-            pause_controller = (
-                snapshot_controller.pause_controller
-                if snapshot_controller is not None
-                else None
-            )
-            if pause_controller is None:
-                pause_controller = VllmEnginePauseController(engine_client)
-
-        was_failover = await self._maybe_wait_for_failover_lock(
-            pause_controller,
-            runtime,
-            config,
-            failover_metrics,
-        )
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
@@ -1233,11 +1188,8 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
-            engine_monitor=engine_monitor,
         )
         lifecycle.handler = handler
-        if pause_controller is not None:
-            handler._pause_controller = pause_controller
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -1303,6 +1255,12 @@ class WorkerFactory:
             logger.warning(
                 "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
+            )
+
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
             )
 
         # Wait for self-benchmark to complete before registering.
@@ -1553,9 +1511,11 @@ class WorkerFactory:
             lora_enabled=config.engine_args.enable_lora,
         )
 
-        was_failover = await self._maybe_wait_for_failover_lock(
-            handler._pause_controller, runtime, config, failover_metrics
-        )
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")

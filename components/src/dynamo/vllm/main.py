@@ -26,6 +26,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model
+from dynamo.common.snapshot.lifecycle import wake_restored_engine
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
@@ -152,15 +153,14 @@ async def worker(argv: list[str] | None = None) -> None:
         setup_vllm_engine,
     )
 
+    snapshot_engine = None
     if snapshot_controller is not None:
+        snapshot_engine = snapshot_controller.engine
         config = await refresh_snapshot_restore_config(
             config,
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
         config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
-        if not config.gms_shadow_mode:
-            await snapshot_controller.pause_controller.resume()
-            snapshot_controller.pause_controller.mark_resumed()
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -174,6 +174,12 @@ async def worker(argv: list[str] | None = None) -> None:
         request_plane=config.request_plane,
         event_plane=config.event_plane,
     )
+
+    # Keep the flock alive for process lifetime. Linux releases it on exit.
+    if snapshot_controller is not None:
+        _failover_lock = await wake_restored_engine(
+            snapshot_controller.pause_controller, runtime
+        )
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
@@ -192,7 +198,7 @@ async def worker(argv: list[str] | None = None) -> None:
         config,
         shutdown_event,
         shutdown_endpoints,
-        snapshot_controller=snapshot_controller,
+        snapshot_engine=snapshot_engine,
     )
 
     logger.debug("Worker function completed, exiting...")

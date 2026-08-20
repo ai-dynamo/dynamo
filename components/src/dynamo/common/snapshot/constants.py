@@ -48,6 +48,7 @@ RESTORE_RUNTIME_ENV_NAMES = {
     "ENGINE_ID",
     "FAILOVER_LOCK_PATH",
     "DYN_VLLM_GMS_SHADOW_MODE",
+    "DYN_GMS_USE_V1",
     # Optional non-secret platform endpoints that may be consumed after restore.
     "MODEL_EXPRESS_URL",
     "PROMETHEUS_ENDPOINT",

@@ -67,13 +67,9 @@ class SnapshotConfig:
             self._cleanup_ready_and_sentinels()
 
         if event == "restore":
-            logger.info("Restore sentinel detected")
-            # Restore-time env is only available after CRIU resumes this process.
-            # Return paused so the backend can refresh that env before deciding
-            # whether to resume normally or wait for failover leadership.
-            logger.info("Returning restored model application-paused")
-            # The checkpoint is complete; post-restore model registration may
-            # need normal Hugging Face cache/download behavior.
+            # Stay paused so backends can refresh restore env, create the
+            # runtime, then call wake_restored_engine().
+            logger.info("Restore sentinel detected; returning application-paused")
             os.environ.pop("HF_HUB_OFFLINE", None)
             return True
 
@@ -175,3 +171,45 @@ class EngineSnapshotController(Generic[EngineT]):
             self.pause_controller,
             *self.pause_args,
         )
+
+
+async def wake_restored_engine(
+    pause_controller: Any,
+    runtime: Any | None = None,
+    *,
+    lock_path: str | None = None,
+) -> Any | None:
+    """Resume a restore-paused engine after ``create_runtime()``.
+
+    When ``FAILOVER_LOCK_PATH`` is set, mark the process healthy, elect via
+    flock, then resume. Keep the returned lock for the process lifetime.
+    """
+    if lock_path is None:
+        lock_path = os.environ.get("FAILOVER_LOCK_PATH")
+
+    lock = None
+    if lock_path:
+        if runtime is not None:
+            runtime.set_health_status(True)
+        logger.info(
+            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+        )
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        lock = FlockFailoverLock(lock_path)
+        await lock.acquire(engine_id=f"engine-{os.environ.get('ENGINE_ID', '0')}")
+        logger.info("[Shadow] Lock acquired, waking engine")
+
+    try:
+        await pause_controller.resume()
+        pause_controller.mark_resumed()
+    except BaseException:
+        if lock is not None:
+            logger.critical(
+                "[Shadow] Engine wake failed after lock acquisition; "
+                "terminating process while retaining the lock"
+            )
+            os._exit(1)
+        raise
+
+    return lock

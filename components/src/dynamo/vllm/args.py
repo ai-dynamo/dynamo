@@ -168,19 +168,10 @@ def cross_validate_config(
             engine_config.stream_interval,
         )
 
-    gms_v1_profile = (
-        engine_config.load_format == "auto"
-        and engine_config.worker_cls
-        == "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
-    )
-    if (
-        dynamo_config.gms_shadow_mode
-        and engine_config.load_format != "gms"
-        and not gms_v1_profile
-    ):
+    # Validate --gms-shadow-mode requires --load-format gms
+    if dynamo_config.gms_shadow_mode and engine_config.load_format != "gms":
         raise ValueError(
-            "--gms-shadow-mode requires --load-format gms or "
-            "the GMS V1 worker with --load-format auto. "
+            "--gms-shadow-mode requires --load-format gms. "
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
 

@@ -443,28 +443,6 @@ def test_parse_args_without_served_model_name_has_no_aliases(mock_vllm_cli):
     assert config.served_model_aliases == []
 
 
-def test_shadow_mode_accepts_gms_v1_startup_profile(mock_vllm_cli):
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--worker-cls",
-        "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker",
-        "--load-format",
-        "auto",
-        "--gms-shadow-mode",
-        "--request-plane",
-        "tcp",
-    )
-
-    config = parse_args()
-
-    assert (
-        config.engine_args.worker_cls
-        == "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
-    )
-    assert config.engine_args.load_format == "auto"
-
-
 def test_should_prefetch_model_for_default_load_format():
     from dynamo.vllm.main import should_prefetch_model
 
