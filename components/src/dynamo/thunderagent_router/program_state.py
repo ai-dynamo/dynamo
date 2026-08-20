@@ -47,22 +47,13 @@ class Program:
     # monotonic seconds; used to compute resume-side decay
     acting_since: float = 0.0
 
-    # Bumped by every `begin_request`. Two concurrent requests for one session
-    # share this object, so object identity alone cannot tell a rollback whether
-    # the mutations it is about to undo are still its own.
+    # Distinguishes concurrent admissions that share a Program object.
     admission_epoch: int = 0
 
 
 @dataclass(frozen=True)
 class RequestSnapshot:
-    """State of a Program immediately before ``begin_request`` mutates it.
-
-    ``program`` is captured so a rollback can tell "the program I mutated" from
-    "a program with the same id that a later request created": the two are
-    different objects and only the first may be restored. ``admission_epoch``
-    extends that to the case where the object is the same but a later request
-    has admitted its own turn on it since.
-    """
+    """Program state captured before admission."""
 
     program: Program
     status: ProgramStatus
@@ -101,12 +92,7 @@ class ProgramTable:
         return program
 
     def snapshot_request(self, program_id: str) -> Optional[RequestSnapshot]:
-        """Record what a following ``begin_request``/admission attempt will change.
-
-        Returns None when the program does not exist yet: that is the signal to
-        ``rollback_request`` that the attempt is what created it, so undoing the
-        attempt means removing it rather than restoring fields.
-        """
+        """Capture state before admission; None means admission creates it."""
         program = self.programs.get(program_id)
         if program is None:
             return None
@@ -128,21 +114,7 @@ class ProgramTable:
     def rollback_request(
         self, program_id: str, snapshot: Optional[RequestSnapshot]
     ) -> None:
-        """Undo one abandoned request's mutations, given its pre-request snapshot.
-
-        With ``snapshot`` None the program did not exist before the attempt, so
-        it is dropped from both tables; dropping it from ``programs`` is what
-        releases the capacity the scheduler had accounted to it. Otherwise the
-        recorded fields — including ``paused`` membership — are put back, which
-        preserves a live session's history that ``release`` would discard.
-
-        Restoration is skipped when a different Program object now holds the id:
-        the recorded one was released meanwhile and a newer request owns it.
-
-        The caller is responsible for the matching ``admission_epoch`` check --
-        the same object can be shared by a later request whose mutations must
-        not be undone. See ``ThunderAgentScheduler._rollback_admission``.
-        """
+        """Restore state only if the snapshot still names the current program."""
         if snapshot is None:
             self.paused.pop(program_id, None)
             self.programs.pop(program_id, None)
@@ -161,15 +133,11 @@ class ProgramTable:
         program.soft_demoted_until = snapshot.soft_demoted_until
         program.acting_since = snapshot.acting_since
         program.admission_epoch = snapshot.admission_epoch
-        # A concurrent admission for the same program may have installed its own
-        # Event; leave that one in place rather than stranding its waiter.
+        # Do not replace an event installed by a concurrent admission.
         if program.waiting is None or program.waiting is snapshot.waiting:
             program.waiting = snapshot.waiting
         if program.lifecycle == ProgramLifecycle.PAUSED and program.waiting is not None:
-            # The Event may have been set by the resume this rollback is undoing.
-            # A paused program has to make its next waiter wait, and clearing
-            # cannot un-wake anyone: `set` completes every waiter already parked
-            # on the Event, and `clear` only affects `wait` calls made after it.
+            # A set event would admit the next paused turn without a capacity check.
             program.waiting.clear()
         if snapshot.was_paused:
             self.paused[program_id] = None
