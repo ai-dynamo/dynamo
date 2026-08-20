@@ -182,14 +182,12 @@ USER root
 # nixl-sys resolves the C API with a bare dlopen("libnixl_capi.so"), and
 # dynamo/_core.abi3.so carries no RPATH, so without this the Rust bindings
 # silently fall back to stub mode while the Python ones work. The wheel keeps
-# its libraries in a private directory; put that on the loader path and point
-# NIXL at the backend plugins beside them. The RUN below fails the build if
-# either path drifts from the wheel layout.
-ENV NIXL_PLUGIN_DIR=/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/.nixl_cu13.mesonpy.libs/plugins
+# its libraries in a private directory; put that on the loader path. NIXL finds
+# the backend plugins beside them on its own (nixl_plugin_manager.cpp's
+# getPluginDir dladdr fallback), so NIXL_PLUGIN_DIR is deliberately left unset.
 RUN NIXL_LIB_DIR="$(/opt/dynamo/venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/.nixl_cu13.mesonpy.libs" && \
     [ -f "${NIXL_LIB_DIR}/libnixl_capi.so" ] || { echo "missing ${NIXL_LIB_DIR}/libnixl_capi.so; NIXL wheel layout changed" >&2; exit 1; } && \
     [ -d "${NIXL_LIB_DIR}/plugins" ] || { echo "missing ${NIXL_LIB_DIR}/plugins; NIXL wheel layout changed" >&2; exit 1; } && \
-    [ "${NIXL_LIB_DIR}" = "${NIXL_PLUGIN_DIR%/plugins}" ] || { echo "NIXL_PLUGIN_DIR ${NIXL_PLUGIN_DIR} does not match ${NIXL_LIB_DIR}/plugins" >&2; exit 1; } && \
     echo "${NIXL_LIB_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
     ldconfig && \
     chmod 755 /opt/dynamo/.launch_screen && \
