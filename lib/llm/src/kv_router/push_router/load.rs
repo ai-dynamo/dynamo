@@ -131,19 +131,8 @@ impl RoutingLoadState {
                 "worker {worker_id} has no runtime configuration"
             );
         }
-        let worker_id = router.select_target_with_load(
-            pinned_worker.map(|target| target.0),
-            |worker_id| workers.contains_key(&worker_id),
-            |worker_id| {
-                workers.get(&worker_id).map_or(0, |config| {
-                    self.slots.active_request_count_for_worker(
-                        worker_id,
-                        config.data_parallel_start_rank(),
-                        config.data_parallel_size(),
-                    ) as u64
-                })
-            },
-        )?;
+        let worker_id =
+            self.select_worker(router, &workers, pinned_worker.map(|target| target.0))?;
         let worker = match pinned_worker {
             Some((pinned_worker_id, Some(dp_rank))) => {
                 debug_assert_eq!(worker_id, pinned_worker_id);
@@ -163,6 +152,38 @@ impl RoutingLoadState {
             worker,
             armed: true,
         })
+    }
+
+    /// Select using the current caller-owned load without reserving it.
+    pub(crate) fn peek(
+        &self,
+        router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    ) -> Result<WorkerWithDpRank> {
+        let _selection = self.selection_gate.lock();
+        let workers = self.workers.read();
+        let worker_id = self.select_worker(router, &workers, None)?;
+        self.least_loaded_rank(&workers, worker_id)
+    }
+
+    fn select_worker(
+        &self,
+        router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        workers: &HashMap<u64, ModelRuntimeConfig>,
+        pinned_worker: Option<u64>,
+    ) -> Result<u64> {
+        router.select_target_with_load(
+            pinned_worker,
+            |worker_id| workers.contains_key(&worker_id),
+            |worker_id| {
+                workers.get(&worker_id).map_or(0, |config| {
+                    self.slots.active_request_count_for_worker(
+                        worker_id,
+                        config.data_parallel_start_rank(),
+                        config.data_parallel_size(),
+                    ) as u64
+                })
+            },
+        )
     }
 
     fn least_loaded_rank(
