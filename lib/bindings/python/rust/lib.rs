@@ -83,6 +83,7 @@ mod planner;
 mod prometheus_metrics;
 mod push_egress;
 mod python_payload;
+mod trtllm_egress;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
