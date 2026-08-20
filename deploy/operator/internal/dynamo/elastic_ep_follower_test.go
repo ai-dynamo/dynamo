@@ -123,6 +123,14 @@ func TestSynthesizeElasticEPFollowerDCD_OnlyForElasticEP(t *testing.T) {
 			component:     withNodeCount(elasticEPComponent(), 2),
 			wantSynthesis: false,
 		},
+		// injectElasticEPRayLaunchFlags leaves a Command-less leader alone rather than
+		// emit a shell command with no executable, so no Ray head is started. A follower
+		// here would poll a /live endpoint that never comes up.
+		{
+			name:          "leader without an explicit Command gets none: it never starts a Ray head",
+			component:     withoutCommand(elasticEPComponent()),
+			wantSynthesis: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -185,6 +193,12 @@ func TestElasticEPFollowerName_BoundedToKubeLimit(t *testing.T) {
 
 func withReplicas(c *v1beta1.DynamoComponentDeploymentSharedSpec, n int32) *v1beta1.DynamoComponentDeploymentSharedSpec {
 	c.Replicas = ptr.To(n)
+	return c
+}
+
+// withoutCommand models a component whose real entrypoint is the image ENTRYPOINT.
+func withoutCommand(c *v1beta1.DynamoComponentDeploymentSharedSpec) *v1beta1.DynamoComponentDeploymentSharedSpec {
+	c.PodTemplate.Spec.Containers[0].Command = nil
 	return c
 }
 

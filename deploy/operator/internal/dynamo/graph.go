@@ -424,6 +424,15 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 	if !IsSinglePodElasticEPLeader(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec) {
 		return nil
 	}
+	// Synthesis needs strictly more than Service emission does: a Ray head must actually
+	// start. A leader with no explicit Command runs its image ENTRYPOINT, which the
+	// operator cannot reconstruct, so injectElasticEPRayLaunchFlags deliberately leaves
+	// it alone and never injects a head. A follower derived from it would poll a /live
+	// endpoint that never comes up. The Service is still emitted for that leader -- it
+	// is harmless and the shape may gain a Command later -- but no follower is derived.
+	if leader := GetMainContainer(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec); leader == nil || len(leader.Command) == 0 {
+		return nil
+	}
 	followerComponentName := elasticEPFollowerName(leaderComponentName)
 	follower := leaderDCD.DeepCopy()
 	follower.Name = elasticEPFollowerName(leaderDCD.Name)
