@@ -668,9 +668,7 @@ pub mod router {
     /// Stale active-request cleanup guard in seconds; this is not a request timeout.
     pub const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
 
-    /// Throughput of one non-CPU worker relative to one CPU worker, used by
-    /// `device-aware-weighted` routing. Values below 1 and unparsable values are ignored.
-    /// Defaults to 8.
+    /// Non-CPU-to-CPU capacity ratio for device-aware weighted routing.
     pub const DYN_ENCODER_CUDA_TO_CPU_RATIO: &str = "DYN_ENCODER_CUDA_TO_CPU_RATIO";
 }
 

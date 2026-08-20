@@ -528,6 +528,22 @@ impl RouterConfig {
             encoder_cuda_to_cpu_ratio,
         })
     }
+
+    #[getter]
+    fn encoder_cuda_to_cpu_ratio(&self) -> Option<usize> {
+        self.encoder_cuda_to_cpu_ratio
+    }
+
+    #[setter]
+    fn set_encoder_cuda_to_cpu_ratio(&mut self, ratio: Option<usize>) -> PyResult<()> {
+        if ratio.is_some_and(|value| value == 0) {
+            return Err(PyValueError::new_err(
+                "encoder_cuda_to_cpu_ratio must be 1 or more",
+            ));
+        }
+        self.encoder_cuda_to_cpu_ratio = ratio;
+        Ok(())
+    }
 }
 
 impl From<RouterConfig> for RsRouterConfig {

@@ -198,11 +198,7 @@ where
     /// Optional typed request extractor for multimodal embedding cache keys.
     multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
 
-    /// Throughput of one non-CPU worker relative to one CPU worker, used by
-    /// `RouterMode::DeviceAwareWeighted`. Resolved once at construction from the value a
-    /// caller passed to [`Self::with_non_cpu_to_cpu_ratio`], else from
-    /// [`environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO`](crate::config::environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO),
-    /// to avoid a syscall per request.
+    // Resolved at construction to avoid reading the environment per request.
     non_cpu_to_cpu_ratio: usize,
 
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
@@ -699,12 +695,7 @@ where
         })
     }
 
-    /// Set the throughput of one non-CPU worker relative to one CPU worker, which
-    /// `RouterMode::DeviceAwareWeighted` uses to split traffic between the two groups.
-    ///
-    /// This takes precedence over
-    /// [`environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO`](crate::config::environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO).
-    /// A ratio below 1 is ignored, so the environment variable and then the default of 8 apply.
+    /// Overrides the capacity ratio used by device-aware weighted routing.
     pub fn with_non_cpu_to_cpu_ratio(mut self, ratio: usize) -> Self {
         self.non_cpu_to_cpu_ratio = non_cpu_to_cpu_ratio(Some(ratio));
         self

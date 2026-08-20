@@ -52,10 +52,7 @@ pub struct RouterConfig {
     pub enforce_disagg: bool,
     #[serde(default)]
     pub session_affinity_ttl_secs: Option<u64>,
-    /// Throughput of one non-CPU worker relative to one CPU worker, which
-    /// `RouterMode::DeviceAwareWeighted` uses to split encode traffic between the two groups.
-    /// A value of 1 or more set here wins. Otherwise `DYN_ENCODER_CUDA_TO_CPU_RATIO` applies,
-    /// and otherwise the default of 8.
+    /// Non-CPU-to-CPU capacity ratio for device-aware weighted routing.
     #[serde(default)]
     pub encoder_cuda_to_cpu_ratio: Option<usize>,
 }

@@ -97,15 +97,9 @@ impl Default for RouteContext {
     }
 }
 
-/// Throughput of one non-CPU worker relative to one CPU worker, when nothing configures it.
 pub(crate) const DEFAULT_NON_CPU_TO_CPU_RATIO: usize = 8;
 
-/// Pick the non-CPU to CPU throughput ratio from the router configuration, falling back to
-/// [`DYN_ENCODER_CUDA_TO_CPU_RATIO`](crate::config::environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO)
-/// and then to [`DEFAULT_NON_CPU_TO_CPU_RATIO`]. A ratio below 1 is ignored, from either source.
-///
-/// Split from [`non_cpu_to_cpu_ratio`] so the precedence rules can be tested without touching
-/// process environment.
+/// Resolves configured, environment, and default ratios in precedence order.
 pub(crate) fn resolve_non_cpu_to_cpu_ratio(configured: Option<usize>, env: Option<&str>) -> usize {
     configured
         .filter(|value| *value >= 1)
@@ -116,7 +110,6 @@ pub(crate) fn resolve_non_cpu_to_cpu_ratio(configured: Option<usize>, env: Optio
         .unwrap_or(DEFAULT_NON_CPU_TO_CPU_RATIO)
 }
 
-/// Resolve the non-CPU to CPU throughput ratio, reading the environment once.
 pub(crate) fn non_cpu_to_cpu_ratio(configured: Option<usize>) -> usize {
     use crate::config::environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO;
     let env = std::env::var(DYN_ENCODER_CUDA_TO_CPU_RATIO).ok();

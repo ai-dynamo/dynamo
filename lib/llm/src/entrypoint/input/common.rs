@@ -230,7 +230,6 @@ pub async fn build_preprocessed_routing(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
-    encoder_cuda_to_cpu_ratio: Option<usize>,
 ) -> anyhow::Result<PreprocessedRouting> {
     build_preprocessed_routing_with_selector(
         client,
@@ -242,7 +241,7 @@ pub async fn build_preprocessed_routing(
         encoder_chooser,
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
-        encoder_cuda_to_cpu_ratio,
+        None,
     )
     .await
 }
@@ -307,8 +306,6 @@ where
     )
     .await?;
 
-    // Only override when the router configuration carries a ratio. Otherwise the router keeps
-    // the value it resolved from DYN_ENCODER_CUDA_TO_CPU_RATIO, or the default of 8.
     let router = match encoder_cuda_to_cpu_ratio {
         Some(ratio) => router.with_non_cpu_to_cpu_ratio(ratio),
         None => router,
