@@ -107,6 +107,19 @@ func ExecuteRestore(
 	if err := c.Restore(criuOpts, notify); err != nil {
 		log.Error(err, "go-criu Restore returned error")
 		logging.LogRestoreErrors(imageDirPath, settings.WorkDir, log)
+		// CRIU writes restore.log into the work directory, which cleanup()
+		// removes moments later -- so on a failed restore the only surviving
+		// evidence is whatever LogRestoreErrors happened to extract. Copy it
+		// next to dump.log in the images directory, which is checkpoint-backed
+		// and durable, and surface the tail the way dump does. Without this a
+		// restore failure gives one line and no way to see what CRIU was doing.
+		restoreLogPath := persistRestoreLog(settings.WorkDir, imageDirPath)
+		log.Error(err, "CRIU restore failed",
+			"images_dir", imageDirPath,
+			"work_dir", settings.WorkDir,
+			"restore_log_path", restoreLogPath,
+			"restore_log_tail", readLogTail(restoreLogPath),
+		)
 		cleanup()
 		return 0, nil, fmt.Errorf("CRIU restore failed: %w", err)
 	}
@@ -304,4 +317,37 @@ func (n *restoreNotify) PostRestore(pid int32) error {
 	n.restoredPID = pid
 	n.log.Info("CRIU post-restore: process restored", "pid", pid)
 	return nil
+}
+
+// persistRestoreLog copies CRIU's restore.log out of the work directory and
+// into the images directory before the work directory is cleaned up. Returns
+// the path it can be read from afterwards, or "" if no log was found.
+func persistRestoreLog(workDir, imageDirPath string) string {
+	if imageDirPath == "" {
+		return ""
+	}
+	dst := filepath.Join(imageDirPath, RestoreLogFilename)
+	for _, dir := range []string{workDir, imageDirPath} {
+		if dir == "" {
+			continue
+		}
+		src := filepath.Join(dir, RestoreLogFilename)
+		if src == dst {
+			if _, err := os.Stat(dst); err == nil {
+				return dst
+			}
+			continue
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			// The log is diagnostic only; a restore must not fail because we
+			// could not copy it.
+			return src
+		}
+		return dst
+	}
+	return ""
 }
