@@ -28,6 +28,7 @@ The example uses the following versions:
 | --- | --- |
 | Dynamo runtime images | `1.3.0` |
 | llm-d Batch Gateway chart and images | `0.3.0` |
+| llm-d Async chart and image | `v0.9.0` |
 | Valkey | `8.0.10-alpine` |
 | Model | `Qwen/Qwen3-0.6B` |
 
@@ -87,10 +88,10 @@ kubectl rollout status -n "${NAMESPACE}" \
   --timeout=180s
 ```
 
-### 4. Deploy llm-d Batch Gateway
+### 4. Deploy the synchronous control
 
-Install the pinned upstream chart. The values file routes exactly one model to
-the dedicated Dynamo frontend:
+Install the pinned upstream chart in its default synchronous dispatch mode. The
+values file routes exactly one model to the dedicated Dynamo frontend:
 
 ```bash
 helm upgrade --install batch-gateway \
@@ -111,7 +112,7 @@ kubectl rollout status -n "${NAMESPACE}" \
   --timeout=180s
 ```
 
-### 5. Run the Batch Lifecycle
+### 5. Run the synchronous batch lifecycle
 
 Forward the Batch API in one terminal:
 
@@ -136,19 +137,67 @@ The example client performs three jobs:
 The command exits with an error if a job reaches an unexpected terminal state
 or returns unexpected request counts or output identifiers.
 
+### 6. Switch to llm-d Async dispatch
+
+Install the pinned llm-d Async chart. The Async Processor reads requests from a
+Redis sorted set, sends each request to the same Dynamo frontend, and writes
+results to the configured Redis list:
+
+```bash
+helm upgrade --install async-dispatch \
+  oci://ghcr.io/llm-d/charts/llm-d-async \
+  --version v0.9.0 \
+  --namespace "${NAMESPACE}" \
+  --values llm-d-async-values.yaml
+
+kubectl rollout status -n "${NAMESPACE}" \
+  deployment/async-dispatch-llm-d-async \
+  --timeout=180s
+```
+
+Switch the Batch Processor to Async dispatch. The second values file is an
+overlay; keep the base values file first:
+
+```bash
+helm upgrade --install batch-gateway \
+  oci://ghcr.io/llm-d/charts/batch-gateway \
+  --version 0.3.0 \
+  --namespace "${NAMESPACE}" \
+  --values batch-gateway-values.yaml \
+  --values batch-gateway-async-values.yaml
+
+kubectl rollout status -n "${NAMESPACE}" \
+  deployment/batch-gateway-processor \
+  --timeout=180s
+```
+
+Keep the Batch API port-forward running and repeat the lifecycle:
+
+```bash
+python3 run_example.py --base-url http://127.0.0.1:8001
+```
+
+The same client validates both modes. In Async mode, Batch Gateway continues to
+own files, job state, cancellation, and output assembly. llm-d Async owns the
+request and result queues and sends ordinary OpenAI-compatible requests to the
+Dynamo frontend. Dynamo remains responsible for routing each request to a
+worker.
+
 ## What This Example Covers
 
 - Uploading a JSONL file and creating, polling, and cancelling Batch jobs.
 - Retrieving successful output and request-level error files.
 - Running real `/v1/chat/completions` inference through a Dynamo frontend and
   one-GPU vLLM worker.
+- Running the same lifecycle with synchronous dispatch and with requests routed
+  through llm-d Async Redis queues.
 - Isolating batch traffic in a `DynamoGraphDeployment` that does not share a
   frontend, router, or worker with an online pool.
 - Pinning the Dynamo and llm-d versions used by the example.
 - Reproducing the lifecycle with the standalone example client.
 
 This workflow was validated with one B200 GPU, Dynamo `1.3.0`, llm-d Batch
-Gateway `0.3.0`, and Qwen3-0.6B.
+Gateway `0.3.0`, llm-d Async `v0.9.0`, and Qwen3-0.6B.
 
 ## What This Example Does Not Cover
 
@@ -162,8 +211,13 @@ Gateway `0.3.0`, and Qwen3-0.6B.
   collector while keeping the `24h` Batch completion window.
 - TLS, ingress, production authentication, metadata-store authentication, HA,
   or multi-replica Batch Gateway components.
-- Shared online and offline capacity, llm-d Async, or Planner-controlled
-  dispatch budgets.
+- Shared online and offline capacity or Planner-controlled dispatch budgets.
+- Durable request redelivery after an llm-d Async failure, multi-replica Batch
+  Processor result routing, or resuming a batch after Processor pod or node
+  loss. Track these limitations in
+  [llm-d Async issue 404](https://github.com/llm-d/llm-d-async/issues/404),
+  [Batch Gateway issue 644](https://github.com/llm-d/llm-d-batch-gateway/issues/644),
+  and [Batch Gateway issue 645](https://github.com/llm-d/llm-d-batch-gateway/issues/645).
 - Completions, embeddings, multimodal inputs, Parquet, or object storage.
 - Performance benchmarking, CI coverage, an upgrade matrix, or a supported
   deployment recipe.
@@ -182,6 +236,7 @@ was not exercised unchanged.
 | Request timeout | The processor allows five minutes and up to three retries per inference request. |
 | Cancellation | llm-d stops queued dispatch and assembles the terminal result. Requests already accepted by Dynamo can still finish. |
 | Output and errors | llm-d stores and assembles Batch files. Dynamo returns ordinary OpenAI-compatible responses. |
+| Dispatch | Sync mode calls the Dynamo frontend directly. Async mode uses Redis request/result queues and a constant-open gate before calling the same frontend. |
 | Capacity | The processor can reach only the dedicated Dynamo frontend and worker in this graph. |
 
 llm-d owns the Batch API, file and job state, queueing, cancellation, recovery,
@@ -194,6 +249,7 @@ example.
 Delete only resources created by this example:
 
 ```bash
+helm uninstall async-dispatch -n "${NAMESPACE}" --ignore-not-found
 helm uninstall batch-gateway -n "${NAMESPACE}"
 kubectl delete -n "${NAMESPACE}" -f batch-infra.yaml
 kubectl delete -n "${NAMESPACE}" -f dynamo.yaml
