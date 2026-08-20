@@ -46,6 +46,29 @@ def test_invalid_environment():
         )
 
 
+def test_sla_target_rejects_redis_environment():
+    """optimization_target='sla' needs forward-pass metrics from a runtime
+    binding; the redis connector never wires one up (no worker_info_provider,
+    unlike 'virtual'), so it would silently degrade to static config sizing
+    rather than actually doing SLA-aware scaling."""
+    with pytest.raises(ValidationError, match="not supported with environment='redis'"):
+        PlannerConfig(
+            namespace="test-ns",
+            environment="redis",
+            optimization_target="sla",
+        )
+
+
+def test_sla_target_allowed_with_virtual_environment():
+    """Sanity check the rejection is redis-specific, not sla-in-general."""
+    config = PlannerConfig(
+        namespace="test-ns",
+        environment="virtual",
+        optimization_target="sla",
+    )
+    assert config.optimization_target == "sla"
+
+
 # ---------------------------------------------------------------------------
 # Power-awareness validator (DGD-owned caps; read-only)
 # ---------------------------------------------------------------------------

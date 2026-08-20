@@ -385,7 +385,7 @@ class PlannerConfig(BaseModel):
     )
 
     environment: Literal[
-        "kubernetes", "virtual", "global-planner"
+        "kubernetes", "virtual", "global-planner", "redis"
     ] = SLAPlannerDefaults.environment
     namespace: str = Field(
         default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo"),
@@ -894,6 +894,17 @@ class PlannerConfig(BaseModel):
             raise ValueError(
                 "global_planner_namespace is required when environment='global-planner'. "
                 "Please specify the namespace where GlobalPlanner is running."
+            )
+
+        if self.optimization_target == "sla" and self.environment == "redis":
+            raise ValueError(
+                "optimization_target='sla' is not supported with "
+                "environment='redis'. SLA sizing needs forward-pass metrics "
+                "from a runtime binding, which -- unlike 'virtual' -- the "
+                "redis connector never wires up (no worker_info_provider), "
+                "so it would silently fall back to static config sizing "
+                "alone. Use 'throughput'/'latency'/'load' with "
+                "environment='redis', or 'virtual'/'kubernetes' for 'sla'."
             )
 
         if self.optimization_target == "load":

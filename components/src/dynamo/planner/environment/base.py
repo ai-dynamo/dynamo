@@ -171,6 +171,9 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         await self.controller.set_component_replicas(targets, blocking=blocking)
 
     async def shutdown(self) -> None:
+        controller_shutdown = getattr(self.controller, "shutdown", None)
+        if callable(controller_shutdown):
+            await controller_shutdown()
         await self.fpm_provider.shutdown()
 
     async def _refresh_deployment_state(
