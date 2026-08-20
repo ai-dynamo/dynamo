@@ -249,6 +249,8 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	done
 	echo "Removing name from standalone v1beta1 DynamoComponentDeployment required fields"
 	$(YQ) eval '(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.required) |= (. - ["name"])' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	echo "Removing DGD-only provider overrides from standalone DynamoComponentDeployment schemas"
+	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec.properties) |= (del(.providerOverride) | del(.multinode.properties.leader) | del(.multinode.properties.worker))' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	# PodTemplateSpec is an external Kubernetes type, so its item-level markers cannot be declared on the API field.
 	# Item-scoped rules avoid unbounded list comprehensions without imposing maxItems on the public API.
 	# The annotation value bound matches Kubernetes' total annotation size limit.
@@ -725,8 +727,7 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
-	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
-	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
+	# Post-process duplicate anchors and fields pruned from standalone DCD CRDs.
 	python3 docs/fix-api-anchors.py ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 
 HELM_CHART_DIR := ../helm/charts/platform
