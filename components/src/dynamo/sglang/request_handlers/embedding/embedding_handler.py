@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator
 from typing import Any, Dict, List, Optional
 
 import sglang as sgl
+from sglang.srt.managers.io_struct import EmbeddingReqInput
 
 from dynamo._core import Context
 from dynamo.sglang.args import Config
@@ -49,6 +50,41 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         super().cleanup()
         self.engine.shutdown()
         logging.info("Engine shutdown")
+
+    async def _encode_input(
+        self,
+        embedding_input: str | list[Any],
+        *,
+        trace_header: dict[str, str] | None,
+        trace_id: str | None,
+    ) -> Any:
+        """Dispatch text and pre-tokenized inputs through their native paths."""
+        if isinstance(embedding_input, list) and (
+            not embedding_input or not isinstance(embedding_input[0], str)
+        ):
+            request_id: str | list[str] | None = trace_id
+            if (
+                embedding_input
+                and isinstance(embedding_input[0], list)
+                and trace_id is not None
+            ):
+                request_id = [
+                    f"{trace_id}-{index}" for index in range(len(embedding_input))
+                ]
+
+            request = EmbeddingReqInput(
+                input_ids=embedding_input,
+                external_trace_header=trace_header,
+                rid=request_id,
+            )
+            responses = self.engine.tokenizer_manager.generate_request(request, None)
+            return await anext(responses)
+
+        return await self.engine.async_encode(
+            prompt=embedding_input,
+            external_trace_header=trace_header,
+            rid=trace_id,
+        )
 
     async def generate(
         self, request: dict, context: Context
@@ -105,10 +141,10 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         trace_header = context.trace_headers() if self.enable_trace else None
         trace_id = context.trace_id
 
-        result = await self.engine.async_encode(
-            prompt=prompt,
-            external_trace_header=trace_header,
-            rid=trace_id,
+        result = await self._encode_input(
+            prompt,
+            trace_header=trace_header,
+            trace_id=trace_id,
         )
 
         # Transform the response to OpenAI format
