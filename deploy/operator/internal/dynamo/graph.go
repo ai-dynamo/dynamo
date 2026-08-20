@@ -1783,11 +1783,9 @@ func GenerateBasePodSpec(
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
-		if backendFramework == BackendFrameworkSGLang && usesSGLangSnapshotGMSV1(component) {
-			gms.EnsureV1ServerSidecar(&podSpec, &podSpec.Containers[0])
-		} else {
-			gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
-		}
+		// Snapshot + intra-pod GMS uses V1 for every backend. GMS or
+		// failover without checkpoint stays on the V0 sidecar.
+		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], GetCheckpoint(component) != nil)
 		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {

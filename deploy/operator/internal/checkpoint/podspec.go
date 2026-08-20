@@ -283,7 +283,7 @@ func InjectResolvedCheckpointIntoPodSpec(
 	if restore.info.Ready && restore.info.GPUMemoryService != nil && restore.info.GPUMemoryService.Enabled {
 		switch restore.info.GPUMemoryService.Mode {
 		case "", nvidiacomv1alpha1.GMSModeIntraPod:
-			EnsureIntraPodGPUMemoryService(podSpec, targetContainers, restore.info.GPUMemoryService.ExtraClientContainers)
+			EnsureIntraPodGPUMemoryService(podSpec, targetContainers, restore.info.GPUMemoryService.ExtraClientContainers, true)
 		case nvidiacomv1alpha1.GMSModeInterPod:
 			return fmt.Errorf("gpuMemoryService checkpoint restore for mode %q is not implemented", restore.info.GPUMemoryService.Mode)
 		default:
@@ -315,26 +315,9 @@ func injectCheckpointIntoPodSpec(
 }
 
 // EnsureIntraPodGPUMemoryService wires the in-pod GMS server sidecar and
-// socket clients for checkpoint create/restore pod specs.
+// socket clients for checkpoint create/restore pod specs. Checkpoint jobs
+// and restores are snapshot-coupled, so useV1 selects the V1 server.
 func EnsureIntraPodGPUMemoryService(
-	podSpec *corev1.PodSpec,
-	targetContainers []*corev1.Container,
-	extraClientContainerNames []string,
-) {
-	ensureIntraPodGPUMemoryService(podSpec, targetContainers, extraClientContainerNames, false)
-}
-
-// EnsureIntraPodGPUMemoryServiceV1 wires the V1 server for clients already
-// configured to use the V1 protocol.
-func EnsureIntraPodGPUMemoryServiceV1(
-	podSpec *corev1.PodSpec,
-	targetContainers []*corev1.Container,
-	extraClientContainerNames []string,
-) {
-	ensureIntraPodGPUMemoryService(podSpec, targetContainers, extraClientContainerNames, true)
-}
-
-func ensureIntraPodGPUMemoryService(
 	podSpec *corev1.PodSpec,
 	targetContainers []*corev1.Container,
 	extraClientContainerNames []string,
@@ -343,11 +326,7 @@ func ensureIntraPodGPUMemoryService(
 	if len(targetContainers) == 0 {
 		return
 	}
-	if useV1 {
-		gms.EnsureV1ServerSidecar(podSpec, targetContainers[0])
-	} else {
-		gms.EnsureServerSidecar(podSpec, targetContainers[0])
-	}
+	gms.EnsureServerSidecar(podSpec, targetContainers[0], useV1)
 	for _, container := range targetContainers {
 		gms.EnsureClient(podSpec, container)
 	}

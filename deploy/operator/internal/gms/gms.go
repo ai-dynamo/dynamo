@@ -29,6 +29,9 @@ const (
 	// EnvSocketDir is the environment variable name for the GMS UDS socket directory.
 	EnvSocketDir = "GMS_SOCKET_DIR"
 
+	// EnvUseV1 selects the GMS V1 client protocol in engine processes.
+	EnvUseV1 = "DYN_GMS_USE_V1"
+
 	// ServerModule is the Python module for the GMS server entry point.
 	ServerModule = "gpu_memory_service.cli.server"
 )
@@ -39,17 +42,11 @@ const (
 // socket-bind via connect-retry. Native sidecar status is kept so kubelet
 // terminates the server when the Job's regular containers exit; a regular
 // container here would keep the Pod in Running forever. Idempotent.
-func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container) {
-	ensureServerSidecar(podSpec, mainContainer, nil)
-}
-
-// EnsureV1ServerSidecar adds a GMS V1 server. Every client in the pod must use
-// the V1 protocol.
-func EnsureV1ServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container) {
-	ensureServerSidecar(podSpec, mainContainer, []string{"--use-v1"})
-}
-
-func ensureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, args []string) {
+//
+// Snapshot-coupled GMS uses the V1 protocol: the sidecar is launched with
+// --use-v1 and the engine container receives DYN_GMS_USE_V1=true. Intra-pod
+// GMS without snapshot keeps the V0 sidecar and does not set that env.
+func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) {
 	if podSpec == nil || mainContainer == nil {
 		return
 	}
@@ -57,7 +54,25 @@ func ensureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 	EnsureClient(podSpec, mainContainer)
 
 	sidecar := Container(ServerContainerName, ServerModule, mainContainer.Image)
-	sidecar.Args = args
+	if useV1 {
+		sidecar.Args = []string{"--use-v1"}
+
+		// Advertise V1 to the engine so SGLang and vLLM select the V1 client.
+		foundEnv := false
+		for i := range mainContainer.Env {
+			if mainContainer.Env[i].Name == EnvUseV1 {
+				mainContainer.Env[i] = corev1.EnvVar{Name: EnvUseV1, Value: "true"}
+				foundEnv = true
+				break
+			}
+		}
+		if !foundEnv {
+			mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{
+				Name:  EnvUseV1,
+				Value: "true",
+			})
+		}
+	}
 	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == sidecar.Name {

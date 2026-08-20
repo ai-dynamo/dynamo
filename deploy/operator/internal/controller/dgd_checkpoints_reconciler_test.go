@@ -373,6 +373,10 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	assert.Contains(t, main.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
 	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName))
+	server := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName)
+	require.NotNil(t, server)
+	assert.Equal(t, []string{"--use-v1"}, server.Args)
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
 	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
 	require.NoError(t, err)
 	checkpointID := checkpoint.DGDCheckpointID(
@@ -399,33 +403,6 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	require.NotNil(t, controllerRef)
 	assert.Equal(t, "DynamoCheckpoint", controllerRef.Kind)
 	assert.Equal(t, ckpt.Name, controllerRef.Name)
-
-	t.Log("Render the same GMS checkpoint contract for SGLang V1")
-	sglangDGD := dgd.DeepCopy()
-	sglangDGD.Name = "test-sglang-dgd"
-	sglangDGD.UID = types.UID("sglang-dgd-uid")
-	sglangComponent := component.DeepCopy()
-	sglangComponent.Checkpoint.Identity.BackendFramework = string(dynamo.BackendFrameworkSGLang)
-
-	sglangCheckpoint, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(
-		ctx, sglangDGD, "worker", betaComponent(t, sglangComponent),
-	)
-	require.NoError(t, err)
-	sglangMain := findContainer(
-		sglangCheckpoint.Spec.Job.PodTemplateSpec.Spec.Containers,
-		commonconsts.MainContainerName,
-	)
-	require.NotNil(t, sglangMain)
-	assert.Contains(t, sglangMain.Env, corev1.EnvVar{
-		Name:  "DYN_SGL_ENABLE_GMS_V1",
-		Value: "true",
-	})
-	sglangServer := findContainer(
-		sglangCheckpoint.Spec.Job.PodTemplateSpec.Spec.InitContainers,
-		gms.ServerContainerName,
-	)
-	require.NotNil(t, sglangServer)
-	assert.Equal(t, []string{"--use-v1"}, sglangServer.Args)
 }
 
 func TestDGDCheckpointsReconciler_SyncGMSResourceClaimTemplateUsesTemporaryDGDOwner(t *testing.T) {

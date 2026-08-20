@@ -298,7 +298,6 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 			targetContainerName,
 			checkpointID,
 			gmsSpec,
-			backendFramework,
 		); err != nil {
 			return nil, err
 		}
@@ -408,7 +407,6 @@ func prepareCheckpointGMSPodTemplate(
 	targetContainerName string,
 	checkpointID string,
 	gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec,
-	backendFramework dynamo.BackendFramework,
 ) error {
 	switch gmsSpec.Mode {
 	case "", nvidiacomv1alpha1.GMSModeIntraPod:
@@ -423,20 +421,12 @@ func prepareCheckpointGMSPodTemplate(
 		return err
 	}
 	ensureCheckpointGMSPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
-	if backendFramework == dynamo.BackendFrameworkSGLang {
-		dynamo.EnableSGLangGMSV1(targetContainer)
-		checkpoint.EnsureIntraPodGPUMemoryServiceV1(
-			&podTemplate.Spec,
-			[]*corev1.Container{targetContainer},
-			gmsSpec.ExtraClientContainers,
-		)
-	} else {
-		checkpoint.EnsureIntraPodGPUMemoryService(
-			&podTemplate.Spec,
-			[]*corev1.Container{targetContainer},
-			gmsSpec.ExtraClientContainers,
-		)
-	}
+	checkpoint.EnsureIntraPodGPUMemoryService(
+		&podTemplate.Spec,
+		[]*corev1.Container{targetContainer},
+		gmsSpec.ExtraClientContainers,
+		true,
+	)
 	return nil
 }
 
