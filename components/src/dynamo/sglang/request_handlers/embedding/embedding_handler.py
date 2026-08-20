@@ -59,19 +59,20 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         trace_id: str | None,
     ) -> Any:
         """Dispatch text and pre-tokenized inputs through their native paths."""
+        request_id: str | list[str] | None = trace_id
+        if (
+            isinstance(embedding_input, list)
+            and embedding_input
+            and isinstance(embedding_input[0], (str, list))
+            and trace_id is not None
+        ):
+            request_id = [
+                f"{trace_id}-{index}" for index in range(len(embedding_input))
+            ]
+
         if isinstance(embedding_input, list) and (
             not embedding_input or not isinstance(embedding_input[0], str)
         ):
-            request_id: str | list[str] | None = trace_id
-            if (
-                embedding_input
-                and isinstance(embedding_input[0], list)
-                and trace_id is not None
-            ):
-                request_id = [
-                    f"{trace_id}-{index}" for index in range(len(embedding_input))
-                ]
-
             request = EmbeddingReqInput(
                 input_ids=embedding_input,
                 external_trace_header=trace_header,
@@ -83,7 +84,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         return await self.engine.async_encode(
             prompt=embedding_input,
             external_trace_header=trace_header,
-            rid=trace_id,
+            rid=request_id,
         )
 
     async def generate(

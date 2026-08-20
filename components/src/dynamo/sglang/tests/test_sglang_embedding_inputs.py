@@ -6,9 +6,16 @@
 from typing import Any
 
 import pytest
-from sglang.srt.managers.io_struct import EmbeddingReqInput
 
-from dynamo.sglang.request_handlers.embedding import embedding_handler as eh
+pytest.importorskip(
+    "sglang.srt.managers.io_struct", reason="sglang not installed in this container"
+)
+
+from sglang.srt.managers.io_struct import EmbeddingReqInput  # noqa: E402
+
+from dynamo.sglang.request_handlers.embedding import (  # noqa: E402
+    embedding_handler as eh,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -25,6 +32,7 @@ class _TokenizerManager:
         self.requests: list[tuple[EmbeddingReqInput, Any]] = []
 
     async def generate_request(self, request: EmbeddingReqInput, context: Any):
+        request.normalize_batch_and_arguments()
         self.requests.append((request, context))
         yield {"embedding": [0.1, 0.2], "meta_info": {"prompt_tokens": 2}}
 
@@ -54,8 +62,14 @@ def _handler(*, enable_trace: bool = True) -> eh.EmbeddingWorkerHandler:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("embedding_input", ["hello", ["hello", "world"]])
-async def test_text_inputs_use_async_encode(embedding_input):
+@pytest.mark.parametrize(
+    ("embedding_input", "expected_request_id"),
+    [
+        ("hello", "embedding-trace"),
+        (["hello", "world"], ["embedding-trace-0", "embedding-trace-1"]),
+    ],
+)
+async def test_text_inputs_use_async_encode(embedding_input, expected_request_id):
     handler = _handler()
 
     outputs = [
@@ -70,7 +84,7 @@ async def test_text_inputs_use_async_encode(embedding_input):
         {
             "prompt": embedding_input,
             "external_trace_header": {"traceparent": "00-test"},
-            "rid": "embedding-trace",
+            "rid": expected_request_id,
         }
     ]
     assert handler.engine.tokenizer_manager.requests == []
