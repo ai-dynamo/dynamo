@@ -35,45 +35,13 @@ use crate::protocols::openai::chat_completions::{
 use crate::tokenizers::traits::Tokenizer;
 use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
 
-/// Upper bound on the lifetime of one dispatched speculative-prefill warmup.
-///
-/// The warmup is a best-effort KV-cache fill for a turn the user may never
-/// send, and it is dispatched on a context nobody else holds, so nothing
-/// upstream can ever stop it. A backend that returns a stream which stays
-/// pending instead of reaching EOF would otherwise pin one task — and
-/// everything it captured — for the life of the process, once per request
-/// that used the hint. The value is generous relative to a `max_tokens=1`
-/// request on a healthy backend and short relative to a human turn: a warmup
-/// that has not finished by now has already lost the race with the next turn
-/// it was warming for.
-///
-/// The bound covers the warmup only. It is armed after the client's turn has
-/// finished, because that is when the warmup is dispatched; a turn is allowed
-/// to take as long as it likes.
+/// Maximum lifetime of one dispatched speculative-prefill warmup.
 const PREFILL_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long the warmup is polled after its downstream has been asked to stop.
-///
-/// `stop_generating` is only a signal. A downstream that acts on it does so
-/// from inside the response stream — the KV router's `monitor_response_stream`
-/// selects on `context.stopped()` and, when that wins, runs `guard.abort()`
-/// before ending the stream. That code lives in the stream this task is
-/// draining, so it can only run if the stream is polled again after the
-/// signal. Dropping straight after signalling therefore guarantees the very
-/// cleanup the signal was asking for never happens.
-///
-/// So the bail-out paths keep draining for this long before letting go. A
-/// downstream that honours the stop ends its stream well inside the window and
-/// the task finishes early; one that ignores it costs this much extra and is
-/// then dropped exactly as before. Short next to [`PREFILL_TASK_TIMEOUT`],
-/// because by this point the warmup has already lost its race.
+/// Maximum downstream cleanup time after a warmup is stopped.
 const PREFILL_WIND_DOWN_GRACE: Duration = Duration::from_secs(5);
 
-/// Publication slot for the warmup stream's context.
-///
-/// [`prefill_task`] fills it before draining so that the bounding wrapper in
-/// [`maybe_wrap_stream`] can reach the downstream context on the timeout and
-/// cancellation paths.
+/// Makes the downstream context reachable from timeout and cancellation paths.
 type PrefillContextSlot = Mutex<Option<Arc<dyn AsyncEngineContext>>>;
 
 /// A minimal `OAIChatLikeRequest` for speculative next-turn prefill.
@@ -115,13 +83,7 @@ impl OAIChatLikeRequest for SpeculativePrefillRequest {
 /// a background task that renders the next-turn prefix and fires a
 /// `max_tokens=1` request through the pipeline to warm the KV cache.
 ///
-/// Once dispatched, the warmup is bounded by [`PREFILL_TASK_TIMEOUT`], and the
-/// task ends at any point when `cancel` — where supplied — is cancelled;
-/// nothing else can stop it, because it runs on a context of its own and no
-/// owner keeps its handle. Either ending asks the downstream to stop and then
-/// drains it for up to [`PREFILL_WIND_DOWN_GRACE`] so that request can actually
-/// be acted on. `request_id` identifies the client request that produced the
-/// warmup, so an abandoned or cancelled one can be traced back.
+/// Warmups stop on timeout or cancellation and allow bounded downstream cleanup.
 ///
 /// When the flag is not set, returns the stream unmodified with zero overhead.
 pub fn maybe_wrap_stream(
@@ -156,20 +118,11 @@ pub fn maybe_wrap_stream(
     let request_id = request_id.to_string();
     let model = request.inner.model.clone();
     tokio::spawn(async move {
-        // Waiting for the client's turn to end is deliberately outside the
-        // bound below: `tx` lives in the wrapper stream returned here, so `rx`
-        // resolves — with `Err` once that stream is dropped — as soon as the
-        // client's generation ends, one way or the other. Charging the wait to
-        // the warmup's budget would spend the whole bound on the turn, and any
-        // turn longer than the bound would never get a warmup at all.
-        //
-        // Cancellation is polled first, here and below. `biased` polls in
-        // source order, so with the work arm first a terminal chunk that lands
-        // in the same poll as a cancellation would win and dispatch a warmup
-        // into a runtime that is already shutting down.
+        // The warmup timeout begins after the client turn completes.
         let response_text = tokio::select! {
             biased;
 
+            // Biased selects must check cancellation before ready work.
             () = cancelled(cancel.clone()) => {
                 tracing::debug!(
                     request_id = %request_id,
@@ -182,17 +135,13 @@ pub fn maybe_wrap_stream(
             received = rx => {
                 match received {
                     Ok(response_text) => response_text,
-                    // No terminal chunk: no assistant turn to warm against.
                     Err(_) => return,
                 }
             }
         };
 
         let context_slot = PrefillContextSlot::new(None);
-        // Pinned and polled by reference so that neither `select!` arm consumes
-        // it: on the bail-out arms the warmup future — and with it the
-        // downstream stream — is still alive while `stop_downstream` runs, and
-        // is dropped only when this block ends.
+        // Keep the warmup alive for bounded cleanup after cancellation or timeout.
         let mut warmup = std::pin::pin!(prefill_task(
             next,
             formatter,
@@ -202,10 +151,6 @@ pub fn maybe_wrap_stream(
             &context_slot,
         ));
 
-        // The arms only decide *whether* to wind down; the winding down itself
-        // happens below. Both arms borrow `warmup` — the timeout arm holds it
-        // for as long as that future lives — so draining it further has to wait
-        // until this block has ended and released the borrow.
         let wind_down = tokio::select! {
             biased;
 
@@ -244,13 +189,7 @@ pub fn maybe_wrap_stream(
         };
 
         if wind_down {
-            // Only a warmup that got as far as its downstream has anything to
-            // wind down, and the slot is how we know. An empty slot means the
-            // cancellation arm won before `warmup` was ever polled, so the
-            // future is still unstarted — and draining it would start it,
-            // dispatching into the very shutdown the arm exists to avoid. The
-            // bound is deliberately read into a local first: holding the lock
-            // guard across the await below would be both wrong and unbuildable.
+            // Never poll an unstarted warmup during shutdown.
             let dispatched = context_slot.lock().is_some();
 
             if !dispatched {
@@ -263,10 +202,6 @@ pub fn maybe_wrap_stream(
             }
 
             stop_downstream(&context_slot);
-            // Dropping the non-winning arm released the borrow but not the
-            // future itself: `warmup` was pinned separately and the stream it
-            // holds is still open, so the downstream can still be polled and
-            // still act on the stop it was just sent.
             if tokio::time::timeout(PREFILL_WIND_DOWN_GRACE, &mut warmup)
                 .await
                 .is_err()
@@ -303,8 +238,7 @@ pub fn maybe_wrap_stream(
     }))
 }
 
-/// Resolves when `token` is cancelled, and never when there is no token, so
-/// the caller's timeout remains the only bound in that case.
+/// Waits forever when no cancellation token is supplied.
 async fn cancelled(token: Option<CancellationToken>) {
     match token {
         Some(token) => token.cancelled().await,
@@ -312,12 +246,7 @@ async fn cancelled(token: Option<CancellationToken>) {
     }
 }
 
-/// Asks the warmup's downstream to wind down, so the KV router's
-/// `RequestGuard` still gets a chance at its normal lifecycle.
-///
-/// This only raises the flag and wakes whoever is waiting on it. The caller
-/// must then keep polling the warmup — see [`PREFILL_WIND_DOWN_GRACE`] — or
-/// the downstream never gets the chance to act on it.
+/// Signals downstream; the caller must keep polling for cleanup to run.
 fn stop_downstream(slot: &PrefillContextSlot) {
     if let Some(context) = slot.lock().take() {
         context.stop_generating();
@@ -375,19 +304,12 @@ async fn prefill_task(
         uuid::Uuid::new_v4().to_string(),
         Default::default(),
     );
-    // Published before the call, not after it. `generate` is itself a place the
-    // warmup can sit for a long time — the KV router waits for a worker in
-    // there — and a stop that arrives during that wait has to find a handle in
-    // the slot or it lands on nothing. The router wraps that wait in
-    // `cancel_on_stop`, so a request context that is already stopped ends the
-    // call promptly rather than after the whole grace window.
+    // Publish before generate, which can block while waiting for a worker.
     *context_slot.lock() = Some(context.context());
 
-    // Drain the stream so the KV router's RequestGuard runs its full lifecycle
-    // (mark_prefill_completed, block tracking, free) instead of relying on drop.
+    // Draining lets the KV router finish RequestGuard cleanup.
     if let Ok(mut stream) = next.generate(context).await {
-        // Swapped for the stream's own context once there is one, so a stop
-        // during the drain reaches the stream rather than only the request.
+        // Stops during draining target the response stream.
         *context_slot.lock() = Some(stream.context());
         while stream.next().await.is_some() {}
     }
@@ -420,8 +342,6 @@ mod tests {
     type BackendEngine =
         dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>;
 
-    /// Flips a shared flag when dropped, so a test can observe the exact moment
-    /// the detached task lets go of the downstream stream it was draining.
     struct DropProbe(Arc<AtomicBool>);
 
     impl Drop for DropProbe {
@@ -430,9 +350,6 @@ mod tests {
         }
     }
 
-    /// The failure this module has to survive: a backend that accepts the
-    /// warmup request and hands back a stream which never yields and never
-    /// reaches EOF. Draining it is an await that by itself never returns.
     #[derive(Debug, Default)]
     struct StallingBackend {
         generate_calls: AtomicUsize,
@@ -449,8 +366,6 @@ mod tests {
             self.stream_dropped.load(Ordering::SeqCst)
         }
 
-        /// Whether the downstream was asked to wind down, i.e. whether
-        /// `stop_generating` reached the context the backend published.
         fn was_asked_to_stop(&self) -> bool {
             self.context
                 .lock()
@@ -475,8 +390,6 @@ mod tests {
 
             let probe = DropProbe(self.stream_dropped.clone());
             let stalled = futures::stream::poll_fn(move |_cx| {
-                // Touched so the probe is owned by the stream and released
-                // only when the stream itself is dropped.
                 let _ = &probe;
                 Poll::Pending
             });
@@ -485,12 +398,6 @@ mod tests {
         }
     }
 
-    /// The downstream that makes `stop_generating` worth sending: it behaves
-    /// like the KV router's `monitor_response_stream`, which selects on
-    /// `context.stopped()` and, when that arm wins, runs `guard.abort()` and
-    /// ends the stream. That cleanup lives *inside* the stream, so it only runs
-    /// if the stream is polled after the stop — which is what
-    /// [`PREFILL_WIND_DOWN_GRACE`] exists to allow.
     #[derive(Debug, Default)]
     struct WindDownBackend {
         generate_calls: AtomicUsize,
@@ -504,8 +411,6 @@ mod tests {
             self.stream_dropped.load(Ordering::SeqCst)
         }
 
-        /// Whether the downstream got far enough to run its own cleanup, the
-        /// way the KV router's `RequestGuard` would.
         fn cleanup_ran(&self) -> bool {
             self.cleanup_ran.load(Ordering::SeqCst)
         }
@@ -535,8 +440,6 @@ mod tests {
             let probe = DropProbe(self.stream_dropped.clone());
             let cleanup = self.cleanup_ran.clone();
             let watched = ctx.clone();
-            // Yields nothing and stays pending until it is asked to stop, at
-            // which point it runs its cleanup and ends.
             let winding =
                 futures::stream::unfold(Some((watched, cleanup, probe)), |state| async move {
                     let (watched, cleanup, probe) = state?;
@@ -550,10 +453,6 @@ mod tests {
         }
     }
 
-    /// A backend that never returns a stream, because the wait for a worker is
-    /// itself somewhere the warmup can be stuck when the runtime goes down.
-    /// It mirrors the router's `cancel_on_stop`: it publishes the request
-    /// context, waits, and ends the call once that context is stopped.
     #[derive(Debug, Default)]
     struct StalledInGenerateBackend {
         generate_calls: AtomicUsize,
@@ -565,8 +464,6 @@ mod tests {
             self.generate_calls.load(Ordering::SeqCst)
         }
 
-        /// Whether the stop reached the request context — which it can only do
-        /// if that context was published before `generate` was awaited.
         fn was_asked_to_stop(&self) -> bool {
             self.context
                 .lock()
@@ -589,8 +486,6 @@ mod tests {
             let ctx = context.context();
             *self.context.lock() = Some(ctx.clone());
 
-            // No stream is ever produced: the call sits here until the request
-            // context is stopped, then reports the cancellation.
             ctx.stopped().await;
             Err(Error::msg("cancelled while selecting a worker"))
         }
@@ -641,8 +536,6 @@ mod tests {
         }
     }
 
-    /// One upstream chunk carrying `text`, terminal when `finish` is set: the
-    /// terminal chunk is what releases the warmup.
     fn chunk(text: &str, finish: bool) -> Annotated<NvCreateChatCompletionStreamResponse> {
         #[allow(deprecated)]
         let choice = ChatChoiceStream {
@@ -683,9 +576,6 @@ mod tests {
         ]))
     }
 
-    /// The same two chunks, but with `turn` of (virtual) thinking time between
-    /// them, so the terminal chunk — and with it the warmup's dispatch — lands
-    /// only after the client's generation has run that long.
     fn slow_upstream(
         turn: Duration,
     ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> {
@@ -711,8 +601,6 @@ mod tests {
             .collect()
     }
 
-    /// Lets the detached task run up to its next suspension point without
-    /// advancing the paused clock.
     async fn settle() {
         for _ in 0..16 {
             tokio::task::yield_now().await;
@@ -735,8 +623,6 @@ mod tests {
             &tokenizer,
             None,
         );
-        // Only the test's own handle and the detached task's clone remain, so
-        // the strong count is a faithful release probe.
         drop(engine);
 
         let items: Vec<_> = wrapped.collect().await;
@@ -746,9 +632,6 @@ mod tests {
             "client stream must be passed through intact"
         );
 
-        // The warmup is genuinely in flight and genuinely stuck: it reached the
-        // backend, and well past the point where a healthy max_tokens=1 request
-        // would have finished it is still holding the stream.
         settle().await;
         assert_eq!(backend.generate_calls(), 1, "warmup should have dispatched");
         tokio::time::sleep(PREFILL_TASK_TIMEOUT / 2).await;
@@ -777,10 +660,6 @@ mod tests {
         );
     }
 
-    /// A reasoning turn that outlives the bound must still get its warmup: the
-    /// bound belongs to the warmup, not to the client's generation. Arming it
-    /// at spawn instead spends the whole budget waiting for the terminal chunk,
-    /// and the warmup is abandoned before it is ever dispatched.
     #[tokio::test(start_paused = true)]
     async fn a_turn_longer_than_the_bound_still_gets_its_warmup() {
         let (formatter, tokenizer) = sample_model_parts();
@@ -799,8 +678,6 @@ mod tests {
         );
         drop(engine);
 
-        // The clock auto-advances past the bound here, while the warmup is
-        // still waiting for the turn to finish.
         let started = Instant::now();
         let items: Vec<_> = wrapped.collect().await;
         assert_eq!(items.len(), 2);
@@ -832,9 +709,6 @@ mod tests {
             "warmup should be released once its own bound elapses"
         );
         assert_eq!(Arc::strong_count(&backend), 1);
-        // Bracketed with the half-bound check above: release happened after
-        // dispatch + bound/2 and by dispatch + 1.5 * bound, so the bound really
-        // is measured from dispatch and not from the task's spawn.
         assert!(dispatched.elapsed() < PREFILL_TASK_TIMEOUT * 2);
     }
 
@@ -873,8 +747,6 @@ mod tests {
             "cancellation should reach the downstream context"
         );
 
-        // This backend ignores the stop, so it is held for the grace window and
-        // then dropped anyway. The bound is on the grace, not on the backend.
         tokio::time::sleep(PREFILL_WIND_DOWN_GRACE).await;
         settle().await;
 
@@ -883,14 +755,9 @@ mod tests {
             "a downstream that ignores the stop should still be released once the grace elapses"
         );
         assert_eq!(Arc::strong_count(&backend), 1);
-        // Proves the release came from cancellation and not from the timeout.
         assert!(started.elapsed() < PREFILL_TASK_TIMEOUT);
     }
 
-    /// The wind-down is only worth sending if the downstream can act on it.
-    /// A downstream that watches its context the way the KV router does must
-    /// get to finish its own cleanup, and must do so inside the grace rather
-    /// than being dropped mid-flight.
     #[tokio::test(start_paused = true)]
     async fn a_downstream_that_honours_the_stop_completes_its_own_cleanup() {
         let (formatter, tokenizer) = sample_model_parts();
@@ -930,8 +797,6 @@ mod tests {
             backend.stream_dropped(),
             "the stream should be released once it has wound down"
         );
-        // It wound down of its own accord, well inside the grace, rather than
-        // being cut off when the grace expired.
         assert!(
             cancelled_at.elapsed() < PREFILL_WIND_DOWN_GRACE,
             "wind-down should complete inside the grace window"
@@ -939,16 +804,6 @@ mod tests {
         assert_eq!(Arc::strong_count(&backend), 1);
     }
 
-    /// A token cancelled before the task ever runs must dispatch nothing.
-    ///
-    /// This pins the precondition, not the arm order. The ordering hazard the
-    /// arms guard against — a terminal chunk and a cancellation becoming ready
-    /// in the *same* poll, where `biased` source order decides the winner — is
-    /// not forceable from a test: whether the detached task observes the two
-    /// wakeups together or one at a time is up to the scheduler, and this test
-    /// passes under either arm order. The reorder above is therefore a
-    /// defensive fix for a real but unforceable race, and this test covers the
-    /// case that can be pinned deterministically.
     #[tokio::test(start_paused = true)]
     async fn an_already_cancelled_token_dispatches_nothing() {
         let (formatter, tokenizer) = sample_model_parts();
@@ -956,8 +811,6 @@ mod tests {
         let engine: Arc<BackendEngine> = backend.clone();
 
         let cancel = CancellationToken::new();
-        // Cancelled before the task ever runs, while `upstream()` has its
-        // terminal chunk ready immediately: both arms are ready on first poll.
         cancel.cancel();
 
         let request = chat_request(true);
@@ -995,14 +848,6 @@ mod tests {
         );
     }
 
-    /// A warmup still waiting for a worker must be reachable by the stop.
-    ///
-    /// `generate` is not instantaneous — the KV router waits for a worker
-    /// inside it — so the handle the bail-out paths need has to be in the slot
-    /// before that call is awaited, not after it returns. Published late, the
-    /// stop lands on an empty slot, the router's `cancel_on_stop` never fires,
-    /// and the grace window is spent waiting on a call that was never told to
-    /// end.
     #[tokio::test(start_paused = true)]
     async fn a_warmup_still_waiting_for_a_worker_is_reachable_by_the_stop() {
         let (formatter, tokenizer) = sample_model_parts();
@@ -1040,8 +885,6 @@ mod tests {
             "a warmup stuck in generate must still be reachable by the stop"
         );
 
-        // And because it was reachable, the call ends on the stop rather than
-        // outliving the grace window.
         settle().await;
         assert_eq!(
             Arc::strong_count(&backend),
