@@ -11,6 +11,7 @@ use crate::identity::RoutingPartitionId;
 use crate::protocols::RouterEvent;
 
 use super::registry::WorkerRegistry;
+use super::server::StreamDumpRecord;
 
 /// Timeout for one peer `/dump` fetch (HTTP request + body transfer). A full
 /// KV-index snapshot can be tens of MB on a busy deployment; 10s only fits
@@ -68,6 +69,119 @@ pub async fn recover_from_peers(peers: &[String], registry: &WorkerRegistry) -> 
     }
 
     Ok(false)
+}
+
+/// Streaming peer recovery over an NDJSON `/dump` (one [`StreamDumpRecord`] per
+/// line): each event is applied as it arrives, so the whole snapshot is never
+/// buffered. No `max_bytes` budget is needed — peak memory is the index plus one
+/// line, not the index plus the full JSON body. This is the EPP peer-recovery
+/// protocol; the JSON [`recover_from_peers`] path stays for standalone
+/// indexer/selection/python peers.
+pub async fn recover_from_peers_streaming(
+    peers: &[String],
+    registry: &WorkerRegistry,
+) -> Result<bool> {
+    let timeout = Duration::from_millis(env_u64(
+        RECOVERY_HTTP_TIMEOUT_ENV,
+        DEFAULT_RECOVERY_HTTP_TIMEOUT_MS,
+    ));
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("failed to build HTTP client")?;
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    for peer_url in peers {
+        match try_recover_from_peer_streaming(&client, peer_url, registry).await {
+            Ok(()) => {
+                tracing::info!(peer = %peer_url, "streaming recovery from peer succeeded");
+                return Ok(true);
+            }
+            Err(e) => {
+                tracing::warn!(peer = %peer_url, error = %e, "streaming recovery from peer failed, trying next");
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+async fn try_recover_from_peer_streaming(
+    client: &reqwest::Client,
+    peer_url: &str,
+    registry: &WorkerRegistry,
+) -> Result<()> {
+    let dump_url = format!("{peer_url}/dump");
+    tracing::info!(url = %dump_url, "streaming dump from peer");
+
+    let mut resp = client
+        .get(&dump_url)
+        .send()
+        .await
+        .context("HTTP request failed")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("peer returned status {}", resp.status());
+    }
+
+    let mut total_events = 0usize;
+    let mut line = String::new();
+    // Read the body chunk-by-chunk and split on newlines. A chunk may contain
+    // several records or only part of one; `line` carries the partial record
+    // across chunks. Each record is applied and dropped immediately.
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .context("failed to read dump response body")?
+    {
+        line.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = line.find('\n') {
+            let record_line = line[..pos].to_string();
+            line.drain(..=pos);
+            if record_line.is_empty() {
+                continue;
+            }
+            let record: StreamDumpRecord = serde_json::from_str(&record_line)
+                .with_context(|| format!("failed to parse dump record: {record_line}"))?;
+            apply_dump_record(registry, record).await?;
+            total_events += 1;
+        }
+    }
+    // A well-formed stream ends with a trailing newline; a leftover partial
+    // line means the stream was truncated mid-record.
+    if !line.is_empty() {
+        anyhow::bail!("peer dump stream ended mid-record");
+    }
+
+    // An empty dump is a valid recovery. Recovery candidates are restricted to
+    // already-serving peers (see `recovery_peer_urls`), so a zero-event dump
+    // means the serving peer genuinely holds no KV index yet (idle cluster),
+    // not a transient race. Rejecting it would deadlock cold starts and idle
+    // rollouts.
+    tracing::info!(total_events, "applied streamed dump events from peer");
+    Ok(())
+}
+
+async fn apply_dump_record(registry: &WorkerRegistry, record: StreamDumpRecord) -> Result<()> {
+    let (model_name, routing_group) = record
+        .key
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid dump key format: {}", record.key))?;
+
+    let key = RoutingPartitionId::new(model_name, routing_group);
+    let indexer = registry.get_or_create_indexer(key, record.block_size);
+
+    // Re-application is idempotent by construction: the radix index keys blocks
+    // by `tokens_hash`, so applying the same (or an overlapping) peer dump again
+    // is a no-op for blocks already present. A cancelled-then-retried attempt
+    // can therefore leave a partially applied snapshot that the next attempt
+    // safely re-applies on top of.
+    indexer
+        .apply_event_routed(record.event)
+        .await
+        .context("peer recovery event was rejected by the local indexer")?;
+    Ok(())
 }
 
 async fn try_recover_from_peer(
@@ -288,5 +402,94 @@ mod tests {
             .await
             .expect("zero disables the cap");
         assert_eq!(body.len(), 512);
+    }
+
+    /// Serve a chunked HTTP response with the given Content-Type and body (no
+    /// Content-Length header), for exercising the streaming dump reader.
+    async fn serve_ndjson(body: &[u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("read test addr");
+        let body = body.to_vec();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept test client");
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await.expect("read request");
+            let mut resp = String::from(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n",
+            );
+            for chunk in body.chunks(7) {
+                resp.push_str(&format!("{:x}\r\n", chunk.len()));
+                resp.push_str(&String::from_utf8_lossy(chunk));
+                resp.push_str("\r\n");
+            }
+            resp.push_str("0\r\n\r\n");
+            socket
+                .write_all(resp.as_bytes())
+                .await
+                .expect("write response");
+        });
+        let url = format!("http://{addr}/dump");
+        drop(server);
+        url
+    }
+
+    #[tokio::test]
+    async fn streaming_recovery_applies_empty_dump() {
+        // A streaming dump with zero records (just a trailing newline) is a
+        // valid recovery, matching the non-streaming "empty dump is success".
+        let url = serve_ndjson(b"\n").await;
+        let client = reqwest::Client::new();
+        let registry = WorkerRegistry::new(1);
+        try_recover_from_peer_streaming(&client, &url, &registry)
+            .await
+            .expect("empty streamed dump must succeed");
+    }
+
+    #[tokio::test]
+    async fn streaming_recovery_rejects_truncated_record() {
+        // A stream that ends mid-record (no trailing newline) must fail instead
+        // of silently applying a partial event.
+        let url = serve_ndjson(br#"{"key":"m:default","block_size":16,"event":{"#).await;
+        let client = reqwest::Client::new();
+        let registry = WorkerRegistry::new(1);
+        let err = try_recover_from_peer_streaming(&client, &url, &registry)
+            .await
+            .expect_err("truncated stream must fail");
+        assert!(
+            err.to_string().contains("mid-record"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_recovery_applies_multiple_records() {
+        // A well-formed NDJSON stream applies each record line-by-line. Empty
+        // blocks make each event a no-op but must parse and apply without error.
+        let record = |worker_id: u64| {
+            serde_json::json!({
+                "key": "m:default",
+                "block_size": 16,
+                "event": {
+                    "worker_id": worker_id,
+                    "storage_tier": "device",
+                    "event": {"event_id": 0, "data": {"stored": {"parent_hash": null, "blocks": []}}},
+                }
+            })
+        };
+        let mut body = serde_json::to_vec(&record(1)).unwrap();
+        body.push(b'\n');
+        body.extend(serde_json::to_vec(&record(2)).unwrap());
+        body.push(b'\n');
+
+        let url = serve_ndjson(&body).await;
+        let client = reqwest::Client::new();
+        let registry = WorkerRegistry::new(1);
+        try_recover_from_peer_streaming(&client, &url, &registry)
+            .await
+            .expect("well-formed stream must apply");
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +38,7 @@ pub struct SelectionServiceBuilder {
     selection_cache: SelectionCacheConfig,
     worker_type: WorkerType,
     plugin_registry: RouterPluginRegistry,
+    defer_indexer_for_bootstrap: bool,
     host: SelectionHost,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     session_affinity_ttl: Option<Duration>,
@@ -78,6 +80,7 @@ impl SelectionServiceBuilder {
             selection_cache: SelectionCacheConfig::default(),
             worker_type,
             plugin_registry,
+            defer_indexer_for_bootstrap: false,
             host: SelectionHost::default(),
             worker_selection_policy_factory: None,
             session_affinity_ttl: None,
@@ -115,6 +118,13 @@ impl SelectionServiceBuilder {
 
     pub fn indexer_peers(mut self, indexer_peers: Vec<String>) -> Self {
         self.indexer_peers = indexer_peers;
+        self
+    }
+
+    /// Keep new ZMQ listeners buffering until
+    /// [`SelectionService::bootstrap_indexer`] completes recovery.
+    pub fn defer_indexer_for_bootstrap(mut self) -> Self {
+        self.defer_indexer_for_bootstrap = true;
         self
     }
 
@@ -210,7 +220,9 @@ impl SelectionServiceBuilder {
                 }
             }
         }
-        core.signal_indexer_ready();
+        if !self.defer_indexer_for_bootstrap {
+            core.signal_indexer_ready();
+        }
 
         let peer_manager = if replica_runtime.is_some() {
             let weak_core = Arc::downgrade(&core);
@@ -349,6 +361,27 @@ impl SelectionService {
     /// The port this service uses for replica synchronization, if enabled.
     pub fn replica_sync_port(&self) -> Option<u16> {
         self.replica_sync_port
+    }
+
+    /// Complete subscribe-first indexer bootstrap around a caller-provided recovery step.
+    ///
+    /// The service waits until every registered ZMQ listener is buffering, runs
+    /// `recover`, then drains the buffered tail before returning. The builder
+    /// must have been configured with [`SelectionServiceBuilder::defer_indexer_for_bootstrap`].
+    pub async fn bootstrap_indexer<F, Fut>(&self, recover: F) -> anyhow::Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = anyhow::Result<()>>,
+    {
+        anyhow::ensure!(
+            !self.core.indexer_listeners_started(),
+            "indexer bootstrap requires deferred listener start; construct the service with \
+             SelectionServiceBuilder::defer_indexer_for_bootstrap()"
+        );
+        self.core.wait_for_indexer_listeners_buffering().await?;
+        recover().await?;
+        self.core.signal_indexer_ready();
+        self.core.wait_for_indexer_listeners_active().await
     }
 
     pub async fn patch_worker(
@@ -533,6 +566,59 @@ mod tests {
         RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
             crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
         }))
+    }
+
+    #[tokio::test]
+    async fn builder_starts_indexer_listeners_by_default() {
+        let service = SelectionServiceBuilder::new(
+            test_config(),
+            WorkerType::Aggregated,
+            test_registry(),
+        )
+        .indexer_threads(1)
+        .build()
+        .await
+        .unwrap();
+        assert!(service.core.indexer_listeners_started());
+        let error = service
+            .bootstrap_indexer(|| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("deferred listener start"));
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn deferred_builder_bootstraps_indexer_in_order() {
+        let service = SelectionServiceBuilder::new(
+            test_config(),
+            WorkerType::Aggregated,
+            test_registry(),
+        )
+        .indexer_threads(1)
+        .defer_indexer_for_bootstrap()
+        .build()
+        .await
+        .unwrap();
+        assert!(!service.core.indexer_listeners_started());
+        let error = service
+            .bootstrap_indexer(|| async { Err(anyhow::anyhow!("recovery failed")) })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "recovery failed");
+        assert!(
+            !service.core.indexer_listeners_started(),
+            "failed recovery must leave buffered listeners gated"
+        );
+        service
+            .bootstrap_indexer(|| async {
+                assert!(!service.core.indexer_listeners_started());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(service.core.indexer_listeners_started());
+        service.shutdown().await;
     }
 
     #[tokio::test]

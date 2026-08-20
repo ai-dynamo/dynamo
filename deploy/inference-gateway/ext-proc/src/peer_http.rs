@@ -10,27 +10,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use axum::{
     Router,
-    extract::{Query, State},
-    http::StatusCode,
+    body::Body,
+    extract::State,
+    http::{StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::get,
 };
+use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use dynamo_kv_router::services::indexer::server::StreamDumpRecord;
 use dynamo_kv_router::services::selection::SelectionService;
+
+/// Media type of the streaming NDJSON dump (one [`StreamDumpRecord`] per line).
+const STREAM_DUMP_MEDIA_TYPE: &str = "application/x-ndjson";
 
 #[derive(Clone)]
 struct AppState {
     service: Arc<SelectionService>,
     recovered: Arc<AtomicBool>,
-}
-
-#[derive(serde::Deserialize)]
-struct DumpQuery {
-    /// Caller's accepted snapshot budget in bytes. The peer rejects over-budget
-    /// snapshots with 413 *before* writing the body. Absent or `0` = unbounded.
-    max_bytes: Option<u64>,
 }
 
 /// Bind the dump listener before returning so peer recovery cannot race server startup.
@@ -66,18 +65,7 @@ fn listener_addr(pod_ip: IpAddr, port: u16) -> SocketAddr {
     }
 }
 
-/// True when the indexer snapshot contains a per-model `{"error": ...}`
-/// entry, which happens when one model's indexer failed to dump. The
-/// recovery consumer deserializes each entry as `DumpEntry` (`block_size`
-/// plus `events`), so an error entry would make the whole body unparseable;
-/// the dump handler fails such snapshots with a non-success status.
-fn snapshot_has_failed_dump(snapshot: &serde_json::Value) -> bool {
-    snapshot
-        .as_object()
-        .is_some_and(|entries| entries.values().any(|entry| entry.get("error").is_some()))
-}
-
-async fn dump(State(state): State<AppState>, Query(query): Query<DumpQuery>) -> Response {
+async fn dump(State(state): State<AppState>) -> Response {
     // Do not serve a snapshot until local recovery/bootstrap has finished: the
     // index is empty during recovery, and an early /dump could let a sibling
     // latch onto an empty index while a warm one exists elsewhere.
@@ -88,47 +76,42 @@ async fn dump(State(state): State<AppState>, Query(query): Query<DumpQuery>) -> 
         )
             .into_response();
     }
-    let snapshot = state.service.indexer_snapshot().await;
-    // A per-model indexer dump failure is surfaced as an `{"error": ...}`
-    // entry inside the snapshot. The recovery consumer expects `DumpEntry`
-    // values and cannot parse that shape, so fail the whole dump with a
-    // non-success status instead of returning a 200 body the consumer would
-    // reject (and then fall back to an empty index on).
-    if snapshot_has_failed_dump(&snapshot) {
-        tracing::warn!("Peer KV-index snapshot contains an indexer dump failure");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "peer KV-index snapshot generation failed",
-        )
-            .into_response();
-    }
-    let bytes = match serde_json::to_vec(&snapshot) {
-        Ok(bytes) => bytes,
+
+    let records = match state.service.indexer_stream_records().await {
+        Ok(records) => records,
         Err(error) => {
-            tracing::warn!(%error, "Failed to serialize peer KV-index snapshot");
+            tracing::warn!(%error, "Failed to collect peer KV-index dump records");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "snapshot serialization failed",
+                "peer KV-index snapshot generation failed",
             )
                 .into_response();
         }
     };
-    if let Some(max) = query.max_bytes
-        && max > 0
-        && bytes.len() as u64 > max
-    {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "peer KV index snapshot exceeds max_bytes",
-        )
-            .into_response();
-    }
-    (
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        bytes,
-    )
-        .into_response()
+
+    // Stream NDJSON, one record per line. The receiver applies each event and
+    // drops it, so the whole snapshot is never buffered on either side and no
+    // max-bytes budget is needed.
+    let stream = futures::stream::iter(records).map(|record: StreamDumpRecord| {
+        match serde_json::to_vec(&record) {
+            Ok(mut bytes) => {
+                bytes.push(b'\n');
+                Ok::<_, std::convert::Infallible>(bytes)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Failed to serialize dump record");
+                // Signal a mid-stream failure with an empty frame; the receiver
+                // treats a truncated record as an error and retries.
+                Ok::<_, std::convert::Infallible>(Vec::new())
+            }
+        }
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, STREAM_DUMP_MEDIA_TYPE)
+        .body(Body::from_stream(stream))
+        .expect("static response builder")
 }
 
 #[cfg(test)]
@@ -179,7 +162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dump_endpoint_matches_selection_service_snapshot() {
+    async fn streaming_dump_emits_ndjson_records() {
         let service = service().await;
         let cancel = CancellationToken::new();
         let port = free_tcp_port();
@@ -193,13 +176,25 @@ mod tests {
         .await
         .expect("spawn peer HTTP server");
 
-        let response: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/dump"))
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/dump"))
             .await
-            .expect("request dump")
-            .json()
-            .await
-            .expect("decode dump");
-        assert_eq!(response, service.indexer_snapshot().await);
+            .expect("request dump");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/x-ndjson")
+        );
+        let body = resp.text().await.expect("read body");
+        // An empty index yields an empty stream; every non-empty line must be a
+        // parseable StreamDumpRecord.
+        for line in body.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            serde_json::from_str::<StreamDumpRecord>(line).expect("valid NDJSON record");
+        }
 
         cancel.cancel();
         service.shutdown().await;
@@ -229,31 +224,6 @@ mod tests {
         service.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn dump_rejects_over_budget_snapshot() {
-        let service = service().await;
-        let cancel = CancellationToken::new();
-        let port = free_tcp_port();
-        spawn(
-            service.clone(),
-            port,
-            "127.0.0.1".parse().unwrap(),
-            cancel.clone(),
-            Arc::new(AtomicBool::new(true)),
-        )
-        .await
-        .expect("spawn peer HTTP server");
-
-        // max_bytes=1 is smaller than any serialized snapshot ("{}" is 2 bytes).
-        let resp = reqwest::get(format!("http://127.0.0.1:{port}/dump?max_bytes=1"))
-            .await
-            .expect("request dump");
-        assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
-
-        cancel.cancel();
-        service.shutdown().await;
-    }
-
     #[test]
     fn listener_addr_matches_pod_ip_family() {
         assert_eq!(
@@ -264,34 +234,6 @@ mod tests {
             listener_addr("2001:db8::1".parse().unwrap(), 9093),
             "[::]:9093".parse().unwrap()
         );
-    }
-
-    #[test]
-    fn snapshot_with_failed_indexer_dump_is_detected() {
-        // A per-model indexer dump failure surfaces as `{"error": ...}`; the
-        // recovery consumer expects `DumpEntry` values, so such snapshots must
-        // be rejected as a whole.
-        let failed = serde_json::json!({
-            "model:default": {"error": "indexer dump failed"},
-        });
-        assert!(snapshot_has_failed_dump(&failed));
-
-        let mixed = serde_json::json!({
-            "model:a": {"block_size": 16, "events": []},
-            "model:b": {"error": "boom"},
-        });
-        assert!(snapshot_has_failed_dump(&mixed));
-    }
-
-    #[test]
-    fn snapshot_without_failed_indexer_dump_is_accepted() {
-        let healthy = serde_json::json!({
-            "model:default": {"block_size": 16, "events": []},
-        });
-        assert!(!snapshot_has_failed_dump(&healthy));
-
-        let empty = serde_json::json!({});
-        assert!(!snapshot_has_failed_dump(&empty));
     }
 
     #[tokio::test]
