@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import threading
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 
 import pytest
 from _deps import HAS_GMS
@@ -161,44 +161,58 @@ def test_latched_failure_raises_fresh_exceptions(monkeypatch) -> None:
     assert str(first.value) == str(second.value)
 
 
+@contextmanager
 def _connected_client(tmp_path, monkeypatch, *, slab_size: int):
     path = str(tmp_path / "weights.sock")
     vmm = FakeVMM(granularity=64)
-    server_manager = GMSServerMemoryManager("GPU-0", vmm, 0)
-    server = GMSRPCServer(path, server_manager)
+    server = GMSRPCServer(path, GMSServerMemoryManager("GPU-0", vmm, 0))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     monkeypatch.setattr(device_identity, "invalidate_device_uuid_cache", lambda: None)
     monkeypatch.setattr(device_identity, "get_device_uuid", lambda _device: "GPU-0")
     client = GMSClientMemoryManager(path, vmm, 0, slab_size=slab_size)
-    client.connect(RequestedLockType.RW)
-    return client, vmm, server, thread
-
-
-def _stop_client(client, server, thread) -> None:
-    client.close()
-    _stop(server, thread)
+    try:
+        client.connect(RequestedLockType.RW)
+        try:
+            yield client, vmm
+        finally:
+            client.close()
+    finally:
+        _stop(server, thread)
 
 
 @pytest.mark.timeout(10)
-def test_small_mappings_share_one_slab_and_reuse_freed_holes(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    client, vmm, server, thread = _connected_client(tmp_path, monkeypatch, slab_size=256)
-    try:
+def test_client_slabs_pack_reuse_coalesce_and_remap(tmp_path, monkeypatch) -> None:
+    with _connected_client(tmp_path, monkeypatch, slab_size=384) as (client, vmm):
         first = client.create_mapping(65)
         second = client.create_mapping(65)
+        third = client.create_mapping(65)
         assert second == first + 128
+        assert third == first + 256
         assert len(client.mappings) == 1
-        assert client.owns(first)
-        assert client.owns(second)
-        assert set(vmm.reservations) == {client.mappings[0].base}
+        assert set(vmm.reservations) == {first}
 
         client.destroy_mapping(first, 65)
-        reused = client.create_mapping(65)
-        assert reused == first
+        assert client.create_mapping(65) == first
+
+        client.destroy_mapping(first, 65)
+        client.destroy_mapping(second, 65)
+        coalesced = client.create_mapping(200)
+        assert coalesced == first
         assert len(client.mappings) == 1
+        assert client.owns(third)
+
+        client.destroy_mapping(coalesced, 200)
+        client.destroy_mapping(third, 65)
+        assert len(client.mappings) == 0
+
+        small = client.create_mapping(65)
+        large = client.create_mapping(400)
+        assert len(client.mappings) == 2
+        assert set(vmm.reservations) == {mapping.base for mapping in client.mappings}
+        client.destroy_mapping(large, 400)
+        assert len(client.mappings) == 1
+        assert client.owns(small)
 
         client.unmap_all_vas()
         client.disconnect()
@@ -206,26 +220,4 @@ def test_small_mappings_share_one_slab_and_reuse_freed_holes(
         client.reallocate_all_handles()
         client.remap_all_vas()
         assert len(client.mappings) == 1
-        assert client.owns(reused)
-        assert client.owns(second)
-    finally:
-        _stop_client(client, server, thread)
-
-
-@pytest.mark.timeout(10)
-def test_mapping_larger_than_slab_gets_its_own_reservation(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    client, vmm, server, thread = _connected_client(tmp_path, monkeypatch, slab_size=256)
-    try:
-        small = client.create_mapping(65)
-        large = client.create_mapping(320)
-        assert len(client.mappings) == 2
-        assert large != small
-        assert set(vmm.reservations) == {mapping.base for mapping in client.mappings}
-        client.destroy_mapping(large, 320)
-        assert len(client.mappings) == 1
         assert client.owns(small)
-    finally:
-        _stop_client(client, server, thread)

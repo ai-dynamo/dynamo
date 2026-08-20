@@ -106,13 +106,14 @@ class GMSClientMemoryManager:
             aligned_size = self._align(size)
             try:
                 for mapping in self._ordered_mappings():
-                    offset = self._take_free(mapping.base, aligned_size)
-                    if offset is None:
-                        continue
-                    va = mapping.base + offset
-                    self._regions[va] = (mapping.base, size)
-                    return va
-                return self._add_slab(size, aligned_size)
+                    va = self._carve(mapping.base, size, aligned_size)
+                    if va is not None:
+                        return va
+                slab = self._add_slab(aligned_size)
+                va = self._carve(slab.base, size, aligned_size)
+                if va is None:
+                    raise RuntimeError("new GMS slab has no room for the allocation")
+                return va
             except Exception as exc:
                 raise self._latch("GMS mapping creation failed", exc) from exc
 
@@ -239,7 +240,7 @@ class GMSClientMemoryManager:
     def _align(self, size: int) -> int:
         return (size + self._granularity - 1) // self._granularity * self._granularity
 
-    def _add_slab(self, size: int, aligned_size: int) -> int:
+    def _add_slab(self, aligned_size: int) -> _InstalledMapping:
         slab_bytes = max(self._slab_size, aligned_size)
         session = self._require_rw()
         allocation_id = f"allocation-{uuid4()}"
@@ -265,10 +266,8 @@ class GMSClientMemoryManager:
             handle,
         )
         self._mappings[mapping.base] = installed
-        leftover = slab_bytes - aligned_size
-        self._free[mapping.base] = [(aligned_size, leftover)] if leftover else []
-        self._regions[mapping.base] = (mapping.base, size)
-        return mapping.base
+        self._free[mapping.base] = [(0, slab_bytes)]
+        return installed
 
     def _destroy_slab(self, mapping: _InstalledMapping) -> None:
         self._select_device()
@@ -279,6 +278,14 @@ class GMSClientMemoryManager:
         self._vmm.address_free(mapping.base, mapping.reservation_size)
         del self._mappings[mapping.base]
         del self._free[mapping.base]
+
+    def _carve(self, slab_base: int, size: int, aligned_size: int) -> int | None:
+        offset = self._take_free(slab_base, aligned_size)
+        if offset is None:
+            return None
+        va = slab_base + offset
+        self._regions[va] = (slab_base, size)
+        return va
 
     def _take_free(self, slab_base: int, aligned_size: int) -> int | None:
         holes = self._free[slab_base]
@@ -295,21 +302,17 @@ class GMSClientMemoryManager:
 
     def _put_free(self, slab_base: int, offset: int, length: int) -> None:
         holes = self._free[slab_base]
-        index = 0
-        while index < len(holes) and holes[index][0] < offset:
-            index += 1
-        holes.insert(index, (offset, length))
-        merged: list[tuple[int, int]] = []
-        for hole_offset, hole_length in holes:
-            if merged and hole_offset <= merged[-1][0] + merged[-1][1]:
-                prev_offset, prev_length = merged[-1]
-                merged[-1] = (
-                    prev_offset,
-                    max(prev_offset + prev_length, hole_offset + hole_length)
-                    - prev_offset,
-                )
-                continue
-            merged.append((hole_offset, hole_length))
+        holes.append((offset, length))
+        holes.sort()
+        merged: list[tuple[int, int]] = [holes[0]]
+        for hole_offset, hole_length in holes[1:]:
+            prev_offset, prev_length = merged[-1]
+            prev_end = prev_offset + prev_length
+            hole_end = hole_offset + hole_length
+            if hole_offset <= prev_end:
+                merged[-1] = (prev_offset, max(prev_end, hole_end) - prev_offset)
+            else:
+                merged.append((hole_offset, hole_length))
         self._free[slab_base] = merged
 
     def _check(self) -> None:
