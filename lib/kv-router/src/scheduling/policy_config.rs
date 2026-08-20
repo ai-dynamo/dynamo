@@ -107,6 +107,15 @@ impl FamilyBucketClassifier {
             .saturating_sub(1);
         self.class_by_family_bucket[family_index * self.buckets.len() + bucket_index]
     }
+
+    /// Names a caller may supply in `policy_class`
+    ///
+    /// Includes explicit class names and policy-family names.
+    fn requestable_names(&self) -> HashSet<String> {
+        let mut names: HashSet<String> = self.family_indices.keys().cloned().collect();
+        names.extend(self.explicit_class_indices.keys().cloned());
+        names
+    }
 }
 
 impl PolicyProfile {
@@ -159,6 +168,18 @@ impl PolicyProfile {
 
     pub fn class(&self, index: usize) -> &PolicyClassConfig {
         &self.classes[index]
+    }
+
+    /// Returns the set of names a caller may supply in `policy_class`
+    pub fn requestable_class_names(&self) -> HashSet<String> {
+        match &self.classifier {
+            PolicyClassifier::SyntheticSingle { .. } => {
+                let mut names = HashSet::new();
+                names.insert(SYNTHETIC_POLICY_CLASS.to_string());
+                names
+            }
+            PolicyClassifier::FamilyBucket(classifier) => classifier.requestable_names(),
+        }
     }
 }
 

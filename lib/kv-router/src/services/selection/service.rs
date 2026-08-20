@@ -246,6 +246,14 @@ impl SelectionService {
         self.core.queueing_enabled(model_name)
     }
 
+    /// Return the configured scheduling policy class names for `model_name`.
+    pub fn policy_classes(
+        &self,
+        model_name: &str,
+    ) -> Result<std::collections::HashSet<String>, crate::scheduling::RouterPolicyConfigError> {
+        self.core.policy_classes(model_name)
+    }
+
     /// The port this service uses for replica synchronization, if enabled.
     pub fn replica_sync_port(&self) -> Option<u16> {
         self.replica_sync_port
