@@ -1052,9 +1052,10 @@ impl ResponseParams {
     }
 }
 
-/// Counts generated token IDs while the reasoning parser classifies streamed
-/// deltas. Responses requests opt into the internal token-ID extension so this
-/// remains exact even when one decoded delta contains multiple tokens.
+/// Estimates reasoning usage by counting generated token IDs on deltas that the
+/// reasoning parser classifies as reasoning. This is intentionally chunk-granular:
+/// if one decoded delta contains both reasoning and visible content, every token in
+/// that delta is counted as reasoning, so the visible-content tokens are overcounted.
 #[derive(Debug, Default)]
 pub(crate) struct ReasoningTokenCounter {
     total: u32,
