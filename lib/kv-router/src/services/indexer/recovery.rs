@@ -87,7 +87,7 @@ async fn try_recover_from_peer(
     };
     tracing::info!(url = %dump_url, "fetching dump from peer");
 
-    let resp = client
+    let mut resp = client
         .get(&dump_url)
         .send()
         .await
@@ -112,8 +112,13 @@ async fn try_recover_from_peer(
         );
     }
 
+    // Read the body as a bounded stream: a chunked response without
+    // Content-Length must not buffer without bound (resp.json() would).
+    // `0` disables the cap, consistent with the documented behavior.
+    let body = read_dump_body(&mut resp, max_dump_bytes).await?;
+
     let dump: HashMap<String, DumpEntry> =
-        resp.json().await.context("failed to parse dump response")?;
+        serde_json::from_slice(&body).context("failed to parse dump response")?;
     let mut total_events = 0usize;
     for (map_key, entry) in dump {
         let (model_name, routing_group) = map_key
@@ -154,6 +159,30 @@ async fn try_recover_from_peer(
     Ok(())
 }
 
+/// Read the `/dump` response body as a bounded stream, failing as soon as the
+/// configured cap is exceeded so a chunked response without `Content-Length`
+/// cannot buffer without bound. `max_dump_bytes == 0` disables the cap,
+/// consistent with the documented behavior.
+async fn read_dump_body(resp: &mut reqwest::Response, max_dump_bytes: u64) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .context("failed to read dump response body")?
+    {
+        if max_dump_bytes > 0
+            && (body.len() as u64).saturating_add(chunk.len() as u64) > max_dump_bytes
+        {
+            anyhow::bail!(
+                "peer dump is too large: exceeds limit {max_dump_bytes} bytes \
+                 (raise {MAX_DUMP_BYTES_ENV} to accept larger snapshots)"
+            );
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +200,93 @@ mod tests {
         // Zero is a valid explicit value (e.g. disabling a cap); it must not be
         // treated as a parse failure that falls back to the default.
         assert_eq!(parse_u64(Some("0".to_string()), 512), 0);
+    }
+
+    /// Serve one `chunked` HTTP response with no `Content-Length` header, the
+    /// shape `read_dump_body` must bound without relying on the header.
+    async fn serve_chunked_without_content_length(body: &[u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("read test addr");
+        let body = body.to_vec();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept test client");
+            // Drain the request line + headers.
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await.expect("read request");
+            // Transfer-Encoding: chunked, deliberately no Content-Length.
+            let mut resp = String::from(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n",
+            );
+            for chunk in body.chunks(7) {
+                resp.push_str(&format!("{:x}\r\n", chunk.len()));
+                resp.push_str(&String::from_utf8_lossy(chunk));
+                resp.push_str("\r\n");
+            }
+            resp.push_str("0\r\n\r\n");
+            socket
+                .write_all(resp.as_bytes())
+                .await
+                .expect("write response");
+        });
+        let url = format!("http://{addr}/dump");
+        // Detach: the server task finishes once the client has consumed the
+        // body; the test runtime aborts it when the test ends.
+        drop(server);
+        url
+    }
+
+    #[tokio::test]
+    async fn read_dump_body_bounds_chunked_response_without_content_length() {
+        // Small body, cap not hit: bounded read succeeds and returns the body.
+        let url =
+            serve_chunked_without_content_length(br#"{"m:default":{"block_size":16,"events":[]}}"#)
+                .await;
+        let client = reqwest::Client::new();
+        let mut resp = client.get(&url).send().await.expect("GET dump");
+        assert!(
+            resp.content_length().is_none(),
+            "fixture must not declare Content-Length"
+        );
+        let body = read_dump_body(&mut resp, 1024)
+            .await
+            .expect("bounded read under cap");
+        assert_eq!(
+            body,
+            br#"{"m:default":{"block_size":16,"events":[]}}"#.to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_dump_body_rejects_oversized_chunked_response_without_content_length() {
+        // Body larger than the cap, no Content-Length: the bounded reader must
+        // fail instead of buffering without bound (resp.json() would).
+        let url = serve_chunked_without_content_length(&[b'x'; 64]).await;
+        let client = reqwest::Client::new();
+        let mut resp = client.get(&url).send().await.expect("GET dump");
+        assert!(resp.content_length().is_none());
+        let err = read_dump_body(&mut resp, 32)
+            .await
+            .expect_err("cap must be enforced without Content-Length");
+        assert!(
+            err.to_string().contains("peer dump is too large"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_dump_body_zero_cap_is_unbounded() {
+        // max_dump_bytes == 0 disables the cap, even for a body larger than
+        // any plausible default and with no Content-Length header.
+        let url = serve_chunked_without_content_length(&[b'x'; 512]).await;
+        let client = reqwest::Client::new();
+        let mut resp = client.get(&url).send().await.expect("GET dump");
+        let body = read_dump_body(&mut resp, 0)
+            .await
+            .expect("zero disables the cap");
+        assert_eq!(body.len(), 512);
     }
 }
