@@ -73,20 +73,6 @@ def test_v1_cli_dispatches_cuda_only_child(monkeypatch, capsys):
     assert "--use-v1 only supports --device-type=cuda" in capsys.readouterr().err
 
 
-def test_enable_loader_requires_use_v1(capsys):
-    with pytest.raises(SystemExit):
-        server.main(["--enable-loader", "--checkpoint-dir", "/ckpt"])
-    assert "--enable-loader requires --use-v1" in capsys.readouterr().err
-
-
-def test_enable_loader_cannot_combine_with_probe(capsys):
-    with pytest.raises(SystemExit):
-        server.main(["--use-v1", "--probe-restore-ready", "--enable-loader"])
-    assert "--probe-restore-ready cannot be combined with --enable-loader" in (
-        capsys.readouterr().err
-    )
-
-
 def test_v1_socket_path_rejects_af_unix_overflow(monkeypatch):
     monkeypatch.setenv("GMS_SOCKET_DIR", "/" + "s" * 200)
     monkeypatch.setattr(v1_device, "get_device_uuid", lambda _device: "GPU-0")

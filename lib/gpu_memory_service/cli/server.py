@@ -18,6 +18,7 @@ import sys
 import time
 from contextlib import closing
 
+from gpu_memory_service.cli.snapshot import start_v1_per_device
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.v1.client.session import _GMSClientSession
@@ -114,9 +115,8 @@ def main(argv: list[str] | None = None) -> None:
         nargs=argparse.REMAINDER,
         metavar="ARG",
         help=(
-            "Run one V1 loader per visible GPU after the servers start. "
-            "Remaining args go to the loader, including --checkpoint-dir. "
-            "Pass --device to load only that GPU."
+            "Start V1 loaders after the servers. Remaining args, including "
+            "--checkpoint-dir, go to the loader. Pass --device to load one GPU."
         ),
     )
     args = parser.parse_args(argv)
@@ -160,41 +160,13 @@ def main(argv: list[str] | None = None) -> None:
             servers.append(server)
 
         if args.enable_loader is not None:
-            named_device = any(
-                argument == "--device" or argument.startswith("--device=")
-                for argument in args.enable_loader
-            )
-            if named_device or any(
-                argument in {"-h", "--help"} for argument in args.enable_loader
-            ):
-                loader = subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-m",
-                        "gpu_memory_service.v1.snapshot.loader",
-                        *args.enable_loader,
-                    ]
+            loaders.extend(
+                start_v1_per_device(
+                    "gpu_memory_service.v1.snapshot.loader",
+                    args.enable_loader,
+                    devices,
                 )
-                logger.info("Started GMS V1 loader pid=%d", loader.pid)
-                loaders.append(loader)
-            else:
-                for device in devices:
-                    loader = subprocess.Popen(
-                        [
-                            sys.executable,
-                            "-m",
-                            "gpu_memory_service.v1.snapshot.loader",
-                            *args.enable_loader,
-                            "--device",
-                            str(device),
-                        ]
-                    )
-                    logger.info(
-                        "Started GMS V1 loader device=%d pid=%d",
-                        device,
-                        loader.pid,
-                    )
-                    loaders.append(loader)
+            )
 
         raise SystemExit(_supervise(servers, loaders))
     finally:

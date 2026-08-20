@@ -24,7 +24,7 @@ def _build_parser():
         "--device",
         type=int,
         default=0,
-        help="CUDA-visible device ordinal. Wrapper CLIs fan out when omitted.",
+        help="CUDA-visible rank-local device ordinal.",
     )
     return parser
 
