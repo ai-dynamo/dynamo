@@ -85,6 +85,7 @@ async def _assert_generate_delegates_to_native_vllm_serving():
     handler._run_with_cancellation.assert_awaited_once()
 
 
+@pytest.mark.timeout(5)
 def test_outer_cancellation_stops_native_vllm_inference():
     asyncio.run(_assert_outer_cancellation_stops_native_vllm_inference())
 
@@ -118,6 +119,7 @@ async def _assert_outer_cancellation_stops_native_vllm_inference():
     await asyncio.wait_for(inference_cancelled.wait(), timeout=1)
 
 
+@pytest.mark.timeout(5)
 def test_context_cancellation_stops_native_vllm_inference():
     asyncio.run(_assert_context_cancellation_stops_native_vllm_inference())
 
