@@ -73,7 +73,6 @@ type rbacManager interface {
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
-	APIReader             client.Reader
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
@@ -345,7 +344,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		}))
 	}
 	if r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
-		disaggregatedSetWatches := newDisaggregatedSetWatchMapper(mgr.GetAPIReader())
+		disaggregatedSetWatches := newDisaggregatedSetWatchMapper(mgr.GetClient())
 		ctrlBuilder = ctrlBuilder.Owns(newDisaggregatedSetObject(), builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
