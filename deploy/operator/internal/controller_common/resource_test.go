@@ -736,6 +736,39 @@ func TestCopySpec(t *testing.T) {
 	g.Expect(dst).To(gomega.Equal(expected))
 }
 
+func TestCopySpecPreservesUnstructuredFields(t *testing.T) {
+	t.Log("Build live and desired unstructured specs with an opaque future field")
+	src := &unstructured.Unstructured{Object: map[string]interface{}{
+		"spec": map[string]interface{}{
+			"known":  "value",
+			"future": map[string]interface{}{"enabled": true},
+		},
+	}}
+	dst := &unstructured.Unstructured{Object: map[string]interface{}{
+		"metadata": map[string]interface{}{"name": "resource"},
+		"spec":     map[string]interface{}{"known": "old"},
+	}}
+
+	t.Log("Copy the desired spec without decoding it through registered Go types")
+	if err := CopySpec(src, dst); err != nil {
+		t.Fatalf("CopySpec() error = %v", err)
+	}
+
+	t.Log("Verify the opaque field and its value were preserved")
+	want := map[string]interface{}{
+		"known":  "value",
+		"future": map[string]interface{}{"enabled": true},
+	}
+	got, found, err := unstructured.NestedMap(dst.Object, "spec")
+	if err != nil {
+		t.Fatalf("read copied spec: %v", err)
+	}
+	if !found {
+		t.Fatal("copied spec was not found")
+	}
+	gomega.NewWithT(t).Expect(got).To(gomega.Equal(want))
+}
+
 func TestAppendUniqueImagePullSecrets(t *testing.T) {
 	tests := []struct {
 		name       string
