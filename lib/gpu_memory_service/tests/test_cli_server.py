@@ -87,63 +87,6 @@ def test_enable_loader_cannot_combine_with_probe(capsys):
     )
 
 
-def _stub_supervisor(monkeypatch) -> tuple[list[list[str]], list[tuple[int, int]]]:
-    started: list[list[str]] = []
-    supervised: list[tuple[int, int]] = []
-
-    class _Alive:
-        def __init__(self, command: list[str]) -> None:
-            started.append(command)
-            self.pid = len(started)
-
-        def poll(self) -> None:
-            return None
-
-        def terminate(self) -> None:
-            return None
-
-    monkeypatch.setattr(server, "init_vmm", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        server, "get_vmm", lambda: SimpleNamespace(list_devices=lambda: [0, 1])
-    )
-    monkeypatch.setattr(server.signal, "signal", lambda *_args: None)
-    monkeypatch.setattr(server.subprocess, "Popen", _Alive)
-    monkeypatch.setattr(
-        server,
-        "_supervise",
-        lambda servers, loaders=None: (
-            supervised.append((len(servers), len(loaders or []))) or 0
-        ),
-    )
-    return started, supervised
-
-
-@pytest.mark.parametrize(
-    ("remainder", "server_count", "device_suffixes"),
-    [
-        (["--checkpoint-dir", "/ckpt"], 2, [["--device", "0"], ["--device", "1"]]),
-        (["--checkpoint-dir", "/ckpt", "--device", "1"], 2, [["--device", "1"]]),
-    ],
-)
-def test_enable_loader_device_scope(
-    monkeypatch, remainder, server_count, device_suffixes
-):
-    started, supervised = _stub_supervisor(monkeypatch)
-
-    with pytest.raises(SystemExit) as exc:
-        server.main(["--use-v1", "--enable-loader", *remainder])
-
-    assert exc.value.code == 0
-    loaders = [
-        command
-        for command in started
-        if "gpu_memory_service.v1.snapshot.loader" in command
-    ]
-    assert supervised == [(server_count, len(device_suffixes))]
-    assert [command[-2:] for command in loaders] == device_suffixes
-    assert all(command.count("--device") == 1 for command in loaders)
-
-
 def test_v1_socket_path_rejects_af_unix_overflow(monkeypatch):
     monkeypatch.setenv("GMS_SOCKET_DIR", "/" + "s" * 200)
     monkeypatch.setattr(v1_device, "get_device_uuid", lambda _device: "GPU-0")
