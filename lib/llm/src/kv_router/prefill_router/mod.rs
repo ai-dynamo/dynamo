@@ -165,6 +165,25 @@ fn nixl_push_handoff(endpoint: &NixlPushEndpoint, request_id: &str) -> PrefillRe
     }
 }
 
+/// Decide whether decode may be dispatched concurrently with prefill.
+///
+/// Overlapping means *synthesizing* the handoff rather than forwarding the
+/// prefill response, and the response is what carries `embedding_params` --
+/// multimodal metadata the decode worker requires, derived from prefill's own
+/// output and so unavailable before prefill runs. A multimodal request
+/// therefore takes the sequential path, where the real response is forwarded
+/// verbatim. Push mode still applies to it; only the overlap is given up.
+fn push_handoff_for(
+    request: &PreprocessedRequest,
+    nixl_push: Option<&NixlPushEndpoint>,
+    request_id: &str,
+) -> Option<PrefillResult> {
+    if request.multi_modal_data.is_some() {
+        return None;
+    }
+    nixl_push.map(|endpoint| nixl_push_handoff(endpoint, request_id))
+}
+
 struct PreparedPrefill {
     worker_id: u64,
     bootstrap_info: Option<BootstrapInfo>,
@@ -656,10 +675,13 @@ where
         let disaggregated_endpoint = self
             .model_manager
             .get_disaggregated_endpoint(endpoint_id, worker_id);
-        let push_handoff = disaggregated_endpoint
-            .as_ref()
-            .and_then(|endpoint| endpoint.nixl_push.as_ref())
-            .map(|endpoint| nixl_push_handoff(endpoint, request_id));
+        let push_handoff = push_handoff_for(
+            request,
+            disaggregated_endpoint
+                .as_ref()
+                .and_then(|endpoint| endpoint.nixl_push.as_ref()),
+            request_id,
+        );
         let bootstrap_info = disaggregated_endpoint
             .map(|endpoint| (endpoint_id, endpoint))
             .and_then(|(endpoint_id, endpoint)| {
@@ -766,7 +788,7 @@ mod tests {
 
     use crate::protocols::common::{
         FinishReason,
-        preprocessor::{PreprocessedRequest, RoutingHints},
+        preprocessor::{MultimodalData, PreprocessedRequest, RoutingHints},
     };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
@@ -1004,6 +1026,64 @@ mod tests {
             tensor_parallel_size: 4,
             pipeline_parallel_size: 2,
         }
+    }
+
+    fn text_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    fn multimodal_request() -> PreprocessedRequest {
+        let mut request = text_request();
+        let mut mm = HashMap::new();
+        mm.insert(
+            "image".to_string(),
+            vec![MultimodalData::RawUrl(
+                "https://example.invalid/a.png".to_string(),
+            )],
+        );
+        request.multi_modal_data = Some(mm);
+        request
+    }
+
+    /// Decode reads `embedding_params` off the forwarded prefill response, and
+    /// prefill only produces them by running. The overlapped path synthesizes
+    /// the handoff instead of forwarding it, so overlapping a multimodal
+    /// request strands decode without that metadata.
+    #[test]
+    fn multimodal_requests_do_not_take_the_overlapped_push_path() {
+        let endpoint = push_endpoint();
+
+        assert!(
+            push_handoff_for(&multimodal_request(), Some(&endpoint), "req-42").is_none(),
+            "multimodal request must fall back to the sequential handoff"
+        );
+    }
+
+    #[test]
+    fn text_requests_still_take_the_overlapped_push_path() {
+        let endpoint = push_endpoint();
+
+        let handoff = push_handoff_for(&text_request(), Some(&endpoint), "req-42")
+            .expect("text request with advertised coordinates should overlap");
+        assert_eq!(
+            handoff.disaggregated_params["kv_transfer_params"]["remote_engine_id"],
+            "prefill-engine-001"
+        );
+    }
+
+    /// Without advertised coordinates there is nothing to overlap with, and the
+    /// multimodal guard must not change that either way.
+    #[test]
+    fn no_advertised_coordinates_means_no_overlap() {
+        assert!(push_handoff_for(&text_request(), None, "req-42").is_none());
+        assert!(push_handoff_for(&multimodal_request(), None, "req-42").is_none());
     }
 
     /// vLLM matches these keys by name off `kv_transfer_params`, so the shape
