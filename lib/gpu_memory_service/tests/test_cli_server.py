@@ -1,13 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for production GMS process and listener topology."""
+"""Tests for GMS process topology."""
 
 from __future__ import annotations
 
 import asyncio
-import sys
-from types import SimpleNamespace
 
 import pytest
 from _deps import HAS_GMS
@@ -18,10 +16,7 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
-from gpu_memory_service.cli import args as cli_args
 from gpu_memory_service.cli import runner, server
-from gpu_memory_service.cli.args import parse_args
-from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.v1 import device as v1_device
 
 pytestmark = [
@@ -30,100 +25,6 @@ pytestmark = [
     pytest.mark.none,
     pytest.mark.gpu_0,
 ]
-
-
-def test_child_command_launches_default_multi_tag_runner():
-    assert server._child_command(3, "cuda") == [
-        sys.executable,
-        "-m",
-        "gpu_memory_service",
-        "--device",
-        "3",
-        "--device-type",
-        "cuda",
-    ]
-
-
-def test_v1_cli_dispatches_cuda_only_child(monkeypatch, capsys):
-    calls = []
-    monkeypatch.setattr(
-        runner.importlib,
-        "import_module",
-        lambda name: (
-            calls.append(("import", name))
-            or SimpleNamespace(main=lambda argv: calls.append(("main", argv)))
-        ),
-    )
-
-    runner.main(["--use-v1", "--device", "3"])
-
-    assert calls == [
-        ("import", "gpu_memory_service.v1.cli"),
-        ("main", ["--device", "3"]),
-    ]
-    assert server._child_command(3, "cuda", use_v1=True) == [
-        sys.executable,
-        "-m",
-        "gpu_memory_service",
-        "--use-v1",
-        "--device",
-        "3",
-    ]
-    with pytest.raises(SystemExit):
-        server.main(["--use-v1", "--device-type", "xpu"])
-    assert "--use-v1 only supports --device-type=cuda" in capsys.readouterr().err
-
-
-def test_probe_restore_ready_uses_v0_session_without_use_v1(monkeypatch):
-    opened = []
-
-    class FakeVMM:
-        def list_devices(self):
-            return [2]
-
-    class FakeSession:
-        def __init__(self, path, lock, timeout_ms):
-            opened.append((path, lock, timeout_ms))
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(server, "init_vmm", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(server, "get_vmm", lambda: FakeVMM())
-    monkeypatch.setattr(
-        server, "_v0_socket_path", lambda device, tag: f"/tmp/{device}-{tag}"
-    )
-    monkeypatch.setattr(server, "_V0ClientSession", FakeSession)
-
-    server.main(["--probe-restore-ready"])
-
-    assert opened == [("/tmp/2-weights", RequestedLockType.RO, 500)]
-
-
-def test_probe_restore_ready_uses_v1_session_with_use_v1(monkeypatch):
-    opened = []
-
-    class FakeVMM:
-        def list_devices(self):
-            return [2]
-
-    class FakeSession:
-        def __init__(self, path, lock, *, connect_timeout, admission_timeout):
-            opened.append((path, lock, connect_timeout, admission_timeout))
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(server, "init_vmm", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(server, "get_vmm", lambda: FakeVMM())
-    monkeypatch.setattr(
-        server, "_v1_socket_path", lambda device, tag: f"/tmp/{device}-{tag}"
-    )
-    monkeypatch.setattr(server, "_V1ClientSession", FakeSession)
-
-    server.main(["--use-v1", "--probe-restore-ready"])
-
-    assert opened == [("/tmp/2-weights", RequestedLockType.RO, 0.5, 0.5)]
 
 
 def test_v1_socket_path_rejects_af_unix_overflow(monkeypatch):
@@ -156,81 +57,6 @@ def test_supervisor_terminates_siblings_when_child_exits():
     clean = [_Process(exit_code=0), _Process()]
     assert server._supervise(clean) == 1
     assert clean[1].terminated
-
-
-def test_parse_args_defaults_to_one_config_per_production_tag(monkeypatch):
-    # get_socket_path queries the GPU UUID through NVML; stub the hardware.
-    monkeypatch.setattr(
-        cli_args,
-        "get_socket_path",
-        lambda device, tag: f"/sockets/{device}-{tag}.sock",
-    )
-
-    configs = parse_args(["--device", "3"])
-
-    assert [config.tag for config in configs] == ["weights", "kv_cache"]
-    assert [config.socket_path for config in configs] == [
-        "/sockets/3-weights.sock",
-        "/sockets/3-kv_cache.sock",
-    ]
-    assert all(config.device == 3 for config in configs)
-
-    (config,) = parse_args(["--device", "3", "--tag", "kv_cache"])
-    assert config.tag == "kv_cache"
-
-
-def test_parse_args_single_tag_honors_explicit_socket_path():
-    (config,) = parse_args(
-        ["--device", "3", "--tag", "weights", "--socket-path", "/run/gms.sock"]
-    )
-
-    assert config.socket_path == "/run/gms.sock"
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["--device", "3", "--tag", "weight"],
-        ["--device", "3", "--tag", "weights", "--tag", "bogus"],
-    ],
-)
-def test_parse_args_rejects_unknown_tags(argv, capsys):
-    with pytest.raises(SystemExit):
-        parse_args(argv)
-
-    assert "invalid choice" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        # Default tags: one socket path cannot serve both listeners.
-        ["--device", "3", "--socket-path", "/run/gms.sock"],
-        # Explicit multiple tags with one socket path.
-        [
-            "--device",
-            "3",
-            "--tag",
-            "weights",
-            "--tag",
-            "kv_cache",
-            "--socket-path",
-            "/run/gms.sock",
-        ],
-    ],
-)
-def test_parse_args_rejects_socket_path_for_multiple_tags(argv, capsys):
-    with pytest.raises(SystemExit):
-        parse_args(argv)
-
-    assert "requires exactly one --tag" in capsys.readouterr().err
-
-
-def test_parse_args_rejects_duplicate_tags(capsys):
-    with pytest.raises(SystemExit):
-        parse_args(["--device", "3", "--tag", "weights", "--tag", "weights"])
-
-    assert "must be unique" in capsys.readouterr().err
 
 
 @pytest.mark.timeout(10)

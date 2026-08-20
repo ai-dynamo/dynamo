@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 import subprocess
 import sys
@@ -14,19 +13,17 @@ from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 logger = logging.getLogger(__name__)
 
 
-def _device_scoped(argv: list[str]) -> bool:
-    return any(
-        a in {"-h", "--help"} or a == "--device" or a.startswith("--device=")
-        for a in argv
-    )
-
-
 def start_per_device(
     module: str, argv: list[str], devices: list[int]
 ) -> list[subprocess.Popen]:
-    targets: list[int | None] = [None] if _device_scoped(argv) else list(devices)
+    scoped = any(
+        argument in {"-h", "--help"}
+        or argument == "--device"
+        or argument.startswith("--device=")
+        for argument in argv
+    )
     processes = []
-    for device in targets:
+    for device in ([None] if scoped else devices):
         extra = [] if device is None else ["--device", str(device)]
         process = subprocess.Popen([sys.executable, "-m", module, *argv, *extra])
         logger.info("Started %s device=%s pid=%d", module, device, process.pid)
@@ -35,11 +32,17 @@ def start_per_device(
 
 
 def run_per_device(module: str, argv: list[str]) -> None:
-    if _device_scoped(argv):
-        importlib.import_module(module).main(argv)
-        return
-    init_vmm(VMMDeviceType.CUDA)
-    processes = start_per_device(module, argv, get_vmm().list_devices())
+    scoped = any(
+        argument in {"-h", "--help"}
+        or argument == "--device"
+        or argument.startswith("--device=")
+        for argument in argv
+    )
+    if not scoped:
+        init_vmm(VMMDeviceType.CUDA)
+    processes = start_per_device(
+        module, argv, [] if scoped else get_vmm().list_devices()
+    )
     try:
         pending = list(processes)
         while pending:
