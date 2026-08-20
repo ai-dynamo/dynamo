@@ -27,6 +27,7 @@ from dynamo.sglang._compat import (
     require_reasoning_kwargs,
 )
 from dynamo.sglang.args import (
+    _diffusion_generator_kwargs,
     _forward_pass_metrics_source,
     _normalize_multimodal_disaggregation_args,
     parse_args,
@@ -38,7 +39,6 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.init_diffusion import _diffusion_generator_kwargs
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
