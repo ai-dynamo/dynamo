@@ -407,7 +407,14 @@ where
             }
             changed = changes_rx.changed() => {
                 changed.context("EPP peer EndpointSlice watch ended during KV-index recovery")?;
-                backoff = initial_backoff;
+                // Only a genuine candidate-set change earns an immediate retry
+                // with the initial backoff. Unrelated churn (readiness flips,
+                // metadata/zone updates) must not reset the backoff either:
+                // under a rolling update it would keep the retry loop hot at
+                // the initial backoff instead of letting it grow.
+                if recovery_peer_urls(store, self_ip, selection_http_port) != peers {
+                    backoff = initial_backoff;
+                }
             }
             _ = tokio::time::sleep(backoff) => {
                 backoff = backoff.saturating_mul(2).min(max_backoff);

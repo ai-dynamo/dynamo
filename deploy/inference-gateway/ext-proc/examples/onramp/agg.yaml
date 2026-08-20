@@ -319,6 +319,42 @@ spec:
       port: 9093
       targetPort: selection-http
 ---
+# `selection-http` serves the peer KV-index snapshot (`GET /dump`) without
+# authentication, so it is reachable only from sibling EPP pods. The same
+# peer-only restriction applies to `replica-agg` lifecycle sync. The GAIE
+# gateway still reaches gRPC (9002) and the kubelet still probes grpc-health
+# (9003) from any source; KV events flow *out* of the EPP to workers, so no
+# inbound rule is needed for them. Clusters without a NetworkPolicy CNI
+# simply ignore this object.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dynamo-epp
+  labels:
+    app: dynamo-epp
+spec:
+  podSelector:
+    matchLabels:
+      app: dynamo-epp
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: dynamo-epp
+      ports:
+        - protocol: TCP
+          port: replica-agg
+        - protocol: TCP
+          port: selection-http
+    - from: [] # any source: GAIE gateway + kubelet probes
+      ports:
+        - protocol: TCP
+          port: grpc
+        - protocol: TCP
+          port: grpc-health
+---
 # InferencePool selects the raw vLLM pods and delegates endpoint selection to
 # the EPP. The EPP reads this object (read-only) to learn the pod selector and
 # target port — the same object the gateway routes to.
