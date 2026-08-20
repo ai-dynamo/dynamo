@@ -217,21 +217,21 @@ The worker in the previous step runs **vLLM**. Dynamo also supports **SGLang** a
 <Tab title="vLLM" language="vllm">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
 ```
 
 </Tab>
 <Tab title="SGLang" language="sglang">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.1
 ```
 
 </Tab>
 <Tab title="TensorRT-LLM" language="trtllm">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.1
 ```
 
 </Tab>
