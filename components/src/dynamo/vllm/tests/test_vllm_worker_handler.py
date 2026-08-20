@@ -1136,6 +1136,26 @@ class TestDeferredAbort:
 
         handler.engine_client.abort.assert_awaited_once_with("req-6")
 
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_cleans_waitables_after_normal_completion(self):
+        handler = _make_handler()
+        handler.shutdown_event = asyncio.Event()
+
+        killed_future = asyncio.get_running_loop().create_future()
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        async with handler._abort_monitor(context, "req-cleanup"):
+            for _ in range(10):
+                if handler.shutdown_event._waiters:
+                    break
+                await asyncio.sleep(0)
+            assert len(handler.shutdown_event._waiters) == 1
+
+        assert killed_future.cancelled()
+        assert not handler.shutdown_event._waiters
+
     # close() cleanup tests: case 1b safety
 
     @pytest.mark.asyncio
