@@ -357,7 +357,12 @@ where
         reconcile_once(service, store, sync_port, self_ip, known).await;
         let peers = recovery_peer_urls(store, self_ip, selection_http_port);
         if peers.is_empty() {
-            tracing::info!("No sibling EPP peers found; bootstrapping an empty KV index");
+            crate::metrics::set_kv_recovery_state(crate::metrics::KV_RECOVERY_EMPTY_BOOTSTRAP);
+            tracing::warn!(
+                "No serving sibling EPP peer found; bootstrapping an EMPTY KV index \
+                 (normal on first deploy, but a full-index loss if the cluster was \
+                 already serving — check expected replica count / recovery history)"
+            );
             return Ok(());
         }
 
@@ -389,7 +394,10 @@ where
         };
 
         match result {
-            Ok(true) => return Ok(()),
+            Ok(true) => {
+                crate::metrics::set_kv_recovery_state(crate::metrics::KV_RECOVERY_RECOVERED);
+                return Ok(());
+            }
             Ok(false) => tracing::warn!(
                 retry_ms = backoff.as_millis(),
                 "No reachable EPP peer dump; retrying KV-index recovery"
