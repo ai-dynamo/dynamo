@@ -346,7 +346,7 @@ class AudioFormatter:
                     stream_state,
                 )
             else:
-                audio_bytes, media_type = await asyncio.to_thread(
+                audio_bytes, _ = await asyncio.to_thread(
                     self._encode_audio, audio_np, sample_rate, encode_fmt, speed
                 )
 
