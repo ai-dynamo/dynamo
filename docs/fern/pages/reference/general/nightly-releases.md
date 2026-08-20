@@ -40,7 +40,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:latest
 ```
 
-The old nightly docs also described immutable `:YYYYMMDD-<shortsha>` container tags. Those tags are not currently visible for the recent NGC nightly images, so use `:latest` unless you have a specific tag from the publish job.
+Every nightly also gets an immutable `:YYYYMMDD-<shortsha>` tag naming the commit it was built from. Use those to pin a specific night; the build selector in [Install Dynamo](../../cli/installation/install-dynamo.mdx) emits them for each backend version.
 
 ## Installing Nightly Wheels
 

@@ -184,7 +184,11 @@ export function KubernetesContainerSelector() {
   const [registry, setRegistry] = useState("");
   const [copyLabel, setCopyLabel] = useState("Copy");
 
-  const entries = INSTALL_DATA[backend][channel].filter((candidate) => candidate.commands.container);
+  const entries = INSTALL_DATA[backend][channel]
+    .filter((candidate) => candidate.commands.container)
+    // This quickstart deploys the rolling nightly. Pinning an older nightly means
+    // setting worker images by hand, which the emitted variables do not cover.
+    .filter((candidate) => channel !== "nightly" || candidate.latest);
   const entry = entries[versionIndex] ?? entries[0];
   const command = commandFor(hardware, backend, channel, entry?.dynamo, registry);
   const hardwareLabel = hardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";

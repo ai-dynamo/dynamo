@@ -2,15 +2,16 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Install-selector view of the shared release data. Keep release and backend
- * versions in releases.data.ts; this module only formats install commands.
+ * Install-selector view of the release data. Stable and source-build versions
+ * come from releases.data.ts; the nightly dimension comes from the generated
+ * module. This module only formats install commands.
  */
 
+import { NIGHTLY_BACKEND_BUILDS } from "./nightly-selector-data.generated";
 import {
   CURRENT_VERSION,
   CURRENT_WHEEL,
   MAIN_TOT,
-  NIGHTLY_BACKEND_BUILDS,
   RELEASES,
   type BackendPins,
 } from "./releases.data";
@@ -23,6 +24,8 @@ export type InstallEntry = {
   backend_version: string;
   dynamo?: string;
   date?: string;
+  /** Immutable NGC nightly tag backing this entry, when it has one. */
+  tag?: string;
   latest?: boolean;
   source?: boolean;
   note?: string;
@@ -98,25 +101,28 @@ function stableEntries(backend: Backend): InstallEntry[] {
 }
 
 function nightlyEntries(backend: Backend): InstallEntry[] {
-  return NIGHTLY_BACKEND_BUILDS.filter((build) => build.backend === backend.id)
-    // Older backend versions are reachable only through their pinned wheel, so a
-    // backend with no wheel extra can offer nothing but the rolling container.
-    .filter((build) => backend.extra || build.latest)
-    .map((build) => ({
+  return NIGHTLY_BACKEND_BUILDS.filter((build) => build.backend === backend.id).map(
+    (build) => ({
       backend_version: build.backendVersion,
-      dynamo: build.dynamo,
+      dynamo: build.dynamo ?? undefined,
       date: build.date,
+      tag: build.tag,
       latest: build.latest,
       note: build.latest
-        ? `Tip of main. The rolling ${backend.image}-runtime-nightly:latest container tracks this ${backend.label} version.`
-        : `Newest nightly that shipped ${backend.label} ${build.backendVersion}. Nightly containers are rolling only, so this version is wheel-pinned.`,
+        ? `Tip of main, also served by the rolling ${backend.image}-runtime-nightly:latest tag.`
+        : `Newest nightly that shipped ${backend.label} ${build.backendVersion}.`,
       commands: {
-        ...(build.latest
-          ? { container: dockerCommand(`${backend.image}-runtime-nightly`, "latest") }
+        // Rolling tag for the newest build, immutable date-sha tag for the rest.
+        container: dockerCommand(
+          `${backend.image}-runtime-nightly`,
+          build.latest ? "latest" : build.tag,
+        ),
+        ...(backend.extra && build.dynamo
+          ? { wheel: nightlyWheelCommand(backend, build.dynamo) }
           : {}),
-        ...(backend.extra ? { wheel: nightlyWheelCommand(backend, build.dynamo) } : {}),
       },
-    }));
+    }),
+  );
 }
 
 function sourceEntries(backend: Backend): InstallEntry[] {

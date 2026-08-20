@@ -50,6 +50,10 @@ on:
     tags:
       # Match only clean semver tags: vX.Y.Z
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  schedule:
+    # Daily refresh so the generated install-selector nightly data stays current
+    # without waiting for a docs change to land.
+    - cron: '0 9 * * *'
   # The Home page calendar refresh used to run here on a six-hour `schedule:`.
   # It now lives in community-events-refresh.yml, which commits the regenerated
   # events to main — and that push comes back through the `push:` trigger above.
@@ -73,8 +77,9 @@ jobs:
   # Detect changed files for conditional job execution
   changed-files:
     runs-on: ubuntu-latest
-    # Skip for tag pushes - version release doesn't need changed-files check
-    if: github.ref_type != 'tag'
+    # Skip for tag pushes (version release doesn't need it) and scheduled runs
+    # (no diff base; the scheduled refresh regenerates unconditionally).
+    if: github.ref_type != 'tag' && github.event_name != 'schedule'
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
     steps:
@@ -99,7 +104,9 @@ jobs:
     if: |
       always() &&
       github.ref_type != 'tag' &&
-      (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
+      needs.changed-files.result != 'failure' &&
+      needs.changed-files.result != 'cancelled' &&
+      (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
     runs-on: ubuntu-latest
     steps:
@@ -129,6 +136,23 @@ jobs:
           python3 source-checkout/docs/fern/scripts/gen_python_api.py --check
           python3 source-checkout/docs/fern/scripts/gen_rust_api.py --check
           python3 source-checkout/docs/fern/scripts/gen_kubernetes_api.py --check
+
+      - name: Generate install-selector nightly data
+        # Writes components/nightly-selector-data.generated.ts, which the
+        # component sync below carries to docs-website. Needs full history and
+        # tags: each NGC nightly tag names the commit that build came from, and
+        # the generator reads container/context.yaml and pyproject.toml there.
+        run: |
+          git -C source-checkout fetch --unshallow --tags 2>/dev/null \
+            || git -C source-checkout fetch --tags
+          # Fail rather than silently emit a collapsed nightly history from a
+          # still-shallow clone (e.g. a transient --unshallow failure).
+          if [ "$(git -C source-checkout rev-parse --is-shallow-repository)" != "false" ]; then
+            echo "::error::source-checkout is still shallow; nightly history would be incomplete"
+            exit 1
+          fi
+          python3 -m pip install --quiet pyyaml
+          python3 source-checkout/docs/fern/scripts/gen_nightly_selector.py
 
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

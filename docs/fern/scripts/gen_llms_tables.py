@@ -1129,7 +1129,6 @@ def build_json(data: dict) -> str:
         "releaseStats": data["RELEASE_STATS"],
         "nightliesNote": data.get("NIGHTLIES_NOTE"),
         "nightlyBuilds": nightly_builds,
-        "nightlyBackendBuilds": data.get("NIGHTLY_BACKEND_BUILDS") or [],
     }
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
