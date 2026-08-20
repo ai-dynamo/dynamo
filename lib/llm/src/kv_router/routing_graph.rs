@@ -124,10 +124,15 @@ impl SchedulerLoadShared {
 pub struct SchedulerLoadSender {
     tx: mpsc::Sender<SchedulerLoadCommand>,
     shared: Arc<SchedulerLoadShared>,
+    source: RouterLoadSource,
     cancellation_token: CancellationToken,
 }
 
 impl SchedulerLoadSender {
+    pub(crate) const fn metric_label(&self) -> &'static str {
+        self.source.metric_label()
+    }
+
     pub fn publish(&self, snapshot: SchedulerLoadSnapshot) {
         self.try_publish(SchedulerLoadCommand::Single(snapshot));
     }
@@ -179,12 +184,18 @@ impl SchedulerLoadReceiver {
 }
 
 pub(crate) fn scheduler_load_channel(
+    source: RouterLoadSource,
     cancellation_token: CancellationToken,
 ) -> (SchedulerLoadSender, SchedulerLoadReceiver) {
-    scheduler_load_channel_with_capacity(cancellation_token, SCHEDULER_LOAD_CHANNEL_CAPACITY)
+    scheduler_load_channel_with_capacity(
+        source,
+        cancellation_token,
+        SCHEDULER_LOAD_CHANNEL_CAPACITY,
+    )
 }
 
 fn scheduler_load_channel_with_capacity(
+    source: RouterLoadSource,
     cancellation_token: CancellationToken,
     capacity: usize,
 ) -> (SchedulerLoadSender, SchedulerLoadReceiver) {
@@ -194,6 +205,7 @@ fn scheduler_load_channel_with_capacity(
         SchedulerLoadSender {
             tx,
             shared: shared.clone(),
+            source,
             cancellation_token,
         },
         SchedulerLoadReceiver { rx, shared },
@@ -215,7 +227,8 @@ mod tests {
     #[tokio::test]
     async fn saturated_channel_coalesces_batch_and_later_absolute_state_converges() {
         let token = CancellationToken::new();
-        let (sender, mut receiver) = scheduler_load_channel_with_capacity(token, 1);
+        let (sender, mut receiver) =
+            scheduler_load_channel_with_capacity(RouterLoadSource::Decode, token, 1);
 
         sender.publish(snapshot(1, 90));
         sender.publish_batch(vec![snapshot(1, 80), snapshot(2, 70)]);
@@ -254,7 +267,7 @@ impl TypedRoutingGraph {
     ) -> anyhow::Result<Arc<Self>> {
         let cancellation_token = parent_token.child_token();
         let (scheduler_load, scheduler_load_rx) =
-            scheduler_load_channel(cancellation_token.child_token());
+            scheduler_load_channel(source, cancellation_token.child_token());
         let monitor = KvWorkerMonitor::new(
             client.clone(),
             source,

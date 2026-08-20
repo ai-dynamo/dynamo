@@ -78,7 +78,6 @@ where
             initial_workers,
             kv_router_config.router_replica_sync,
             router_id,
-            worker_type,
             scheduler_load,
             cancellation_token.child_token(),
         )
@@ -542,7 +541,11 @@ mod tests {
             None,
             Some("test-model"),
             "decode",
-            super::super::routing_graph::scheduler_load_channel(cancellation_token.child_token()).0,
+            super::super::routing_graph::scheduler_load_channel(
+                super::super::RouterLoadSource::Decode,
+                cancellation_token.child_token(),
+            )
+            .0,
             cancellation_token.clone(),
         )
         .await
