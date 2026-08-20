@@ -290,6 +290,7 @@ impl Selector {
                     // image-only upgrade from a deployment that predates the
                     // dump endpoint). Degrade to no-recovery instead of failing
                     // startup: the replica bootstraps empty and serves.
+                    crate::metrics::set_kv_recovery_state(crate::metrics::KV_RECOVERY_DISABLED);
                     tracing::warn!(
                         service = %replication.service_name,
                         "selection-http port not found; peer KV-index recovery disabled \
