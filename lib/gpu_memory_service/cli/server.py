@@ -3,7 +3,7 @@
 
 """GMS server entry point.
 
-Launches one GMS server process per GPU, then supervises them. V1 restore
+Launches one GMS server process per GPU, then supervises them. Restore
 optionally starts one-shot loaders. Device discovery uses NVML without
 initializing the CUDA driver.
 """
@@ -18,7 +18,7 @@ import sys
 import time
 from contextlib import closing
 
-from gpu_memory_service.cli.snapshot import start_v1_per_device
+from gpu_memory_service.cli.snapshot import start_per_device
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.v1.client.session import _GMSClientSession
@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> None:
         nargs=argparse.REMAINDER,
         metavar="ARG",
         help=(
-            "Start V1 loaders after the servers. Remaining args, including "
+            "Start loaders after the servers. Remaining args, including "
             "--checkpoint-dir, go to the loader. Pass --device to load one GPU."
         ),
     )
@@ -124,8 +124,6 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--use-v1 only supports --device-type=cuda")
     if args.probe_restore_ready and not args.use_v1:
         parser.error("--probe-restore-ready requires --use-v1")
-    if args.enable_loader is not None and not args.use_v1:
-        parser.error("--enable-loader requires --use-v1")
     if args.probe_restore_ready and args.enable_loader is not None:
         parser.error("--probe-restore-ready cannot be combined with --enable-loader")
 
@@ -160,10 +158,13 @@ def main(argv: list[str] | None = None) -> None:
             servers.append(server)
 
         if args.enable_loader is not None:
+            loader_argv = list(args.enable_loader)
+            if args.use_v1:
+                loader_argv.insert(0, "--use-v1")
             loaders.extend(
-                start_v1_per_device(
-                    "gpu_memory_service.v1.snapshot.loader",
-                    args.enable_loader,
+                start_per_device(
+                    "gpu_memory_service.cli.snapshot.loader",
+                    loader_argv,
                     devices,
                 )
             )

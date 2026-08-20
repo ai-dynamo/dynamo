@@ -21,6 +21,15 @@ pytestmark = [
 ]
 
 
+def test_saver_device_defaults_to_all_visible():
+    args = saver._build_parser().parse_args(["--checkpoint-dir", "/ckpt"])
+    assert args.device is None
+    args = saver._build_parser().parse_args(
+        ["--checkpoint-dir", "/ckpt", "--device", "2"]
+    )
+    assert args.device == 2
+
+
 def test_save_device_sets_cuda_context_before_storage_client(monkeypatch):
     calls = []
 
