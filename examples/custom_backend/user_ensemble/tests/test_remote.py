@@ -21,7 +21,6 @@ from dynamo.workflow import (  # noqa: E402
     ValueRef,
     WorkflowOrchestrator,
 )
-from dynamo.workflow.remote import StageResponseEnvelope  # noqa: E402
 from examples.custom_backend.user_ensemble.remote import (  # noqa: E402
     classifier_worker as classifier_worker_module,
 )
@@ -108,20 +107,14 @@ class _Client:
                 yield {"token_ids": [4, 2], "index": 0, "finish_reason": "stop"}
                 return
             if self.name == "response":
-                completion = dict(request["inputs"]["completion"])
+                completion = dict(request["completion"])
                 completion["engine_data"] = {
-                    "ensemble": {"classifier_scores": dict(request["inputs"]["scores"])}
+                    "ensemble": {"classifier_scores": dict(request["scores"])}
                 }
                 outputs = {"chunk": completion}
             else:
                 outputs = {"scores": {"relevant": 0.75, "not_relevant": 0.25}}
-            yield StageResponseEnvelope(
-                stage_id=request["stage"],
-                contract_id=request["contract"],
-                attempt_id=request["attempt"],
-                invocation_id=request["invocation"],
-                outputs=outputs,
-            ).to_dict()
+            yield outputs
 
         return stream()
 
@@ -260,7 +253,7 @@ async def test_orchestrator_fans_out_request_concurrently_and_joins() -> None:
     assert barrier.arrivals == {"classifier", "generator"}
     assert generator.request == request
     assert classifier.request is not None
-    assert classifier.request["inputs"]["request"] == request
+    assert classifier.request["request"] == request
     assert result["chunk"]["token_ids"] == [4, 2]
     assert result["chunk"]["engine_data"]["ensemble"]["classifier_scores"] == {
         "relevant": 0.75,
@@ -293,8 +286,8 @@ async def test_orchestrator_can_join_through_remote_response() -> None:
 
     assert barrier.arrivals == {"classifier", "generator"}
     assert response.request is not None
-    assert response.request["inputs"]["completion"]["token_ids"] == [4, 2]
-    assert response.request["inputs"]["scores"] == {
+    assert response.request["completion"]["token_ids"] == [4, 2]
+    assert response.request["scores"] == {
         "relevant": 0.75,
         "not_relevant": 0.25,
     }
