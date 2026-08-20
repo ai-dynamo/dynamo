@@ -24,7 +24,7 @@ use tonic_health::ServingStatus as HealthServingStatus;
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{ResponseState, build_generate_request};
-use crate::engine::VllmSidecarEngine;
+use crate::engine::{VllmSidecarEngine, validate_http_endpoint};
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
@@ -469,6 +469,28 @@ fn discovered_model_reports_rl_worker_metadata() {
         RlWorkerMetadata::new(4, Some("http://worker:8120".to_string()))
             .expect("valid expected metadata")
     );
+}
+
+#[test]
+fn http_admin_endpoint_accepts_http_https_and_path_prefixes() {
+    for endpoint in [
+        "http://worker:8120",
+        "https://worker.example.com",
+        "https://worker.example.com/admin/v1",
+    ] {
+        assert_eq!(
+            validate_http_endpoint(endpoint).expect("valid HTTP admin endpoint"),
+            endpoint
+        );
+    }
+}
+
+#[test]
+fn http_admin_endpoint_rejects_invalid_values() {
+    for endpoint in ["", "worker:8120", "grpc://worker:8120", "https:///admin"] {
+        let error = validate_http_endpoint(endpoint).unwrap_err();
+        assert!(error.to_string().contains("--vllm-http-endpoint"));
+    }
 }
 
 #[test]
