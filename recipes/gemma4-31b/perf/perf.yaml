@@ -225,4 +225,4 @@ spec:
       volumes:
       - name: model-cache
         persistentVolumeClaim:
-          claimName: shared-model-cache
+          claimName: model-cache

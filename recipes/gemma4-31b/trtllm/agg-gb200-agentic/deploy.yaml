@@ -89,7 +89,7 @@ spec:
           volumes:
             - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
 
     - name: agg
       type: worker
@@ -192,7 +192,7 @@ spec:
           volumes:
             - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
             - name: dshm
               emptyDir:
                 medium: Memory
