@@ -289,3 +289,68 @@ def test_rust_handler_processes_batches_off_loop_and_wakes_once_per_request():
         for thread_name in result.handle_response_threads
     }
     assert result_threads == set()
+
+
+def test_rust_handler_cancellation_removes_native_request_state():
+    class RecordingProcessor:
+        def __init__(self):
+            self.registered = []
+            self.cancelled = []
+            self.frames_sent = 0
+
+        def register(
+            self,
+            client_id,
+            prompt_tokens,
+            num_choices,
+            response_sender,
+            calibrated_work_us,
+        ):
+            self.registered.append(client_id)
+
+        def process_mock_batch(self, _responses):
+            return []
+
+        def cancel(self, client_id):
+            self.cancelled.append(client_id)
+            return True
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        llm = FakeLLM(
+            EngineConfig(
+                batch=BatchConfig(total=1),
+                iteration=ConstantIteration(50.0),
+                max_tokens=100,
+            ),
+            costs=Costs().with_scale(0.0),
+        )
+        processor = RecordingProcessor()
+        handler = RuntimeRustEgressWorkerHandler(llm, processor=processor)
+        llm.start(loop)
+        try:
+            stream = handler.generate(
+                {
+                    "token_ids": [11],
+                    "stop_conditions": {"max_tokens": 100},
+                    "sampling_options": {"n": 1},
+                },
+                context=None,
+                response_sender=object(),
+            )
+            pending = asyncio.create_task(anext(stream))
+            while not processor.registered:
+                await asyncio.sleep(0)
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+
+            client_id = processor.registered[0]
+            return client_id, processor.cancelled, dict(llm._results)
+        finally:
+            llm.shutdown()
+
+    client_id, cancelled, remaining_results = asyncio.run(run())
+
+    assert cancelled == [client_id]
+    assert remaining_results == {}
