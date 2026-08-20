@@ -14,17 +14,17 @@ from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 logger = logging.getLogger(__name__)
 
 
-def _v1_scoped(argv: list[str]) -> bool:
+def _device_scoped(argv: list[str]) -> bool:
     return any(
         a in {"-h", "--help"} or a == "--device" or a.startswith("--device=")
         for a in argv
     )
 
 
-def start_v1_per_device(
+def start_per_device(
     module: str, argv: list[str], devices: list[int]
 ) -> list[subprocess.Popen]:
-    targets: list[int | None] = [None] if _v1_scoped(argv) else list(devices)
+    targets: list[int | None] = [None] if _device_scoped(argv) else list(devices)
     processes = []
     for device in targets:
         extra = [] if device is None else ["--device", str(device)]
@@ -34,12 +34,12 @@ def start_v1_per_device(
     return processes
 
 
-def run_v1_per_device(module: str, argv: list[str]) -> None:
-    if _v1_scoped(argv):
+def run_per_device(module: str, argv: list[str]) -> None:
+    if _device_scoped(argv):
         importlib.import_module(module).main(argv)
         return
     init_vmm(VMMDeviceType.CUDA)
-    processes = start_v1_per_device(module, argv, get_vmm().list_devices())
+    processes = start_per_device(module, argv, get_vmm().list_devices())
     try:
         pending = list(processes)
         while pending:
