@@ -8,6 +8,7 @@ use crate::config::HealthStatus;
 use crate::config::environment_names::logging as env_logging;
 use crate::config::environment_names::runtime::canary as env_canary;
 use crate::config::environment_names::runtime::system as env_system;
+use crate::engine_routes::EngineRouteMethod;
 use crate::logging::make_system_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::traits::DistributedRuntimeProvider;
@@ -15,7 +16,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::{Json, Path, State},
-    http::StatusCode,
+    http::{Method, StatusCode},
     response::IntoResponse,
     routing::{any, delete, get, post},
 };
@@ -188,7 +189,7 @@ pub async fn spawn_system_status_server(
             "/engine/{*path}",
             any({
                 let state = Arc::clone(&server_state);
-                move |path, body| engine_route_handler(state, path, body)
+                move |method, path, body| engine_route_handler(state, method, path, body)
             }),
         );
 
@@ -642,12 +643,51 @@ fn parse_lora_response(response_data: &serde_json::Value) -> LoraResponse {
 #[tracing::instrument(skip_all, level = "trace", fields(path = %path))]
 async fn engine_route_handler(
     state: Arc<SystemStatusState>,
+    method: Method,
     Path(path): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
     tracing::trace!("Engine route request to /engine/{path}");
 
-    // Parse body as JSON (empty object for GET/empty body)
+    // Look up callback
+    let route = match state.drt().engine_routes().get_route(&path) {
+        Some(route) => route,
+        None => {
+            tracing::debug!("Route /engine/{path} not found");
+            return (
+                StatusCode::NOT_FOUND,
+                json!({
+                    "error": "Route not found",
+                    "message": format!("Route /engine/{} not found", path)
+                })
+                .to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    let is_method_allowed = match route.method() {
+        None => true,
+        Some(EngineRouteMethod::Get) => method == Method::GET,
+        Some(EngineRouteMethod::Post) => method == Method::POST,
+    };
+    if !is_method_allowed {
+        tracing::debug!(%method, "method not allowed for /engine/{path}");
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            json!({
+                "error": "Method not allowed",
+                "message": format!("{} is not allowed for /engine/{}", method, path)
+            })
+            .to_string(),
+        )
+            .into_response();
+    }
+
+    let callback = route.callback();
+
+    // Parse body as JSON (empty object for GET/empty body) only after the
+    // method check, so a wrong method consistently returns 405.
     let body_json: serde_json::Value = if body.is_empty() {
         serde_json::json!({})
     } else {
@@ -668,24 +708,6 @@ async fn engine_route_handler(
         }
     };
 
-    // Look up callback
-    let callback = match state.drt().engine_routes().get(&path) {
-        Some(cb) => cb,
-        None => {
-            tracing::debug!("Route /engine/{path} not found");
-            return (
-                StatusCode::NOT_FOUND,
-                json!({
-                    "error": "Route not found",
-                    "message": format!("Route /engine/{} not found", path)
-                })
-                .to_string(),
-            )
-                .into_response();
-        }
-    };
-
-    // Call callback (it's async, so await it)
     match callback(body_json).await {
         Ok(response) => {
             tracing::trace!("Engine route handler succeeded for /engine/{path}");
@@ -754,6 +776,7 @@ mod integration_tests {
     use anyhow::Result;
     use rstest::rstest;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -1177,6 +1200,45 @@ mod integration_tests {
                 // DRT handles server cleanup automatically
             },
         )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_engine_route_rejects_wrong_method_without_invoking_callback() {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("0"))], async {
+            let drt = Arc::new(create_test_drt_async().await);
+            let invocations = Arc::new(AtomicUsize::new(0));
+            let callback_invocations = Arc::clone(&invocations);
+            let callback: crate::engine_routes::EngineRouteCallback = Arc::new(move |_| {
+                let callback_invocations = Arc::clone(&callback_invocations);
+                Box::pin(async move {
+                    callback_invocations.fetch_add(1, Ordering::Relaxed);
+                    Ok(serde_json::json!({"state": "draining"}))
+                })
+            });
+            drt.engine_routes()
+                .register_method("drain", EngineRouteMethod::Post, callback);
+
+            let addr = drt
+                .system_status_server_info()
+                .expect("system status server should be started")
+                .socket_addr;
+            let client = reqwest::Client::new();
+            let url = format!("http://{addr}/engine/drain");
+
+            let response = client.get(&url).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(invocations.load(Ordering::Relaxed), 0);
+
+            let response = client
+                .post(&url)
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(invocations.load(Ordering::Relaxed), 1);
+        })
         .await;
     }
 

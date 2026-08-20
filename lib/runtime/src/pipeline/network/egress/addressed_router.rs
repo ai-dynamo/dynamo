@@ -784,7 +784,7 @@ where
 ///
 /// Impls MUST surface faults as top-level [`crate::error::ErrorType`] variants
 /// (`CannotConnect` / `Disconnected` / `ConnectionTimeout` / `ResponseTimeout` /
-/// `WorkerOverloaded` / `ResourceExhausted` / `Cancelled`), or
+/// `WorkerOverloaded` / `WorkerDraining` / `ResourceExhausted` / `Cancelled`), or
 /// `wrap_with_fault_detection`'s
 /// report-down / overload / migration won't fire.
 ///

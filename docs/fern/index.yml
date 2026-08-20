@@ -1112,6 +1112,8 @@ navigation:
             path: pages/reference/components/tls-configuration.mdx
           - page: Frontend Configuration
             path: pages/reference/components/frontend-configuration.mdx
+          - page: Worker Admin API
+            path: pages/reference/components/worker-admin-api.mdx
           - page: Planner Configuration
             path: pages/reference/components/planner-configuration.mdx
           - page: Profiler Configuration

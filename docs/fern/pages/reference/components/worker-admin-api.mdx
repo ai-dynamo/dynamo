@@ -1,0 +1,54 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Worker Admin API
+subtitle: Worker-local lifecycle endpoints for draining, resuming, and checking worker state
+---
+
+**Experimental.** Unified-backend workers expose lifecycle controls through the worker system-status
+server. Set `DYN_SYSTEM_PORT` to zero or a positive port to enable this server.
+
+<Warning>
+The system-status server does not authenticate Admin API requests. Restrict the system port to the
+operator network.
+</Warning>
+
+## Endpoints
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| `POST` | `/engine/drain` | Unregister the worker, wait for discovery convergence, then stop new request admission and drain admitted work |
+| `POST` | `/engine/resume` | Resume request admission, then re-register the worker in discovery |
+| `GET` | `/engine/status` | Return the worker lifecycle status |
+
+Send an empty body or an empty JSON object. Each endpoint returns the same status shape:
+
+```json
+{
+  "state": "draining",
+  "inflight_requests": 2,
+  "discovery_registered": false
+}
+```
+
+`state` is one of `serving`, `draining`, `drained`, or `stopping`. Delete a worker only when its state
+is `drained`. An aggregated worker reaches `drained` after all admitted requests finish. A
+disaggregated prefill worker also requires backend quiescence support. Until its backend can confirm
+quiescence, it remains `draining`.
+
+While discovery converges, a draining worker continues to accept requests that a frontend already
+selected. After the configured graceful-shutdown grace period, the worker rejects late admissions
+with a worker-draining signal that makes the frontend reselect another worker independently of the
+configured migration budget, then waits for all admitted work to finish.
+
+The existing `SIGTERM` graceful-shutdown path remains the default fallback and uses the same
+discovery-first convergence ordering. The Admin API does not delete the worker or replace the
+shutdown timeout.
+
+## Example
+
+```bash
+curl --fail-with-body -X POST http://worker-host:8081/engine/drain
+curl --fail-with-body http://worker-host:8081/engine/status
+curl --fail-with-body -X POST http://worker-host:8081/engine/resume
+```

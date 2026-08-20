@@ -34,6 +34,7 @@ use crate::engine::{
     EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
+use crate::lifecycle::{RequestTracker, WorkerLifecycleController};
 use crate::publisher::{PublisherHandles, setup_publishers};
 
 /// Default grace-period in seconds between discovery unregister and engine drain.
@@ -295,7 +296,7 @@ impl EngineKind {
     }
 
     /// See [`LLMEngine::is_quiescent`].
-    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+    pub(crate) async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.is_quiescent().await,
             EngineKind::Raw(e) => e.is_quiescent().await,
@@ -658,7 +659,7 @@ impl Worker {
         // alive.
         if shutdown.is_cancelled() {
             tracing::info!("Shutdown signal observed during engine.start(); running orchestrator");
-            self.orchestrator_steps(&endpoint).await;
+            self.orchestrator_steps(&endpoint, None).await;
             return Ok(());
         }
 
@@ -844,13 +845,25 @@ impl Worker {
     /// Full graceful-shutdown orchestrator: discovery unregister →
     /// grace period → engine drain → cleanup. Shared by every shutdown path —
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
-    async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
-        if let Err(e) = endpoint.unregister_endpoint_instance().await {
+    async fn orchestrator_steps(
+        &mut self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+        lifecycle: Option<&WorkerLifecycleController>,
+    ) {
+        if let Some(lifecycle) = lifecycle {
+            lifecycle.begin_shutdown().await;
+        } else if let Err(e) = endpoint.unregister_endpoint_instance().await {
             tracing::warn!(error = %e, "discovery unregister failed");
         } else {
             tracing::info!("Endpoint unregistered from discovery");
         }
-        self.run_engine_shutdown_steps().await;
+        if lifecycle.is_some() {
+            // The lifecycle controller already kept admission open for the
+            // discovery convergence grace period before closing it.
+            self.run_engine_shutdown_steps_with_grace(0.0).await;
+        } else {
+            self.run_engine_shutdown_steps().await;
+        }
     }
 
     /// Start the engine exactly once. `Worker::run` consumes `self`, so all
@@ -986,14 +999,24 @@ impl Worker {
         // `serde_json::Value` probe surface; the raw pipeline
         // (`RawEngineAdapter`) is already JSON-shaped, so it serves as its
         // own probe. The tuple annotation drives the trait-object coercions.
+        let request_tracker = RequestTracker::new();
+        let lifecycle = WorkerLifecycleController::new(
+            Arc::clone(&request_tracker),
+            endpoint.clone(),
+            self.engine.clone(),
+            self.config.disaggregation_mode,
+            Duration::from_secs_f64(grace_period_secs()),
+        );
+
         let (ingress, probe_engine): (
             Arc<dyn dynamo_runtime::pipeline::network::PushWorkHandler>,
             dynamo_runtime::local_endpoint_registry::LocalAsyncEngine,
         ) = match &self.engine {
             EngineKind::Llm(engine) => {
-                let engine_adapter = Arc::new(EngineAdapter::new(
+                let engine_adapter = Arc::new(EngineAdapter::with_request_tracker(
                     engine.clone(),
                     self.config.disaggregation_mode,
+                    Arc::clone(&request_tracker),
                 ));
                 let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
                     err(
@@ -1005,7 +1028,10 @@ impl Worker {
                 (ingress, probe)
             }
             EngineKind::Raw(engine) => {
-                let raw_adapter = Arc::new(RawEngineAdapter::new(engine.clone()));
+                let raw_adapter = Arc::new(RawEngineAdapter::with_request_tracker(
+                    engine.clone(),
+                    Arc::clone(&request_tracker),
+                ));
                 let ingress = Ingress::for_engine(raw_adapter.clone()).map_err(|e| {
                     err(
                         ErrorType::Backend(BackendError::Unknown),
@@ -1079,7 +1105,7 @@ impl Worker {
                 Ok(endpoint) => endpoint,
                 Err(error) => {
                     self.begin_engine_route_shutdown().await;
-                    self.orchestrator_steps(&endpoint).await;
+                    self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
                     return Err(err(
                         ErrorType::Backend(BackendError::Unknown),
                         format!("serve: {error}"),
@@ -1088,7 +1114,7 @@ impl Worker {
             },
             _ = shutdown.cancelled() => {
                 self.begin_engine_route_shutdown().await;
-                self.orchestrator_steps(&endpoint).await;
+                self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
                 return Ok(());
             }
         };
@@ -1101,13 +1127,28 @@ impl Worker {
             if let Err(error) = primary_endpoint.shutdown().await {
                 tracing::warn!(%error, "primary endpoint shutdown failed");
             }
-            self.orchestrator_steps(&endpoint).await;
+            self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
             return Ok(());
         }
 
         // Administrative routes are registered above, but remain gated until
         // the exact primary discovery instance is callable.
         self.activate_engine_routes().await;
+
+        let admin_routes = match lifecycle.register_admin_routes(endpoint.drt().engine_routes()) {
+            Ok(routes) => routes,
+            Err(error) => {
+                self.begin_engine_route_shutdown().await;
+                if let Err(shutdown_error) = primary_endpoint.shutdown().await {
+                    tracing::warn!(%shutdown_error, "primary endpoint shutdown failed");
+                }
+                self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
+                return Err(err(
+                    ErrorType::Backend(BackendError::Unknown),
+                    format!("register worker Admin API routes: {error}"),
+                ));
+            }
+        };
 
         let rl_endpoint = if let Some(rl_config) = rl_config {
             match crate::rl::serve_endpoint(&endpoint, rl_config).await {
@@ -1117,7 +1158,7 @@ impl Worker {
                     if let Err(shutdown_error) = primary_endpoint.shutdown().await {
                         tracing::warn!(%shutdown_error, "primary endpoint shutdown failed");
                     }
-                    self.orchestrator_steps(&endpoint).await;
+                    self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
                     return Err(err(
                         ErrorType::Backend(BackendError::Unknown),
                         format!("RL endpoint setup: {error}"),
@@ -1170,7 +1211,10 @@ impl Worker {
             tracing::warn!(%error, "RL discovery endpoint shutdown failed");
         }
 
-        self.orchestrator_steps(&endpoint).await;
+        // The DRT can outlive this Python worker. Remove callbacks that retain
+        // this worker's controller and engine before engine cleanup begins.
+        drop(admin_routes);
+        self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
         serve_result
     }
 

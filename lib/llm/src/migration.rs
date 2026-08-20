@@ -32,6 +32,11 @@ use dynamo_runtime::pipeline::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
+/// Reselections caused by stale discovery are operational retries, not user
+/// migrations. Bound them separately so a broken discovery view cannot loop
+/// forever while the default `migration_limit = 0` still remains safe.
+const WORKER_DRAINING_RESELECTION_LIMIT: u32 = 3;
+
 /// Accessors the migration RetryManager needs from a response chunk.
 /// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
 /// lets it stamp the failed worker's span onto the next attempt's
@@ -80,6 +85,10 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
     error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
 }
 
+fn is_worker_draining(err: &(dyn StdError + 'static)) -> bool {
+    error::match_error_chain(err, &[ErrorType::WorkerDraining], &[])
+}
+
 /// Whether a worker-scoped failure can be retried without violating an explicit route.
 ///
 /// The phase is read after the failed attempt because disaggregated routing updates the
@@ -125,6 +134,43 @@ fn is_migratable_for_request(
 
     let phase = tracker.phase();
     allows_phase(phase)
+}
+
+fn can_reselect_worker_for_request(request: &PreprocessedRequest) -> bool {
+    let allows_phase = |phase| match explicit_target(request, phase) {
+        Ok(None) => true,
+        Ok(Some(target)) => {
+            tracing::debug!(
+                ?phase,
+                worker_id = target.worker_id,
+                dp_rank = ?target.dp_rank,
+                "Worker reselection disabled for explicitly pinned worker"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(?phase, %error, "Worker reselection disabled for invalid target");
+            false
+        }
+    };
+
+    let Some(tracker) = request.tracker.as_ref() else {
+        return [
+            RequestPhase::Prefill,
+            RequestPhase::Decode,
+            RequestPhase::Aggregated,
+        ]
+        .into_iter()
+        .all(allows_phase);
+    };
+    allows_phase(tracker.phase())
+}
+
+fn is_worker_draining_for_request(
+    request: &PreprocessedRequest,
+    err: &(dyn StdError + 'static),
+) -> bool {
+    is_worker_draining(err) && can_reselect_worker_for_request(request)
 }
 
 pub struct Migration {
@@ -250,6 +296,13 @@ impl MigrationEvent {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RetryReason {
+    Initial,
+    Migration,
+    WorkerDraining,
+}
+
 struct RetryManager<Resp>
 where
     Resp: Data + HasTokenIds,
@@ -261,6 +314,7 @@ where
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
     retries_left: u32,
+    worker_draining_reselections_left: u32,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
@@ -313,9 +367,10 @@ where
             }
             retries_left = 0;
         }
-        if retries_left > 0 {
-            preprocessed_request.migration_state = Some(Default::default());
-        }
+        // The routing layer also uses this state to exclude a worker that
+        // rejected admission because it is draining. That operational
+        // reselection remains enabled even when user migration is disabled.
+        preprocessed_request.migration_state = Some(Default::default());
         let mut slf = Self {
             context,
             metadata,
@@ -324,12 +379,13 @@ where
             next_generate: next,
             next_stream: None,
             retries_left: retries_left + 1, // +1 to account for the initial attempt
+            worker_draining_reselections_left: WORKER_DRAINING_RESELECTION_LIMIT,
             max_seq_len,
             model_name,
             metrics,
             last_worker_link: None,
         };
-        slf.new_stream(None).await?;
+        slf.new_stream(RetryReason::Initial, None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
         Ok(slf)
     }
@@ -345,17 +401,27 @@ where
             };
             if let Some(response) = response_stream.next().await {
                 // Check if this is a migratable error that should trigger stream recreation.
-                if let Some(err) = response.error.as_ref()
-                    && is_migratable_for_request(&self.request, err)
-                {
-                    tracing::warn!(error = %err, "Stream disconnected, recreating stream");
-                    self.metrics.inc_migration_ongoing_request(&self.model_name);
-                    let migration_event =
-                        MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
-                    if let Err(err) = self.new_stream(Some(migration_event)).await {
-                        tracing::warn!(error = ?err, "Cannot recreate stream");
+                if let Some(err) = response.error.as_ref() {
+                    let retry = if is_worker_draining_for_request(&self.request, err) {
+                        Some((RetryReason::WorkerDraining, None))
+                    } else if is_migratable_for_request(&self.request, err) {
+                        self.metrics.inc_migration_ongoing_request(&self.model_name);
+                        Some((
+                            RetryReason::Migration,
+                            Some(MigrationEvent::new(
+                                frontend_service::migration_type::ONGOING_REQUEST,
+                            )),
+                        ))
                     } else {
-                        continue;
+                        None
+                    };
+                    if let Some((retry_reason, migration_event)) = retry {
+                        tracing::warn!(error = %err, ?retry_reason, "Recreating request stream");
+                        if let Err(err) = self.new_stream(retry_reason, migration_event).await {
+                            tracing::warn!(error = ?err, "Cannot recreate stream");
+                        } else {
+                            continue;
+                        }
                     }
                 }
                 self.track_response(&response);
@@ -365,10 +431,33 @@ where
         }
     }
 
-    async fn new_stream(&mut self, mut migration_event: Option<MigrationEvent>) -> Result<()> {
-        let mut response_stream: Option<Result<ManyOut<Annotated<Resp>>>> = None;
-        while self.retries_left > 0 {
-            self.retries_left -= 1;
+    async fn new_stream(
+        &mut self,
+        mut retry_reason: RetryReason,
+        mut migration_event: Option<MigrationEvent>,
+    ) -> Result<()> {
+        let response_stream = loop {
+            match retry_reason {
+                RetryReason::Initial if self.retries_left > 0 => {
+                    self.retries_left -= 1;
+                }
+                RetryReason::Migration if self.retries_left > 0 => {
+                    self.retries_left -= 1;
+                }
+                RetryReason::WorkerDraining if self.worker_draining_reselections_left > 0 => {
+                    self.worker_draining_reselections_left -= 1;
+                }
+                RetryReason::Initial | RetryReason::Migration => {
+                    self.record_migration_outcome(
+                        migration_event.as_ref(),
+                        frontend_service::migration_outcome::FAILURE,
+                    );
+                    return Err(Error::msg("Migration limit exhausted"));
+                }
+                RetryReason::WorkerDraining => {
+                    return Err(Error::msg("Worker-draining reselection limit exhausted"));
+                }
+            }
             // Once any chunks have arrived from a previous attempt, stamp
             // that worker's span as `migration_link` so the next worker's
             // span renders an OTel Link back to it. Guarded so the initial
@@ -400,24 +489,34 @@ where
                     .build()
                     .into());
             }
-            response_stream = Some(self.next_generate.generate(request).await);
-            if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
-                && is_migratable_for_request(&self.request, err.as_ref())
-            {
-                tracing::warn!(error = %err, "Creating new stream, retrying");
-                if migration_event.is_none() {
-                    migration_event = Some(MigrationEvent::new(
-                        frontend_service::migration_type::NEW_REQUEST,
-                    ));
+            let response_stream = self.next_generate.generate(request).await;
+            if let Some(err) = response_stream.as_ref().err() {
+                if is_worker_draining_for_request(&self.request, err.as_ref())
+                    && self.worker_draining_reselections_left > 0
+                {
+                    tracing::warn!(error = %err, "Selected worker is draining, reselecting");
+                    retry_reason = RetryReason::WorkerDraining;
+                    continue;
                 }
-                // Preserve the existing per-attempt metric contract.
-                self.metrics.inc_migration_new_request(&self.model_name);
-                continue;
+                if is_migratable_for_request(&self.request, err.as_ref()) {
+                    tracing::warn!(error = %err, "Creating new stream, retrying");
+                    if migration_event.is_none() {
+                        migration_event = Some(MigrationEvent::new(
+                            frontend_service::migration_type::NEW_REQUEST,
+                        ));
+                    }
+                    // Preserve the existing per-attempt metric contract.
+                    self.metrics.inc_migration_new_request(&self.model_name);
+                    if self.retries_left > 0 {
+                        retry_reason = RetryReason::Migration;
+                        continue;
+                    }
+                }
             }
-            break;
-        }
+            break response_stream;
+        };
         match response_stream {
-            Some(Ok(next_stream)) => {
+            Ok(next_stream) => {
                 self.record_migration_outcome(
                     migration_event.as_ref(),
                     frontend_service::migration_outcome::SUCCESS,
@@ -425,7 +524,7 @@ where
                 self.next_stream = Some(next_stream);
                 Ok(())
             }
-            Some(Err(err)) => {
+            Err(err) => {
                 let outcome =
                     if error::match_error_chain(err.as_ref(), &[ErrorType::Cancelled], &[]) {
                         frontend_service::migration_outcome::CANCELLED
@@ -434,13 +533,6 @@ where
                     };
                 self.record_migration_outcome(migration_event.as_ref(), outcome);
                 Err(err) // should propagate original error if any
-            }
-            None => {
-                self.record_migration_outcome(
-                    migration_event.as_ref(),
-                    frontend_service::migration_outcome::FAILURE,
-                );
-                Err(Error::msg("Migration limit exhausted"))
             }
         }
     }
@@ -656,6 +748,21 @@ mod tests {
         assert!(is_migratable_for_request(&unpinned, &error));
     }
 
+    #[test]
+    fn explicit_worker_pin_blocks_draining_reselection() {
+        let error = DynamoError::builder()
+            .error_type(ErrorType::WorkerDraining)
+            .message("worker is draining")
+            .build();
+        let mut request = create_mock_request(1);
+        request.routing = Some(RoutingHints {
+            backend_instance_id: Some(7),
+            ..Default::default()
+        });
+
+        assert!(!is_worker_draining_for_request(&request, &error));
+    }
+
     // Helper to create a mock preprocessed request
     fn create_mock_request(max_tokens: u32) -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -701,6 +808,8 @@ mod tests {
         /// Fails on first call with NoResponders error, then succeeds on subsequent calls
         FailThenSuccess,
         FailThenSuccessWithAffinity,
+        /// A stale discovery view selects a draining worker before a healthy replacement.
+        WorkerDrainingThenSuccess,
         /// Fails on the first call and cancels the request before the retry
         FailThenCancel {
             context: Arc<Controller>,
@@ -818,6 +927,18 @@ mod tests {
                         self.send_responses(responses_already_generated, self.num_responses)
                             .await
                     }
+                }
+                MockBehavior::WorkerDrainingThenSuccess => {
+                    if call_num == 0 {
+                        return Err(anyhow::anyhow!(
+                            DynamoError::builder()
+                                .error_type(ErrorType::WorkerDraining)
+                                .message("selected worker is draining")
+                                .build()
+                        ));
+                    }
+                    self.send_responses(responses_already_generated, self.num_responses)
+                        .await
                 }
                 MockBehavior::FailThenCancel { context } => {
                     assert_eq!(call_num, 0, "cancelled retry must not reach the engine");
@@ -1123,6 +1244,28 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    #[tokio::test]
+    async fn draining_worker_is_reselected_when_migration_is_disabled() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::WorkerDrainingThenSuccess,
+            1,
+            100,
+            context_id.clone(),
+        ));
+        let calls = Arc::clone(&mock_engine.call_count);
+        let request =
+            Context::with_id_and_metadata(create_mock_request(1), context_id, BTreeMap::new());
+
+        let migration = Migration::new(0, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+        let mut stream = migration.generate(request, mock_engine).await.unwrap();
+        let responses = stream.by_ref().collect::<Vec<_>>().await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(responses.len(), 1);
+        assert!(responses[0].error.is_none());
     }
 
     #[tokio::test]

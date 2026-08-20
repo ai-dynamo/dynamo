@@ -56,6 +56,14 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     match_error_chain(err, INHIBITED, &[])
 }
 
+fn should_skip_for_reselection(err: &(dyn std::error::Error + 'static)) -> bool {
+    match_error_chain(
+        err,
+        &[ErrorType::WorkerOverloaded, ErrorType::WorkerDraining],
+        &[],
+    )
+}
+
 /// Read the backend response inactivity timeout from the environment.
 /// Reuses `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` — the same env var
 /// as the HTTP-layer safety net in `disconnect.rs`.
@@ -1588,14 +1596,13 @@ where
                             "Reporting instance {instance_id} down due to error: {err}"
                         );
                         self.client.report_instance_down(instance_id);
-                    } else if match_error_chain(err.as_ref(), &[ErrorType::WorkerOverloaded], &[]) {
-                        // Backpressure: worker said "my queue is full,
-                        // retry later". Mark overloaded so this FE skips it on
-                        // the next selection; the next ActiveLoad event from the
-                        // worker monitor overwrites the overloaded set from fresh
-                        // metrics. This is NOT report_instance_down (fault path).
+                    } else if should_skip_for_reselection(err.as_ref()) {
+                        // Backpressure or intentional draining: skip this worker
+                        // on the next selection. Discovery or the next fresh load
+                        // event will converge the local view. This is not the
+                        // report-instance-down fault path.
                         tracing::debug!(
-                            "Marking instance {instance_id} overloaded due to backpressure: {err}"
+                            "Temporarily skipping instance {instance_id} after rejection: {err}"
                         );
                         self.client.mark_overloaded_immediate(instance_id);
                     }
@@ -1612,13 +1619,18 @@ where
         let client = self.client.clone();
         let client_for_timeout = self.client.clone();
         let stream = stream.map(move |res| {
-            if let Some(err) = res.err()
-                && is_inhibited(&err)
-            {
-                tracing::debug!(
-                    "Reporting instance {instance_id} down due to migratable error: {err}"
-                );
-                client.report_instance_down(instance_id);
+            if let Some(err) = res.err() {
+                if is_inhibited(&err) {
+                    tracing::debug!(
+                        "Reporting instance {instance_id} down due to migratable error: {err}"
+                    );
+                    client.report_instance_down(instance_id);
+                } else if should_skip_for_reselection(&err) {
+                    tracing::debug!(
+                        "Temporarily skipping instance {instance_id} after stream rejection: {err}"
+                    );
+                    client.mark_overloaded_immediate(instance_id);
+                }
             }
             res
         });
@@ -2081,6 +2093,17 @@ mod tests {
             !is_inhibited(&cancelled),
             "client cancellation is not a worker fault"
         );
+    }
+
+    #[test]
+    fn draining_worker_is_skipped_without_being_quarantined() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::WorkerDraining)
+            .message("worker is draining")
+            .build();
+
+        assert!(should_skip_for_reselection(&err));
+        assert!(!is_inhibited(&err));
     }
 
     #[test]
