@@ -1010,7 +1010,12 @@ class MultimodalPrefillWorkerHandler(
                 )
                 if registration_task in done:
                     break
-                if first_result_task in done and not first_result_ready:
+                if first_result_task is not None:
+                    first_result_is_done = first_result_task in done
+                else:
+                    first_result_is_done = False
+                if first_result_is_done and not first_result_ready:
+                    assert first_result_task is not None
                     try:
                         first_result = await first_result_task
                     except StopAsyncIteration as e:
@@ -1141,7 +1146,7 @@ class MultimodalPrefillWorkerHandler(
             if tensor_id is not None and not released:
                 self.embeddings_processor.release_embeddings(tensor_id)
 
-    async def cleanup(self) -> None:
+    async def cleanup_async(self) -> None:
         tasks = list(self._consume_tasks)
         for task in tasks:
             if not task.done():

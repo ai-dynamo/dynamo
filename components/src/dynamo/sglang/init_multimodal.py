@@ -253,7 +253,7 @@ async def init_multimodal_prefill_worker(
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
-        await handler.cleanup()
+        await handler.cleanup_async()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")
             await run_deferred_handlers()

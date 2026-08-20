@@ -409,7 +409,7 @@ async def test_multimodal_prefill_cleanup_awaits_consumers_before_engine_shutdow
     handler._consume_tasks = {task}
     handler.engine = SimpleNamespace(shutdown=lambda: events.append("engine shutdown"))
 
-    await handler.cleanup()
+    await handler.cleanup_async()
 
     assert events == ["consumer stopped", "engine shutdown"]
     assert not handler._consume_tasks
