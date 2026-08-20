@@ -115,16 +115,7 @@ impl DiscoveredModel {
             .and_then(|size| size.checked_mul(parallelism.data_parallel_size))
             .filter(|size| *size > 0)
             .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
-        let backend = self
-            .server
-            .rl_capabilities
-            .as_ref()
-            .and_then(|capabilities| {
-                capabilities
-                    .weight_transfer_enabled
-                    .then(|| capabilities.weight_transfer_backend.clone())
-            });
-        RlWorkerMetadata::new(world_size, backend, admin_base_url)
+        RlWorkerMetadata::new(world_size, admin_base_url)
             .map_err(|error| client::protocol_error(error.to_string()))
     }
 
