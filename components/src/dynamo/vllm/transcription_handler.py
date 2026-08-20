@@ -13,6 +13,7 @@ from io import BytesIO
 from typing import Any, AsyncIterator
 
 from dynamo._core import Context
+from dynamo.llm import HttpError
 
 from .args import Config
 from .engine_monitor import VllmEngineMonitor
@@ -74,9 +75,10 @@ class TranscriptionWorkerHandler:
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
 
         model_name = config.served_model_name or config.model
+        model_names = [model_name, *(config.served_model_aliases or [])]
         models = OpenAIServingModels(
             engine,
-            [BaseModelPath(name=model_name, model_path=config.model)],
+            [BaseModelPath(name=name, model_path=config.model) for name in model_names],
         )
         self.serving = OpenAIServingTranscription(
             engine,
@@ -163,7 +165,7 @@ class TranscriptionWorkerHandler:
 
         result = await self._run_with_cancellation(audio, native_request, context)
         if ErrorResponse is not None and isinstance(result, ErrorResponse):
-            raise ValueError(result.message)
+            raise HttpError(result.error.code, result.error.message)
         if not hasattr(result, "model_dump"):
             raise TypeError(
                 f"Unexpected vLLM transcription response type: {type(result).__name__}"
