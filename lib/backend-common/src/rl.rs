@@ -30,27 +30,17 @@ pub(crate) struct RlEndpointConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RlWorkerMetadata {
     world_size: NonZeroU32,
-    weight_transfer_backend: Option<String>,
     admin_base_url: Option<String>,
 }
 
 impl RlWorkerMetadata {
-    pub fn new(
-        world_size: u32,
-        weight_transfer_backend: Option<String>,
-        admin_base_url: Option<String>,
-    ) -> anyhow::Result<Self> {
+    pub fn new(world_size: u32, admin_base_url: Option<String>) -> anyhow::Result<Self> {
         let world_size = NonZeroU32::new(world_size)
             .ok_or_else(|| anyhow::anyhow!("RL worker world size must be positive"))?;
-        let weight_transfer_backend = normalized_optional(
-            weight_transfer_backend,
-            "RL weight-transfer backend must not be blank",
-        )?;
         let admin_base_url =
             normalized_optional(admin_base_url, "RL admin base URL must not be blank")?;
         Ok(Self {
             world_size,
-            weight_transfer_backend,
             admin_base_url,
         })
     }
@@ -177,9 +167,6 @@ impl RlRouteHandler {
         });
         if let Some(metadata) = &self.metadata {
             response["world_size"] = json!(metadata.world_size.get());
-            if let Some(backend) = &metadata.weight_transfer_backend {
-                response["weight_transfer_backend"] = json!(backend);
-            }
             if let Some(url) = &metadata.admin_base_url {
                 response["admin_base_url"] = json!(url);
             }
@@ -215,12 +202,8 @@ mod tests {
             routes,
             system_url: "http://worker:8080".to_string(),
             metadata: Some(
-                RlWorkerMetadata::new(
-                    4,
-                    Some(" nccl ".to_string()),
-                    Some(" http://worker:8120 ".to_string()),
-                )
-                .expect("valid metadata"),
+                RlWorkerMetadata::new(4, Some(" http://worker:8120 ".to_string()))
+                    .expect("valid metadata"),
             ),
         };
 
@@ -232,7 +215,6 @@ mod tests {
                 "system_url": "http://worker:8080",
                 "admin_base_url": "http://worker:8120",
                 "world_size": 4,
-                "weight_transfer_backend": "nccl",
             })
         );
         assert_eq!(
@@ -243,8 +225,7 @@ mod tests {
 
     #[test]
     fn rl_worker_metadata_rejects_invalid_values() {
-        assert!(RlWorkerMetadata::new(0, None, None).is_err());
-        assert!(RlWorkerMetadata::new(1, Some("   ".to_string()), None).is_err());
-        assert!(RlWorkerMetadata::new(1, None, Some("   ".to_string())).is_err());
+        assert!(RlWorkerMetadata::new(0, None).is_err());
+        assert!(RlWorkerMetadata::new(1, Some("   ".to_string())).is_err());
     }
 }
