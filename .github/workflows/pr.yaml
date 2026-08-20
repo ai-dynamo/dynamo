@@ -3,6 +3,10 @@
 
 name: PR
 
+permissions:
+  contents: read
+  packages: read
+
 on:
   push:
     branches:
