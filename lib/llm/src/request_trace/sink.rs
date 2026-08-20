@@ -139,9 +139,7 @@ impl RequestTraceSink for JsonlRequestTraceSink {
 }
 
 pub struct JsonlGzipRequestTraceSink {
-    /// `JsonlGzipWriter::close` consumes the writer, but the sink only ever has
-    /// `&self`, so the writer lives behind interior mutability and `shutdown`
-    /// takes it out to close it. `None` means shutdown already closed it.
+    // shutdown consumes the writer; None means it has already closed.
     writer: Mutex<Option<JsonlGzipWriter<RequestTraceRecord>>>,
 }
 
@@ -195,8 +193,7 @@ impl RequestTraceSink for JsonlGzipRequestTraceSink {
     }
 
     async fn shutdown(&self) {
-        // Take the writer out under a short-lived guard so `close`, which awaits
-        // the writer task's final flush, does not run while holding the lock.
+        // Release the lock before awaiting the final flush.
         let writer = self.writer.lock().await.take();
         if let Some(writer) = writer
             && let Err(error) = writer.close().await
@@ -437,9 +434,6 @@ mod tests {
     async fn gzip_sink_shutdown_flushes_buffered_record() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("request_trace_shutdown");
-        // Nothing but shutdown can flush this record: the buffer dwarfs one
-        // record, the flush tick is a minute away, and neither roll threshold
-        // can trigger.
         let sink = JsonlGzipRequestTraceSink::new(
             path.display().to_string(),
             JsonlGzipSinkOptions {
@@ -456,7 +450,6 @@ mod tests {
         sink.emit(&sample_record()).await;
 
         RequestTraceSink::shutdown(&sink).await;
-        // A second shutdown must return normally rather than panic.
         RequestTraceSink::shutdown(&sink).await;
 
         let segment = segment_path(&path, 0);
