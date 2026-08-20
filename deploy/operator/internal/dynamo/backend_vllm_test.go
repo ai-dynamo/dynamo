@@ -400,10 +400,16 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 		// Keeping the worker probes (liveness FailureThreshold 1) would have the kubelet
 		// kill it on the first probe and restart it forever.
 		{
-			name:              "elastic EP follower drops the probes it can never satisfy",
-			numberOfNodes:     1,
-			role:              RoleFollower,
-			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			name:          "elastic EP follower drops the probes it can never satisfy",
+			numberOfNodes: 1,
+			role:          RoleFollower,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				// Synthesis stamps the leader's Service name here; the follower launch
+				// reads it rather than rebuilding the address from its own identity.
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationElasticEPLeaderService: "mydgd-decode-ray",
+				},
+			},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer: &corev1.Container{
 				Command:        []string{"python3", "-m", "dynamo.vllm"},

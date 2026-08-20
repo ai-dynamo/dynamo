@@ -63,6 +63,14 @@ const (
 	// leader's serve command. Operator-set when it expands a leader; never user-set.
 	KubeAnnotationElasticEPFollower = "nvidia.com/elastic-ep-follower"
 
+	// KubeAnnotationElasticEPLeaderService carries the exact headless Service name the
+	// follower must join, stamped on the follower's pod template when it is synthesized.
+	// The follower reads this instead of recomputing the name from its own identity, so
+	// the emitter and the joiner cannot disagree -- and so the leader address can be
+	// scoped to one DGD and one worker generation without the follower having to
+	// reconstruct that scoping. Operator-set; never user-set.
+	KubeAnnotationElasticEPLeaderService = "nvidia.com/elastic-ep-leader-service"
+
 	// NodeLabelGPUClique is the NVLink-partition label the DRA driver stamps on GB200
 	// nodes. Nodes sharing a value share a multi-node NVLink fabric; nodes in different
 	// partitions have no NVLink route between them. Used as the topology key that pins an

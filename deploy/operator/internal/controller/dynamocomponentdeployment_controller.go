@@ -719,9 +719,13 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(ctx context.Context, opt generateResourceOption) (*corev1.Service, bool, error) {
 	dcd := opt.dynamoComponentDeployment
 	componentName := dynamo.GetDCDComponentName(dcd)
+	// Named from the DCD's own resource name, never the bare component name: that name
+	// is unique per DGD and per worker generation, so this Service cannot collide with
+	// another DGD's "decode-ray" or with the other generation's during a rollout. The
+	// delete stub must use the same name or it would garbage-collect nothing.
 	deleteStub := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.ElasticEPLeaderServiceName(componentName),
+			Name:      dynamo.ElasticEPLeaderServiceNameForDCD(dcd),
 			Namespace: dcd.Namespace,
 		},
 	}
@@ -733,7 +737,7 @@ func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(c
 	// labels, so this addresses one Ray head only while the component is one pod.
 	// replicas > 1 round-robins across independent clusters; numberOfNodes > 1 publishes
 	// workers as if they were the head.
-	if !isSinglePodElasticEPLeader(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+	if !dynamo.IsSinglePodElasticEPLeader(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
 		return deleteStub, true, nil
 	}
 	dynamoNamespace := dynamo.GetDCDDynamoNamespace(dcd)
@@ -746,7 +750,7 @@ func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(c
 	}
 	annotations := dynamo.GetDCDKubeAnnotations(dcd)
 	svc := dynamo.GenerateElasticEPHeadlessService(dynamo.ComponentServiceParams{
-		ServiceName:     componentName,
+		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
 		ComponentType:   componentType,
 		DynamoNamespace: dynamoNamespace,
@@ -754,6 +758,7 @@ func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(c
 		Labels:          dynamo.GetDCDKubeLabels(dcd),
 		Annotations:     annotations,
 		IsK8sDiscovery:  commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, annotations),
+		DCDSelector:     dcd.Name,
 	})
 	return svc, false, nil
 }

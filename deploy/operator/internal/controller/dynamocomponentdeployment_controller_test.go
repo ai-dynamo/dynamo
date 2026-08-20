@@ -919,9 +919,22 @@ func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *tes
 			t.Log("Only the single-pod elastic-EP leader owns a real Service; every other shape is a delete stub")
 			require.Equal(t, tt.wantDelete, toDelete)
 			require.NotNil(t, svc)
+
+			// Pin the naming contract for BOTH outcomes. The name is built from the DCD
+			// resource name, not the component name, so it cannot collide with another
+			// DGD's "decode-ray" or with the other generation's mid-rollout -- and the
+			// delete stub must use that same name or it garbage-collects nothing.
+			t.Log("Both the retained Service and the delete stub are named from the DCD identity")
+			require.Equal(t, dynamo.ElasticEPLeaderServiceNameForDCD(dcd), svc.Name)
+			require.NotEqual(t, dynamo.ElasticEPLeaderServiceName("decode"), svc.Name,
+				"must not be named from the bare component name")
+
 			if !tt.wantDelete {
 				require.Equal(t, corev1.ClusterIPNone, svc.Spec.ClusterIP)
 				require.Equal(t, "decode", svc.Spec.Selector[commonconsts.KubeLabelDynamoComponent])
+
+				t.Log("and the selector is narrowed to this one DCD generation")
+				require.Equal(t, dcd.Name, svc.Spec.Selector[commonconsts.KubeLabelDynamoSelector])
 			}
 		})
 	}

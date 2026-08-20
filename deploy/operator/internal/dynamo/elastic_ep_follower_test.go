@@ -18,6 +18,7 @@
 package dynamo
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -137,6 +138,51 @@ func TestSynthesizeElasticEPFollowerDCD_OnlyForElasticEP(t *testing.T) {
 	}
 }
 
+// A 60-63 character leader name is itself valid, but appending the follower suffix pushes
+// the result past the 63-character DNS-1123 limit, and the API server then rejects the
+// generated DCD and stalls the whole reconcile.
+func TestElasticEPFollowerName_BoundedToKubeLimit(t *testing.T) {
+	tests := []struct {
+		name       string
+		leaderName string
+	}{
+		{name: "short name keeps the plain suffix", leaderName: "decode"},
+		{name: "exactly at the limit", leaderName: strings.Repeat("a", maxKubeNameLength)},
+		{name: "one under the limit", leaderName: strings.Repeat("b", maxKubeNameLength-1)},
+		{name: "well over the limit", leaderName: strings.Repeat("c", maxKubeNameLength+40)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("derive the follower identity from the leader's")
+			got := elasticEPFollowerName(tt.leaderName)
+
+			t.Log("it always fits the Kubernetes name limit and stays a valid DNS-1123 label")
+			if len(got) > maxKubeNameLength {
+				t.Errorf("name %q is %d chars, over the %d limit", got, len(got), maxKubeNameLength)
+			}
+			if !regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`).MatchString(got) {
+				t.Errorf("name %q is not a valid DNS-1123 label", got)
+			}
+
+			t.Log("it stays recognizable as a follower and is stable across calls")
+			if !strings.HasSuffix(got, "-"+commonconsts.GroveRoleSuffixFollower) {
+				t.Errorf("name %q lost the follower suffix", got)
+			}
+			if again := elasticEPFollowerName(tt.leaderName); again != got {
+				t.Errorf("not deterministic: %q then %q", got, again)
+			}
+		})
+	}
+
+	t.Log("distinct over-long leaders still derive distinct followers")
+	a := elasticEPFollowerName(strings.Repeat("d", 70) + "-one")
+	b := elasticEPFollowerName(strings.Repeat("d", 70) + "-two")
+	if a == b {
+		t.Errorf("truncation collapsed two distinct leaders onto %q", a)
+	}
+}
+
 func withReplicas(c *v1beta1.DynamoComponentDeploymentSharedSpec, n int32) *v1beta1.DynamoComponentDeploymentSharedSpec {
 	c.Replicas = ptr.To(n)
 	return c
@@ -233,15 +279,28 @@ func TestSynthesizeElasticEPFollowerDCD_DerivesADistinctIdentity(t *testing.T) {
 	}
 }
 
-// Both the Grove role name (<leader>) and the non-Grove synthesized name (<leader>-flw)
-// must resolve to the same leader headless Service <leader>-ray.
+// The follower joins exactly the address it is handed. It must never derive the leader
+// Service name from its own identity: that name is DGD- and generation-scoped and may be
+// hash-truncated, so any recomputation here is a chance for the joiner to drift from the
+// Service the reconciler actually emitted.
 func TestInjectElasticEPRayLaunchFlags_Follower(t *testing.T) {
 	tests := []struct {
-		name        string
-		serviceName string
+		name          string
+		serviceName   string
+		leaderService string
 	}{
-		{name: "grove role name", serviceName: "my-worker"},
-		{name: "non-grove synthesized name", serviceName: "my-worker-" + commonconsts.GroveRoleSuffixFollower},
+		{
+			name:          "uses the carried address",
+			serviceName:   "my-worker-" + commonconsts.GroveRoleSuffixFollower,
+			leaderService: "my-worker-ray",
+		},
+		{
+			// A truncated follower name shares no prefix with the leader Service, so
+			// this case fails outright if the address is ever rebuilt from serviceName.
+			name:          "address is unrelated to the follower's own name",
+			serviceName:   "trunc-a1b2-" + commonconsts.GroveRoleSuffixFollower,
+			leaderService: "mydgd-my-worker-9f2c-ray",
+		},
 	}
 
 	for _, tt := range tests {
@@ -252,7 +311,7 @@ func TestInjectElasticEPRayLaunchFlags_Follower(t *testing.T) {
 			}
 
 			t.Log("rewriting the follower's launch command")
-			if !injectElasticEPRayLaunchFlags(container, RoleFollower, tt.serviceName, nil) {
+			if !injectElasticEPRayLaunchFlags(container, RoleFollower, tt.serviceName, nil, tt.leaderService) {
 				t.Fatal("expected the follower launch to be injected")
 			}
 			if len(container.Args) != 1 {
@@ -260,12 +319,17 @@ func TestInjectElasticEPRayLaunchFlags_Follower(t *testing.T) {
 			}
 			script := container.Args[0]
 
-			t.Log("it joins the leader Service (<leader>-ray), never its own name, and pins its Ray node address to the pod IP")
-			if !strings.Contains(script, "ray start --address=my-worker-ray:6379") {
-				t.Errorf("follower must join the leader Service my-worker-ray; got: %s", script)
+			t.Log("it joins the carried leader address verbatim and pins its Ray node address to the pod IP")
+			if !strings.Contains(script, "ray start --address="+tt.leaderService+":6379") {
+				t.Errorf("follower must join %s; got: %s", tt.leaderService, script)
 			}
 			if !strings.Contains(script, `--node-ip-address="$POD_IP"`) {
 				t.Errorf("follower must pin --node-ip-address to POD_IP; got: %s", script)
+			}
+
+			t.Log("nothing in the command is derived from the follower's own component name")
+			if strings.Contains(script, tt.serviceName) {
+				t.Errorf("follower must not build its address from its own name %q; got: %s", tt.serviceName, script)
 			}
 
 			t.Log("it health-gates on the leader /live so the join lands after the leader has placed its data-parallel group")

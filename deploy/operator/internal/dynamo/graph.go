@@ -362,6 +362,33 @@ func GenerateDynamoComponentsDeployments(
 	return deployments, nil
 }
 
+// maxKubeNameLength is the DNS-1123 label limit that both a resource name and a label
+// value must satisfy.
+const maxKubeNameLength = 63
+
+// elasticEPFollowerName derives a follower identity from the leader's, bounded to the
+// Kubernetes name limit.
+//
+// A 60-63 character leader name is itself valid, but appending the suffix pushes the
+// result past the limit and the API server rejects the generated DCD, stalling the whole
+// reconcile. Truncating with a deterministic hash keeps the identity unique and stable
+// across reconciles. Truncation is only safe because the follower no longer recovers the
+// leader's address by stripping this suffix -- it carries the address explicitly (see
+// KubeAnnotationElasticEPLeaderService).
+func elasticEPFollowerName(leaderName string) string {
+	name := NormalizeKubeResourceName(leaderName + "-" + commonconsts.GroveRoleSuffixFollower)
+	if len(name) <= maxKubeNameLength {
+		return name
+	}
+
+	hash := fnv.New32a()
+	hash.Write([]byte(name))
+	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
+	// Keep the follower suffix last so the identity stays recognizable.
+	keep := maxKubeNameLength - len(suffix) - len(commonconsts.GroveRoleSuffixFollower) - 2
+	return NormalizeKubeResourceName(leaderName[:keep] + "-" + suffix + "-" + commonconsts.GroveRoleSuffixFollower)
+}
+
 // IsSinglePodElasticEPLeader reports whether a component is the single-pod elastic-EP
 // leader that the headless Ray Service addresses and a follower can join.
 //
@@ -397,13 +424,12 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 	if !IsSinglePodElasticEPLeader(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec) {
 		return nil
 	}
-	followerComponentName := leaderComponentName + "-" + commonconsts.GroveRoleSuffixFollower
+	followerComponentName := elasticEPFollowerName(leaderComponentName)
 	follower := leaderDCD.DeepCopy()
-	follower.Name = NormalizeKubeResourceName(leaderDCD.Name + "-" + commonconsts.GroveRoleSuffixFollower)
+	follower.Name = elasticEPFollowerName(leaderDCD.Name)
 	follower.Spec.Replicas = ptr.To(int32(0))
 	// GetDCDComponentName prefers Spec.ComponentName over the label, so both must carry
-	// the "-flw" name or the follower's resources and worker hash collide with the
-	// leader's. The RoleFollower launch trims the suffix to rejoin the leader's Ray head.
+	// the follower name or its resources and worker hash collide with the leader's.
 	if follower.Spec.ComponentName != "" {
 		follower.Spec.ComponentName = followerComponentName
 	}
@@ -415,6 +441,15 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 		follower.Annotations = map[string]string{}
 	}
 	follower.Annotations[commonconsts.KubeAnnotationElasticEPFollower] = commonconsts.KubeLabelValueTrue
+
+	// Carry the leader's exact Service name rather than letting the follower rebuild it.
+	// The name is DGD- and generation-scoped and may be hash-truncated, so it is not
+	// recoverable from the follower's own identity; stamping it here keeps the emitter
+	// and the joiner on one value. It lives on the pod template because that is what the
+	// backend sees when it rewrites the launch command.
+	followerPodTemplate := ensurePodTemplate(&follower.Spec.DynamoComponentDeploymentSharedSpec)
+	followerPodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPLeaderService] =
+		ElasticEPLeaderServiceNameForDCD(leaderDCD)
 
 	// Placement: pin the follower into the leader's NVLink partition and off the leader's
 	// node, merging with any user affinity inherited from the leader's deep copy. The terms
@@ -1001,6 +1036,11 @@ type ComponentServiceParams struct {
 	Labels          map[string]string
 	Annotations     map[string]string
 	IsK8sDiscovery  bool
+	// DCDSelector, when set, narrows the selector to a single DCD generation via
+	// KubeLabelDynamoSelector. Only the elastic-EP leader Service uses it: it must
+	// address exactly one Ray head, and the component labels alone match every
+	// generation of that component.
+	DCDSelector string
 }
 
 func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, error) {
@@ -1072,14 +1112,20 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 const maxServiceNameLength = 63
 
 // ElasticEPLeaderServiceName returns the name a single-pod elastic-EP leader is
-// reachable at: its component service name plus a "-ray" suffix.
+// reachable at: the base it is given plus a "-ray" suffix.
 //
-// That suffix can push a long name past the DNS-1035 limit, which the API server
-// rejects, failing the whole stable-resources reconcile. Truncate with a hash suffix
-// instead, as PCSNameForDGD does. The hash must be deterministic because the follower
-// derives this name independently rather than reading it back from the Service.
-func ElasticEPLeaderServiceName(componentServiceName string) string {
-	name := NormalizeKubeResourceName(componentServiceName + "-ray")
+// Callers must pass a DGD-scoped, per-generation base -- the leader's DCD resource name
+// -- never the bare component name. Two DGDs in one Kubernetes namespace can both
+// declare a "decode" component, and during a worker rollout two generations of the same
+// component coexist; a name built from the component alone collides in both cases, so
+// one deployment's Service silently takes over or deletes another's and a follower joins
+// the wrong Ray head. ElasticEPLeaderServiceNameForDCD is the only intended caller.
+//
+// The suffix can push a long base past the DNS-1035 limit, which the API server rejects,
+// failing the whole reconcile. Truncate with a deterministic hash suffix instead, as
+// PCSNameForDGD does, so the name stays stable across reconciles.
+func ElasticEPLeaderServiceName(base string) string {
+	name := NormalizeKubeResourceName(base + "-ray")
 	if len(name) <= maxServiceNameLength {
 		return name
 	}
@@ -1088,6 +1134,17 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 	hash.Write([]byte(name))
 	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
 	return name[:maxServiceNameLength-len(suffix)-1] + "-" + suffix
+}
+
+// ElasticEPLeaderServiceNameForDCD is the single authoritative source for the headless
+// Ray Service name of an elastic-EP leader.
+//
+// Both sides go through it: the reconciler that emits the Service, and the synthesis
+// that stamps the address onto the follower. The follower never recomputes the name from
+// its own identity, so truncation or scoping changes here cannot leave it polling a
+// hostname no Service backs.
+func ElasticEPLeaderServiceNameForDCD(leaderDCD *v1beta1.DynamoComponentDeployment) string {
+	return ElasticEPLeaderServiceName(leaderDCD.Name)
 }
 
 // GenerateElasticEPHeadlessService returns a headless Service that gives a single-pod
@@ -1125,6 +1182,13 @@ func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Ser
 		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
 		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
 		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
+	}
+
+	// Narrow to one DCD generation when the caller supplies its identity. Without this
+	// the component labels alone also match the *other* generation's pod mid-rollout,
+	// so the Service would publish two independent Ray heads under one name.
+	if params.DCDSelector != "" {
+		selector[commonconsts.KubeLabelDynamoSelector] = params.DCDSelector
 	}
 
 	return &corev1.Service{
