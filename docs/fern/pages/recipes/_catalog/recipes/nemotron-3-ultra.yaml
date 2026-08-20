@@ -425,14 +425,15 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 1M context; reference concurrency qualification pending
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 30
   deploy:
     asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 60.71 tok/s/user, 88.13 tok/s/GPU, 4309.32 ms TTFT, 16.470 ms ITL @ c30
 related_benchmarks: []
 maintainer: null
 gaps:
