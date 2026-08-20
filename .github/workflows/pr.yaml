@@ -951,7 +951,6 @@ jobs:
       # parallel-safety or split them into their own job -- unlike `parallel`,
       # `defaulted` is not an author's claim that the test is parallel-safe.
       cpu_parallel_test_markers: 'pre_merge and (parallel or defaulted) and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not defaulted and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 

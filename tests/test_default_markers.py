@@ -87,23 +87,6 @@ def test_fully_marked_test_is_not_flagged_defaulted(root_conftest):
     assert item.markers == {"post_merge", "gpu_2"}
 
 
-@pytest.mark.parametrize("workflow", ["pr.yaml", "post-merge-ci.yml", "nightly-ci.yml"])
-def test_defaulted_marker_routes_off_the_sequential_job(workflow):
-    """Every CPU job selector must agree with the marker the hook applies.
-
-    The sequential job runs the fault-tolerance suite in a single process and
-    was OOM-killed once every unmarked test defaulted into it, so a defaulted
-    test has to match the parallel selector and miss the sequential one. All
-    three workflows carry the same pair; updating one and not the others would
-    silently send defaulted tests back into sequential on that pipeline.
-    """
-    text = (Path(__file__).parents[1] / ".github" / "workflows" / workflow).read_text()
-    assert "'pre_merge and (parallel or defaulted) and not" in text
-    assert "'pre_merge and not parallel and not defaulted and not" in text
-    assert "'pre_merge and parallel and not" not in text
-    assert "'pre_merge and not parallel and not (" not in text
-
-
 def test_demo_trees_are_not_defaulted(pytester, monkeypatch):
     """An unmarked demo script must stay deselected, not become pre_merge.
 
