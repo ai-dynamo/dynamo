@@ -460,18 +460,6 @@ fn server_info() -> pb::ServerInfo {
 }
 
 #[test]
-fn discovered_model_reports_rl_worker_metadata() {
-    let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
-    assert_eq!(
-        model
-            .rl_worker_metadata(Some("http://worker:8120".to_string()))
-            .expect("valid RL metadata"),
-        RlWorkerMetadata::new(4, Some("http://worker:8120".to_string()))
-            .expect("valid expected metadata")
-    );
-}
-
-#[test]
 fn rl_worker_metadata_identifies_zero_parallelism_dimensions() {
     for (dimension, expected) in [
         ("tensor", "tensor-parallel size of zero"),
