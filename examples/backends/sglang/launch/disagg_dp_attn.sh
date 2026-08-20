@@ -71,6 +71,7 @@ python3 -m dynamo.sglang \
   --tp 2 \
   --dp-size 2 \
   --enable-dp-attention \
+  --dist-init-addr "${SGLANG_PREFILL_DIST_INIT_ADDR:?SGLANG_PREFILL_DIST_INIT_ADDR must be set}" \
   --trust-remote-code \
   --disaggregation-mode prefill \
   --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
@@ -96,6 +97,7 @@ python3 -m dynamo.sglang \
   --tp 2 \
   --dp-size 2 \
   --enable-dp-attention \
+  --dist-init-addr "${SGLANG_DECODE_DIST_INIT_ADDR:?SGLANG_DECODE_DIST_INIT_ADDR must be set}" \
   --trust-remote-code \
   --disaggregation-mode decode \
   --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
