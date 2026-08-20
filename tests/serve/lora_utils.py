@@ -55,19 +55,7 @@ MINIO_BUCKET = "my-loras"
 DEFAULT_LORA_REPO = "codelion/Qwen3-0.6B-accuracy-recovery-lora"
 DEFAULT_LORA_NAME = "codelion/Qwen3-0.6B-accuracy-recovery-lora"
 
-# boto3's managed transfers (upload_file) pick their transfer client from the
-# host: with preferred_transfer_client left at "auto", boto3 switches to the AWS
-# CRT client whenever awscrt.s3.is_optimized_for_system() is true, which it is on
-# the network-optimized instance shapes used for H100 CI and false on ordinary
-# runners. The CRT path builds requests from the region alone and ignores this
-# client's endpoint_url (boto3/crt.py passes endpoint_url=None and hardcodes
-# use_ssl=True), so an upload meant for MinIO is silently re-addressed to
-# https://<bucket>.s3.amazonaws.com and rejected with InvalidAccessKeyId -- while
-# plain client calls such as head_bucket/create_bucket, which never go through a
-# transfer manager, keep working against MinIO. awscrt is not a declared
-# dependency of this repo; it arrives transitively, so this cannot be settled by
-# pinning either. Pin the classic transfer client so uploads always go to the
-# configured endpoint, whatever the instance type.
+# The CRT transfer client can ignore the configured MinIO endpoint.
 MINIO_TRANSFER_CONFIG = TransferConfig(preferred_transfer_client="classic")
 
 
@@ -315,9 +303,6 @@ class MinioService:
                     Config=MINIO_TRANSFER_CONFIG,
                 )
             except (ClientError, S3UploadFailedError, BotoCoreError) as e:
-                # A managed transfer reports failures as S3UploadFailedError or a
-                # BotoCoreError, not only ClientError; naming the endpoint keeps
-                # "which storage did this actually talk to" in the message.
                 raise RuntimeError(
                     f"Failed to upload {file_path} to "
                     f"{self.config.endpoint}/{self.config.bucket}/{s3_key}: {e}"
