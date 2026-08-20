@@ -370,6 +370,15 @@ struct EndpointWanRuntime {
 struct EndpointAvailabilityWatch {
     routable: watch::Receiver<Vec<WorkerId>>,
     discovered: watch::Receiver<Vec<Instance>>,
+    /// Owns the client's background instance-reconciliation task; the process-wide
+    /// token would keep one task alive per watch attempt until process shutdown.
+    cancel: CancellationToken,
+}
+
+impl Drop for EndpointAvailabilityWatch {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 impl EndpointAvailabilityWatch {
@@ -1157,7 +1166,7 @@ async fn run_endpoint_slot(
         }
 
         if membership.is_some() && instance_rx.is_none() {
-            match instance_availability_watch(&component, &endpoint).await {
+            match instance_availability_watch(&component, &endpoint, &cancel).await {
                 Ok(receiver) => {
                     // Both runtime watchers carry an initial snapshot. An empty snapshot is an
                     // authoritative observation that the endpoint currently has no live workers.
@@ -1627,16 +1636,25 @@ async fn run_endpoint_slot(
 async fn instance_availability_watch(
     component: &Component,
     endpoint: &EndpointId,
+    slot_cancel: &CancellationToken,
 ) -> anyhow::Result<EndpointAvailabilityWatch> {
-    let endpoint = component
+    let target = component
         .drt()
         .namespace(&endpoint.namespace)?
         .component(&endpoint.component)?
         .endpoint(&endpoint.name);
-    let client = endpoint.client().await?;
+    let cancel = slot_cancel.child_token();
+    let client = match target.client_with_cancellation(cancel.clone()).await {
+        Ok(client) => client,
+        Err(error) => {
+            cancel.cancel();
+            return Err(error);
+        }
+    };
     Ok(EndpointAvailabilityWatch {
         routable: client.instance_avail_watcher(),
         discovered: client.instance_source.as_ref().clone(),
+        cancel,
     })
 }
 
@@ -2226,6 +2244,21 @@ mod tests {
             DcMembershipView::default(),
             &DcPoolCatalog::new(DcRelayIdentity::new(0, 1), 0, Vec::new()),
         ))
+    }
+
+    #[test]
+    fn dropping_an_availability_watch_stops_its_client_task() {
+        let slot_cancel = CancellationToken::new();
+        let cancel = slot_cancel.child_token();
+        let watch = EndpointAvailabilityWatch {
+            routable: tokio::sync::watch::channel(Vec::new()).1,
+            discovered: tokio::sync::watch::channel(Vec::new()).1,
+            cancel: cancel.clone(),
+        };
+
+        drop(watch);
+        assert!(cancel.is_cancelled());
+        assert!(!slot_cancel.is_cancelled());
     }
 
     use dynamo_kv_router::{
