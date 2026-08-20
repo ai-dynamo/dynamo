@@ -316,14 +316,8 @@ pub mod llm {
     /// disabled.
     pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
 
-    /// Idle heartbeat interval, in milliseconds, for the forward-pass-metrics
-    /// *direct publisher* — the Rust publisher the mocker and the TensorRT-LLM
-    /// adapter start. It does not reach `FpmEventRelay`, which has no periodic
-    /// timer, nor the Python `_FpmPublisherThread` that carries the vLLM path's
-    /// own 1 s heartbeat. Accepted range is `1` through `300000` (five minutes);
-    /// unset, `0`, invalid, or above the maximum keeps the 1 s default that
-    /// matches the Python publisher. The value is read once, when the publisher
-    /// starts.
+    /// Rust direct-publisher heartbeat interval in ms (1..=300000; default 1000).
+    /// This does not affect `FpmEventRelay` or the Python vLLM publisher.
     pub const DYN_FPM_HEARTBEAT_INTERVAL_MS: &str = "DYN_FPM_HEARTBEAT_INTERVAL_MS";
 
     /// Enable LoRA adapter support (set to "true" to enable)
@@ -813,15 +807,10 @@ pub mod mocker {
     /// explicitly trying to reproduce the original behavior.
     pub const DYN_MOCKER_SYNC_DIRECT: &str = "DYN_MOCKER_SYNC_DIRECT";
 
-    /// Timer primitive backing the mocker's precise sleep: `auto` (default),
-    /// `timerfd`, or `time_driver`. `auto` keeps the platform default —
-    /// `timerfd` on Linux, the Tokio time driver everywhere else. Unrecognized
-    /// values warn and fall back to `auto`. Read once per process.
+    /// Precise-sleep backend: `auto`, `timerfd`, or `time_driver`; read once.
     pub const DYN_MOCKER_SLEEP_BACKEND: &str = "DYN_MOCKER_SLEEP_BACKEND";
 
-    /// Truthy values record requested-vs-actual wake times for the mocker's
-    /// precise sleep into a per-backend drift histogram. Off by default; the
-    /// accounting costs an extra clock read per sleep. Read once per process.
+    /// Enables per-backend precise-sleep drift accounting; read once.
     pub const DYN_MOCKER_SLEEP_DRIFT: &str = "DYN_MOCKER_SLEEP_DRIFT";
 }
 

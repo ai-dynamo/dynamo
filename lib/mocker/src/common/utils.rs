@@ -77,34 +77,23 @@ pub fn compute_kv_transfer_delay(
     .map(|delay_ms| Duration::from_secs_f64(delay_ms / 1000.0))
 }
 
-/// Environment variable selecting which timer primitive backs the precise sleep.
 const SLEEP_BACKEND_ENV: &str = "DYN_MOCKER_SLEEP_BACKEND";
 
-/// Environment variable enabling sleep-drift accounting.
 const SLEEP_DRIFT_ENV: &str = "DYN_MOCKER_SLEEP_DRIFT";
 
 /// Which timer primitive serves a [`sleep_until_precise`] deadline.
-///
-/// The two concrete variants ride different Tokio drivers: `Timerfd` registers a
-/// `timerfd` file descriptor on the **IO driver**, while `TimeDriver` uses
-/// [`tokio::time::sleep_until`] and therefore the **time driver**. Which one a
-/// build used to be decided entirely by `#[cfg(target_os = "linux")]`, so the
-/// time-driver path — the only path macOS ever takes — was not compiled, let
-/// alone exercised, on Linux. Making the choice a runtime value is what lets a
-/// Linux host run the macOS path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SleepBackend {
     /// Platform default: `Timerfd` on Linux, `TimeDriver` everywhere else.
     Auto,
-    /// Linux `timerfd` on the IO driver. Resolves to `TimeDriver` on other
-    /// targets, and falls back to it at runtime if the timerfd cannot be created.
+    /// Linux `timerfd`; falls back to `TimeDriver` if unavailable.
     Timerfd,
     /// Tokio's time driver.
     TimeDriver,
 }
 
 impl SleepBackend {
-    /// Map to the concrete backend this target would use. Never returns `Auto`.
+    /// Resolves the target's concrete backend.
     pub fn resolve(self) -> SleepBackend {
         match self {
             SleepBackend::TimeDriver => SleepBackend::TimeDriver,
@@ -118,7 +107,6 @@ impl SleepBackend {
         }
     }
 
-    /// Stable label used on drift records and log lines.
     pub fn label(self) -> &'static str {
         match self {
             SleepBackend::Auto => "auto",
@@ -159,21 +147,17 @@ static CONFIGURED_SLEEP_BACKEND: LazyLock<SleepBackend> = LazyLock::new(|| {
 static SLEEP_DRIFT_ENABLED: LazyLock<bool> =
     LazyLock::new(|| dynamo_truthy::env_is_truthy(SLEEP_DRIFT_ENV));
 
-/// The backend [`sleep_until_precise`] uses, resolved once from the environment.
+/// Returns the backend selected once from the environment.
 pub fn configured_sleep_backend() -> SleepBackend {
     *CONFIGURED_SLEEP_BACKEND
 }
 
-/// Whether [`sleep_until_precise`] accounts drift into [`sleep_drift_stats`].
-///
-/// The default path must not pay for an extra `Instant::now()` per pass
-/// boundary: at high speedup ratios the scheduler crosses this function far more
-/// often than it crosses anything that would amortize the clock read.
+/// Returns whether precise-sleep drift accounting is enabled.
 pub fn sleep_drift_enabled() -> bool {
     *SLEEP_DRIFT_ENABLED
 }
 
-/// One measured wake: what was asked for, what was observed, and which backend served it.
+/// Timing data for one measured wake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SleepDriftRecord {
     /// Concrete backend that served the wake. Never `SleepBackend::Auto`.
@@ -186,19 +170,12 @@ pub struct SleepDriftRecord {
     pub drift: Duration,
 }
 
-/// Upper bucket bounds, in seconds, for the sleep-drift histogram.
-///
-/// The first ten mirror `EVENT_LOOP_DELAY_SECONDS` in `dynamo-runtime`'s tokio
-/// perf canary so the two can be read side by side. The last two extend past
-/// 1.0 s, because a histogram whose top bucket *is* the mode under
-/// investigation cannot distinguish "late by a second" from "later still".
+// Extends past one second so delayed wakes do not all collapse into the final bucket.
 const DRIFT_BUCKET_BOUNDS_SECS: [f64; 12] = [
     0.0, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0,
 ];
 
-/// Cumulative per-backend drift histogram plus count, total, and max.
 struct DriftHistogram {
-    /// Cumulative counts: index `i` counts drift <= `DRIFT_BUCKET_BOUNDS_SECS[i]`.
     buckets: [AtomicU64; DRIFT_BUCKET_BOUNDS_SECS.len()],
     count: AtomicU64,
     total_nanos: AtomicU64,
@@ -215,7 +192,6 @@ impl DriftHistogram {
         }
     }
 
-    /// Returns the number of observations recorded so far, this one included.
     fn observe(&self, drift: Duration) -> u64 {
         let secs = drift.as_secs_f64();
         for (bucket, bound) in self.buckets.iter().zip(DRIFT_BUCKET_BOUNDS_SECS) {
@@ -252,12 +228,11 @@ static TIME_DRIVER_DRIFT: DriftHistogram = DriftHistogram::new();
 #[derive(Clone, Debug, PartialEq)]
 pub struct SleepDriftStats {
     pub backend: SleepBackend,
-    /// Number of measured wakes. Expired deadlines are not counted; they never sleep.
+    /// Number of measured wakes; expired deadlines are excluded.
     pub count: u64,
     pub total: Duration,
     pub max: Duration,
-    /// `(upper bound in seconds, cumulative count at or below that bound)`. A
-    /// bucket count below `count` means observations landed past the last bound.
+    /// Cumulative counts keyed by upper bound in seconds.
     pub buckets: Vec<(f64, u64)>,
 }
 
@@ -268,16 +243,13 @@ fn histogram_for(backend: SleepBackend) -> &'static DriftHistogram {
     }
 }
 
-/// Read the accumulated drift for one backend.
+/// Returns accumulated drift for one backend.
 pub fn sleep_drift_stats(backend: SleepBackend) -> SleepDriftStats {
     let backend = backend.resolve();
     histogram_for(backend).snapshot(backend)
 }
 
-/// Fold one measured wake into the process-wide histogram and log it.
-///
-/// The per-record log line is the readout for a bimodal distribution: the
-/// aggregate says how many wakes were late, the lines say which ones.
+/// Records and logs one measured wake.
 pub fn record_sleep_drift(record: &SleepDriftRecord) {
     let count = histogram_for(record.backend).observe(record.drift);
     tracing::debug!(
@@ -292,12 +264,8 @@ pub fn record_sleep_drift(record: &SleepDriftRecord) {
     }
 }
 
-/// Observations between aggregate readouts, so a run that ends without anyone
-/// calling [`sleep_drift_stats`] still leaves the distribution in the log.
 const DRIFT_SUMMARY_EVERY: u64 = 1_000;
 
-/// Log one aggregate snapshot. The per-wake lines say which wakes were late;
-/// this says how many were, which is the question an ablation actually asks.
 fn log_sleep_drift_summary(backend: SleepBackend) {
     let stats = sleep_drift_stats(backend);
     let mean_ms = if stats.count == 0 {
@@ -325,11 +293,6 @@ pub async fn sleep_precise(duration: Duration) {
 /// Unlike `sleep_precise`, this accounts for time already elapsed since the
 /// deadline's reference point, making it suitable for simulation loops where
 /// computation time should be subtracted from the sleep.
-///
-/// The backend comes from `DYN_MOCKER_SLEEP_BACKEND` and drift accounting from
-/// `DYN_MOCKER_SLEEP_DRIFT`, both resolved once per process. Neither is set in
-/// normal operation, and with both unset this behaves exactly as it did before
-/// they existed.
 pub async fn sleep_until_precise(deadline: Instant) {
     if sleep_drift_enabled() {
         if let Some(record) =
@@ -342,10 +305,7 @@ pub async fn sleep_until_precise(deadline: Instant) {
     sleep_until_backend(deadline, configured_sleep_backend()).await;
 }
 
-/// Sleep until `deadline` on `backend`, measuring the wake.
-///
-/// Returns `None` for an already-expired deadline, which yields instead of
-/// sleeping and so has no backend and no drift to report.
+/// Sleeps until `deadline` and returns timing data, or `None` if it has expired.
 pub async fn sleep_until_precise_measured(
     deadline: Instant,
     backend: SleepBackend,
@@ -362,8 +322,6 @@ pub async fn sleep_until_precise_measured(
     })
 }
 
-/// Returns the backend that actually served the wake, or `None` if the deadline
-/// had already passed and no timer was armed.
 async fn sleep_until_backend(deadline: Instant, backend: SleepBackend) -> Option<SleepBackend> {
     // Scheduler work may consume the modeled delay, especially at high speedup ratios. Avoid
     // allocating and registering a timerfd when there is no remaining time to sleep. Preserve
@@ -375,9 +333,7 @@ async fn sleep_until_backend(deadline: Instant, backend: SleepBackend) -> Option
 
     #[cfg(target_os = "linux")]
     if backend.resolve() == SleepBackend::Timerfd {
-        // A timerfd may be unavailable (fd exhaustion, restricted sandbox), and an armed
-        // one may still fail on read. Either way the fallback is the time driver, which
-        // has to finish the sleep before the record can claim which backend served it.
+        // Creation and read failures both fall back to the time driver.
         let timerfd_served = match tokio_timerfd::Delay::new(deadline) {
             Ok(delay) => delay.await.is_ok(),
             Err(_) => false,
@@ -412,15 +368,6 @@ mod tests {
         sleep.await;
     }
 
-    /// The default cadence must not move: on Linux `auto` still means timerfd,
-    /// and the drift accounting stays off unless it is asked for.
-    ///
-    /// The expectation is a `#[cfg]`-gated literal, not a `cfg!(...)`
-    /// expression. An expression here would be a transcription of `resolve()`'s
-    /// own branch table and would keep agreeing with it after someone edited
-    /// it, which is precisely the assertion this test must not make. See
-    /// `test_default_backend_actually_sleeps_on_timerfd` for the same claim
-    /// driven through the production sleep body.
     #[test]
     fn test_auto_backend_keeps_platform_default() {
         assert_eq!(configured_sleep_backend(), SleepBackend::Auto);
@@ -436,22 +383,6 @@ mod tests {
         assert_eq!(SleepBackend::TimeDriver.resolve(), SleepBackend::TimeDriver);
     }
 
-    /// The default path, exercised rather than restated: a process with no
-    /// environment set asks for `Auto`, and on Linux the wake must be served by
-    /// the timerfd on the IO driver — the same primitive `main` reaches today.
-    ///
-    /// This goes through `sleep_until_precise_measured`, which is the body
-    /// `sleep_until_precise` runs, so it observes which primitive actually
-    /// served the sleep instead of asking `resolve()` what it would have
-    /// picked. An edit that left the branch table alone but changed which
-    /// backend the default path reaches — a differently-consulted
-    /// `configured_sleep_backend()`, a moved `resolve()` call — fails here and
-    /// nowhere else.
-    ///
-    /// A `TimeDriver` result would mean the timerfd could not be created (fd
-    /// exhaustion, a restricted sandbox) and the documented fallback fired.
-    /// That is a real difference in what the default path does on this host,
-    /// so it is asserted rather than tolerated.
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_default_backend_actually_sleeps_on_timerfd() {
@@ -483,32 +414,6 @@ mod tests {
         assert_eq!(SleepBackend::parse("kqueue"), None);
     }
 
-    /// A wake requested on one backend must be served by that backend, and must
-    /// not slide onto an unrelated one-second timer that happens to be armed on
-    /// the same runtime.
-    ///
-    /// The 1 s timer stands in for the fpm idle heartbeat in
-    /// `lib/llm/src/fpm_publisher.rs`, which is re-armed one second out on every
-    /// fire and is therefore, essentially always, the furthest entry in the time
-    /// driver's wheel — the shape a coalescing bug needs. The bound is 200 ms:
-    /// far above scheduling noise on a loaded CI box, and far below the ~1000 ms
-    /// mode under investigation, so it separates the two regimes without
-    /// flaking. `TimeDriver` is forced because it is the backend macOS always
-    /// takes and Linux otherwise never compiles.
-    ///
-    /// The heartbeat is polled once and reports back before the 2 ms deadline is
-    /// armed. Registration on the time driver happens on that first poll, and
-    /// spawning alone does not order it against this task on a two-worker
-    /// runtime — without the handshake the 1 s entry might not be in the wheel
-    /// at all when the short sleep is armed, and the interference the test is
-    /// named for would not be established.
-    ///
-    /// Which assertion has failure power, stated plainly so a later reader does
-    /// not over-trust this fixture: the backend-identity assertion is what fails
-    /// against pre-change behavior, where `#[cfg]` decided and a requested
-    /// `TimeDriver` was silently unanswerable on Linux. The 200 ms drift bound
-    /// is the discriminator for the ~1000 ms mode itself; it has never been
-    /// observed to fire on Linux, and it is not evidence about macOS.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_short_sleep_does_not_ride_the_one_second_timer() {
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();

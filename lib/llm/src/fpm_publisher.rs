@@ -30,31 +30,11 @@ use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
 const FPM_VERSION: i32 = 1;
-/// Default idle heartbeat interval. Matches the default in Python
-/// `_FpmPublisherThread.HEARTBEAT_INTERVAL`; the
-/// `DYN_FPM_HEARTBEAT_INTERVAL_MS` override below is Rust-side only, so the two
-/// publishers agree unless an operator sets it.
+/// Matches Python `_FpmPublisherThread.HEARTBEAT_INTERVAL` by default.
 const IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
-/// Largest accepted idle heartbeat interval.
-///
-/// The heartbeat is a liveness signal, so an interval far beyond the default is
-/// indistinguishable from a publisher that has stopped: a consumer waiting on it
-/// gives up long before it fires. Five minutes is three orders of magnitude
-/// above the 1 s default, which leaves ample room for the ablation this override
-/// exists for while still rejecting a value that would silence the publisher.
-///
-/// A representability check is not a substitute for this bound.
-/// `Instant::checked_add` accepts `Duration::from_millis(u64::MAX)` — roughly
-/// 584 million years — on Linux, so `u64::MAX` would pass an arithmetic guard
-/// and produce exactly the never-heartbeats-again outcome the guard is for.
+/// Prevents an override from effectively disabling the liveness signal.
 const MAX_IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Resolve the idle heartbeat interval from `DYN_FPM_HEARTBEAT_INTERVAL_MS`.
-///
-/// Anything that is not a usable interval — unset, unparseable, zero, or above
-/// [`MAX_IDLE_HEARTBEAT_INTERVAL`] — keeps [`IDLE_HEARTBEAT_INTERVAL`], because
-/// a publisher that silently stops heartbeating is worse than one that ignores a
-/// bad override.
 fn parse_idle_heartbeat_interval(value: Result<String, std::env::VarError>) -> Duration {
     let value = match value {
         Ok(value) => value,
@@ -459,9 +439,7 @@ impl FpmDirectPublisher {
         // Each task forwards active-pass snapshots and emits periodic idle
         // heartbeats (zeroed snapshot, wall_time=0.0) when the scheduler is
         // idle, matching the Python `_FpmPublisherThread` contract.
-        //
-        // Resolve the interval once here rather than per task, so every dp_rank
-        // heartbeats on the same period even if the environment changes later.
+        // All ranks use the value captured when the publisher starts.
         let heartbeat_interval = idle_heartbeat_interval();
         if heartbeat_interval != IDLE_HEARTBEAT_INTERVAL {
             tracing::info!(
@@ -729,13 +707,10 @@ mod tests {
 
     #[test]
     fn test_idle_heartbeat_interval_env_override() {
-        // Absent keeps the Python-matching default.
         assert_eq!(
             parse_idle_heartbeat_interval(Err(std::env::VarError::NotPresent)),
             IDLE_HEARTBEAT_INTERVAL
         );
-        // A usable override wins, including one shorter than the default —
-        // that is the whole point of being able to move the timer off 1 s.
         assert_eq!(
             parse_idle_heartbeat_interval(Ok("250".to_string())),
             Duration::from_millis(250)
@@ -744,8 +719,6 @@ mod tests {
             parse_idle_heartbeat_interval(Ok(" 5000 ".to_string())),
             Duration::from_millis(5000)
         );
-        // Zero would disable heartbeats entirely; garbage and negatives cannot
-        // be honored. All fall back rather than changing the contract.
         assert_eq!(
             parse_idle_heartbeat_interval(Ok("0".to_string())),
             IDLE_HEARTBEAT_INTERVAL
@@ -758,10 +731,6 @@ mod tests {
             parse_idle_heartbeat_interval(Ok("-1".to_string())),
             IDLE_HEARTBEAT_INTERVAL
         );
-        // The ceiling, asserted against literals on both sides of it. Deriving
-        // the expectation from `Instant::checked_add` the way the parser used
-        // to decide would mirror the implementation and could not detect the
-        // gap this bound closes.
         assert_eq!(
             parse_idle_heartbeat_interval(Ok("300000".to_string())),
             Duration::from_millis(300_000),
@@ -772,10 +741,6 @@ mod tests {
             IDLE_HEARTBEAT_INTERVAL,
             "one millisecond past the ceiling falls back"
         );
-        // The value that motivates the ceiling: on Linux `Instant::checked_add`
-        // accepts `Duration::from_millis(u64::MAX)`, so a representability guard
-        // would honor it and the publisher would never heartbeat again. The
-        // ceiling rejects it on every platform, which is what this asserts.
         assert_eq!(
             parse_idle_heartbeat_interval(Ok(u64::MAX.to_string())),
             IDLE_HEARTBEAT_INTERVAL
