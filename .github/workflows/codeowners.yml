@@ -37,7 +37,7 @@ jobs:
       # fail, nothing else means anything.
       - name: Unit tests (matcher + tree-independence)
         run: |
-          python -m pytest .github/codeowners/test_codeowners.py -v \
+          python -m pytest .github/codeowners/ -v \
             -p no:cacheprovider \
             --override-ini="addopts=" \
             --override-ini="filterwarnings="

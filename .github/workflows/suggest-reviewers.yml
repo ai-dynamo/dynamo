@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Suggest reviewers
+
+# Answers "who reviews this?" on the pull request that asked. The same answer
+# .github/codeowners/who_owns.py has always given, delivered where a contributor
+# is already standing instead of requiring them to know a script exists.
+#
+# Resolution needs no authentication: CODEOWNERS ships in this repository, so
+# the answer is public and external contributors get it too. Which people are on
+# an owning team, and how loaded they are, is a different question this does not
+# ask -- that needs an org-scoped token and stays on the maintainer surface.
+
+on:
+  issue_comment:
+    types: [created]
+
+# Read-only by default. The comment is posted with a separate bot token, so no
+# job here needs write access to this repository (zizmor: excessive-permissions).
+permissions:
+  contents: read
+
+jobs:
+  suggest:
+    # Pull requests only, and only when actually asked. Matching a bare mention
+    # of the bot would fire on every unrelated tag of it in a thread.
+    if: >
+      github.event.issue.pull_request &&
+      (github.event.comment.body == '/reviewers' ||
+        startsWith(github.event.comment.body, '/reviewers ') ||
+        startsWith(github.event.comment.body, format('/reviewers{0}', '\n')) ||
+        (contains(github.event.comment.body, '@dynamo-ops') &&
+          contains(github.event.comment.body, 'review')))
+    runs-on: ubuntu-latest
+    concurrency:
+      group: suggest-reviewers-${{ github.repository }}-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    steps:
+      # The default branch, explicitly, NOT the pull request head. This job
+      # holds a token that can write comments, and the head of a fork pull
+      # request is attacker-controlled: checking it out would run their
+      # suggest_reviewers.py with that token. The changed-file list comes from
+      # the API below, so nothing from the pull request is ever executed.
+      # CODEOWNERS is evaluated at the base anyway, so this is also the correct
+      # ref for the answer.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      # No pip step: suggest_reviewers.py imports only the standard library and
+      # codeowners_match, so there is nothing to install and nothing to fail.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Collect changed paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --jq '.[].filename' \
+            | jq -Rs 'split("\n") | map(select(length > 0))' > changed.json
+          echo "changed paths: $(jq 'length' changed.json)"
+
+      - name: Render the answer
+        run: |
+          set -euo pipefail
+          python .github/codeowners/suggest_reviewers.py \
+            --codeowners CODEOWNERS \
+            --files changed.json > comment.md
+          cat comment.md >> "${GITHUB_STEP_SUMMARY}"
+
+      # Upsert, so asking twice edits one comment instead of notifying every
+      # subscriber again. The marker is written by suggest_reviewers.py.
+      #
+      # The body reaches gh through a file, never through the command line or a
+      # ${{ }} interpolation: it is rendered from paths in a pull request, and
+      # a path can contain anything (zizmor: template-injection).
+      - name: Post or update the comment
+        env:
+          GH_TOKEN: ${{ secrets.OPS_BOT_PAT }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "Missing OPS_BOT_PAT secret; cannot comment as @dynamo-ops."
+            exit 1
+          fi
+
+          existing="$(gh api --paginate \
+            "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --jq 'map(select(.body | contains("<!-- dynamo-ops:suggest-reviewers -->")))
+                  | .[0].id // empty')"
+
+          if [ -n "${existing}" ]; then
+            gh api --method PATCH "repos/${REPO}/issues/comments/${existing}" \
+              -F "body=@comment.md" >/dev/null
+            echo "Updated comment ${existing}."
+          else
+            gh api --method POST "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+              -F "body=@comment.md" >/dev/null
+            echo "Posted a new comment."
+          fi
