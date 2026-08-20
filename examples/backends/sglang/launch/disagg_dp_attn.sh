@@ -55,6 +55,13 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 DISAGG_BOOTSTRAP_PORT="${DYN_DISAGG_BOOTSTRAP_PORT:-12345}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 
+# SGLang derives a contiguous port block from --dist-init-addr: the supplied
+# port plus the next six. Keep the prefill and decode bases at least seven
+# apart so the two blocks stay disjoint. The serve test overrides both with
+# separately allocated blocks; these defaults keep the script runnable by hand.
+PREFILL_DIST_INIT_ADDR="${SGLANG_PREFILL_DIST_INIT_ADDR:-127.0.0.1:29500}"
+DECODE_DIST_INIT_ADDR="${SGLANG_DECODE_DIST_INIT_ADDR:-127.0.0.1:29510}"
+
 print_launch_banner "Launching Disaggregated DP Attention (2 shared GPUs)" "$MODEL" "$HTTP_PORT"
 
 python3 -m dynamo.frontend &
@@ -71,7 +78,7 @@ python3 -m dynamo.sglang \
   --tp 2 \
   --dp-size 2 \
   --enable-dp-attention \
-  --dist-init-addr "${SGLANG_PREFILL_DIST_INIT_ADDR:?SGLANG_PREFILL_DIST_INIT_ADDR must be set}" \
+  --dist-init-addr "$PREFILL_DIST_INIT_ADDR" \
   --trust-remote-code \
   --disaggregation-mode prefill \
   --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
@@ -97,7 +104,7 @@ python3 -m dynamo.sglang \
   --tp 2 \
   --dp-size 2 \
   --enable-dp-attention \
-  --dist-init-addr "${SGLANG_DECODE_DIST_INIT_ADDR:?SGLANG_DECODE_DIST_INIT_ADDR must be set}" \
+  --dist-init-addr "$DECODE_DIST_INIT_ADDR" \
   --trust-remote-code \
   --disaggregation-mode decode \
   --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
