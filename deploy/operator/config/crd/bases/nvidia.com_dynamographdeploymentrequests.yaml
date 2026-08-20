@@ -561,6 +561,15 @@ spec:
                 features:
                   description: Features controls optional Dynamo platform features in the generated deployment.
                   properties:
+                    kvRouter:
+                      description: KVRouter configures KV-cache-aware routing for the generated deployment.
+                      properties:
+                        enabled:
+                          description: |-
+                            Enabled indicates whether to enable KV-cache-aware routing in the generated DGD.
+                            KV routing optimizes request scheduling based on KV cache locality.
+                          type: boolean
+                      type: object
                     mocker:
                       description: Mocker configures the simulated (mocker) backend for testing without GPUs.
                       properties:
