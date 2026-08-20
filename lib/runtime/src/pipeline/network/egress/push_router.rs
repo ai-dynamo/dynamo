@@ -178,10 +178,6 @@ where
     /// A trait object so an alternate transport can swap it out.
     addressed: Arc<dyn StreamingDispatch<T, U>>,
 
-    /// This router's registration with the shared discovery watcher for its
-    /// endpoint. Behind an `Arc` because `PushRouter` is `Clone`: the watcher
-    /// keeps running until the last clone is dropped, and only then releases
-    /// `addressed`.
     watcher: Arc<WatcherSubscription>,
 
     /// When false, `generate_with_fault_detection` skips fault detection logic:
@@ -307,19 +303,38 @@ static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
     dashmap::DashMap<RuntimeEndpointId, ()>,
 > = std::sync::OnceLock::new();
 
-/// Object-safe, non-generic view of the discovery lifecycle hooks on
-/// [`StreamingDispatch`]. The watcher registry below is a `static`, which cannot
-/// be generic over a router's request/response types, so the sinks it stores
-/// erase them.
 #[async_trait]
 trait LifecycleSink: Send + Sync {
     async fn on_instance_removed(&self, id: &EndpointInstanceId);
     async fn on_instance_added(&self, id: &EndpointInstanceId);
 }
 
-/// Adapts one router's typed [`StreamingDispatch`] to [`LifecycleSink`].
 struct DispatchSink<T, U> {
     dispatch: Arc<dyn StreamingDispatch<T, U>>,
+}
+
+struct SinkEntry {
+    sink: Arc<dyn LifecycleSink>,
+    delivery: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl SinkEntry {
+    fn new(sink: Arc<dyn LifecycleSink>) -> Self {
+        Self {
+            sink,
+            delivery: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+        let _delivery = self.delivery.lock().await;
+        self.sink.on_instance_removed(id).await;
+    }
+
+    async fn on_instance_added(&self, id: &EndpointInstanceId) {
+        let _delivery = self.delivery.lock().await;
+        self.sink.on_instance_added(id).await;
+    }
 }
 
 #[async_trait]
@@ -339,55 +354,40 @@ where
 
 #[derive(Default)]
 struct WatcherState {
-    /// Registered sinks, one per live `PushRouter` subscribed to this watcher.
-    sinks: HashMap<u64, Arc<dyn LifecycleSink>>,
+    sinks: HashMap<u64, Arc<SinkEntry>>,
 
-    /// Instances discovery currently reports for this endpoint, keyed by
-    /// instance id, so a router that subscribes to an already-running watcher can
-    /// be replayed the adds it was not around for.
     live: HashMap<u64, EndpointInstanceId>,
 }
 
-/// One `list_and_watch` subscription per runtime endpoint, shared by every live
-/// `PushRouter` for that endpoint rather than bound to whichever dispatch
-/// happened to construct it first.
 struct EndpointWatcher {
-    /// Cancelled when the last subscription drops. Deliberately not a child of
-    /// the runtime's `primary_token()`: it is driven by subscriber refcount, not
-    /// by runtime teardown, and the task selects on both.
     cancel: tokio_util::sync::CancellationToken,
     next_sink_id: AtomicU64,
     state: std::sync::Mutex<WatcherState>,
 }
 
 impl EndpointWatcher {
-    fn new() -> Self {
+    fn new(cancel: tokio_util::sync::CancellationToken) -> Self {
         Self {
-            cancel: tokio_util::sync::CancellationToken::new(),
+            cancel,
             next_sink_id: AtomicU64::new(0),
             state: std::sync::Mutex::new(WatcherState::default()),
         }
     }
 
-    /// Register `sink`, returning its id and the instances to replay to it.
-    fn add_sink(&self, sink: Arc<dyn LifecycleSink>) -> (u64, Vec<EndpointInstanceId>) {
+    fn add_sink(&self, sink: Arc<SinkEntry>) -> (u64, Vec<EndpointInstanceId>) {
         let sink_id = self.next_sink_id.fetch_add(1, Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
         state.sinks.insert(sink_id, sink);
         (sink_id, state.live.values().cloned().collect())
     }
 
-    /// Deregister a sink, releasing its dispatch. True when it was the last one.
     fn remove_sink(&self, sink_id: u64) -> bool {
         let mut state = self.state.lock().unwrap();
         state.sinks.remove(&sink_id);
         state.sinks.is_empty()
     }
 
-    /// Snapshot for fan-out. The lock is never held across the hook `await`s, so
-    /// a sink deregistered mid-fan-out is still called once more from this
-    /// snapshot; the hooks are documented as idempotent for exactly this reason.
-    fn sinks(&self) -> Vec<Arc<dyn LifecycleSink>> {
+    fn sinks(&self) -> Vec<Arc<SinkEntry>> {
         self.state.lock().unwrap().sinks.values().cloned().collect()
     }
 
@@ -403,13 +403,6 @@ impl EndpointWatcher {
         self.state.lock().unwrap().live.remove(&id.instance_id);
     }
 
-    /// True while discovery still reports `instance_id` for this endpoint.
-    fn is_live(&self, instance_id: u64) -> bool {
-        self.state.lock().unwrap().live.contains_key(&instance_id)
-    }
-
-    /// Forget every remembered instance missing from `present`, returning the
-    /// ones dropped so the caller can fan their removal out to the sinks.
     fn retain_live(&self, present: &HashSet<u64>) -> Vec<EndpointInstanceId> {
         let mut state = self.state.lock().unwrap();
         let stale: Vec<u64> = state
@@ -425,11 +418,6 @@ impl EndpointWatcher {
     }
 }
 
-/// At most one `list_and_watch` per runtime endpoint, across all `PushRouter`
-/// instances. Keyed by `RuntimeEndpointId` (not bare `EndpointId`) so two
-/// `DistributedRuntime`s in one process do not share a watcher. Entry removed
-/// when the last subscription drops, or on watcher exit, so a later router
-/// re-arms a fresh watcher.
 static ENDPOINT_WATCHERS: std::sync::OnceLock<
     dashmap::DashMap<RuntimeEndpointId, Arc<EndpointWatcher>>,
 > = std::sync::OnceLock::new();
@@ -438,11 +426,6 @@ fn endpoint_watchers() -> &'static dashmap::DashMap<RuntimeEndpointId, Arc<Endpo
     ENDPOINT_WATCHERS.get_or_init(dashmap::DashMap::new)
 }
 
-/// One router's registration with the shared watcher for its endpoint.
-///
-/// `PushRouter` holds this behind an `Arc` because it derives `Clone`: the
-/// watcher must outlive the *last* clone, so a `Drop` impl on `PushRouter`
-/// itself would cancel the watcher out from under the surviving clones.
 struct WatcherSubscription {
     key: RuntimeEndpointId,
     watcher: Arc<EndpointWatcher>,
@@ -453,10 +436,8 @@ impl Drop for WatcherSubscription {
     fn drop(&mut self) {
         use dashmap::mapref::entry::Entry;
 
-        // "Was that the last sink?" and the registry removal must happen under
-        // the same shard lock that registration takes, or a router constructed
-        // at the instant this one drops can attach to a watcher that is already
-        // cancelling and never hear from discovery again.
+        // Registration and last-subscriber removal share the shard lock so a
+        // router cannot attach to a watcher while it is being cancelled.
         match endpoint_watchers().entry(self.key.clone()) {
             Entry::Occupied(entry) if Arc::ptr_eq(entry.get(), &self.watcher) => {
                 if self.watcher.remove_sink(self.sink_id) {
@@ -464,9 +445,6 @@ impl Drop for WatcherSubscription {
                     self.watcher.cancel.cancel();
                 }
             }
-            // Our watcher already left the registry (task exit or panic) and a
-            // later router may have armed a fresh one under this key. Release
-            // our own sink only; the entry is not ours to remove.
             _ => {
                 if self.watcher.remove_sink(self.sink_id) {
                     self.watcher.cancel.cancel();
@@ -476,18 +454,6 @@ impl Drop for WatcherSubscription {
     }
 }
 
-/// Subscribe this router's `dispatch` to the discovery watcher for `endpoint`,
-/// starting the watcher if this is the first subscriber.
-///
-/// The watcher watches discovery for instance removals and cancels pending
-/// response-stream registrations on the removed instance, unblocking queued
-/// requests with a migratable `Disconnected` error. Uses raw `list_and_watch`
-/// events (not a coalesced snapshot diff) so a rapid remove→re-add of the same
-/// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
-///
-/// The returned guard is owned by the `PushRouter`. Dropping the last guard for
-/// an endpoint stops the watcher and releases every dispatch registered with it;
-/// dropping one of several only deregisters that router's dispatch.
 async fn spawn_instance_removal_watcher<T, U>(
     endpoint: Endpoint,
     dispatch: Arc<dyn StreamingDispatch<T, U>>,
@@ -500,9 +466,11 @@ where
     use dashmap::mapref::entry::Entry;
 
     let key = RuntimeEndpointId::for_endpoint(&endpoint);
-    let sink: Arc<dyn LifecycleSink> = Arc::new(DispatchSink { dispatch });
+    let sink = Arc::new(SinkEntry::new(Arc::new(DispatchSink { dispatch })));
+    // The initial replay holds the same per-sink lock as live fan-out. Events
+    // recorded after registration therefore cannot overtake the replay.
+    let replay_delivery = sink.delivery.clone().lock_owned().await;
 
-    // Scoped so the shard lock is released before the replay `await` below.
     let (watcher, sink_id, replay) = {
         match endpoint_watchers().entry(key.clone()) {
             Entry::Occupied(entry) => {
@@ -517,54 +485,33 @@ where
                 (watcher, sink_id, replay)
             }
             Entry::Vacant(entry) => {
-                let watcher = Arc::new(EndpointWatcher::new());
+                let watcher = Arc::new(EndpointWatcher::new(cancel_token.child_token()));
                 let (sink_id, _) = watcher.add_sink(sink.clone());
                 entry.insert(watcher.clone());
-                spawn_endpoint_watcher_task(
-                    endpoint,
-                    key.clone(),
-                    watcher.clone(),
-                    cancel_token.clone(),
-                );
+                spawn_endpoint_watcher_task(endpoint, key.clone(), watcher.clone());
                 (watcher, sink_id, Vec::new())
             }
         }
     };
 
-    // Own the deregistration guard before the first `await`. The sink is
-    // already registered, so a caller that drops this future mid-replay would
-    // otherwise leave it in the watcher for the life of the process, holding
-    // the dispatch alive and keeping the subscriber count above zero.
     let subscription = WatcherSubscription {
         key,
         watcher,
         sink_id,
     };
 
-    // A late subscriber missed the initial `Added` burst, so hand it the
-    // instances the watcher already knows about. Only this sink is replayed.
     for id in replay {
-        // The snapshot was taken under the shard lock, but the fan-out task
-        // runs free of it and can retire an instance before the replay reaches
-        // it. That inverts the order this sink sees — removal, then a stale
-        // add — leaving a dead instance marked live until the next discovery
-        // event. Re-reading liveness keeps the replay honest.
-        if !subscription.watcher.is_live(id.instance_id) {
-            continue;
-        }
-        sink.on_instance_added(&id).await;
+        sink.sink.on_instance_added(&id).await;
     }
+    drop(replay_delivery);
 
     subscription
 }
 
-/// Run the shared `list_and_watch` loop for one runtime endpoint, fanning every
-/// event out to the sinks registered with `watcher` at the time it arrives.
 fn spawn_endpoint_watcher_task(
     endpoint: Endpoint,
     key: RuntimeEndpointId,
     watcher: Arc<EndpointWatcher>,
-    cancel_token: tokio_util::sync::CancellationToken,
 ) {
     use crate::discovery::{
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
@@ -574,9 +521,6 @@ fn spawn_endpoint_watcher_task(
     let endpoint_name = endpoint.name().to_string();
 
     tokio::spawn(async move {
-        // Release on every exit path (including panic); a leaked entry silently
-        // disables removal cancellation until process restart. Only clears the
-        // entry if it is still ours — a later router may have re-armed.
         struct GuardRelease(RuntimeEndpointId, Arc<EndpointWatcher>);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
@@ -587,8 +531,6 @@ fn spawn_endpoint_watcher_task(
         }
         let _release = GuardRelease(key, watcher.clone());
 
-        // Cancelled when the last subscribed router is dropped; the runtime's
-        // token stays wired alongside it so process shutdown still stops us.
         let lifecycle = watcher.cancel.clone();
 
         let namespace = endpoint.component().namespace().name();
@@ -607,7 +549,7 @@ fn spawn_endpoint_watcher_task(
             let mut stream = match endpoint
                 .drt()
                 .discovery()
-                .list_and_watch(query.clone(), None)
+                .list_and_watch(query.clone(), Some(lifecycle.clone()))
                 .await
             {
                 Ok(s) => s,
@@ -618,27 +560,13 @@ fn spawn_endpoint_watcher_task(
                     );
                     tokio::select! {
                         _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
-                        _ = cancel_token.cancelled() => break 'reconnect,
                         _ = lifecycle.cancelled() => break 'reconnect,
                     }
                 }
             };
 
-            // A fresh `list_and_watch` re-lists whatever still exists but never
-            // reports what vanished while the previous stream was down, so an
-            // instance that died during the outage would otherwise stay in
-            // `live` for the life of the process: replayed as present to every
-            // router built afterwards, and never released. Reconcile against an
-            // explicit listing to find those.
-            //
-            // The listing is taken after the watch is established, not before.
-            // Anything that goes away from here on is carried by the stream as a
-            // `Removed`, so the two together leave no window: a removal earlier
-            // than the listing is caught by the listing, a removal later than it
-            // by the stream. An instance retired between the watch's own
-            // snapshot and the listing is pruned here and may still arrive as a
-            // late `Added`, but the stream owes us its `Removed` too, and the
-            // hooks are idempotent by contract.
+            // Establish the watch before re-listing so a removal cannot fall
+            // between the reconciliation snapshot and the replacement stream.
             if resubscribing {
                 match endpoint.drt().discovery().list(query).await {
                     Ok(instances) => {
@@ -660,10 +588,6 @@ fn spawn_endpoint_watcher_task(
                             }
                         }
                     }
-                    // Reconciliation is best effort: without a listing we cannot
-                    // tell a departed instance from an unreachable store, and
-                    // pruning on that guess would cancel live dispatches. Keep
-                    // the remembered set and try again on the next reconnect.
                     Err(e) => {
                         tracing::warn!(
                             endpoint = %endpoint_name,
@@ -708,9 +632,6 @@ fn spawn_endpoint_watcher_task(
                                 continue 'reconnect;
                             }
                         }
-                    }
-                    _ = cancel_token.cancelled() => {
-                        break 'reconnect;
                     }
                     _ = lifecycle.cancelled() => {
                         break 'reconnect;
@@ -3250,11 +3171,6 @@ mod tests {
         rt.shutdown();
     }
 
-    /// Concurrent routers for one endpoint share a single watcher: the second
-    /// one to arrive is replayed the instances the watcher already knows, both
-    /// keep receiving events, and the registry entry is released only when the
-    /// last of them is dropped — so a later router re-arms a fresh watcher
-    /// instead of inheriting a cancelled one.
     #[tokio::test]
     async fn watcher_subscriptions_share_and_release_the_registry_entry() {
         let rt = Runtime::from_current().unwrap();
@@ -3286,9 +3202,6 @@ mod tests {
             "the first router must receive the initial-snapshot add"
         );
 
-        // The watcher is live and has recorded the instance, so a router built
-        // now joins it rather than starting a second `list_and_watch`. The
-        // replay happens during construction, so no polling is needed.
         let dispatch_b = Arc::new(RecordingDispatch::default());
         let router_b = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
             client.clone(),
@@ -3308,7 +3221,6 @@ mod tests {
             "the watcher must survive while another router is still subscribed"
         );
 
-        // The surviving generation still hears from discovery.
         endpoint.unregister_endpoint_instance().await.unwrap();
         assert!(
             poll_until(|| dispatch_b.removed.lock().unwrap().contains(&instance_id)).await,
@@ -3487,13 +3399,6 @@ mod tests {
         rt.shutdown();
     }
 
-    /// Dropping a router must end the task that owns its dispatch, and a router
-    /// constructed afterwards for the same endpoint must receive discovery
-    /// notifications. This is the shape of the reproduction in
-    /// <https://github.com/ai-dynamo/dynamo/issues/13206>: the watcher used to be
-    /// keyed in a process-global map and cancelled only by the runtime's
-    /// `primary_token()`, so the spawned task held dispatch A until process
-    /// shutdown and router B's watcher registration was skipped outright.
     #[tokio::test]
     async fn dropped_router_releases_dispatch_and_later_router_is_notified() {
         let rt = Runtime::from_current().unwrap();
@@ -3520,9 +3425,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Gate on the initial-snapshot add so the watcher is provably running
-        // before router A is dropped; otherwise the release below could pass
-        // simply because nothing had subscribed yet.
         assert!(
             poll_until(|| dispatch_a.added.lock().unwrap().contains(&instance_id)).await,
             "on_instance_added (initial snapshot) not delivered to router A's dispatch"
@@ -3546,9 +3448,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Same gate as for router A, and the first half of the expected behavior:
-        // the later router hears about the instances discovery already knows about,
-        // and its watcher is provably subscribed before discovery is mutated below.
         assert!(
             poll_until(|| dispatch_b.added.lock().unwrap().contains(&instance_id)).await,
             "on_instance_added not delivered to the later router's dispatch"
@@ -3584,8 +3483,6 @@ mod tests {
         }
     }
 
-    /// Stands in for a subscribed router where only the watcher's bookkeeping
-    /// is under test; the hooks themselves are exercised end to end above.
     struct InertSink;
 
     #[async_trait]
@@ -3594,39 +3491,28 @@ mod tests {
         async fn on_instance_added(&self, _id: &EndpointInstanceId) {}
     }
 
+    fn inert_sink() -> Arc<SinkEntry> {
+        Arc::new(SinkEntry::new(Arc::new(InertSink)))
+    }
+
     #[test]
-    fn add_sink_replays_only_instances_discovery_still_reports() {
-        let watcher = EndpointWatcher::new();
+    fn add_sink_excludes_instances_removed_before_registration() {
+        let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
         watcher.record_added(&test_instance_id(1));
         watcher.record_added(&test_instance_id(2));
-
-        let (_sink_id, replay) = watcher.add_sink(Arc::new(InertSink));
-        assert_eq!(replay.len(), 2);
-
-        // What the fan-out task does between the snapshot and the replay await.
         watcher.record_removed(&test_instance_id(2));
 
-        let replayed: Vec<u64> = replay
-            .iter()
-            .filter(|id| watcher.is_live(id.instance_id))
-            .map(|id| id.instance_id)
-            .collect();
-        assert_eq!(
-            replayed,
-            vec![1],
-            "an instance retired after the snapshot must not be replayed as present"
-        );
+        let (_sink_id, replay) = watcher.add_sink(inert_sink());
+        assert_eq!(replay.iter().map(|id| id.instance_id).collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]
     fn retain_live_drops_instances_missing_from_a_fresh_listing() {
-        let watcher = EndpointWatcher::new();
+        let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
         watcher.record_added(&test_instance_id(1));
         watcher.record_added(&test_instance_id(2));
         watcher.record_added(&test_instance_id(3));
 
-        // Instance 2 vanished while the watch was down, so the re-listing that
-        // follows a reconnect does not mention it.
         let present = HashSet::from([1, 3]);
         let dropped: Vec<u64> = watcher
             .retain_live(&present)
@@ -3635,12 +3521,8 @@ mod tests {
             .collect();
 
         assert_eq!(dropped, vec![2]);
-        assert!(watcher.is_live(1));
-        assert!(!watcher.is_live(2));
-        assert!(watcher.is_live(3));
 
-        // The reconciled set is what a later subscriber gets replayed.
-        let (_sink_id, replay) = watcher.add_sink(Arc::new(InertSink));
+        let (_sink_id, replay) = watcher.add_sink(inert_sink());
         let mut replayed: Vec<u64> = replay.iter().map(|id| id.instance_id).collect();
         replayed.sort_unstable();
         assert_eq!(replayed, vec![1, 3]);
@@ -3648,10 +3530,11 @@ mod tests {
 
     #[test]
     fn retain_live_keeps_everything_when_the_listing_matches() {
-        let watcher = EndpointWatcher::new();
+        let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
         watcher.record_added(&test_instance_id(7));
 
         assert!(watcher.retain_live(&HashSet::from([7])).is_empty());
-        assert!(watcher.is_live(7));
+        let (_sink_id, replay) = watcher.add_sink(inert_sink());
+        assert_eq!(replay[0].instance_id, 7);
     }
 }

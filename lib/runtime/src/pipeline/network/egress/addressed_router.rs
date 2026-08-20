@@ -788,13 +788,8 @@ where
 /// `wrap_with_fault_detection`'s
 /// report-down / overload / migration won't fire.
 ///
-/// The removal watcher behind `on_instance_removed` / `on_instance_added` runs
-/// once per endpoint but fans out: every live `PushRouter` for that endpoint has
-/// its dispatch called, and the watcher stops once the last of those routers is
-/// dropped. Per-instance state may therefore be private to one router. Both
-/// hooks MUST be idempotent — a dispatch that subscribes to an already-running
-/// watcher is replayed the instances it currently knows about, so the same add
-/// can arrive twice.
+/// Discovery events are fanned out to every live router. These hooks must be
+/// idempotent because late subscribers replay the instances already known.
 #[async_trait::async_trait]
 pub trait StreamingDispatch<T, U>: Send + Sync
 where
