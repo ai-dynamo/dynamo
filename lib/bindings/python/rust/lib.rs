@@ -1138,13 +1138,15 @@ impl From<llm_rs::worker_type::WorkerType> for WorkerType {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None, *, event_plane=None))]
+    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None, *, event_plane=None, nats_tls_ca_cert_path=None, nats_tls_insecure=None))]
     fn new(
         event_loop: PyObject,
         discovery_backend: String,
         request_plane: String,
         enable_nats: Option<bool>,
         event_plane: Option<String>,
+        nats_tls_ca_cert_path: Option<String>,
+        nats_tls_insecure: Option<bool>,
     ) -> PyResult<Self> {
         if enable_nats.is_some() {
             Python::with_gil(|py| {
@@ -1200,13 +1202,24 @@ impl DistributedRuntime {
             || (explicit_event_plane.is_none()
                 && std::env::var(config::environment_names::nats::NATS_SERVER).is_ok());
 
+        // Explicit Python-provided TLS settings win over the NATS_TLS_* env
+        // fallback baked into ClientOptions' builder defaults.
+        let nats_config = if nats_enabled {
+            let mut builder = dynamo_runtime::transports::nats::ClientOptions::builder();
+            if let Some(path) = nats_tls_ca_cert_path {
+                builder.tls_ca_cert_path(Some(std::path::PathBuf::from(path)));
+            }
+            if let Some(insecure) = nats_tls_insecure {
+                builder.tls_insecure(insecure);
+            }
+            Some(builder.build().map_err(to_pyerr)?)
+        } else {
+            None
+        };
+
         let runtime_config = DistributedConfig {
             discovery_backend: discovery_backend_config,
-            nats_config: if nats_enabled {
-                Some(dynamo_runtime::transports::nats::ClientOptions::default())
-            } else {
-                None
-            },
+            nats_config,
             request_plane,
             event_transport_kind,
         };
