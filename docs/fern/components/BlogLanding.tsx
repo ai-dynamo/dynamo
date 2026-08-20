@@ -5,6 +5,16 @@
 
 const ARTICLES = [
   {
+    title: "Dynamo Agent Optimization Skills",
+    description:
+      "A skillpack that turns coding agents into disciplined performance engineers: objective functions, experimental discipline, and inference domain knowledge.",
+    href: "/dynamo/dev/digest/agent-optimization-skills",
+    date: "August 20, 2026",
+    readTime: "2 min read",
+    category: "Agentic AI",
+    art: "agents",
+  },
+  {
     title: "DynoSim: Simulating the Pareto Frontier",
     description:
       "Explore serving configurations with a workload-driven Dynamo simulator before committing scarce GPU time to cluster validation.",
