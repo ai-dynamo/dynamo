@@ -407,6 +407,9 @@ def test_router_decisions_sglang_disagg(
             "gpu_start_index": 1,
             "disaggregation_mode": "decode",
         },
+        # SGLang disaggregated responses do not yet expose the complete timing
+        # telemetry; this test covers NATS routing and worker separation.
+        test_kwargs={"verify_timing": False},
     )
 
 
