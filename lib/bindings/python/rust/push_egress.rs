@@ -25,7 +25,9 @@
 //! The sender reaches the handler as the `response_sender` keyword argument,
 //! and only that way — the same parameter the signature check keys on.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Error;
 use bytes::Bytes;
@@ -37,7 +39,7 @@ use tokio_stream::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
 use dynamo_runtime::engine::AsyncEngineContext;
-use dynamo_runtime::error::DynamoError;
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, NetworkStreamWrapper, RequestPlanePayloadCodec,
@@ -137,6 +139,23 @@ impl PushFrame {
         })
     }
 
+    /// Encode an already-owned response without touching the Python runtime.
+    pub(crate) fn owned(annotated: Annotated<serde_json::Value>) -> Result<Self, String> {
+        let codec = RequestPlanePayloadCodec::configured();
+        let (bytes, is_error) = python_payload::encode_annotated_response(codec, annotated)
+            .map_err(|error| {
+                format!(
+                    "failed serializing owned response as {}: {error}",
+                    codec.name()
+                )
+            })?;
+        Ok(Self {
+            bytes: bytes.into(),
+            is_error,
+            codec,
+        })
+    }
+
     /// Encode a terminal error frame. Pure Rust — no Python object involved —
     /// so this is callable from either side of the bridge.
     fn error(annotated: Annotated<serde_json::Value>) -> Self {
@@ -200,12 +219,11 @@ impl PushFrame {
     }
 }
 
-// ── GIL-side sink ────────────────────────────────────────────────────────────
+// ── Per-request sink ─────────────────────────────────────────────────────────
 
-/// The GIL-side half of one request's push channel. Every method is called with
-/// the GIL already held by the Python caller, except the two the Rust driver
-/// task uses to terminate a stream its handler left open.
-struct ResponseSink {
+/// The send side of one request's push channel. Python handlers use `send`,
+/// while owned Rust response workers use the cancellation-aware methods.
+pub(crate) struct ResponseSink {
     /// `None` once the stream has been closed. Dropping the last `Sender` is
     /// what ends the receiver stream, so closing is "take the sender".
     tx: Mutex<Option<mpsc::Sender<PushFrame>>>,
@@ -214,6 +232,15 @@ struct ResponseSink {
     /// response stream would leave the handler generating into nothing until it
     /// noticed the send error on its own.
     ctx: Arc<dyn AsyncEngineContext>,
+    /// Runtime that owns the response stream. Plain Rust shard threads use it
+    /// for terminal delivery without entering Python.
+    runtime: tokio::runtime::Handle,
+}
+
+#[derive(Debug)]
+pub(crate) enum OwnedSendError {
+    Stopped,
+    Failed(String),
 }
 
 impl ResponseSink {
@@ -284,20 +311,85 @@ impl ResponseSink {
             .map_err(|_| self.consumer_gone())
     }
 
+    /// Encode and enqueue a response whose complete representation is owned by Rust.
+    pub(crate) fn send_owned(
+        &self,
+        annotated: Annotated<serde_json::Value>,
+        cancelled: &AtomicBool,
+        shutting_down: &AtomicBool,
+        send_gate: &Mutex<()>,
+    ) -> Result<(), OwnedSendError> {
+        if cancelled.load(Ordering::Acquire) || shutting_down.load(Ordering::Acquire) {
+            return Err(OwnedSendError::Stopped);
+        }
+        let mut frame = PushFrame::owned(annotated).map_err(OwnedSendError::Failed)?;
+        let Some(tx) = self.sender() else {
+            return Err(OwnedSendError::Failed(
+                "response stream is closed; send after close".to_string(),
+            ));
+        };
+
+        loop {
+            let send_guard = send_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cancelled.load(Ordering::Acquire) || shutting_down.load(Ordering::Acquire) {
+                return Err(OwnedSendError::Stopped);
+            }
+            let send_result = tx.try_send(frame);
+            drop(send_guard);
+            match send_result {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Full(returned)) => {
+                    frame = returned;
+                    std::thread::park_timeout(Duration::from_micros(100));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.ctx.stop_generating();
+                    return Err(OwnedSendError::Failed(
+                        "response stream consumer has closed".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Normal end of stream.
-    fn close(&self) {
+    pub(crate) fn close(&self) {
         // Dropping the last sender is what ends the receiver stream. Idempotent
         // so the Rust-side safety net can close a stream the handler already
         // closed itself.
         drop(self.take_sender());
     }
 
+    pub(crate) fn cancel(&self) {
+        self.ctx.stop_generating();
+        self.close();
+    }
+
+    pub(crate) fn shutdown(&self) {
+        self.ctx.stop_generating();
+        self.close_with_dynamo_error(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("owned response processor is shutting down")
+                .build(),
+        );
+    }
+
     /// Terminate the stream with an untyped error frame.
-    fn close_with_error(&self, message: String) {
+    pub(crate) fn close_with_error(&self, message: String) {
         let Some(tx) = self.take_sender() else {
             return;
         };
         self.send_terminal(tx, PushFrame::error(Annotated::from_error(message)));
+    }
+
+    pub(crate) fn close_with_owned_error(&self, message: String) -> bool {
+        let Some(tx) = self.take_sender() else {
+            return false;
+        };
+        self.send_terminal(tx, PushFrame::error(Annotated::from_error(message)))
     }
 
     /// Terminate the stream with a typed backend error frame. Not exposed to
@@ -305,7 +397,7 @@ impl ResponseSink {
     /// raises instead of closing the sender itself. Preserving the type matters
     /// downstream — `BackendError::EngineShutdown` is what triggers request
     /// migration and marks the worker inhibited.
-    fn close_with_dynamo_error(&self, error: DynamoError) {
+    pub(crate) fn close_with_dynamo_error(&self, error: DynamoError) {
         let Some(tx) = self.take_sender() else {
             return;
         };
@@ -314,31 +406,22 @@ impl ResponseSink {
 
     /// Enqueue a terminal frame after the sender has already been taken.
     ///
-    /// Unlike [`ResponseSink::send`] this runs on either side of the bridge:
-    /// from Python (`close_with_error`) or from the Rust driver task's error
-    /// path. Those have opposite constraints when the channel is full —
-    /// `blocking_send` panics inside an async task, and `spawn` needs a runtime
-    /// handle Python's event-loop thread does not have — so pick per caller.
-    /// Holding `tx` until the frame lands is what keeps the stream open long
-    /// enough to deliver it; the stream ends when the task below drops it.
-    fn send_terminal(&self, tx: mpsc::Sender<PushFrame>, frame: PushFrame) {
+    /// This can run from Python, a Tokio task, or a plain Rust shard thread.
+    /// The response stream's stored runtime handles the full-channel path, so
+    /// terminal delivery never blocks a caller or acquires the GIL. Holding
+    /// `tx` in the task keeps the stream open until the frame lands.
+    fn send_terminal(&self, tx: mpsc::Sender<PushFrame>, frame: PushFrame) -> bool {
         let frame = match tx.try_send(frame) {
-            Ok(()) => return,
+            Ok(()) => return true,
             Err(mpsc::error::TrySendError::Full(frame)) => frame,
             // Consumer is gone; there is nothing left to report to.
-            Err(mpsc::error::TrySendError::Closed(_)) => return,
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
         };
 
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let _ = tx.send(frame).await;
-            });
-            return;
-        }
-
-        // No runtime on this thread: we are on the Python side. Same GIL rule
-        // as `send` — release it across the wait.
-        let _ = Python::with_gil(|py| py.allow_threads(|| tx.blocking_send(frame)));
+        self.runtime.spawn(async move {
+            let _ = tx.send(frame).await;
+        });
+        true
     }
 }
 
@@ -401,7 +484,7 @@ impl ResponseSender {
 impl ResponseSender {
     /// Rust-side handle to the same sink, for the safety net that terminates
     /// the stream if the handler's generator raises.
-    fn sink(&self) -> Arc<ResponseSink> {
+    pub(crate) fn sink(&self) -> Arc<ResponseSink> {
         self.sink.clone()
     }
 }
@@ -426,6 +509,7 @@ pub(crate) fn response_channel(
         sink: Arc::new(ResponseSink {
             tx: Mutex::new(Some(tx)),
             ctx,
+            runtime: tokio::runtime::Handle::current(),
         }),
     };
 
@@ -662,15 +746,21 @@ mod tests {
         assert!(!frame.is_error);
         let wrapper = decode(&frame.bytes, frame.codec);
         let annotated = wrapper.data.expect("owned frame carries data");
+        let data = annotated.data.expect("owned frame carries response data");
+        let fields = data.as_map().expect("owned response is a map");
         assert_eq!(
-            annotated.data.expect("owned frame carries response data"),
-            rmpv::Value::Map(vec![
-                (rmpv::Value::from("index"), rmpv::Value::from(0)),
-                (
-                    rmpv::Value::from("token_ids"),
-                    rmpv::Value::Array(vec![10.into(), 11.into()])
-                ),
-            ])
+            fields
+                .iter()
+                .find(|(key, _)| key.as_str() == Some("index"))
+                .map(|(_, value)| value),
+            Some(&rmpv::Value::from(0))
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|(key, _)| key.as_str() == Some("token_ids"))
+                .map(|(_, value)| value),
+            Some(&rmpv::Value::Array(vec![10.into(), 11.into()]))
         );
     }
 
@@ -811,7 +901,7 @@ mod tests {
     }
 
     // The rest of this module's surface -- ResponseSink send/close semantics,
-    // send_terminal's spawn-vs-blocking_send branches, PushFrame::encode, and
+    // send_terminal's runtime handoff, PushFrame::encode, and
     // handler_supports_push -- cannot be unit-tested here: pyo3's
     // `extension-module` is hardcoded in Cargo.toml, so any test whose object
     // graph reaches the Python C API fails to link against libpython. Covering

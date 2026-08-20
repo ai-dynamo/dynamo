@@ -2,33 +2,68 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
 
 use dynamo_runtime::protocols::annotated::Annotated;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+#[cfg(not(test))]
+use pyo3::exceptions::PyValueError;
+#[cfg(not(test))]
+use pyo3::prelude::*;
+#[cfg(not(test))]
+use pyo3::types::PyModule;
+#[cfg(not(test))]
+use pythonize::depythonize;
+
+#[cfg(not(test))]
+pub fn add_to_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<OwnedTokenEgress>()?;
+    Ok(())
+}
+
 pub(crate) trait OwnedFrameSink: Send + Sync {
-    fn send(&self, frame: Annotated<Value>) -> Result<(), String>;
+    fn send(
+        &self,
+        frame: Annotated<Value>,
+        cancelled: &AtomicBool,
+        shutting_down: &AtomicBool,
+        send_gate: &Mutex<()>,
+    ) -> Result<(), FrameSendError>;
     fn close(&self);
-    fn close_with_error(&self, message: String);
+    fn cancel(&self);
+    fn close_with_error(&self, message: String) -> bool;
+    fn shutdown(&self);
+}
+
+#[derive(Debug)]
+pub(crate) enum FrameSendError {
+    Stopped,
+    Failed(String),
+}
+
+#[derive(Debug, Deserialize)]
+struct EngineChoice {
+    index: usize,
+    #[serde(default)]
+    new_token_ids: Vec<u32>,
+    #[serde(default)]
+    finish_reason: Option<String>,
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct EngineResponse {
     client_id: u64,
     #[serde(default)]
-    new_token_ids: Vec<Vec<u32>>,
+    outputs: Vec<EngineChoice>,
     #[serde(default)]
     is_final: bool,
-    #[serde(default)]
-    finish_reasons: Option<Vec<Option<String>>>,
-    #[serde(default)]
-    stop_reasons: Option<Vec<Option<String>>>,
     #[serde(default)]
     error_msg: Option<String>,
 }
@@ -38,11 +73,27 @@ impl EngineResponse {
     fn tokens(client_id: u64, new_token_ids: Vec<Vec<u32>>, is_final: bool) -> Self {
         Self {
             client_id,
-            new_token_ids,
+            outputs: new_token_ids
+                .into_iter()
+                .enumerate()
+                .map(|(index, new_token_ids)| EngineChoice {
+                    index,
+                    new_token_ids,
+                    finish_reason: None,
+                    stop_reason: None,
+                })
+                .collect(),
             is_final,
-            finish_reasons: None,
-            stop_reasons: None,
             error_msg: None,
+        }
+    }
+
+    fn error(client_id: u64, message: &str) -> Self {
+        Self {
+            client_id,
+            outputs: Vec::new(),
+            is_final: true,
+            error_msg: Some(message.to_string()),
         }
     }
 }
@@ -69,24 +120,34 @@ impl OwnedResponseState {
         }
     }
 
-    fn apply(&mut self, response: EngineResponse) -> Vec<Value> {
-        for (index, new_tokens) in response.new_token_ids.into_iter().enumerate() {
-            let Some(choice) = self.choices.get_mut(index) else {
-                break;
-            };
-            choice.token_ids.extend(new_tokens);
+    fn apply(&mut self, response: EngineResponse) -> Result<Vec<Value>, String> {
+        let mut seen = vec![false; self.choices.len()];
+        for output in &response.outputs {
+            if output.index >= self.choices.len() {
+                return Err(format!(
+                    "choice index {} is outside registered range 0..{}",
+                    output.index,
+                    self.choices.len()
+                ));
+            }
+            if std::mem::replace(&mut seen[output.index], true) {
+                return Err(format!(
+                    "choice index {} appears more than once",
+                    output.index
+                ));
+            }
         }
 
-        Self::update_reasons(
-            &mut self.choices,
-            response.finish_reasons,
-            |choice, reason| choice.finish_reason = reason,
-        );
-        Self::update_reasons(
-            &mut self.choices,
-            response.stop_reasons,
-            |choice, reason| choice.stop_reason = reason,
-        );
+        for output in &response.outputs {
+            let choice = &mut self.choices[output.index];
+            choice.token_ids.extend_from_slice(&output.new_token_ids);
+            if output.finish_reason.is_some() {
+                choice.finish_reason.clone_from(&output.finish_reason);
+            }
+            if output.stop_reason.is_some() {
+                choice.stop_reason.clone_from(&output.stop_reason);
+            }
+        }
 
         let completion_tokens = self
             .choices
@@ -94,16 +155,17 @@ impl OwnedResponseState {
             .map(|choice| choice.token_ids.len())
             .sum::<usize>();
 
-        self.choices
-            .iter_mut()
-            .enumerate()
-            .map(|(index, choice)| {
+        Ok(response
+            .outputs
+            .into_iter()
+            .map(|output| {
+                let choice = &mut self.choices[output.index];
                 let mut frame = Map::new();
                 frame.insert(
                     "token_ids".to_string(),
                     json!(choice.token_ids[choice.emitted..]),
                 );
-                frame.insert("index".to_string(), json!(index));
+                frame.insert("index".to_string(), json!(output.index));
                 choice.emitted = choice.token_ids.len();
 
                 let terminal = choice.finish_reason.is_some() || response.is_final;
@@ -129,29 +191,15 @@ impl OwnedResponseState {
                 }
                 Value::Object(frame)
             })
-            .collect()
-    }
-
-    fn update_reasons(
-        choices: &mut [ChoiceState],
-        reasons: Option<Vec<Option<String>>>,
-        update: impl Fn(&mut ChoiceState, Option<String>),
-    ) {
-        let Some(reasons) = reasons else {
-            return;
-        };
-        for (choice, reason) in choices.iter_mut().zip(reasons) {
-            if reason.is_some() {
-                update(choice, reason);
-            }
-        }
+            .collect())
     }
 }
 
 struct RegisteredRequest {
     response_state: Mutex<OwnedResponseState>,
     sink: Arc<dyn OwnedFrameSink>,
-    calibrated_work_us: f64,
+    cancelled: AtomicBool,
+    send_gate: Mutex<()>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -174,6 +222,7 @@ struct IndexedOutcome {
 #[derive(Default)]
 struct ProcessorShared {
     requests: Mutex<HashMap<u64, Arc<RegisteredRequest>>>,
+    shutting_down: AtomicBool,
     responses_processed: AtomicUsize,
     responses_dropped: AtomicUsize,
     frames_sent: AtomicUsize,
@@ -200,27 +249,74 @@ impl ProcessorShared {
         };
 
         self.responses_processed.fetch_add(1, Ordering::Relaxed);
+        if request.cancelled.load(Ordering::Acquire) || self.shutting_down.load(Ordering::Acquire) {
+            return IndexedOutcome {
+                ordinal,
+                client_id,
+                completed: false,
+                processed: true,
+                frames_sent: 0,
+            };
+        }
+
         let mut terminal = response.is_final || response.error_msg.is_some();
         let mut frames_sent = 0;
 
         if let Some(error) = response.error_msg {
-            request.sink.close_with_error(error);
+            if request.sink.close_with_error(error) {
+                frames_sent += 1;
+                self.frames_sent.fetch_add(1, Ordering::Relaxed);
+            }
         } else {
-            spin_for(request.calibrated_work_us);
-            let frames = request
-                .response_state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .apply(response);
+            let frames = {
+                let mut state = request
+                    .response_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if request.cancelled.load(Ordering::Acquire)
+                    || self.shutting_down.load(Ordering::Acquire)
+                {
+                    return IndexedOutcome {
+                        ordinal,
+                        client_id,
+                        completed: false,
+                        processed: true,
+                        frames_sent: 0,
+                    };
+                }
+                state.apply(response)
+            };
+            let frames = match frames {
+                Ok(frames) => frames,
+                Err(error) => {
+                    if request.sink.close_with_error(error) {
+                        frames_sent += 1;
+                        self.frames_sent.fetch_add(1, Ordering::Relaxed);
+                    }
+                    terminal = true;
+                    Vec::new()
+                }
+            };
             let mut sink_failed = false;
             for frame in frames {
-                match request.sink.send(Annotated::from_data(frame)) {
+                match request.sink.send(
+                    Annotated::from_data(frame),
+                    &request.cancelled,
+                    &self.shutting_down,
+                    &request.send_gate,
+                ) {
                     Ok(()) => {
                         frames_sent += 1;
                         self.frames_sent.fetch_add(1, Ordering::Relaxed);
                     }
-                    Err(error) => {
-                        request.sink.close_with_error(error);
+                    Err(FrameSendError::Stopped) => {
+                        terminal = false;
+                        sink_failed = true;
+                        break;
+                    }
+                    Err(FrameSendError::Failed(error)) => {
+                        tracing::debug!(client_id, %error, "owned response sink stopped");
+                        request.sink.close();
                         sink_failed = true;
                         terminal = true;
                         break;
@@ -232,6 +328,7 @@ impl ProcessorShared {
             }
         }
 
+        let completed = terminal && !request.cancelled.load(Ordering::Acquire);
         if terminal {
             self.remove(client_id, &request);
         }
@@ -239,7 +336,7 @@ impl ProcessorShared {
         IndexedOutcome {
             ordinal,
             client_id,
-            completed: terminal,
+            completed,
             processed: true,
             frames_sent,
         }
@@ -267,7 +364,12 @@ impl ProcessorShared {
             .map(|(_, request)| request)
             .collect::<Vec<_>>();
         for request in requests {
-            request.sink.close();
+            let _send_guard = request
+                .send_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            request.cancelled.store(true, Ordering::Release);
+            request.sink.shutdown();
         }
     }
 }
@@ -285,6 +387,7 @@ struct ShardCommand {
 pub(crate) struct ShardedProcessor {
     shared: Arc<ProcessorShared>,
     shard_count: usize,
+    dispatch: Mutex<()>,
     senders: Mutex<Option<Vec<SyncSender<ShardCommand>>>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -315,6 +418,7 @@ impl ShardedProcessor {
         Ok(Self {
             shared,
             shard_count,
+            dispatch: Mutex::new(()),
             senders: Mutex::new(Some(senders)),
             workers: Mutex::new(workers),
         })
@@ -326,13 +430,9 @@ impl ShardedProcessor {
         prompt_tokens: usize,
         num_choices: usize,
         sink: Arc<dyn OwnedFrameSink>,
-        calibrated_work_us: f64,
     ) -> Result<(), String> {
         if num_choices == 0 {
             return Err("num_choices must be at least 1".to_string());
-        }
-        if !calibrated_work_us.is_finite() || calibrated_work_us < 0.0 {
-            return Err("calibrated_work_us must be finite and non-negative".to_string());
         }
 
         let mut requests = self
@@ -348,7 +448,8 @@ impl ShardedProcessor {
             Arc::new(RegisteredRequest {
                 response_state: Mutex::new(OwnedResponseState::new(prompt_tokens, num_choices)),
                 sink,
-                calibrated_work_us,
+                cancelled: AtomicBool::new(false),
+                send_gate: Mutex::new(()),
             }),
         );
         Ok(())
@@ -358,11 +459,15 @@ impl ShardedProcessor {
         &self,
         responses: Vec<EngineResponse>,
     ) -> Result<BatchOutcome, String> {
+        let _dispatch = self
+            .dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut partitions = (0..self.shard_count)
             .map(|_| Vec::new())
             .collect::<Vec<_>>();
         for (ordinal, response) in responses.into_iter().enumerate() {
-            let shard = response.client_id as usize % self.shard_count;
+            let shard = (response.client_id % self.shard_count as u64) as usize;
             partitions[shard].push(IndexedResponse { ordinal, response });
         }
 
@@ -418,7 +523,18 @@ impl ShardedProcessor {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&client_id);
         if let Some(request) = request {
-            request.sink.close();
+            let _send_guard = request
+                .send_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            request.cancelled.store(true, Ordering::Release);
+            request.sink.cancel();
+            drop(
+                request
+                    .response_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
             true
         } else {
             false
@@ -432,10 +548,24 @@ impl ShardedProcessor {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len()
     }
+
+    fn responses_processed(&self) -> usize {
+        self.shared.responses_processed.load(Ordering::Relaxed)
+    }
+
+    fn responses_dropped(&self) -> usize {
+        self.shared.responses_dropped.load(Ordering::Relaxed)
+    }
+
+    fn frames_sent(&self) -> usize {
+        self.shared.frames_sent.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for ShardedProcessor {
     fn drop(&mut self) {
+        self.shared.shutting_down.store(true, Ordering::Release);
+        self.shared.close_all();
         drop(
             self.senders
                 .lock()
@@ -453,7 +583,6 @@ impl Drop for ShardedProcessor {
                 tracing::error!("owned response shard panicked during shutdown");
             }
         }
-        self.shared.close_all();
     }
 }
 
@@ -468,19 +597,122 @@ fn run_shard(receiver: Receiver<ShardCommand>, shared: Arc<ProcessorShared>) {
     }
 }
 
-fn spin_for(work_us: f64) {
-    if work_us <= 0.0 {
-        return;
+#[cfg(not(test))]
+struct PushFrameSink {
+    sink: Arc<crate::push_egress::ResponseSink>,
+}
+
+#[cfg(not(test))]
+impl OwnedFrameSink for PushFrameSink {
+    fn send(
+        &self,
+        frame: Annotated<Value>,
+        cancelled: &AtomicBool,
+        shutting_down: &AtomicBool,
+        send_gate: &Mutex<()>,
+    ) -> Result<(), FrameSendError> {
+        self.sink
+            .send_owned(frame, cancelled, shutting_down, send_gate)
+            .map_err(|error| match error {
+                crate::push_egress::OwnedSendError::Stopped => FrameSendError::Stopped,
+                crate::push_egress::OwnedSendError::Failed(message) => {
+                    FrameSendError::Failed(message)
+                }
+            })
     }
-    let deadline = Instant::now() + Duration::from_secs_f64(work_us / 1_000_000.0);
-    while Instant::now() < deadline {
-        std::hint::spin_loop();
+
+    fn close(&self) {
+        self.sink.close();
+    }
+
+    fn cancel(&self) {
+        self.sink.cancel();
+    }
+
+    fn close_with_error(&self, message: String) -> bool {
+        self.sink.close_with_owned_error(message)
+    }
+
+    fn shutdown(&self) {
+        self.sink.shutdown();
+    }
+}
+
+#[cfg(not(test))]
+#[pyclass]
+pub struct OwnedTokenEgress {
+    processor: ShardedProcessor,
+}
+
+#[cfg(not(test))]
+#[pymethods]
+impl OwnedTokenEgress {
+    #[new]
+    #[pyo3(signature = (shards=4, queue_depth=2))]
+    fn new(shards: usize, queue_depth: usize) -> PyResult<Self> {
+        Ok(Self {
+            processor: ShardedProcessor::new(shards, queue_depth).map_err(PyValueError::new_err)?,
+        })
+    }
+
+    #[pyo3(signature = (client_id, prompt_tokens, num_choices, response_sender))]
+    fn register(
+        &self,
+        client_id: u64,
+        prompt_tokens: usize,
+        num_choices: usize,
+        response_sender: PyRef<'_, crate::push_egress::ResponseSender>,
+    ) -> PyResult<()> {
+        self.processor
+            .register(
+                client_id,
+                prompt_tokens,
+                num_choices,
+                Arc::new(PushFrameSink {
+                    sink: response_sender.sink(),
+                }),
+            )
+            .map_err(PyValueError::new_err)
+    }
+
+    fn process_batch(&self, py: Python<'_>, responses: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
+        let responses = depythonize::<Vec<EngineResponse>>(responses).map_err(|error| {
+            PyValueError::new_err(format!("invalid engine response batch: {error}"))
+        })?;
+        let outcome = py
+            .allow_threads(|| self.processor.process_batch(responses))
+            .map_err(PyValueError::new_err)?;
+        Ok(outcome.completed_client_ids)
+    }
+
+    fn cancel(&self, py: Python<'_>, client_id: u64) -> bool {
+        py.allow_threads(|| self.processor.cancel(client_id))
+    }
+
+    #[getter]
+    fn active_requests(&self) -> usize {
+        self.processor.active_requests()
+    }
+
+    #[getter]
+    fn responses_processed(&self) -> usize {
+        self.processor.responses_processed()
+    }
+
+    #[getter]
+    fn responses_dropped(&self) -> usize {
+        self.processor.responses_dropped()
+    }
+
+    #[getter]
+    fn frames_sent(&self) -> usize {
+        self.processor.frames_sent()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
@@ -489,16 +721,29 @@ mod tests {
     use dynamo_runtime::protocols::annotated::Annotated;
     use serde_json::json;
 
-    use super::{EngineResponse, OwnedFrameSink, ShardedProcessor};
+    use super::{EngineChoice, EngineResponse, FrameSendError, OwnedFrameSink, ShardedProcessor};
 
     #[derive(Default)]
     struct RecordingSink {
         frames: Mutex<Vec<Annotated<serde_json::Value>>>,
         closed: AtomicBool,
+        errors: Mutex<Vec<String>>,
     }
 
     impl OwnedFrameSink for RecordingSink {
-        fn send(&self, frame: Annotated<serde_json::Value>) -> Result<(), String> {
+        fn send(
+            &self,
+            frame: Annotated<serde_json::Value>,
+            cancelled: &AtomicBool,
+            shutting_down: &AtomicBool,
+            send_gate: &Mutex<()>,
+        ) -> Result<(), FrameSendError> {
+            let _send_guard = send_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cancelled.load(Ordering::Acquire) || shutting_down.load(Ordering::Acquire) {
+                return Err(FrameSendError::Stopped);
+            }
             self.frames
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -510,7 +755,20 @@ mod tests {
             self.closed.store(true, Ordering::Relaxed);
         }
 
-        fn close_with_error(&self, _message: String) {
+        fn cancel(&self) {
+            self.close();
+        }
+
+        fn close_with_error(&self, message: String) -> bool {
+            self.errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(message);
+            self.close();
+            true
+        }
+
+        fn shutdown(&self) {
             self.close();
         }
     }
@@ -530,31 +788,257 @@ mod tests {
     }
 
     impl OwnedFrameSink for GateSink {
-        fn send(&self, _frame: Annotated<serde_json::Value>) -> Result<(), String> {
+        fn send(
+            &self,
+            _frame: Annotated<serde_json::Value>,
+            cancelled: &AtomicBool,
+            shutting_down: &AtomicBool,
+            send_gate: &Mutex<()>,
+        ) -> Result<(), FrameSendError> {
+            {
+                let _send_guard = send_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if cancelled.load(Ordering::Acquire) || shutting_down.load(Ordering::Acquire) {
+                    return Err(FrameSendError::Stopped);
+                }
+            }
             self.entered
                 .send(self.client_id)
                 .expect("test receiver remains open");
             let (lock, ready) = &*self.released;
             let mut released = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            while !*released {
+            while !*released
+                && !cancelled.load(Ordering::Acquire)
+                && !shutting_down.load(Ordering::Acquire)
+            {
                 released = ready
-                    .wait(released)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .wait_timeout(released, Duration::from_millis(10))
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .0;
+            }
+            if cancelled.load(Ordering::Acquire) || shutting_down.load(Ordering::Acquire) {
+                return Err(FrameSendError::Stopped);
+            }
+            let _send_guard = send_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cancelled.load(Ordering::Acquire) || shutting_down.load(Ordering::Acquire) {
+                return Err(FrameSendError::Stopped);
             }
             Ok(())
         }
 
         fn close(&self) {}
 
-        fn close_with_error(&self, _message: String) {
-            self.close();
+        fn cancel(&self) {
+            self.release();
         }
+
+        fn close_with_error(&self, _message: String) -> bool {
+            self.close();
+            true
+        }
+
+        fn shutdown(&self) {
+            self.release();
+        }
+    }
+
+    struct PausingSink {
+        entered: mpsc::Sender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+        frames: AtomicUsize,
+    }
+
+    impl OwnedFrameSink for PausingSink {
+        fn send(
+            &self,
+            _frame: Annotated<serde_json::Value>,
+            cancelled: &AtomicBool,
+            shutting_down: &AtomicBool,
+            send_gate: &Mutex<()>,
+        ) -> Result<(), FrameSendError> {
+            let _send_guard = send_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cancelled.load(Ordering::Acquire) || shutting_down.load(Ordering::Acquire) {
+                return Err(FrameSendError::Stopped);
+            }
+            self.entered.send(()).expect("test receiver remains open");
+            self.resume
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .recv()
+                .expect("test sender remains open");
+            self.frames.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn close(&self) {}
+
+        fn cancel(&self) {}
+
+        fn close_with_error(&self, _message: String) -> bool {
+            true
+        }
+
+        fn shutdown(&self) {}
     }
 
     #[test]
     fn rejects_zero_shards_and_zero_queue_depth() {
         assert!(ShardedProcessor::new(0, 1).is_err());
         assert!(ShardedProcessor::new(1, 0).is_err());
+    }
+
+    #[test]
+    fn builds_delta_frames_with_python_semantic_parity() {
+        let mut state = super::OwnedResponseState::new(3, 2);
+
+        let first = state
+            .apply(EngineResponse {
+                client_id: 1,
+                outputs: vec![
+                    EngineChoice {
+                        index: 0,
+                        new_token_ids: vec![10],
+                        finish_reason: None,
+                        stop_reason: None,
+                    },
+                    EngineChoice {
+                        index: 1,
+                        new_token_ids: vec![20],
+                        finish_reason: None,
+                        stop_reason: None,
+                    },
+                ],
+                is_final: false,
+                error_msg: None,
+            })
+            .expect("valid first response");
+        assert_eq!(
+            first,
+            vec![
+                json!({"token_ids": [10], "index": 0}),
+                json!({"token_ids": [20], "index": 1}),
+            ]
+        );
+
+        let final_frames = state
+            .apply(EngineResponse {
+                client_id: 1,
+                outputs: vec![
+                    EngineChoice {
+                        index: 0,
+                        new_token_ids: vec![11, 12],
+                        finish_reason: Some("stop".to_string()),
+                        stop_reason: None,
+                    },
+                    EngineChoice {
+                        index: 1,
+                        new_token_ids: vec![21],
+                        finish_reason: Some("length".to_string()),
+                        stop_reason: Some("eos".to_string()),
+                    },
+                ],
+                is_final: true,
+                error_msg: None,
+            })
+            .expect("valid final response");
+        assert_eq!(
+            final_frames,
+            vec![
+                json!({
+                    "token_ids": [11, 12],
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "completion_usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 5,
+                        "total_tokens": 8,
+                        "prompt_tokens_details": null
+                    }
+                }),
+                json!({
+                    "token_ids": [21],
+                    "index": 1,
+                    "finish_reason": "length",
+                    "stop_reason": "eos",
+                    "completion_usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 5,
+                        "total_tokens": 8,
+                        "prompt_tokens_details": null
+                    }
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn reordered_partial_choices_emit_only_supplied_indices() {
+        let mut state = super::OwnedResponseState::new(0, 3);
+
+        let frames = state
+            .apply(EngineResponse {
+                client_id: 1,
+                outputs: vec![
+                    EngineChoice {
+                        index: 2,
+                        new_token_ids: vec![20],
+                        finish_reason: None,
+                        stop_reason: None,
+                    },
+                    EngineChoice {
+                        index: 0,
+                        new_token_ids: vec![10],
+                        finish_reason: None,
+                        stop_reason: None,
+                    },
+                ],
+                is_final: false,
+                error_msg: None,
+            })
+            .expect("valid partial response");
+
+        assert_eq!(
+            frames,
+            vec![
+                json!({"token_ids": [20], "index": 2}),
+                json!({"token_ids": [10], "index": 0}),
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_choice_indices_are_rejected_before_state_mutation() {
+        let mut state = super::OwnedResponseState::new(0, 1);
+        let invalid = state.apply(EngineResponse {
+            client_id: 1,
+            outputs: vec![
+                EngineChoice {
+                    index: 0,
+                    new_token_ids: vec![1],
+                    finish_reason: None,
+                    stop_reason: None,
+                },
+                EngineChoice {
+                    index: 0,
+                    new_token_ids: vec![2],
+                    finish_reason: None,
+                    stop_reason: None,
+                },
+            ],
+            is_final: false,
+            error_msg: None,
+        });
+        assert!(invalid.is_err());
+
+        let valid = state
+            .apply(EngineResponse::tokens(1, vec![vec![3]], false))
+            .expect("state remains usable");
+        assert_eq!(valid, vec![json!({"token_ids": [3], "index": 0})]);
     }
 
     #[test]
@@ -572,10 +1056,10 @@ mod tests {
             released: Arc::new((Mutex::new(false), Condvar::new())),
         });
         processor
-            .register(2, 0, 1, sink_zero.clone(), 0.0)
+            .register(2, 0, 1, sink_zero.clone())
             .expect("register shard zero client");
         processor
-            .register(3, 0, 1, sink_one.clone(), 0.0)
+            .register(3, 0, 1, sink_one.clone())
             .expect("register shard one client");
 
         let processing = {
@@ -608,7 +1092,7 @@ mod tests {
         let processor = ShardedProcessor::new(4, 1).expect("valid processor");
         let sink = Arc::new(RecordingSink::default());
         processor
-            .register(9, 2, 1, sink.clone(), 0.0)
+            .register(9, 2, 1, sink.clone())
             .expect("register client 9");
 
         let outcome = processor
@@ -629,6 +1113,109 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_batch_calls_are_serialized() {
+        let processor = Arc::new(ShardedProcessor::new(2, 1).expect("valid processor"));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let blocking_sink = Arc::new(GateSink {
+            entered: entered_tx,
+            client_id: 2,
+            released: Arc::new((Mutex::new(false), Condvar::new())),
+        });
+        let other_sink = Arc::new(RecordingSink::default());
+        processor
+            .register(2, 0, 1, blocking_sink.clone())
+            .expect("register blocking client");
+        processor
+            .register(3, 0, 1, other_sink)
+            .expect("register other client");
+
+        let first = {
+            let processor = processor.clone();
+            thread::spawn(move || {
+                processor.process_batch(vec![EngineResponse::tokens(2, vec![vec![1]], false)])
+            })
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first batch reached its shard");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let second = {
+            let processor = processor.clone();
+            thread::spawn(move || {
+                let result =
+                    processor.process_batch(vec![EngineResponse::tokens(3, vec![vec![2]], false)]);
+                done_tx.send(result).expect("test receiver remains open");
+            })
+        };
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+
+        blocking_sink.release();
+        first
+            .join()
+            .expect("first batch did not panic")
+            .expect("first batch succeeded");
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second batch completed after first")
+            .expect("second batch succeeded");
+        second.join().expect("second batch did not panic");
+    }
+
+    #[test]
+    fn completion_ids_follow_input_order_across_shards() {
+        let processor = ShardedProcessor::new(4, 1).expect("valid processor");
+        let sink_three = Arc::new(RecordingSink::default());
+        let sink_zero = Arc::new(RecordingSink::default());
+        processor
+            .register(3, 0, 1, sink_three)
+            .expect("register client 3");
+        processor
+            .register(4, 0, 1, sink_zero)
+            .expect("register client 4");
+
+        let outcome = processor
+            .process_batch(vec![
+                EngineResponse::tokens(3, vec![vec![3]], true),
+                EngineResponse::tokens(4, vec![vec![4]], true),
+            ])
+            .expect("process cross-shard completions");
+
+        assert_eq!(outcome.completed_client_ids, vec![3, 4]);
+        assert_eq!(processor.active_requests(), 0);
+    }
+
+    #[test]
+    fn error_closes_request_and_late_response_is_dropped() {
+        let processor = ShardedProcessor::new(2, 1).expect("valid processor");
+        let sink = Arc::new(RecordingSink::default());
+        processor
+            .register(6, 0, 1, sink.clone())
+            .expect("register client 6");
+
+        let error = processor
+            .process_batch(vec![EngineResponse::error(6, "engine failed")])
+            .expect("process terminal error");
+        let late = processor
+            .process_batch(vec![EngineResponse::tokens(6, vec![vec![99]], true)])
+            .expect("drop late response");
+
+        assert_eq!(error.completed_client_ids, vec![6]);
+        assert_eq!(late.responses_dropped, 1);
+        assert_eq!(
+            sink.errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["engine failed"]
+        );
+        assert!(sink.closed.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn cancellation_does_not_wait_for_a_backpressured_shard() {
         let processor = Arc::new(ShardedProcessor::new(2, 1).expect("valid processor"));
         let (entered_tx, entered_rx) = mpsc::channel();
@@ -638,7 +1225,7 @@ mod tests {
             released: Arc::new((Mutex::new(false), Condvar::new())),
         });
         processor
-            .register(4, 0, 1, sink.clone(), 0.0)
+            .register(4, 0, 1, sink.clone())
             .expect("register client 4");
 
         let processing = {
@@ -671,5 +1258,59 @@ mod tests {
 
         assert_eq!(cancelled, Ok(true));
         assert_eq!(processor.active_requests(), 0);
+    }
+
+    #[test]
+    fn cancellation_waits_for_inflight_enqueue_and_prevents_late_frames() {
+        let processor = Arc::new(ShardedProcessor::new(1, 1).expect("valid processor"));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let sink = Arc::new(PausingSink {
+            entered: entered_tx,
+            resume: Mutex::new(resume_rx),
+            frames: AtomicUsize::new(0),
+        });
+        processor
+            .register(8, 0, 1, sink.clone())
+            .expect("register client 8");
+
+        let processing = {
+            let processor = processor.clone();
+            thread::spawn(move || {
+                processor.process_batch(vec![EngineResponse::tokens(8, vec![vec![1]], false)])
+            })
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("send reached its linearization point");
+
+        let (cancelled_tx, cancelled_rx) = mpsc::channel();
+        let cancelling = {
+            let processor = processor.clone();
+            thread::spawn(move || {
+                cancelled_tx
+                    .send(processor.cancel(8))
+                    .expect("test receiver remains open");
+            })
+        };
+        assert_eq!(
+            cancelled_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+
+        resume_tx.send(()).expect("paused send remains open");
+        assert_eq!(cancelled_rx.recv_timeout(Duration::from_secs(1)), Ok(true));
+        let frames_at_cancel = sink.frames.load(Ordering::Relaxed);
+        processor
+            .process_batch(vec![EngineResponse::tokens(8, vec![vec![2]], false)])
+            .expect("late response is dropped");
+
+        processing
+            .join()
+            .expect("processing did not panic")
+            .expect("processing succeeded");
+        cancelling.join().expect("cancellation did not panic");
+        assert_eq!(frames_at_cancel, 1);
+        assert_eq!(sink.frames.load(Ordering::Relaxed), frames_at_cancel);
     }
 }

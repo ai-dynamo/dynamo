@@ -260,6 +260,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     engine::add_to_module(m)?;
     push_egress::add_to_module(m)?;
+    #[cfg(not(test))]
+    trtllm_egress::add_to_module(m)?;
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
     backend::add_to_module(m)?;
