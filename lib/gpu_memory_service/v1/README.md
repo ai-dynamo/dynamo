@@ -233,9 +233,8 @@ and queue flags, and repeatable `--posix-backend-param KEY=VALUE` overrides.
 Start the restored worker with `GMS_SOCKET_DIR`. Only the `weights` socket is
 used by artifact transfer. `--enable-loader` must come last among server flags.
 
-Select the worker while retaining vLLM's normal load format:
-
-```text
-python -m dynamo.vllm ... \
-  --worker-cls gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker
-```
+The operator injects `DYN_GMS_USE_V1=true` on snapshot-coupled GMS pods.
+Dynamo vLLM and SGLang backends select the V1 client from that env; no extra
+CLI flag is required. vLLM keeps its normal load format and uses
+`GMSV1Worker`. SGLang enables `--enable-memory-saver` (a real SGLang
+ServerArgs field) from the same env.
