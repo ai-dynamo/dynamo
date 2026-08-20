@@ -14,8 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionToolCall, IncompleteDetails, InputTokenDetails, Instructions,
-    OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    AssistantRole, ErrorObject, FunctionToolCall, IncompleteDetails, InputTokenDetails,
+    Instructions, OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
     OutputTextContent, OutputTokenDetails, ReasoningItem, Response, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
     ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
@@ -79,7 +79,7 @@ struct FunctionCallState {
     pending_arg_deltas: Vec<String>,
     output_index: Option<u32>,
     started: bool,
-    done: bool,
+    output_status: Option<OutputStatus>,
 }
 
 impl FunctionCallState {
@@ -420,7 +420,7 @@ impl ResponseStreamConverter {
                             pending_arg_deltas: Vec::new(),
                             output_index: None,
                             started: false,
-                            done: false,
+                            output_status: None,
                         });
                     }
 
@@ -536,7 +536,8 @@ impl ResponseStreamConverter {
         }
 
         if should_finish_function_calls {
-            self.append_pending_function_call_done_events(events);
+            let output_status = self.output_status();
+            self.append_pending_function_call_done_events(events, output_status);
         }
     }
 
@@ -596,16 +597,16 @@ impl ResponseStreamConverter {
     fn append_pending_function_call_done_events(
         &mut self,
         events: &mut Vec<Result<Event, anyhow::Error>>,
+        output_status: OutputStatus,
     ) {
-        let output_status = self.output_status();
         // `started` is set only after `has_identity()` observes both required
         // fields, matching Anthropic's `is_emit_ready()` identity requirement.
         let mut pending: Vec<_> = self
             .function_call_items
             .iter_mut()
-            .filter(|fc| fc.started && !fc.done)
+            .filter(|fc| fc.started && fc.output_status.is_none())
             .map(|fc| {
-                fc.done = true;
+                fc.output_status = Some(output_status);
                 (
                     fc.item_id.clone(),
                     fc.call_id.clone(),
@@ -665,7 +666,10 @@ impl ResponseStreamConverter {
     }
 
     fn completed_output(&self) -> Vec<OutputItem> {
-        let output_status = self.output_status();
+        self.output_with_status(self.output_status())
+    }
+
+    fn output_with_status(&self, output_status: OutputStatus) -> Vec<OutputItem> {
         let mut output = Vec::new();
         if self.reasoning_started {
             output.push((
@@ -707,13 +711,64 @@ impl ResponseStreamConverter {
                         namespace: function_call.namespace.clone(),
                         name: function_call.name.clone(),
                         arguments: function_call.accumulated_args.clone(),
-                        status: Some(output_status),
+                        status: Some(function_call.output_status.unwrap_or(output_status)),
                     }),
                 ));
             }
         }
         output.sort_unstable_by_key(|(output_index, _)| *output_index);
         output.into_iter().map(|(_, item)| item).collect()
+    }
+
+    fn close_open_message_item(
+        &mut self,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+        output_status: OutputStatus,
+    ) {
+        if !self.message_started {
+            return;
+        }
+
+        let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
+            sequence_number: self.next_seq(),
+            item_id: self.message_item_id.clone(),
+            output_index: self.message_output_index,
+            content_index: 0,
+            text: self.accumulated_text.clone(),
+            logprobs: Some(vec![]),
+        });
+        events.push(self.make_sse_event(&text_done));
+
+        let part_done =
+            ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
+                sequence_number: self.next_seq(),
+                item_id: self.message_item_id.clone(),
+                output_index: self.message_output_index,
+                content_index: 0,
+                part: OutputContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                }),
+            });
+        events.push(self.make_sse_event(&part_done));
+
+        let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+            sequence_number: self.next_seq(),
+            output_index: self.message_output_index,
+            item: OutputItem::Message(OutputMessage {
+                id: self.message_item_id.clone(),
+                content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                })],
+                role: AssistantRole::Assistant,
+                phase: None,
+                status: output_status,
+            }),
+        });
+        events.push(self.make_sse_event(&item_done));
     }
 
     /// Emit remaining output completion events and `response.completed` at stream end.
@@ -730,53 +785,10 @@ impl ResponseStreamConverter {
         // whether the still-open reasoning item completed or was truncated.
         self.append_reasoning_done_events(events, output_status);
 
-        // Close text message if it was started
-        if self.message_started {
-            let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
-                sequence_number: self.next_seq(),
-                item_id: self.message_item_id.clone(),
-                output_index: self.message_output_index,
-                content_index: 0,
-                text: self.accumulated_text.clone(),
-                logprobs: Some(vec![]),
-            });
-            events.push(self.make_sse_event(&text_done));
-
-            let part_done =
-                ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
-                    sequence_number: self.next_seq(),
-                    item_id: self.message_item_id.clone(),
-                    output_index: self.message_output_index,
-                    content_index: 0,
-                    part: OutputContent::OutputText(OutputTextContent {
-                        text: self.accumulated_text.clone(),
-                        annotations: vec![],
-                        logprobs: Some(vec![]),
-                    }),
-                });
-            events.push(self.make_sse_event(&part_done));
-
-            let item_done =
-                ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
-                    sequence_number: self.next_seq(),
-                    output_index: self.message_output_index,
-                    item: OutputItem::Message(OutputMessage {
-                        id: self.message_item_id.clone(),
-                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
-                            text: self.accumulated_text.clone(),
-                            annotations: vec![],
-                            logprobs: Some(vec![]),
-                        })],
-                        role: AssistantRole::Assistant,
-                        phase: None,
-                        status: output_status,
-                    }),
-                });
-            events.push(self.make_sse_event(&item_done));
-        }
+        self.close_open_message_item(events, output_status);
 
         // Fallback for backends that end the transport without a finish-reason chunk.
-        self.append_pending_function_call_done_events(events);
+        self.append_pending_function_call_done_events(events, output_status);
 
         let terminal_status = self.terminal_status();
         let response = self.make_response(terminal_status.clone(), self.completed_output());
@@ -795,17 +807,29 @@ impl ResponseStreamConverter {
     }
 
     /// Emit error events when the stream ends due to a backend error.
-    pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_error_events(&mut self, error: ErrorObject) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
-        self.append_error_events(&mut events);
+        self.append_error_events(error, &mut events);
         events
     }
 
     /// Append error events when the stream ends due to a backend error.
-    pub fn append_error_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+    pub fn append_error_events(
+        &mut self,
+        error: ErrorObject,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
+        let output_status = OutputStatus::Incomplete;
+        self.append_reasoning_done_events(events, output_status);
+        self.close_open_message_item(events, output_status);
+        self.append_pending_function_call_done_events(events, output_status);
+
+        let mut response =
+            self.make_response(Status::Failed, self.output_with_status(output_status));
+        response.error = Some(error);
         let failed = ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::Failed, vec![]),
+            response,
         });
         events.push(self.make_sse_event(&failed));
     }
@@ -1350,6 +1374,30 @@ mod tests {
         let response = conv.make_response(conv.terminal_status(), conv.completed_output());
         assert_eq!(response.status, Status::Completed);
         let OutputItem::FunctionCall(call) = &response.output[0] else {
+            panic!("expected function call output");
+        };
+        assert_eq!(call.status, Some(OutputStatus::Completed));
+    }
+
+    #[test]
+    fn test_backend_error_preserves_completed_function_call_status() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some("{\"city\":\"SF\"}"),
+        ));
+        let _ = conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+
+        let events = conv.emit_error_events(ErrorObject {
+            code: "server_error".to_string(),
+            message: "backend error".to_string(),
+        });
+        assert_eq!(event_types(&events), vec!["response.failed".to_string()]);
+
+        let output = conv.output_with_status(OutputStatus::Incomplete);
+        let OutputItem::FunctionCall(call) = &output[0] else {
             panic!("expected function call output");
         };
         assert_eq!(call.status, Some(OutputStatus::Completed));

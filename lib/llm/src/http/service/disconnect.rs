@@ -31,7 +31,7 @@
 use axum::response::sse::Event;
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -65,6 +65,26 @@ pub enum ConnectionStatus {
 pub struct ConnectionHandle {
     sender: Option<tokio::sync::oneshot::Sender<ConnectionStatus>>,
     on_drop: ConnectionStatus,
+}
+
+/// One-shot application error reported by an SSE producer.
+///
+/// The producer writes only when it emits a terminal protocol failure. The
+/// disconnect monitor reads once when the source stream ends, avoiding
+/// synchronization on successful per-token events.
+#[derive(Clone, Default)]
+pub(super) struct StreamErrorSignal {
+    error_type: Arc<OnceLock<ErrorType>>,
+}
+
+impl StreamErrorSignal {
+    pub(super) fn set(&self, error_type: ErrorType) {
+        let _ = self.error_type.set(error_type);
+    }
+
+    fn get(&self) -> Option<&ErrorType> {
+        self.error_type.get()
+    }
 }
 
 impl ConnectionHandle {
@@ -186,6 +206,12 @@ async fn connection_monitor(
 
 type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
 
+#[derive(Default)]
+struct StreamMonitorOptions {
+    activity_rx: Option<mpsc::UnboundedReceiver<()>>,
+    error_signal: Option<StreamErrorSignal>,
+}
+
 fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
     let error = SanitizedError::Internal;
     let body = serde_json::json!({
@@ -222,7 +248,7 @@ pub fn monitor_for_disconnects(
         stream_handle,
         backend_stream_timeout(),
         openai_stream_error,
-        None,
+        StreamMonitorOptions::default(),
     )
 }
 
@@ -240,7 +266,28 @@ pub(crate) fn monitor_for_disconnects_with_error(
         stream_handle,
         backend_stream_timeout(),
         error_formatter,
-        None,
+        StreamMonitorOptions::default(),
+    )
+}
+
+pub(super) fn monitor_for_disconnects_with_error_signal(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    error_signal: StreamErrorSignal,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        openai_stream_error,
+        StreamMonitorOptions {
+            error_signal: Some(error_signal),
+            ..Default::default()
+        },
     )
 }
 
@@ -258,7 +305,10 @@ pub fn monitor_for_disconnects_with_activity(
         stream_handle,
         backend_stream_timeout(),
         openai_stream_error,
-        Some(activity_rx),
+        StreamMonitorOptions {
+            activity_rx: Some(activity_rx),
+            ..Default::default()
+        },
     )
 }
 
@@ -277,7 +327,7 @@ fn monitor_for_disconnects_with_timeout(
         stream_handle,
         inactivity_timeout,
         openai_stream_error,
-        None,
+        StreamMonitorOptions::default(),
     )
 }
 
@@ -288,9 +338,14 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
     error_formatter: StreamErrorFormatter,
-    mut activity_rx: Option<mpsc::UnboundedReceiver<()>>,
+    options: StreamMonitorOptions,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
+
+    let StreamMonitorOptions {
+        mut activity_rx,
+        error_signal,
+    } = options;
 
     // Default to Cancelled: if the stream is dropped unexpectedly (e.g. client
     // disconnect causing a broken-pipe on the SSE write), the guard will report
@@ -335,8 +390,13 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                             break;
                         }
                         None => {
-                            // Stream ended normally
-                            inflight_guard.mark_ok();
+                            if let Some(error_type) =
+                                error_signal.as_ref().and_then(StreamErrorSignal::get)
+                            {
+                                inflight_guard.mark_error(error_type.clone());
+                            } else {
+                                inflight_guard.mark_ok();
+                            }
                             stream_handle.disarm();
 
                             // todo: if we yield a dynamo sentinel event, we need to do it before the done or the
@@ -730,7 +790,10 @@ mod tests {
             handle,
             Some(Duration::from_secs(10)),
             openai_stream_error,
-            Some(activity_rx),
+            StreamMonitorOptions {
+                activity_rx: Some(activity_rx),
+                ..Default::default()
+            },
         );
         tokio::pin!(monitored);
 
