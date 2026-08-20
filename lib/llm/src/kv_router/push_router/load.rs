@@ -18,9 +18,7 @@ use tokio::time::Instant;
 
 use crate::{
     discovery::RuntimeConfigWatch,
-    kv_router::sequence::{
-        ActiveSequencesMulti, SequenceRequest, create_multi_worker_load_sequences,
-    },
+    kv_router::sequence::{ActiveSequencesMulti, SequenceRequest, create_multi_worker_sequences},
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
@@ -55,7 +53,7 @@ impl RoutingLoadState {
         let initial_workers: HashMap<u64, ModelRuntimeConfig> = workers.borrow().clone();
         let router_id = endpoint.drt().discovery().instance_id();
         let cancellation_token = endpoint.drt().primary_token().child_token();
-        let slots = create_multi_worker_load_sequences(
+        let slots = create_multi_worker_sequences(
             endpoint,
             block_size as usize,
             initial_workers.clone(),
@@ -123,7 +121,6 @@ impl RoutingLoadState {
         request: &PreprocessedRequest,
         pinned_worker: Option<(u64, Option<u32>)>,
     ) -> Result<RoutingLoadReservation> {
-        let tracked_request = self.tracked_request(request_id, request);
         // Serialize the policy decision with its slot booking. Without this boundary, concurrent
         // P2C decisions could all observe the same pre-admission load.
         let _selection = self.selection_gate.lock();
@@ -143,6 +140,7 @@ impl RoutingLoadState {
             }
             _ => self.least_loaded_rank(&workers, worker_id)?,
         };
+        let tracked_request = self.tracked_request(request_id, request);
         self.slots
             .add_request_if_registered(tracked_request.sequence_request(worker), Instant::now())
             .with_context(|| format!("reserve routing load on worker {worker:?}"))?;
