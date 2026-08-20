@@ -154,11 +154,11 @@ ARG NIXL_REF
 # UV_FIND_LINKS points at the crick wheel pre-built in the crick_builder stage;
 # uv prefers it over the sdist on arm64 where no manylinux aarch64 wheel exists.
 RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+    echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
-    echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     # The meta package requires both backends unconditionally (its cu12/cu13
     # extras are vestigial), so install the backend first and the meta module
     # --no-deps to keep a single CUDA build and one libnixl_capi.so.
@@ -182,9 +182,14 @@ USER root
 # nixl-sys resolves the C API with a bare dlopen("libnixl_capi.so"), and
 # dynamo/_core.abi3.so carries no RPATH, so without this the Rust bindings
 # silently fall back to stub mode while the Python ones work. The wheel keeps
-# its libraries in a private directory; put that on the loader path.
+# its libraries in a private directory; put that on the loader path and point
+# NIXL at the backend plugins beside them. The RUN below fails the build if
+# either path drifts from the wheel layout.
+ENV NIXL_PLUGIN_DIR=/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/.nixl_cu13.mesonpy.libs/plugins
 RUN NIXL_LIB_DIR="$(/opt/dynamo/venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/.nixl_cu13.mesonpy.libs" && \
     [ -f "${NIXL_LIB_DIR}/libnixl_capi.so" ] || { echo "missing ${NIXL_LIB_DIR}/libnixl_capi.so; NIXL wheel layout changed" >&2; exit 1; } && \
+    [ -d "${NIXL_LIB_DIR}/plugins" ] || { echo "missing ${NIXL_LIB_DIR}/plugins; NIXL wheel layout changed" >&2; exit 1; } && \
+    [ "${NIXL_LIB_DIR}" = "${NIXL_PLUGIN_DIR%/plugins}" ] || { echo "NIXL_PLUGIN_DIR ${NIXL_PLUGIN_DIR} does not match ${NIXL_LIB_DIR}/plugins" >&2; exit 1; } && \
     echo "${NIXL_LIB_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
     ldconfig && \
     chmod 755 /opt/dynamo/.launch_screen && \

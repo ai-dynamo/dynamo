@@ -25,6 +25,9 @@ dynamo:
     # The frontend installs NIXL from PyPI (the tag minus its leading "v")
     # rather than building it in wheel_builder, so it moves independently of
     # the framework-level ref the runtime target's nixl-sys links against.
+    # Those refs differing assumes the NIXL C API stays ABI-compatible between
+    # them: nixl-sys resolves it at runtime, so a break surfaces as a missing
+    # symbol in the running frontend rather than as a build failure.
     nixl_ref: v1.3.2
   epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.2
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
