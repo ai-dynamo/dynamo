@@ -13,7 +13,7 @@ use axum::{
     body::Body,
     extract::State,
     http::Request,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -29,11 +29,15 @@ use dynamo_runtime::{
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{StreamExt, stream};
+use http_body_util::LengthLimitError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
+    disconnect::{
+        ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
+        monitor_for_disconnects_with_activity,
+    },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
@@ -701,9 +705,9 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
-    ensure_json_content_type(&headers)?;
+    let body = read_json_request_body(&headers, body).await?;
     let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
@@ -1863,9 +1867,9 @@ async fn pooling(
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
-    ensure_json_content_type(&headers)?;
+    let body = read_json_request_body(&headers, body).await?;
     let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
@@ -2028,6 +2032,61 @@ fn unsupported_media_type_error() -> ErrorResponse {
     )
 }
 
+/// Returns the standard error response for a request body that exceeds the
+/// configured size limit.
+fn payload_too_large_error() -> ErrorResponse {
+    let code = StatusCode::PAYLOAD_TOO_LARGE;
+    (
+        code,
+        Json(ErrorMessage {
+            message: format!(
+                "Request body exceeds the limit of {} MB set by {}",
+                get_body_limit() / (1024 * 1024),
+                env_llm::DYN_HTTP_BODY_LIMIT_MB
+            ),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+            metric_error_type: None,
+        }),
+    )
+}
+
+/// Returns the standard error response when the request body cannot be read.
+fn failed_to_read_request_body_error() -> ErrorResponse {
+    let code = StatusCode::BAD_REQUEST;
+    (
+        code,
+        Json(ErrorMessage {
+            message: "Failed to read request body".to_string(),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+            metric_error_type: None,
+        }),
+    )
+}
+
+/// Reads and buffers a JSON request body.
+///
+/// Validates the `Content-Type` before reading the body and limits buffering to [`get_body_limit`].
+async fn read_json_request_body(headers: &HeaderMap, body: Body) -> Result<Bytes, ErrorResponse> {
+    ensure_json_content_type(headers)?;
+    axum::body::to_bytes(body, get_body_limit())
+        .await
+        .map_err(|error| {
+            // `to_bytes` wraps an oversized-body failure in its error source
+            // rather than returning `LengthLimitError` directly.
+            if std::error::Error::source(&error)
+                .is_some_and(|source| source.is::<LengthLimitError>())
+            {
+                payload_too_large_error()
+            } else {
+                failed_to_read_request_body_error()
+            }
+        })
+}
+
 fn is_json_content_type(content_type: &str) -> bool {
     let media_type = content_type.split(';').next().unwrap_or_default().trim();
     let Some((media_type, subtype)) = media_type.split_once('/') else {
@@ -2077,11 +2136,32 @@ fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
     changed.then_some(out)
 }
 
+/// A backend error extracted from an event, ready for `backend_error_response`.
+struct BackendErrorInfo {
+    message: String,
+    status: StatusCode,
+    /// Classification already established from the error chain, when the
+    /// status alone is not enough to recover it. `None` means "derive it from
+    /// `status`" — the ordinary case for a status the worker supplied.
+    sanitized: Option<SanitizedError>,
+}
+
+impl BackendErrorInfo {
+    /// The common case: nothing known beyond what the worker reported.
+    fn from_status(message: String, status: StatusCode) -> Self {
+        Self {
+            message,
+            status,
+            sanitized: None,
+        }
+    }
+}
+
 /// Checks if an Annotated event represents a backend error and extracts error information.
-/// Returns Some((message, status_code)) if it's an error, None otherwise.
+/// Returns Some(info) if it's an error, None otherwise.
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
-) -> Option<(String, StatusCode)> {
+) -> Option<BackendErrorInfo> {
     #[derive(serde::Deserialize)]
     struct ErrorPayload {
         message: Option<String>,
@@ -2126,6 +2206,15 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 .unwrap_or_else(|| "Unknown error".to_string())
         };
 
+        // Capacity rejection is not a backend fault. Workers report it with their
+        // own status (503), which a client cannot tell from a real outage, so the
+        // error chain wins over the payload code — admission-path and worker-path
+        // rejections then surface identically. See DYN_HTTP_OVERLOAD_STATUS_CODE.
+        let overloaded = event
+            .error
+            .as_ref()
+            .is_some_and(|error| super::metrics::request_was_rejected(error));
+
         // Parse the status-bearing node's own message. The diagnostic string
         // above includes its causes and therefore is not necessarily JSON.
         let status_message = event
@@ -2136,27 +2225,46 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(status_message) {
             // Preserve explicit HTTP-like statuses (for example 415); Python
             // 4xx exceptions share the Backend(InvalidArgument) category.
-            let code = match error_payload.code {
-                Some(code) => {
-                    StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+            let code = if overloaded {
+                overload_status_code()
+            } else {
+                match error_payload.code {
+                    Some(code) => {
+                        StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                    None if invalid_argument.is_some() => StatusCode::BAD_REQUEST,
+                    None => StatusCode::INTERNAL_SERVER_ERROR,
                 }
-                None if invalid_argument.is_some() => StatusCode::BAD_REQUEST,
-                None => StatusCode::INTERNAL_SERVER_ERROR,
             };
             let message = error_payload
                 .message
                 .unwrap_or_else(|| status_message.to_string());
-            return Some((message, code));
+            return Some(BackendErrorInfo {
+                message,
+                status: code,
+                sanitized: overloaded.then_some(SanitizedError::Overloaded),
+            });
         }
 
         if let Some(invalid_argument) = invalid_argument {
-            return Some((
+            return Some(BackendErrorInfo::from_status(
                 invalid_argument.message().to_string(),
                 StatusCode::BAD_REQUEST,
             ));
         }
 
-        return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
+        if overloaded {
+            return Some(BackendErrorInfo {
+                message: error_str,
+                status: overload_status_code(),
+                sanitized: Some(SanitizedError::Overloaded),
+            });
+        }
+
+        return Some(BackendErrorInfo::from_status(
+            error_str,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
@@ -2170,7 +2278,7 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         let message = error_payload
             .message
             .unwrap_or_else(|| json_value.to_string());
-        return Some((message, code));
+        return Some(BackendErrorInfo::from_status(message, code));
     }
 
     // Check if comment contains error information (without event: error)
@@ -2186,13 +2294,16 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         {
             let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let message = error_payload.message.unwrap_or(comment_str);
-            return Some((message, code));
+            return Some(BackendErrorInfo::from_status(message, code));
         }
 
         // Comments present with no data AND no event type indicates error
         // (events with event types like "request_id" or "event.dynamo.test.sentinel" are annotations)
         if event.data.is_none() && event.event.is_none() {
-            return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+            return Some(BackendErrorInfo::from_status(
+                comment_str,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
         }
     }
 
@@ -2269,8 +2380,8 @@ where
             continue;
         }
 
-        if let Some((error_msg, status_code)) = extract_backend_error_if_present(&event) {
-            return Err(backend_error_response(error_msg, status_code));
+        if let Some(backend_error) = extract_backend_error_if_present(&event) {
+            return Err(backend_error_response(backend_error));
         }
 
         // First non-annotation, non-error event — hand back for downstream
@@ -2280,20 +2391,29 @@ where
     }
 }
 
-/// Convert an `(error_msg, status_code)` pair from `extract_backend_error_if_present`
-/// into the wire `ErrorResponse`. Shared between the non-streaming preflight
+/// Convert a `BackendErrorInfo` from `extract_backend_error_if_present` into the
+/// wire `ErrorResponse`. Shared between the non-streaming preflight
 /// (`check_for_backend_error`) and the streaming preflight so both paths speak
 /// the same sanitization + status contract to the client.
-fn backend_error_response(error_msg: String, status_code: StatusCode) -> ErrorResponse {
-    match SanitizedError::for_backend_status(status_code) {
-        Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
+///
+/// A classification carried on the info wins over one derived from the status:
+/// the status alone cannot distinguish a capacity rejection from an outage once
+/// `DYN_HTTP_OVERLOAD_STATUS_CODE` is set outside the 5xx range.
+fn backend_error_response(backend_error: BackendErrorInfo) -> ErrorResponse {
+    let BackendErrorInfo {
+        message,
+        status,
+        sanitized,
+    } = backend_error;
+    match sanitized.or_else(|| SanitizedError::for_backend_status(status)) {
+        Some(variant) => ErrorMessage::sanitized_with_details(variant, message),
         // 4xx (non-499): protocol contract — forward backend message as-is.
         None => (
-            status_code,
+            status,
             Json(ErrorMessage {
-                message: error_msg,
-                error_type: map_error_code_to_error_type(status_code),
-                code: status_code.as_u16(),
+                message,
+                error_type: map_error_code_to_error_type(status),
+                code: status.as_u16(),
                 details: None,
                 metric_error_type: None,
             }),
@@ -2418,9 +2538,13 @@ fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> boo
 /// all present), so we can dispatch immediately upon seeing the chunk rather than waiting
 /// for `finish_reason="tool_calls"` to arrive. Each event payload includes `choice_index`
 /// for correct disambiguation when `n > 1`.
+///
+/// Dedup is keyed by `(choice_index, tool_call_id)`, not by id alone: with `n > 1` the
+/// backend may reuse the same tool call id across choices, and keying on the id alone
+/// would silently drop every choice after the first.
 fn streaming_tool_dispatch_events(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
-    dispatched_ids: &mut HashSet<String>,
+    dispatched_ids: &mut HashSet<(u32, String)>,
     out: &mut Vec<Result<Event, axum::Error>>,
 ) {
     let Some(data) = &response.data else {
@@ -2441,7 +2565,8 @@ fn streaming_tool_dispatch_events(
             if let (true, Some(id)) = (has_name_and_args, &chunk.id) {
                 // Skip already-dispatched tool calls (dedup guard, matches
                 // the stopped/done flags in Anthropic/Responses converters).
-                if !dispatched_ids.insert(id.clone()) {
+                // Scoped per choice so repeated ids across choices still dispatch.
+                if !dispatched_ids.insert((choice.index, id.clone())) {
                     continue;
                 }
                 let payload = ToolCallDispatchPayload {
@@ -2624,6 +2749,23 @@ async fn chat_completions(
         parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
     let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
 
+    // Any force_nonempty_content=true request: surface reasoning as content when
+    // the turn produced none. See `wants_reasoning_as_content_when_empty`.
+    let move_reasoning_to_content_when_empty =
+        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
+            request.chat_template_args.as_ref(),
+        );
+    let parsing_options = parsing_options
+        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
+    // Computed before `request` moves into `generate`. Only a stream that can
+    // withhold every data frame needs forced keep-alive frames.
+    let stream_can_defer_all_output =
+        crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
+            parsing_options.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
+        );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2695,12 +2837,13 @@ async fn chat_completions(
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
-        let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+        let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
 
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
         //   - `event: reasoning_dispatch`  — complete reasoning block (emitted once)
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
@@ -2729,6 +2872,19 @@ async fn chat_completions(
 
                 // Drop empty chunks from multi-byte token assembly.
                 if response.data.as_ref().is_some_and(is_empty_stream_response) {
+                    let _ = activity_tx.send(());
+                    // Not forwarded, but the engine still generated these tokens,
+                    // so account for them before discarding. Otherwise the
+                    // real-time output-token counter undercounts and TTFT is
+                    // attributed to the first *renderable* chunk rather than the
+                    // first generated one. This already affected multi-byte token
+                    // assembly; the Nemotron force_nonempty_content deferral makes
+                    // empty chunks common enough to matter.
+                    process_chat_response_and_observe_metrics(
+                        &response,
+                        &mut response_collector,
+                        &mut http_queue_guard,
+                    );
                     continue;
                 }
                 if tool_dispatch_enabled {
@@ -2768,14 +2924,19 @@ async fn chat_completions(
                 }
             }
         };
-        let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
+        let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
+        let stream = monitor_for_disconnects_with_activity(
+            stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            activity_rx,
+        );
 
         let mut sse_stream = Sse::new(stream);
-
-        if let Some(keep_alive) = state.sse_keep_alive() {
+        if let Some(keep_alive) = keep_alive {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
-
         Ok(sse_stream.into_response())
     } else {
         // Check first event for backend errors before aggregating (non-streaming only)
@@ -2950,8 +3111,11 @@ pub fn validate_completion_fields_generic(
 async fn handler_responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateResponse>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateResponse = parse_json_request("responses", &body)?;
+
     // return a 503 if the service or model is not ready.
     // Resolve the templated model first so empty/missing `model` fields
     // don't bypass the gate.
@@ -3080,6 +3244,12 @@ async fn responses(
         return Ok(resp.into_response());
     }
 
+    // Validate sampling and output parameters
+    if let Err(err_response) = validate_responses_fields(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
@@ -3173,6 +3343,28 @@ async fn responses(
             request.inner.tool_choice.as_ref(),
         ),
     );
+
+    // Responses requests share the chat-completions aggregator for the unary
+    // path. Thread this option through so its post-parse fallback also caps a
+    // model-produced batch to the first tool call when parallel calls are
+    // disabled. The streaming Responses converter enforces the same contract.
+    let parsing_options =
+        parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
+
+    // NOTE: `move_reasoning_to_content_when_empty` is the aggregator flag and is
+    // not set here. A non-streaming Responses request DOES reach the aggregator
+    // (forcing stream=true on the converted request only drives internal
+    // streaming; the client-facing `streaming` flag still selects the aggregating
+    // branch below), so it reaches it with the flag false.
+    //
+    // That is currently unreachable rather than wrong: the Responses-to-chat
+    // conversion hard-codes `chat_template_args: None`, so
+    // `force_nonempty_content` can never be set on this path in the first place.
+    // If that conversion ever forwards chat_template_args, the streaming stage
+    // would still cover the reasoning-only case — `postprocessor_parsing_stream`
+    // gates on the request's own args via `wants_reasoning_as_content_when_empty`
+    // rather than on this flag — but the aggregator backstop should be wired here
+    // too at that point. Tracked as follow-up.
 
     let mut response_collector = state
         .metrics_clone()
@@ -3397,12 +3589,53 @@ pub fn validate_response_unsupported_fields(
     None
 }
 
+/// Validates sampling and output parameters on the Responses API request.
+pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
+    use crate::protocols::openai::validate;
+
+    let map_err = |e: anyhow::Error| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    };
+
+    validate::validate_temperature(request.inner.temperature).map_err(&map_err)?;
+    validate::validate_top_p(request.inner.top_p).map_err(&map_err)?;
+    validate::validate_max_tokens(request.inner.max_output_tokens).map_err(&map_err)?;
+
+    if let Some(text) = &request.inner.text {
+        use crate::protocols::openai::responses::convert_text_format;
+        if let Some(response_format) = convert_text_format(text) {
+            validate::validate_response_format(&Some(response_format)).map_err(&map_err)?;
+        }
+    }
+
+    Ok(())
+}
+
 // todo - abstract this to the top level lib.rs to be reused
 pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
     if !state.is_ready() {
         return Err(ErrorMessage::_service_unavailable());
     }
     Ok(())
+}
+
+/// Returns an OpenAI-compatible JSON `404` error response for an
+/// unmatched route.
+pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> ErrorResponse {
+    let code = StatusCode::NOT_FOUND;
+    (
+        code,
+        Json(ErrorMessage {
+            message: format!("Route not found: {} {}", method, uri.path()),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+            metric_error_type: None,
+        }),
+    )
 }
 
 /// Canonical, customer-facing message for "model is registered but not yet
@@ -4396,7 +4629,7 @@ mod tests {
     use super::*;
     use crate::discovery::ModelManagerError;
     use crate::protocols::common::StopConditionsProvider;
-    use crate::protocols::common::extensions::NvExt;
+    use crate::protocols::common::extensions::{AgentCompaction, NvExt};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -4792,6 +5025,10 @@ mod tests {
                 session_id: "session-123".to_string(),
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
+                compaction: Some(AgentCompaction {
+                    trigger: Some("automatic".to_string()),
+                    ..Default::default()
+                }),
                 kv_hints: None,
                 input_trigger: None,
             },
@@ -4809,6 +5046,38 @@ mod tests {
             Some("parent-456")
         );
         assert_eq!(agent_context.session_final, Some(true));
+        assert_eq!(
+            agent_context
+                .compaction
+                .as_ref()
+                .and_then(|compaction| compaction.trigger.as_deref()),
+            Some("automatic")
+        );
+    }
+
+    #[test]
+    fn test_context_from_headers_preserves_codex_compaction() {
+        let mut headers = HeaderMap::new();
+        headers.insert("thread-id", "codex-thread".parse().unwrap());
+        headers.insert(
+            "x-codex-turn-metadata",
+            r#"{"request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested","implementation":"local","phase":"summary_turn","strategy":"memento"}}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let context = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        let agent_context = context
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("agent context attached");
+        assert_eq!(agent_context.session_id, "codex-thread");
+        assert_eq!(
+            agent_context
+                .compaction
+                .as_ref()
+                .and_then(|compaction| compaction.implementation.as_deref()),
+            Some("local")
+        );
     }
 
     #[test]
@@ -4977,6 +5246,120 @@ mod tests {
                 "client response must not include the underlying engine message"
             );
         }
+    }
+
+    #[test]
+    fn backend_overload_reports_overload_status_not_worker_status() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        // Production path: a vLLM worker rejects on its own slot limit and puts
+        // 503 in the payload. The chain says ResourceExhausted, so the client
+        // must see the overload status rather than a generic outage.
+        let event: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message(
+                        r#"{"message":"Worker local total request limit reached (32/32)","code":503}"#,
+                    )
+                    .build(),
+            ),
+        };
+
+        let backend_error =
+            extract_backend_error_if_present(&event).expect("error event should be extracted");
+        assert_eq!(backend_error.status, overload_status_code());
+        assert_eq!(backend_error.status.as_u16(), 529);
+        assert!(backend_error.message.contains("request limit reached"));
+        // Carried, not re-derived from the status — this is what keeps the
+        // rendering identical to the admission path at any configured status.
+        assert!(matches!(
+            backend_error.sanitized,
+            Some(SanitizedError::Overloaded)
+        ));
+    }
+
+    #[test]
+    fn backend_non_overload_status_is_still_preserved() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        // The override is scoped to capacity rejections; a genuine backend
+        // failure must keep the status the worker chose.
+        let event: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Unknown)
+                    .message(r#"{"message":"engine crashed","code":503}"#)
+                    .build(),
+            ),
+        };
+
+        let backend_error =
+            extract_backend_error_if_present(&event).expect("error event should be extracted");
+        assert_eq!(backend_error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(backend_error.sanitized.is_none());
+    }
+
+    #[test]
+    fn backend_overload_is_sanitized_at_a_non_5xx_overload_status() {
+        // DYN_HTTP_OVERLOAD_STATUS_CODE accepts 200-999. Deriving the category
+        // from the status alone sends a 4xx overload down the forward-verbatim
+        // path, leaking the worker's internal text; a 2xx/3xx one down the
+        // coerce-to-500 path, dropping the configured status. The carried
+        // category avoids both, so the worker path renders exactly like the
+        // admission path at every configured value.
+        let response = backend_error_response(BackendErrorInfo {
+            message: "Worker local total request limit reached (32/32)".to_string(),
+            status: StatusCode::TOO_MANY_REQUESTS,
+            sanitized: Some(SanitizedError::Overloaded),
+        });
+
+        assert_eq!(response.0, overload_status_code());
+        assert_eq!(response.1.code, overload_status_code().as_u16());
+        assert_eq!(response.1.message, SanitizedError::Overloaded.to_string());
+        assert!(!response.1.message.contains("32/32"));
+    }
+
+    #[test]
+    fn python_worker_503_reaches_the_frontend_as_backend_unknown() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        // Exactly what map_python_exception (bindings/python/rust/engine.rs) and
+        // py_err_to_dynamo (backend.rs) build for a Python exception carrying
+        // `.code = 503`: 503 is outside 400..500, so the type is Backend(Unknown)
+        // and the message is the JSON envelope. No cause is attached.
+        let event: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::Unknown))
+                    .message(
+                        r#"{"message":"Worker local total request limit reached (32/32)","code":503}"#,
+                    )
+                    .build(),
+            ),
+        };
+
+        // request_was_rejected keys on ErrorType::ResourceExhausted, which this
+        // shape never carries, so the overload override does not engage.
+        assert!(!super::super::metrics::request_was_rejected(
+            event.error.as_ref().expect("error is set")
+        ));
+
+        let backend_error =
+            extract_backend_error_if_present(&event).expect("error event should be extracted");
+        assert_eq!(backend_error.status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
@@ -5201,6 +5584,84 @@ mod tests {
         );
 
         assert!(validate_response_unsupported_fields(&request).is_none());
+    }
+
+    #[test]
+    fn test_validate_responses_fields_accepts_clean_request() {
+        assert!(validate_responses_fields(&make_base_request()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_responses_fields_rejects_zero_max_output_tokens() {
+        let mut request = make_base_request();
+        request.inner.max_output_tokens = Some(0);
+
+        let (code, body) =
+            validate_responses_fields(&request).expect_err("max_output_tokens: 0 must be rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.message,
+            format!("{VALIDATION_PREFIX}Max tokens must be greater than 0, got 0")
+        );
+    }
+
+    #[test]
+    fn test_validate_responses_fields_rejects_zero_top_p() {
+        let mut request = make_base_request();
+        request.inner.top_p = Some(0.0);
+
+        let (code, body) =
+            validate_responses_fields(&request).expect_err("top_p: 0 must be rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.message,
+            format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got 0")
+        );
+    }
+
+    #[test]
+    fn test_validate_responses_fields_rejects_non_object_json_schema() {
+        use dynamo_protocols::types::ResponseFormatJsonSchema;
+        use dynamo_protocols::types::responses::{
+            ResponseTextParam, TextResponseFormatConfiguration,
+        };
+
+        let mut request = make_base_request();
+        request.inner.text = Some(ResponseTextParam {
+            format: TextResponseFormatConfiguration::JsonSchema(ResponseFormatJsonSchema {
+                name: "city".into(),
+                description: None,
+                schema: serde_json::json!(42), // Invalid: not an object
+                strict: None,
+            }),
+            verbosity: None,
+        });
+
+        let (code, body) = validate_responses_fields(&request)
+            .expect_err("non-object json_schema must be rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(body.message.contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn test_validate_responses_fields_accepts_object_json_schema() {
+        use dynamo_protocols::types::ResponseFormatJsonSchema;
+        use dynamo_protocols::types::responses::{
+            ResponseTextParam, TextResponseFormatConfiguration,
+        };
+
+        let mut request = make_base_request();
+        request.inner.text = Some(ResponseTextParam {
+            format: TextResponseFormatConfiguration::JsonSchema(ResponseFormatJsonSchema {
+                name: "city".into(),
+                description: None,
+                schema: serde_json::json!({"type": "object"}),
+                strict: None,
+            }),
+            verbosity: None,
+        });
+
+        assert!(validate_responses_fields(&request).is_ok());
     }
 
     #[test]
@@ -6561,7 +7022,7 @@ mod tests {
 
     fn collect_tool_dispatch_events(
         response: &Annotated<NvCreateChatCompletionStreamResponse>,
-        dispatched_ids: &mut HashSet<String>,
+        dispatched_ids: &mut HashSet<(u32, String)>,
     ) -> Vec<Result<Event, axum::Error>> {
         let mut events = Vec::new();
         streaming_tool_dispatch_events(response, dispatched_ids, &mut events);
@@ -6863,17 +7324,17 @@ mod tests {
 
     #[test]
     fn test_tool_dispatch_n_greater_than_1_includes_choice_index() {
-        // Regression test: with n > 1, each choice should carry its own choice_index
-        // so clients can disambiguate which choice the tool call belongs to.
+        // Regression test for #12676: with n > 1, identical tool-call ids from different
+        // choices must each dispatch with their own choice_index.
         let choice_0 = make_choice_with_tool_call(
             0,
-            Some("call_a"),
+            Some("call_1"),
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         );
         let choice_1 = make_choice_with_tool_call(
             1,
-            Some("call_b"),
+            Some("call_1"),
             Some("get_time"),
             Some(r#"{"tz":"UTC"}"#),
         );
@@ -6884,11 +7345,11 @@ mod tests {
 
         let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json0["choice_index"], 0);
-        assert_eq!(json0["tool_call"]["id"], "call_a");
+        assert_eq!(json0["tool_call"]["id"], "call_1");
 
         let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
         assert_eq!(json1["choice_index"], 1);
-        assert_eq!(json1["tool_call"]["id"], "call_b");
+        assert_eq!(json1["tool_call"]["id"], "call_1");
     }
 
     #[test]

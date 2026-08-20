@@ -4,7 +4,8 @@
 
 # Standalone test image — layers test deps on top of a pre-built runtime image.
 # Usage: docker build -f container/Dockerfile.test --target test_image --build-arg BASE_IMAGE=<runtime-image> .
-# For adding specific unique tests software, like in planner, add a target: docker build -f container/Dockerfile.test --target test_distroless --build-arg BASE_IMAGE=<runtime-image> .
+# Planner's distroless runtime needs the dedicated test_planner target below.
+# Usage: docker build -f container/Dockerfile.test --target test_planner --build-arg BASE_IMAGE=<planner-image> .
 ARG BASE_IMAGE
 
 FROM ${BASE_IMAGE} AS test_image
@@ -30,6 +31,12 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
+COPY --chmod=664 --chown=dynamo:0 tests/__init__.py /workspace/tests/__init__.py
+COPY --chmod=664 --chown=dynamo:0 tests/marker_categories.py /workspace/tests/marker_categories.py
+# The nightly version-stamping tests execute this script against temporary
+# fixture repositories. Keep the production image unchanged and expose only
+# this script in the test image.
+COPY --chmod=664 --chown=dynamo:0 .github/scripts/apply_dev_version.py /workspace/.github/scripts/apply_dev_version.py
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
@@ -76,5 +83,24 @@ COPY --from=github_runner_tools /github-runner-tools/opt/dynamo/lib/ /opt/dynamo
 # find/chmod exist now (copied above): apply the /workspace dir-write fix that
 # test_image skipped on this distroless base.
 RUN find /workspace -type d -exec chmod o+w {} +
+
+USER dynamo
+
+FROM test_distroless AS test_planner
+
+# Keep Planner-only tests out of the production image. The Planner runtime
+# installs the AISimulate wheel, so its test image can execute the optional
+# Dynamo replay and Sweeper integration contracts.
+USER root
+COPY --chmod=775 --chown=dynamo:0 lib/bindings/python/tests/replay/ /workspace/lib/bindings/python/tests/replay/
+COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/mocker/config.py /workspace/components/src/dynamo/mocker/config.py
+# Give the isolated copy a unique basename so pytest cannot alias it with
+# another non-package `test_config.py` during whole-workspace collection.
+COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/mocker/tests/unit/test_config.py /workspace/components/src/dynamo/mocker/tests/unit/test_mocker_config.py
+
+# BuildKit applies the file mode to parent directories it creates for these
+# single-file COPY instructions. Restore directory traversal/write access for
+# the uid/gid that the ARC runner injects at pod startup.
+RUN find /workspace -type d -exec chmod o+rwx {} +
 
 USER dynamo

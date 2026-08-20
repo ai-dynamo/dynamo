@@ -144,6 +144,31 @@ func TestDCDAlphaCompatibilityHelpersReadThroughAPIConversion(t *testing.T) {
 	}
 }
 
+func TestGetDCDKubeAnnotationsExcludesWorkerTopologySpreadMarker(t *testing.T) {
+	t.Log("Create a DCD with a user annotation and the controller-owned topology marker")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					"example.com/user": "kept",
+					commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped: "spoofed",
+				}}},
+			},
+		},
+	}
+
+	t.Log("Render workload annotations")
+	annotations := GetDCDKubeAnnotations(dcd)
+
+	t.Log("Keep user metadata but reserve the controller-owned marker")
+	if got := annotations["example.com/user"]; got != "kept" {
+		t.Fatalf("user annotation = %q, want kept", got)
+	}
+	if _, exists := annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped]; exists {
+		t.Fatalf("controller-owned topology marker was propagated: %#v", annotations)
+	}
+}
+
 func TestComponentRuntimeNamespace(t *testing.T) {
 	tests := []struct {
 		name             string

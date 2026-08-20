@@ -37,11 +37,11 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   <div className="dynamo-recipe-browser-header">
     <div>
       <p className="dynamo-recipe-eyebrow">Recipe catalog</p>
-      <h3>16 model families</h3>
+      <h3>17 model families</h3>
       <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>80</strong>
+      <strong>84</strong>
       <span>Deployable configurations</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
@@ -185,6 +185,15 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <p className="dynamo-model-summary">Disaggregated vLLM serving with KV-aware routing on 16x H200, for multi-turn conversational traffic with prefix reuse.</p>
     <div className="dynamo-model-tags"><span>vLLM</span><span>16x H200</span><span>Multi-turn conversation</span><span>Related benchmark</span></div>
   <a className="dynamo-card-link" href="qwen3-32b.mdx" aria-label="Open the Qwen3-32B recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div><h3>Qwen3.5-122B-A10B</h3><p>Qwen</p></div>
+    </div>
+    <p className="dynamo-model-summary">vLLM recipes for long-context agentic traffic on B200 NVFP4 and H200 FP8, aggregated or disaggregated 1P2D, with KV-aware routing and MTP speculation on H200 aggregated.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>2-4x B200/H200</span><span>Agentic trace replay</span></div>
+  <a className="dynamo-card-link" href="qwen3-5-122b.mdx" aria-label="Open the Qwen3.5-122B-A10B recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="trtllm" data-hardware="b200 h100 h200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation">
     <div className="dynamo-model-card-top">

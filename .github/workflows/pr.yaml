@@ -127,7 +127,6 @@ jobs:
       - operator
       - operator-integration
       - helm-chart-tests
-      - snapshot-agent
       - snapshot-placeholder-vllm
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
@@ -282,54 +281,6 @@ jobs:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test
         run: make -C deploy/helm/charts/platform lint test
-
-# ============================================================================
-# Snapshot Agent
-# ============================================================================
-
-  snapshot-agent:
-    needs: changed-files
-    if: |
-      needs.changed-files.outputs.snapshot == 'true' ||
-      needs.changed-files.outputs.snapshot_vllm == 'true' ||
-      needs.changed-files.outputs.snapshot_sglang == 'true' ||
-      needs.changed-files.outputs.snapshot_trtllm == 'true' ||
-      needs.changed-files.outputs.operator == 'true' ||
-      needs.changed-files.outputs.deploy == 'true'
-    name: Snapshot Agent
-    runs-on: prod-default-v2
-    # actions: read lets the compliance step download a prior run's baseline
-    # snapshot compliance artifact to diff the OSRB CSV against. Missing -> the
-    # diff soft-degrades, build stays green.
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
-      - name: Build and push snapshot agent
-        uses: ./.github/actions/build-deploy-component
-        with:
-          component: snapshot
-          image_tag: ${{ github.sha }}-snapshot-agent
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
-          # OSRB CSV diff baseline: the target branch selects the rule, while the
-          # merge-base pins PR->main diffs to the PR's fork point.
-          diff_event_context: pr
-          diff_current_branch: ${{ github.ref_name }}
-          diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
-          diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
-          gh_token: ${{ secrets.GITHUB_TOKEN }}
 
 # ============================================================================
 # Power Agent
@@ -991,8 +942,15 @@ jobs:
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
-      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      # `defaulted` is applied by the repository-root conftest.py to any test that
+      # declared no lifecycle or hardware marker. It is routed here, not to the
+      # sequential job: sequential runs the fault-tolerance suite in one process
+      # and was OOM-killed (exit 137) once every unmarked test landed in it.
+      # NOTE: this job is `-n 0` today (cpu_parallel_mode: 'none'), so `defaulted`
+      # only picks the pod. Before enabling real xdist here, vet these tests for
+      # parallel-safety or split them into their own job -- unlike `parallel`,
+      # `defaulted` is not an author's claim that the test is parallel-safe.
+      cpu_parallel_test_markers: 'pre_merge and (parallel or defaulted) and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 
@@ -1170,8 +1128,7 @@ jobs:
       - name: Build and push snapshot placeholder
         uses: ./.github/actions/build-deploy-component
         with:
-          component: snapshot
-          target: placeholder
+          component: checkpoint-placeholder
           image_tag: ${{ github.sha }}-vllm-placeholder
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
@@ -1223,8 +1180,7 @@ jobs:
       - name: Build and push snapshot placeholder
         uses: ./.github/actions/build-deploy-component
         with:
-          component: snapshot
-          target: placeholder
+          component: checkpoint-placeholder
           image_tag: ${{ github.sha }}-sglang-placeholder
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
@@ -1277,8 +1233,7 @@ jobs:
       - name: Build and push snapshot placeholder
         uses: ./.github/actions/build-deploy-component
         with:
-          component: snapshot
-          target: placeholder
+          component: checkpoint-placeholder
           image_tag: ${{ github.sha }}-trtllm-placeholder
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
@@ -1324,6 +1279,8 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          # Sole writer of this vCluster name; every other caller recovers into it.
+          reset_existing: 'true'
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
@@ -1433,6 +1390,8 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          # Sole writer of this vCluster name; every other caller recovers into it.
+          reset_existing: 'true'
           vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1469,6 +1428,8 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          # Sole writer of this vCluster name; every other caller recovers into it.
+          reset_existing: 'true'
           vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1505,6 +1466,8 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          # Sole writer of this vCluster name; every other caller recovers into it.
+          reset_existing: 'true'
           vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-trtllm-dt
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1521,14 +1484,13 @@ jobs:
 
   deploy-snapshot-agent-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Snapshot Agent Setup
-    needs: [changed-files, deploy-operator-checkpoint-vllm, snapshot-agent]
+    needs: [changed-files, deploy-operator-checkpoint-vllm]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true') &&
-      needs.deploy-operator-checkpoint-vllm.result == 'success' &&
-      needs.snapshot-agent.result == 'success'
+      needs.deploy-operator-checkpoint-vllm.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 15
     permissions:
@@ -1570,18 +1532,16 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
 
   deploy-snapshot-agent-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Snapshot Agent Setup
-    needs: [changed-files, deploy-operator-checkpoint-sglang, snapshot-agent]
+    needs: [changed-files, deploy-operator-checkpoint-sglang]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
-      needs.deploy-operator-checkpoint-sglang.result == 'success' &&
-      needs.snapshot-agent.result == 'success'
+      needs.deploy-operator-checkpoint-sglang.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 15
     permissions:
@@ -1623,18 +1583,16 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
 
   deploy-snapshot-agent-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Snapshot Agent Setup
-    needs: [changed-files, deploy-operator-checkpoint-trtllm, snapshot-agent]
+    needs: [changed-files, deploy-operator-checkpoint-trtllm]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
-      needs.deploy-operator-checkpoint-trtllm.result == 'success' &&
-      needs.snapshot-agent.result == 'success'
+      needs.deploy-operator-checkpoint-trtllm.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 15
     permissions:
@@ -1676,7 +1634,6 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
 
   deploy-test-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Deploy Test
@@ -1731,7 +1688,6 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
       - name: Run DynamoCheckpoint Deploy Test
         uses: ./.github/actions/dynamo-deploy-test
         with:
@@ -1805,7 +1761,6 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
       - name: Run DynamoCheckpoint Deploy Test
         uses: ./.github/actions/dynamo-deploy-test
         with:
@@ -1879,7 +1834,6 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-snapshot-agent
       - name: Run DynamoCheckpoint Deploy Test
         uses: ./.github/actions/dynamo-deploy-test
         with:
@@ -1975,7 +1929,6 @@ jobs:
     needs:
       - changed-files
       - operator
-      - snapshot-agent
       - snapshot-placeholder-vllm
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm

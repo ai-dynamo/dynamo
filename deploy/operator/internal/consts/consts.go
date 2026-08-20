@@ -42,6 +42,11 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	// KubeAnnotationWorkloadProvider records the controller-owned immutable graph-level workload provider.
+	KubeAnnotationWorkloadProvider = "nvidia.com/workload-provider"
+	WorkloadProviderComponent      = "component"
+	WorkloadProviderGrove          = "grove"
+
 	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
 	// PodCliqueSet update strategy while the long-term DGD API is settled.
 	// Supported values match Grove exactly: "RollingRecreate" and "OnDelete".
@@ -82,6 +87,10 @@ const (
 	// recorded on the parent DGD. Older operators understand only the v1 value,
 	// so v1-compatible releases continue to generate new DCDs with the v1 value.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
+
+	// KubeAnnotationDynamoWorkerTopologySpreadScoped is a controller-owned marker
+	// for workload resources whose topology selectors are scoped by worker generation.
+	KubeAnnotationDynamoWorkerTopologySpreadScoped = "nvidia.com/dynamo-worker-topology-spread-scoped"
 
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
 	// lifecycle is tied to an owning DGD generation.
@@ -184,6 +193,13 @@ const (
 
 	// VLLMNixlSideChannelHostEnvVar is the env var that tells vLLM which host IP to use for the NIXL side channel.
 	VLLMNixlSideChannelHostEnvVar = "VLLM_NIXL_SIDE_CHANNEL_HOST"
+
+	// VLLMDPMasterIPEnvVar is the env var that tells vLLM which IP hosts the data-parallel master.
+	VLLMDPMasterIPEnvVar = "VLLM_DP_MASTER_IP"
+
+	// PodIPEnvVar carries the pod's own IP from the downward API, for launch
+	// commands that must name an address rather than let a library guess one.
+	PodIPEnvVar = "POD_IP"
 
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics

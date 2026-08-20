@@ -11,7 +11,7 @@
 # file is passed via --requirement, and applies to the whole install.
 --no-binary imageio-ffmpeg
 
-aiohttp>=3.9.0,<4.0
+aiohttp>=3.14.3,<4.0
 fastapi==0.120.1
 grpcio-tools<=1.76.0  # May have platform-specific builds; pins grpcio ecosystem version
 httpx==0.28.1
@@ -28,17 +28,19 @@ nvtx==0.2.14
 opentelemetry-api<=1.38.0  # Pinned for tracing support
 opentelemetry-exporter-otlp<=1.38.0
 opentelemetry-sdk<=1.38.0
+# Transitive via imageio/matplotlib; floor keeps images on the current patch line.
+pillow>=12.3.0
 prometheus_client==0.23.1
 protobuf>=5.29.5,<7.0.0
 pydantic>=2.11.4,<2.13
 pydantic-settings<2.13.0
 PyYAML==6.0.3
 tensorboardX==2.6.2.2
-# Transformers version constraint for container builds
-# - vLLM 0.11.0: >=4.55.2, vLLM 0.11.2: >=4.56.0,<5
-# - TensorRT-LLM 1.3.0rc14: ==4.57.3
-# - SGLang 0.5.8: ==4.57.1
-# Using >=4.56.0 to satisfy all frameworks
+# Framework-agnostic Transformers floor for the Dynamo runtime wheel builder
+# and frontend image. Backend runtime images do not install this file; they
+# inherit mutually incompatible framework-specific requirements instead:
+# vLLM 0.27.1 requires >=5.5.3, TensorRT-LLM 1.3.0rc24 pins 5.5.4, and
+# SGLang 0.5.16 pins 5.12.1.
 transformers>=4.56.0
 uvicorn==0.38.0
 zstandard==0.23.0

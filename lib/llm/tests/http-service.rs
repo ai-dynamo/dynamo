@@ -33,7 +33,13 @@ use dynamo_runtime::{
 use futures::StreamExt;
 use prometheus::{Registry, proto::MetricType};
 use reqwest::StatusCode;
-use std::{io::Cursor, sync::Arc};
+use std::{
+    io::Cursor,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
 
@@ -43,6 +49,20 @@ use ports::bind_random_port;
 
 struct CounterEngine {}
 
+#[derive(Default)]
+struct NvextProbeEngine {
+    called: AtomicBool,
+    received_nvext: AtomicBool,
+}
+
+impl NvextProbeEngine {
+    fn observed_nvext(&self) -> Option<bool> {
+        self.called
+            .load(Ordering::Acquire)
+            .then(|| self.received_nvext.load(Ordering::Acquire))
+    }
+}
+
 struct FirstTokenGateEngine {
     release: Arc<tokio::sync::Notify>,
 }
@@ -50,19 +70,61 @@ struct FirstTokenGateEngine {
 // Add a new long-running test engine
 struct LongRunningEngine {
     delay_ms: u64,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    started: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+    started_notify: Arc<tokio::sync::Notify>,
+    cancelled_notify: Arc<tokio::sync::Notify>,
 }
 
 impl LongRunningEngine {
     fn new(delay_ms: u64) -> Self {
         Self {
             delay_ms,
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            started: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            started_notify: Arc::new(tokio::sync::Notify::new()),
+            cancelled_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
-    fn was_cancelled(&self) -> bool {
-        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    async fn wait_for_started(&self) {
+        wait_for_signal(&self.started, &self.started_notify, "engine start").await;
+    }
+
+    async fn wait_for_cancellation(&self) {
+        wait_for_signal(
+            &self.cancelled,
+            &self.cancelled_notify,
+            "engine cancellation",
+        )
+        .await;
+    }
+}
+
+async fn wait_for_signal(flag: &AtomicBool, notify: &tokio::sync::Notify, signal: &str) {
+    timeout(std::time::Duration::from_secs(3), async {
+        while !flag.load(Ordering::Acquire) {
+            notify.notified().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {signal}"));
+}
+
+struct StreamCancellationGuard {
+    cancelled: Arc<AtomicBool>,
+    cancelled_notify: Arc<tokio::sync::Notify>,
+    completed: bool,
+}
+
+impl Drop for StreamCancellationGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+
+        self.cancelled.store(true, Ordering::Release);
+        self.cancelled_notify.notify_one();
     }
 }
 
@@ -85,6 +147,34 @@ impl
 
         let stream = stream! {
             release.notified().await;
+            let output = generator.create_choice(0, Some("choice 0".to_string()), None, None);
+            yield Annotated::from_data(output);
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for NvextProbeEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        self.received_nvext
+            .store(request.nvext.is_some(), Ordering::Release);
+        self.called.store(true, Ordering::Release);
+        let mut generator = request.response_generator(ctx.id().to_string());
+
+        let stream = stream! {
             let output = generator.create_choice(0, Some("choice 0".to_string()), None, None);
             yield Annotated::from_data(output);
         };
@@ -155,25 +245,27 @@ impl
             self.delay_ms
         );
 
-        let cancelled_flag = self.cancelled.clone();
+        let started = self.started.clone();
+        let cancelled = self.cancelled.clone();
+        let started_notify = self.started_notify.clone();
+        let cancelled_notify = self.cancelled_notify.clone();
         let delay_ms = self.delay_ms;
 
         let ctx_clone = ctx.clone();
         let stream = async_stream::stream! {
-
-            // the stream can be dropped or it can be cancelled
-            // either way we consider this a cancellation
-            cancelled_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut cancellation_guard = StreamCancellationGuard {
+                cancelled,
+                cancelled_notify,
+                completed: false,
+            };
+            started.store(true, Ordering::Release);
+            started_notify.notify_one();
 
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {
-                    // the stream went to completion
-                    cancelled_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-
+                    cancellation_guard.completed = true;
                 }
-                _ = ctx_clone.stopped() => {
-                    cancelled_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
+                _ = ctx_clone.stopped() => {}
             }
 
             yield Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation("event.dynamo.test.sentinel", &"DONE".to_string()).expect("Failed to create annotated response");
@@ -816,7 +908,58 @@ async fn test_sse_keep_alive_emits_comments_during_idle_stream() {
 }
 
 #[tokio::test]
-async fn test_batch_api_skeleton_routes_return_not_implemented() {
+async fn test_disabled_batch_api_routes_are_hidden() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://localhost:{port}");
+    let openapi: serde_json::Value = client
+        .get(format!("{base}/openapi.json"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    for path in [
+        "/v1/files",
+        "/v1/files/{file_id}/content",
+        "/v1/batches",
+        "/v1/batches/{batch_id}",
+    ] {
+        assert!(
+            openapi["paths"].get(path).is_none(),
+            "disabled Batch API route is documented: {path}"
+        );
+    }
+
+    for (method, path) in [
+        (reqwest::Method::POST, "/v1/files"),
+        (reqwest::Method::GET, "/v1/files/file-123/content"),
+        (reqwest::Method::POST, "/v1/batches"),
+        (reqwest::Method::GET, "/v1/batches/batch-123"),
+    ] {
+        let response = client
+            .request(method, format!("{base}{path}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_enabled_batch_api_routes_are_documented_and_return_not_implemented() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
@@ -831,6 +974,26 @@ async fn test_batch_api_skeleton_routes_return_not_implemented() {
 
     let client = reqwest::Client::new();
     let base = format!("http://localhost:{port}");
+    let openapi: serde_json::Value = client
+        .get(format!("{base}/openapi.json"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    for path in [
+        "/v1/files",
+        "/v1/files/{file_id}/content",
+        "/v1/batches",
+        "/v1/batches/{batch_id}",
+    ] {
+        assert!(
+            openapi["paths"].get(path).is_some(),
+            "enabled Batch API route is missing from OpenAPI: {path}"
+        );
+    }
 
     let response = client
         .post(format!("{base}/v1/files"))
@@ -940,45 +1103,18 @@ async fn test_client_disconnect_cancellation_unary() {
         .build()
         .expect("Failed to build request");
 
-    // Start the request and cancel it after 1 second
-    let start_time = std::time::Instant::now();
-
-    let request_future = async {
+    let request_task = tokio::spawn(async move {
         client
             .post(format!("http://localhost:{}/v1/chat/completions", port))
             .json(&request)
             .send()
             .await
-    };
+    });
 
-    // Use timeout to simulate client disconnect after 1 second
-    let result = timeout(std::time::Duration::from_millis(1000), request_future).await;
-
-    let elapsed = start_time.elapsed();
-
-    // The request should timeout (simulating client disconnect)
-    assert!(result.is_err(), "Request should have timed out");
-
-    // Give the service a moment to detect the disconnect and propagate cancellation
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // Verify the engine was cancelled
-    assert!(
-        long_running_engine.was_cancelled(),
-        "Engine should have been cancelled due to client disconnect"
-    );
-
-    // Verify cancellation happened quickly (within 2 seconds, not the full 10 seconds)
-    assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "Cancellation should have propagated quickly, took {:?}",
-        elapsed
-    );
-
-    tracing::info!(
-        "✅ Client disconnect test passed! Request cancelled in {:?}, engine detected cancellation",
-        elapsed
-    );
+    long_running_engine.wait_for_started().await;
+    request_task.abort();
+    assert!(request_task.await.unwrap_err().is_cancelled());
+    long_running_engine.wait_for_cancellation().await;
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
@@ -1036,51 +1172,18 @@ async fn test_client_disconnect_cancellation_streaming() {
         .build()
         .expect("Failed to build request");
 
-    // Start the request and cancel it after 1 second
-    let start_time = std::time::Instant::now();
-
-    let request_future = async {
-        let response = client
+    let request_task = tokio::spawn(async move {
+        client
             .post(format!("http://localhost:{}/v1/chat/completions", port))
             .json(&request)
             .send()
             .await
-            .unwrap();
+    });
 
-        // Start reading the stream, then drop it to simulate client disconnect
-        let mut stream = response.bytes_stream();
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // Read one chunk then drop the stream (simulating client disconnect)
-        let _ = StreamExt::next(&mut stream).await;
-        // Stream gets dropped here when function exits
-    };
-
-    // Use timeout to simulate the streaming request timing out
-    let _result = timeout(std::time::Duration::from_millis(1500), request_future).await;
-
-    let elapsed = start_time.elapsed();
-
-    // Give the service time to detect the disconnect
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-    // Verify the engine was cancelled
-    assert!(
-        long_running_engine.was_cancelled(),
-        "Engine should have been cancelled due to streaming client disconnect"
-    );
-
-    // Verify cancellation happened reasonably quickly
-    assert!(
-        elapsed < std::time::Duration::from_secs(3),
-        "Stream cancellation should have propagated reasonably quickly, took {:?}",
-        elapsed
-    );
-
-    tracing::info!(
-        "✅ Streaming client disconnect test passed! Stream cancelled in {:?}, engine detected cancellation",
-        elapsed
-    );
+    long_running_engine.wait_for_started().await;
+    request_task.abort();
+    assert!(request_task.await.unwrap_err().is_cancelled());
+    long_running_engine.wait_for_cancellation().await;
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
@@ -1421,8 +1524,9 @@ async fn test_nvext_disabled_strips_request_and_response() {
     wait_for_service_ready(port).await;
 
     let card = ModelDeploymentCard::with_name_only("test-model");
+    let probe_engine = Arc::new(NvextProbeEngine::default());
     manager
-        .add_chat_completions_model("test-model", card.mdcsum(), Arc::new(CounterEngine {}))
+        .add_chat_completions_model("test-model", card.mdcsum(), probe_engine.clone())
         .unwrap();
 
     let response = reqwest::Client::new()
@@ -1444,6 +1548,11 @@ async fn test_nvext_disabled_strips_request_and_response() {
     assert!(response.status().is_success());
 
     let body = response.text().await.expect("read body");
+    assert_eq!(
+        probe_engine.observed_nvext(),
+        Some(false),
+        "the disabled gate must strip nvext before dispatching to the engine"
+    );
     assert!(
         !body.contains("\"nvext\""),
         "nvext gate off: response must not contain an `nvext` field, got: {body}"
@@ -1594,7 +1703,9 @@ impl
 async fn test_audio_speech_backend_invalid_argument_returns_4xx() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true);
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true)
+        .unwrap();
 
     let state = service.state_clone();
     let manager = state.manager();
@@ -1700,7 +1811,9 @@ impl
 async fn test_audio_speech_failed_status_meters_as_client_error() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true);
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true)
+        .unwrap();
 
     let state = service.state_clone();
     let manager = state.manager();
@@ -1804,8 +1917,12 @@ impl
 async fn test_classify_and_pooling_validation_errors_are_metered() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Classify, true);
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Pooling, true);
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Classify, true)
+        .unwrap();
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Pooling, true)
+        .unwrap();
 
     let state = service.state_clone();
     let manager = state.manager();
