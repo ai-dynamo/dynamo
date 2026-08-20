@@ -1340,23 +1340,17 @@ class HandlerBase(BaseGenerativeHandler):
                                 len(o.token_ids) for o in res.outputs
                             )
 
-                            prompt_tokens_details = None
                             if prefill_prompt_tokens_details:
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                if output.request_perf_metrics is not None:
-                                    kv_cache_metrics = (
-                                        output.request_perf_metrics.kv_cache_metrics
-                                    )
-                                    cached_tokens = min(
-                                        num_input_tokens,
-                                        kv_cache_metrics.num_reused_blocks
-                                        * self.kv_block_size,
-                                    )
-                                    if cached_tokens > 0:
-                                        prompt_tokens_details = {
-                                            "cached_tokens": int(cached_tokens),
-                                        }
+                                # Clamp to prompt size: image token_ids are unexpanded
+                                # placeholders, so the engine count (measured over the
+                                # expanded prompt) can exceed it.
+                                prompt_tokens_details = {
+                                    "cached_tokens": min(
+                                        num_input_tokens, int(res.cached_tokens or 0)
+                                    ),
+                                }
 
                             out["completion_usage"] = {
                                 "prompt_tokens": int(num_input_tokens),

@@ -271,6 +271,8 @@ planner:
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
+  # Keep this tombstone until the vendored-tree deletion has merged so the
+  # deleted paths in that PR remain covered by the Planner CI filter.
   - 'aisimulate/**'
   # Power-aware planner (PR #9369): per-node power agent component
   - 'deploy/power-agent/**'
@@ -351,6 +353,11 @@ rust:
   # Sidecar protobuf contracts are compiled by crate build scripts and need the
   # same workspace checks as sidecar Rust sources.
   - 'lib/sidecar/**/*.proto'
+  # The prometheus_names.py sync check runs as part of cargo test in the
+  # rust-tests job; trigger it when the generator template or committed output
+  # changes.
+  - 'lib/bindings/python/codegen/templates/prometheus_names.py.template'
+  - 'lib/bindings/python/src/dynamo/prometheus_names.py'
 
 benchmarks:
   - 'benchmarks/**'

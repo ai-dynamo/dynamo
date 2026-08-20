@@ -422,7 +422,7 @@ func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *te
 		},
 	})
 	dgd.Annotations = map[string]string{
-		commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+		commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 	}
 	reconciler := createTestDGDReconcilerWithStatus(dgd)
 	program := reconciler.newComponentProgram()
@@ -466,7 +466,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 				},
 			})
 			dgd.Annotations = map[string]string{
-				commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+				commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 			}
 			kubeClient := fake.NewClientBuilder().
 				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
@@ -541,7 +541,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 			},
 		})
 		dgd.Annotations = map[string]string{
-			commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+			commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 		}
 		reconciler := createTestDGDReconcilerWithStatus(dgd)
 		program := reconciler.newComponentProgram()
@@ -552,7 +552,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		require.NotNil(t, status.RollingUpdate)
 		assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, status.RollingUpdate.Phase)
 		assert.Nil(t, dgd.Status.RollingUpdate)
-		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash])
+		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 	})
 
 	t.Run("multinode component workload keeps unsupported-path hash behavior", func(t *testing.T) {
