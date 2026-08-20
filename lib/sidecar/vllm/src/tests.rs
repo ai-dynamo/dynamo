@@ -472,6 +472,25 @@ fn discovered_model_reports_rl_worker_metadata() {
 }
 
 #[test]
+fn rl_worker_metadata_identifies_zero_parallelism_dimensions() {
+    for (dimension, expected) in [
+        ("tensor", "tensor-parallel size of zero"),
+        ("pipeline", "pipeline-parallel size of zero"),
+    ] {
+        let mut server = server_info();
+        let parallelism = server.parallelism.as_mut().expect("parallelism metadata");
+        match dimension {
+            "tensor" => parallelism.tensor_parallel_size = 0,
+            "pipeline" => parallelism.pipeline_parallel_size = 0,
+            _ => unreachable!(),
+        }
+        let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
+        let error = model.rl_worker_metadata(None).unwrap_err();
+        assert!(error.to_string().contains(expected));
+    }
+}
+
+#[test]
 fn http_admin_endpoint_accepts_http_https_and_path_prefixes() {
     for endpoint in [
         "http://worker:8120",
