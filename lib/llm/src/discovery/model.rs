@@ -652,12 +652,12 @@ impl Model {
     ) -> Option<LoadThresholdConfig> {
         let mut result = None;
         for entry in self.worker_sets.iter() {
-            if let Some(ref monitor) = entry.value().worker_monitor {
+            if let Some(ref thresholds) = entry.value().load_thresholds {
                 if let Some(cfg) = config {
-                    monitor.set_load_threshold_config(cfg);
+                    thresholds.update(cfg);
                 }
                 if result.is_none() {
-                    result = Some(monitor.load_threshold_config());
+                    result = Some(thresholds.get());
                 }
             }
         }

@@ -39,5 +39,6 @@ pub use watcher::{ModelUpdate, ModelWatcher};
 
 mod worker_monitor;
 pub use worker_monitor::{
-    KvWorkerMonitor, LoadThresholdConfig, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL, WorkerLoadState,
+    KvWorkerMonitor, LoadThresholdConfig, LoadThresholdHandle, WORKER_TYPE_DECODE,
+    WORKER_TYPE_PREFILL, WorkerLoadState,
 };

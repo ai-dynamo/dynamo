@@ -28,10 +28,12 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::Backend,
-    discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
+    discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{EncoderRouter, PrefillRouter, WorkerSelectorFactory},
+    kv_router::{
+        EncoderRouter, PrefillRouter, RouterLoadSource, TypedRoutingGraph, WorkerSelectorFactory,
+    },
     local_model::runtime_config::{
         ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
     },
@@ -479,7 +481,7 @@ where
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
-        worker_set.set_lifecycle_cancellation(cancellation);
+        worker_set.set_lifecycle_cancellation(cancellation.clone());
         worker_set.set_topology_endpoint(endpoint.clone());
         worker_set.set_instance_watcher(instance_watcher);
 
@@ -539,7 +541,6 @@ where
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
 
-            let endpoint = component.endpoint(&mcid.endpoint);
             // Loading the tokenizer is expensive (~10 MiB JSON), so only do it
             // once and only when a local pipeline actually needs it.  Models
             // without tokenizer.json (e.g. Qwen3-Omni) set tokenizer = None;
@@ -566,6 +567,27 @@ where
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
+            let load_thresholds =
+                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let routing_graph = if needs_preprocessed_routing {
+                let source = RouterLoadSource::from_worker_type(effective_worker_type(
+                    card.worker_type,
+                    card.model_type,
+                ))?;
+                Some(
+                    TypedRoutingGraph::start(
+                        client.clone(),
+                        source,
+                        load_thresholds.clone(),
+                        &cancellation,
+                        Some(allocator_trim.clone()),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+
             // Create the KV router whenever any routed pipeline will be built.
             // Python chat factories receive a Rust-routed engine, so they also
             // need the shared chooser in KV mode.
@@ -579,8 +601,11 @@ where
                     let mut chooser = self
                         .manager
                         .kv_chooser_for_with_selector_and_client(
-                            &endpoint,
-                            client.clone(),
+                            routing_graph
+                                .as_ref()
+                                .expect("routing graph must exist")
+                                .client()
+                                .clone(),
                             card.kv_cache_block_size,
                             selector,
                             Some(router_config.kv_router_config.clone()),
@@ -589,6 +614,14 @@ where
                             WORKER_TYPE_DECODE, // This is the decode router
                             Some(card.display_name.clone()),
                             card.runtime_config.enable_eagle,
+                            routing_graph
+                                .as_ref()
+                                .expect("routing graph must exist")
+                                .scheduler_load_sender(),
+                            routing_graph
+                                .as_ref()
+                                .expect("routing graph must exist")
+                                .cancellation_token(),
                         )
                         .await?;
                     Arc::get_mut(&mut chooser)
@@ -598,33 +631,6 @@ where
                 } else {
                     None
                 };
-
-            // Create the worker monitor for this WorkerSet BEFORE the prefill router so the
-            // monitor can be handed directly to PrefillRouter::new_with_selector_factory. Each
-            // WorkerSet gets its own monitor (1-to-1), scoped to this WorkerSet's Client/namespace.
-            // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
-            // worker TTFT/ITL
-            // cleanup); thresholds control overload detection. The monitor and prefill router are
-            // created together here, so the monitor is passed into the prefill router directly.
-            //
-            // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
-            // so that overload-state updates (via set_overloaded_instances) are visible to the
-            // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
-            // Using a different Client instance would cause the PushRouter to never see
-            // overloaded workers, since each Client::new() creates independent ArcSwap state.
-            let worker_monitor = if needs_preprocessed_routing {
-                let monitor_client = kv_chooser
-                    .as_ref()
-                    .map(|chooser| chooser.client().clone())
-                    .unwrap_or_else(|| client.clone());
-                Some(KvWorkerMonitor::new_with_task_guard(
-                    monitor_client,
-                    router_config.load_threshold_config.clone(),
-                    allocator_trim.clone(),
-                ))
-            } else {
-                None
-            };
 
             // Only a typed Decode endpoint participates in the namespace-level
             // P/D rendezvous. Aggregated and Encode endpoints are independent
@@ -650,7 +656,8 @@ where
                     router_config.session_affinity_ttl_secs,
                     model_name.clone(),
                     namespace.clone(),
-                    worker_monitor.clone(),
+                    load_thresholds.clone(),
+                    cancellation.child_token(),
                     Some(allocator_trim.clone()),
                 ))
             } else {
@@ -667,10 +674,8 @@ where
                 None
             };
 
-            // Store the worker monitor and prefill router on the WorkerSet.
-            // The prefill router is stored so the watcher can deactivate/reactivate it
-            // when prefill workers die or rejoin.
-            worker_set.worker_monitor = worker_monitor.clone();
+            worker_set.load_thresholds =
+                needs_preprocessed_routing.then_some(load_thresholds.clone());
             worker_set.prefill_router = prefill_chooser.clone().map(|router| {
                 router as Arc<dyn crate::kv_router::prefill_router::PrefillRouterLifecycle>
             });
@@ -682,7 +687,7 @@ where
                         &client,
                         self.manager.clone(),
                         router_config.router_mode,
-                        worker_monitor.clone(),
+                        routing_graph.clone().expect("routing graph must exist"),
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
                         encoder_chooser.clone(),

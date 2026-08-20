@@ -10,11 +10,11 @@
 mod direct_zmq;
 
 pub use dynamo_kv_router::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, SequenceError, SequencePublishQueueError, SequencePublisher,
-    SequenceRequest, SequenceSubscriber,
+    ActiveSequencesMultiWorker, SchedulerLoadSnapshot, SequenceError, SequencePublishQueueError,
+    SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 use dynamo_kv_router::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
+    ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
     MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
 };
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
@@ -34,7 +34,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
-use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
+use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, SchedulerLoadSender};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 #[cfg(test)]
 use dynamo_kv_router::protocols::PrefillLoadHint;
@@ -165,7 +165,7 @@ fn active_sequence_event_channel(
 /// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
 pub struct RuntimeSequencePublisher {
     event_sender: Option<ActiveSequenceEventPublisher>,
-    metrics_publisher: Arc<EventPublisher>,
+    scheduler_load: SchedulerLoadSender,
     worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
 }
 
@@ -177,32 +177,12 @@ impl SequencePublisher for RuntimeSequencePublisher {
         event_sender.enqueue(event)
     }
 
-    fn publish_load(&self, load: ActiveLoad) {
-        let publisher = self.metrics_publisher.clone();
-        tokio::spawn(async move {
-            if let Err(e) = publisher.publish(&load).await {
-                tracing::trace!(
-                    "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
-                    load.worker_id,
-                    load.dp_rank
-                );
-            }
-        });
+    fn publish_scheduler_load(&self, snapshot: SchedulerLoadSnapshot) {
+        self.scheduler_load.publish(snapshot);
     }
 
-    fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-        let publisher = self.metrics_publisher.clone();
-        tokio::spawn(async move {
-            for load in loads {
-                if let Err(e) = publisher.publish(&load).await {
-                    tracing::trace!(
-                        "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
-                        load.worker_id,
-                        load.dp_rank
-                    );
-                }
-            }
-        });
+    fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
+        self.scheduler_load.publish_batch(snapshots);
     }
 
     fn observe_load(
@@ -442,6 +422,7 @@ pub async fn create_multi_worker_sequences(
     replica_sync: bool,
     router_id: u64,
     worker_type: &'static str,
+    scheduler_load: SchedulerLoadSender,
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
@@ -477,13 +458,11 @@ pub async fn create_multi_worker_sequences(
     } else {
         None
     };
-    let metrics_publisher =
-        Arc::new(EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?);
     let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
     let publisher = RuntimeSequencePublisher {
         event_sender,
-        metrics_publisher,
+        scheduler_load,
         worker_status_metrics,
     };
 
@@ -547,6 +526,10 @@ mod tests {
     use dynamo_kv_router::protocols::ActiveSequenceEventData;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::time::Instant;
+
+    fn scheduler_load_sender() -> SchedulerLoadSender {
+        super::super::routing_graph::scheduler_load_channel(CancellationToken::new()).0
+    }
 
     fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
         Some(PrefillLoadHint {
@@ -866,6 +849,7 @@ mod tests {
             true,
             1,
             crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
@@ -876,6 +860,7 @@ mod tests {
             true,
             3,
             crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
@@ -886,6 +871,7 @@ mod tests {
             true,
             2,
             crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
@@ -1022,6 +1008,7 @@ mod tests {
             true,
             1,
             crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;
@@ -1032,6 +1019,7 @@ mod tests {
             true,
             2,
             crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;
@@ -1178,6 +1166,7 @@ mod tests {
             true,
             1,
             crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;
@@ -1188,6 +1177,7 @@ mod tests {
             true,
             2,
             crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;

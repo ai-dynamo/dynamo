@@ -17,7 +17,7 @@ use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_d
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{KvRoutingGraph, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{
@@ -97,7 +97,7 @@ const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
 /// without the `block_on` / unsafe FFI overhead.
 pub struct Router {
     prefill_router: Arc<PrefillRouter>,
-    decode_router: Arc<KvRouter>,
+    decode_router: KvRoutingGraph,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
@@ -185,9 +185,8 @@ impl Router {
             None,
             model_name.clone(),
             actual_namespace.to_string(),
-            // ext-proc constructs no KvWorkerMonitor; overload publishing is
-            // unused on this path (matches the prior namespace-lookup miss).
-            None,
+            decode_router.owner().load_thresholds(),
+            drt.child_token(),
         );
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);

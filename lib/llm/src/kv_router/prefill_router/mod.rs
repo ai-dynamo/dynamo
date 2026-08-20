@@ -239,6 +239,9 @@ where
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     model_name: String,
+    load_thresholds: crate::discovery::LoadThresholdHandle,
+    parent_token: CancellationToken,
+    task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
 }
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
@@ -877,7 +880,8 @@ mod tests {
             None,
             "test-model".to_string(),
             "test-namespace".to_string(),
-            None,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            CancellationToken::new(),
         );
         let task_state = Arc::downgrade(&router.activation_task_state);
         let weak = Arc::downgrade(&router);
