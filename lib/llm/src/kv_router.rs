@@ -2137,6 +2137,10 @@ mod tests {
         assert!(matches!(router.indexer, Indexer::None));
         assert!(router.kv_event_subscription.is_none());
         assert!(router.shared_cache.is_none());
+        assert!(matches!(
+            router.dump_events().await,
+            Err(KvRouterError::Unsupported(message)) if message == "event dumping requires a KV indexer"
+        ));
     }
 
     async fn make_test_router_with_workers(
