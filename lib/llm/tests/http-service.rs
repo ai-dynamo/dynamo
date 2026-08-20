@@ -1560,8 +1560,12 @@ impl
 async fn test_classify_and_pooling_validation_errors_are_metered() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Classify, true);
-    service.enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Pooling, true);
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Classify, true)
+        .unwrap();
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Pooling, true)
+        .unwrap();
 
     let state = service.state_clone();
     let manager = state.manager();
