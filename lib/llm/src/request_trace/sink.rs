@@ -22,11 +22,7 @@ use super::{
     otel_sink::OtelRequestTraceSink,
 };
 
-/// One live set of sink workers. Every worker of the generation holds a clone of
-/// the `Arc`, so the generation is alive exactly while at least one worker is
-/// still running: the last worker to finish drops the final strong reference and
-/// `stopped` fires. The registry below keeps only a `Weak`, so a generation that
-/// has wound down cannot block the next one from starting.
+// Workers own the generation; the registry holds only a weak reference so shutdown permits restart.
 struct WorkerGeneration {
     stopped: CancellationToken,
 }
@@ -244,24 +240,14 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
     spawn_generation(shutdown, parse_sinks_from_env).await
 }
 
-/// Start one generation of sink workers unless a generation is already live.
-///
-/// The lock is held across sink construction so that an initialization
-/// overlapping a slow sink connect waits for, and reports, the real outcome
-/// instead of being told success while the first one is still connecting.
 async fn spawn_generation<F, Fut>(shutdown: CancellationToken, make_sinks: F) -> anyhow::Result<()>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = anyhow::Result<Vec<Arc<dyn RequestTraceSink>>>>,
 {
     let mut live = generation().lock().await;
-    // A generation stays upgradable until its last worker finishes draining, so
-    // an initialization arriving after the generation's shutdown token fired but
-    // before that drain completes joins the outgoing generation and gets no
-    // workers of its own. The window is bounded by the drain plus
-    // `sink.shutdown()`, unlike the permanent latch this replaces. Closing it
-    // would mean re-binding a shared generation's workers to the newest token,
-    // which the sharing requirement rules out.
+    // A cancelled generation stays live while workers drain; replacing it earlier would
+    // duplicate emissions, while rebinding its token would change shared shutdown semantics.
     if live.upgrade().is_some() {
         return Ok(());
     }
@@ -269,7 +255,6 @@ where
     let generation = Arc::new(WorkerGeneration {
         stopped: CancellationToken::new(),
     });
-    // On error nothing is stored, so the next initialization retries.
     let sinks = make_sinks().await?;
     spawn_workers(shutdown, sinks, &generation);
     *live = Arc::downgrade(&generation);
@@ -288,9 +273,7 @@ fn spawn_workers(
         let worker_shutdown = shutdown.clone();
         let generation = Arc::clone(generation);
         tokio::spawn(async move {
-            // Named binding on purpose: a bare `_` would drop the handle here
-            // and release the generation while this worker is still draining.
-            let _generation = generation;
+            let _generation_guard = generation;
             loop {
                 tokio::select! {
                     biased;
@@ -334,9 +317,6 @@ fn spawn_workers(
     tracing::info!(sinks = sink_count, "Request trace sinks ready");
 }
 
-/// Clone of the live generation's `stopped` token, for tests that need to await
-/// a generation winding down. It must never hand out the `Arc` itself: an
-/// awaiting caller holding one would keep the generation alive forever.
 #[cfg(test)]
 async fn live_generation_stopped() -> Option<CancellationToken> {
     generation()
@@ -407,8 +387,7 @@ mod tests {
         record
     }
 
-    /// The generation registry is process-global, so the tests that drive it end
-    /// to end must not overlap with each other.
+    // Tests that drive the process-global generation registry must not overlap.
     static GENERATION_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
     struct RecordingSink {
@@ -447,9 +426,7 @@ mod tests {
         }
     }
 
-    /// Wait for one specific record. The trace bus is process-global and other
-    /// tests in this binary publish to it, so a sink cannot assume the first
-    /// record it sees is the one its own test published.
+    // Other tests publish to the process-global bus, so filter by request ID.
     async fn await_record(
         records: &mut mpsc::UnboundedReceiver<RequestTraceRecord>,
         request_id: &str,
@@ -530,9 +507,6 @@ mod tests {
         shutdown_generation(token_two).await;
     }
 
-    /// Sequential by design: the contended path, where the second initializer
-    /// arrives while the first is still constructing sinks, is covered by
-    /// `overlapping_initializer_waits_for_slow_sink_construction` below.
     #[tokio::test]
     async fn second_initializer_reuses_live_generation() {
         let _serialized = GENERATION_TEST_LOCK.lock().await;
@@ -569,8 +543,6 @@ mod tests {
             await_record(&mut records_one, "shared-generation").await,
             "the live generation's sink stopped receiving records"
         );
-        // No worker was ever spawned for the second sink, so this cannot race
-        // with a delivery still in flight.
         assert!(
             records_two.try_recv().is_err(),
             "a duplicate worker emitted into the overlapping initializer's sink"
@@ -579,9 +551,6 @@ mod tests {
         shutdown_generation(token).await;
     }
 
-    /// The lock is held across sink construction, so an initializer that arrives
-    /// while a slow sink is still being built must wait for that construction
-    /// rather than be handed a success it cannot rely on.
     #[tokio::test]
     async fn overlapping_initializer_waits_for_slow_sink_construction() {
         let _serialized = GENERATION_TEST_LOCK.lock().await;
