@@ -17,9 +17,9 @@ from types import SimpleNamespace
 import pytest
 
 from tests.utils.pytest_parallel_gpu import (
+    _SCHEDULER_STALL_TIMEOUT_S,
     _GpuState,
     _priority_key,
-    _SCHEDULER_STALL_TIMEOUT_S,
     _select_launches,
     _TestEntry,
     _update_scheduler_stall,
