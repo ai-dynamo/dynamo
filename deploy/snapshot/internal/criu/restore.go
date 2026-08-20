@@ -124,6 +124,13 @@ func ExecuteRestore(
 		return 0, nil, fmt.Errorf("CRIU restore failed: %w", err)
 	}
 
+	// Persist on success too, not just on failure. A successful restore's log
+	// carries the phase timings, and -- more practically -- it is the only way
+	// to confirm this plumbing works at all without first causing a failure.
+	if p := persistRestoreLog(settings.WorkDir, imageDirPath); p != "" {
+		log.V(1).Info("CRIU restore log persisted", "restore_log_path", p)
+	}
+
 	return notify.restoredPID, cleanup, nil
 }
 
