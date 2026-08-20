@@ -114,6 +114,15 @@ class FakeLLM:
             self._dispatch_thread.join(timeout=5.0)
             self._dispatch_thread = None
 
+    def cancel_native(self, result: GenerationResult) -> None:
+        """Remove native request state before late engine responses arrive."""
+        result.abort()
+        with self._results_lock:
+            if self._results.get(result.client_id) is result:
+                self._results.pop(result.client_id)
+        if result.response_processor is not None:
+            result.response_processor.cancel(result.client_id)
+
     # -- the boundary ------------------------------------------------------
 
     def generate_async(

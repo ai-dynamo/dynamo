@@ -141,8 +141,7 @@ class RuntimeRustEgressWorkerHandler:
         try:
             await generation_result.wait_native()
         except (asyncio.CancelledError, GeneratorExit):
-            generation_result.abort()
-            self.processor.cancel(generation_result.client_id)
+            self.llm.cancel_native(generation_result)
             raise
 
         if False:  # pragma: no cover - keep the handler an async generator

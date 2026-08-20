@@ -186,7 +186,7 @@ impl OwnedResponseState {
 }
 
 struct RegisteredRequest {
-    response_state: OwnedResponseState,
+    response_state: Mutex<OwnedResponseState>,
     sink: Arc<dyn OwnedFrameSink>,
     calibrated_work_us: f64,
 }
@@ -201,7 +201,7 @@ pub(crate) struct BatchOutcome {
 
 #[derive(Default)]
 pub(crate) struct ProcessorCore {
-    requests: Mutex<HashMap<u64, Arc<Mutex<RegisteredRequest>>>>,
+    requests: Mutex<HashMap<u64, Arc<RegisteredRequest>>>,
     responses_processed: AtomicUsize,
     responses_dropped: AtomicUsize,
     frames_sent: AtomicUsize,
@@ -232,11 +232,11 @@ impl ProcessorCore {
         }
         requests.insert(
             client_id,
-            Arc::new(Mutex::new(RegisteredRequest {
-                response_state: OwnedResponseState::new(prompt_tokens, num_choices),
+            Arc::new(RegisteredRequest {
+                response_state: Mutex::new(OwnedResponseState::new(prompt_tokens, num_choices)),
                 sink,
                 calibrated_work_us,
-            })),
+            }),
         );
         Ok(())
     }
@@ -261,21 +261,22 @@ impl ProcessorCore {
             outcome.responses_processed += 1;
             self.responses_processed.fetch_add(1, Ordering::Relaxed);
             let mut terminal = response.is_final || response.error_msg.is_some();
-            let mut request = request
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
 
             if let Some(error) = response.error_msg {
                 request.sink.close_with_error(error);
             } else {
                 let _nvtx = dynamo_nvtx_range!("rust_egress.handle_build");
                 spin_for(request.calibrated_work_us);
-                let frames = request.response_state.apply(EngineResponse {
-                    new_token_ids: response.new_token_ids,
-                    is_final: response.is_final,
-                    finish_reasons: response.finish_reasons,
-                    stop_reasons: response.stop_reasons,
-                });
+                let frames = request
+                    .response_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .apply(EngineResponse {
+                        new_token_ids: response.new_token_ids,
+                        is_final: response.is_final,
+                        finish_reasons: response.finish_reasons,
+                        stop_reasons: response.stop_reasons,
+                    });
                 let mut sink_failed = false;
                 for frame in frames {
                     let _send_nvtx = dynamo_nvtx_range!("rust_egress.send");
@@ -296,10 +297,9 @@ impl ProcessorCore {
                     request.sink.close();
                 }
             }
-            drop(request);
 
             if terminal {
-                self.remove(client_id);
+                self.remove(client_id, &request);
                 outcome.completed_client_ids.push(client_id);
             }
         }
@@ -313,22 +313,24 @@ impl ProcessorCore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&client_id);
         if let Some(request) = request {
-            request
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .sink
-                .close();
+            request.sink.close();
             true
         } else {
             false
         }
     }
 
-    fn remove(&self, client_id: u64) {
-        self.requests
+    fn remove(&self, client_id: u64, request: &Arc<RegisteredRequest>) {
+        let mut requests = self
+            .requests
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&client_id);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if requests
+            .get(&client_id)
+            .is_some_and(|current| Arc::ptr_eq(current, request))
+        {
+            requests.remove(&client_id);
+        }
     }
 
     pub(crate) fn active_requests(&self) -> usize {
@@ -428,8 +430,8 @@ impl OwnedTokenEgress {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
     use std::time::Duration;
@@ -743,11 +745,7 @@ mod tests {
         let processing = {
             let processor = processor.clone();
             thread::spawn(move || {
-                processor.process_batch(vec![MockEngineResponse::tokens(
-                    36,
-                    vec![vec![1]],
-                    false,
-                )])
+                processor.process_batch(vec![MockEngineResponse::tokens(36, vec![vec![1]], false)])
             })
         };
         sink.wait_until_send_blocks();
