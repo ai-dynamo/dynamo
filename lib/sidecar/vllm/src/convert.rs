@@ -45,6 +45,7 @@ struct VllmTitoPlaceholder {
 struct VllmTitoProjection {
     priority: Option<i32>,
     features: Option<VllmTitoFeatures>,
+    routed_experts_prompt_start: Option<u32>,
 }
 
 fn request_has_raw_media(request: &PreprocessedRequest) -> bool {
@@ -192,7 +193,7 @@ pub(crate) fn build_generate_request(
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
             skip_special_tokens: request.output_options.skip_special_tokens,
-            routed_experts_prompt_start: None,
+            routed_experts_prompt_start: vllm_tito.routed_experts_prompt_start,
         }),
         kv: Some(kv),
         truncate_prompt_tokens: 0,
@@ -315,6 +316,7 @@ fn validate_and_remove_vllm_tito(
                 | "skip_special_tokens"
                 | "include_stop_str_in_output"
                 | "return_token_ids"
+                | "routed_experts_prompt_start"
         ) {
             return Err(client::invalid_argument(format!(
                 "extra_args.vllm_tito.sampling_params.{key} is not supported by vLLM gRPC"
@@ -329,6 +331,20 @@ fn validate_and_remove_vllm_tito(
             "extra_args.vllm_tito.sampling_params.skip_special_tokens must be a boolean",
         ));
     }
+    let routed_experts_prompt_start = sampling
+        .get("routed_experts_prompt_start")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    client::invalid_argument(
+                        "extra_args.vllm_tito.sampling_params.routed_experts_prompt_start must be an unsigned 32-bit integer",
+                    )
+                })
+        })
+        .transpose()?;
     if sampling
         .get("return_token_ids")
         .is_some_and(|value| value != &serde_json::Value::Bool(true))
@@ -404,6 +420,7 @@ fn validate_and_remove_vllm_tito(
     Ok(VllmTitoProjection {
         priority: Some(priority),
         features,
+        routed_experts_prompt_start,
     })
 }
 
