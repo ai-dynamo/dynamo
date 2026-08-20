@@ -25,25 +25,25 @@ from gpu_memory_service.integrations.common.utils import (
 )
 from gpu_memory_service.integrations.sglang.memory_saver import (
     get_gms_memory_saver_impl,
+    register_gms_hook_mode,
 )
 from gpu_memory_service.integrations.sglang.patches import (
     patch_model_runner,
     patch_static_state_for_gms,
-    patch_torch_memory_saver,
 )
 
 logger = logging.getLogger(__name__)
 
-# Apply patches at module import time.
+# Register the memory saver and apply patches at module import time.
 # This module is only imported when load_format="gms" is used.
-# Because SGLang scheduler processes use multiprocessing spawn, these patches
-# must run inside the child process.  The import chain that triggers this is:
+# Because SGLang scheduler processes use multiprocessing spawn, this setup must
+# run inside the child process.  The import chain that triggers this is:
 #   child unpickles server_args.load_format -> imports GMSModelLoader -> here.
+register_gms_hook_mode()
 patch_empty_cache()
-patch_torch_memory_saver()
 patch_model_runner()
 patch_static_state_for_gms()
-logger.info("[GMS] Applied patches")
+logger.info("[GMS] Registered memory saver and applied patches")
 
 
 class GMSModelLoader:
@@ -75,7 +75,8 @@ class GMSModelLoader:
         if impl is None:
             raise RuntimeError(
                 "GMS impl not initialized. "
-                "Ensure torch_memory_saver patch was applied before model loading."
+                "Ensure the GMS hook mode was registered and initialized "
+                "before model loading."
             )
 
         mode = impl.allocators["weights"].granted_lock_type

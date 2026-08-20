@@ -3,7 +3,6 @@
 
 """SGLang-specific patches for GPU Memory Service integration.
 
-- patch_torch_memory_saver: Routes weights and kv_cache to GMS
 - patch_model_runner: Fixes memory accounting with pre-loaded weights
 - patch_static_state_for_gms: No-ops named-buffer export/import (GMS preserves them)
 """
@@ -11,131 +10,15 @@
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
-from typing import Optional
 
-import gpu_memory_service.integrations.sglang as gms_sglang
-import torch
 from gpu_memory_service.integrations.sglang.memory_saver import (
-    GMSMemorySaverImpl,
     get_gms_memory_saver_impl,
 )
 
 logger = logging.getLogger(__name__)
 
-_torch_memory_saver_patched = False
 _model_runner_patched = False
 _static_state_patched = False
-
-
-def patch_torch_memory_saver() -> None:
-    """Patch torch_memory_saver to use GPU Memory Service implementation.
-
-    This function is idempotent - calling it multiple times has no effect.
-    This patch is only applied when GMSModelLoader is imported (load_format="gms").
-    """
-    global _torch_memory_saver_patched
-    if _torch_memory_saver_patched:
-        return
-
-    try:
-        import torch_memory_saver
-        import torch_memory_saver.entrypoint as entrypoint_module
-    except ImportError:
-        logger.debug("[GMS] torch_memory_saver not installed, skipping patch")
-        return
-
-    # Store reference to original method
-    original_ensure_initialized = entrypoint_module.TorchMemorySaver._ensure_initialized
-    original_configure_subprocess = torch_memory_saver.configure_subprocess
-
-    def patched_ensure_initialized(self):
-        """Patched _ensure_initialized that uses GPU Memory Service implementation."""
-        # Check if already initialized
-        if self._impl is not None:
-            logger.debug("[GMS] TorchMemorySaver already initialized, skipping")
-            return
-
-        # Check hook_mode - use GMS for None or explicit "gms"
-        hook_mode = self._impl_ctor_kwargs.get("hook_mode")
-        logger.info(f"[GMS] TorchMemorySaver initializing with hook_mode={hook_mode}")
-
-        if hook_mode is None or hook_mode == "gms":
-            # In GMS mode we install only the strict GMS implementation:
-            # weights + kv_cache go through GMS, generic unsupported tags stay
-            # no-ops/warnings, and cuda_graph remains unsupported.
-            # Get device from torch.cuda.current_device() (already set by SGLang)
-            device_index = torch.cuda.current_device()
-
-            # Read lock mode set by setup_gms() (defaults to RW_OR_RO)
-            gms_impl = GMSMemorySaverImpl(
-                device_index=device_index,
-                mode=gms_sglang._gms_lock_mode,
-                ro_connect_timeout_ms=gms_sglang._gms_ro_connect_timeout_ms,
-            )
-
-            # Set _impl directly (accessible via gms_impl property)
-            self._impl = gms_impl
-            logger.info(
-                "[GMS] Using GMS mode (device=%d, mode=%s)",
-                device_index,
-                gms_impl.allocators["weights"].granted_lock_type.name,
-            )
-            del self._impl_ctor_kwargs
-        else:
-            # Fall back to original implementation
-            logger.info("[GMS] Using default torch_memory_saver hook mode")
-            original_ensure_initialized(self)
-
-    entrypoint_module.TorchMemorySaver._ensure_initialized = patched_ensure_initialized
-
-    @contextmanager
-    def patched_configure_subprocess():
-        """Avoid LD_PRELOAD in GMS mode; keep upstream behavior otherwise."""
-        singleton = torch_memory_saver.torch_memory_saver
-        ctor_kwargs = getattr(singleton, "_impl_ctor_kwargs", None) or {}
-        hook_mode = ctor_kwargs.get("hook_mode")
-
-        if hook_mode is None or hook_mode == "gms":
-            logger.info("[GMS] torch_memory_saver.configure_subprocess is a no-op")
-            yield
-            return
-
-        with original_configure_subprocess():
-            yield
-
-    torch_memory_saver.configure_subprocess = patched_configure_subprocess
-
-    # Add property to access GMS impl directly from the singleton
-    @property
-    def gms_impl(self) -> Optional[GMSMemorySaverImpl]:
-        """Get the GMS impl if installed, None otherwise."""
-        if isinstance(self._impl, GMSMemorySaverImpl):
-            return self._impl
-        return None
-
-    entrypoint_module.TorchMemorySaver.gms_impl = gms_impl
-
-    # If the singleton was already initialized before this patch ran (e.g.,
-    # due to import ordering in multiprocessing spawn), reset _impl so the
-    # next call to _ensure_initialized goes through the patched version and
-    # creates GMSMemorySaverImpl instead of the default _TorchMemorySaverImpl.
-    import torch_memory_saver
-
-    singleton = torch_memory_saver.torch_memory_saver
-    if singleton._impl is not None:
-        logger.debug(
-            "[GMS] TorchMemorySaver singleton already initialized, "
-            "resetting to force GMS re-init on next use"
-        )
-        singleton._impl = None
-        # The original _ensure_initialized deletes _impl_ctor_kwargs after
-        # creating _impl.  Restore it so the patched version can read it.
-        if not hasattr(singleton, "_impl_ctor_kwargs"):
-            singleton._impl_ctor_kwargs = {}
-
-    _torch_memory_saver_patched = True
-    logger.debug("[GMS] Patched torch_memory_saver")
 
 
 def patch_model_runner() -> None:

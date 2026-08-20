@@ -568,15 +568,14 @@ The integration uses a custom worker class (`GMSWorker`) that:
 python -m dynamo.sglang \
   --model-path <model> \
   --load-format gms \
-  --enable-memory-saver \
   --mem-fraction-static 0.9
 ```
 
-The integration patches `torch_memory_saver` to route both weight and KV-cache operations through GMS:
+The integration registers the public `gms` hook mode/backend with `torch_memory_saver` and routes weights/KV through GMS:
 - Weights (`"weights"`) use the `weights` GMS tag
 - KV cache (`"kv_cache"`) uses a separate RW-only `kv_cache` GMS tag
 - Other tags are not supported in GMS mode
-- The `--enable-memory-saver` flag is required to activate the memory saver pathway
+- `setup_gms` enables the memory saver pathway automatically
 
 ### Shadow Engine Failover (Pause / Resume)
 
