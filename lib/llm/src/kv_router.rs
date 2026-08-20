@@ -16,9 +16,9 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        AdmissionCohort, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
-        RequestLifecycleLease, RequestProgressUpdater, ScheduleMode, ScheduleRequest,
-        TieredOverlapRefresher, effective_prefill_tokens,
+        AdmissionCohort, AdmissionPopulationClose, AdmissionPopulationMember, CacheHitEstimates,
+        OverlapAnalysis, OverloadedWorkerProvider, RequestLifecycleLease, RequestProgressUpdater,
+        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
@@ -684,6 +684,7 @@ where
             strict_priority,
             policy_class,
             session_id,
+            None,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -709,6 +710,7 @@ where
         strict_priority: u32,
         policy_class: Option<String>,
         session_id: Option<String>,
+        admission_population: Option<AdmissionPopulationMember>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -828,6 +830,7 @@ where
                 strict_priority,
                 policy_class,
                 session_id,
+                admission_population,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -1020,6 +1023,16 @@ where
     /// Sum of ISL tokens for requests currently parked in the scheduler queue.
     pub fn pending_isl_tokens(&self) -> usize {
         self.scheduler.pending_isl_tokens()
+    }
+
+    pub async fn close_admission_population(
+        &self,
+        policy_class: String,
+        close: AdmissionPopulationClose,
+    ) -> Result<(), KvSchedulerError> {
+        self.scheduler
+            .close_admission_population(policy_class, close)
+            .await
     }
 
     fn prefill_load_hint_for(

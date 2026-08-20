@@ -7,7 +7,7 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::AdmissionCohort,
+    scheduling::{AdmissionCohort, AdmissionPopulationMember},
     scheduling::{RequestLifecycleLease, RequestProgressUpdater, RoutingEligibility},
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
@@ -52,6 +52,7 @@ pub(super) struct SelectionOptions {
     pub(super) affinity_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
     pub(super) session_id: Option<String>,
+    pub(super) admission_population: Option<AdmissionPopulationMember>,
 }
 
 struct BestMatchArgs<'a> {
@@ -66,6 +67,7 @@ struct BestMatchArgs<'a> {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    admission_population: Option<AdmissionPopulationMember>,
     expected_output_tokens: Option<u32>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -89,6 +91,7 @@ impl KvPushRouter {
                 args.strict_priority,
                 args.policy_class,
                 args.session_id,
+                args.admission_population,
                 args.expected_output_tokens,
                 args.pinned_worker,
                 args.allowed_worker_ids,
@@ -150,6 +153,7 @@ impl KvPushRouter {
             affinity_worker,
             policy_class,
             session_id,
+            admission_population,
         } = options;
         let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
         let Some((pinned_worker_id, requested_dp_rank)) =
@@ -169,6 +173,7 @@ impl KvPushRouter {
                     strict_priority,
                     policy_class,
                     session_id,
+                    admission_population,
                     expected_output_tokens,
                     pinned_worker: None,
                     allowed_worker_ids,
@@ -241,6 +246,7 @@ impl KvPushRouter {
             strict_priority,
             policy_class,
             session_id,
+            admission_population,
             expected_output_tokens,
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,

@@ -13,9 +13,10 @@ use tokio::time::Instant;
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::queue_admission::{
-    AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest, AdmissionTicket,
-    ClassAdmissionAction, PolicyClassAdmissionPolicies, PolicyClassAdmissionPolicy,
-    RequestProgress, RequestProgressUpdater, WorkerEligibility, WorkerPlacement,
+    AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionPopulationClose,
+    AdmissionPopulationMember, AdmissionRequest, AdmissionTicket, ClassAdmissionAction,
+    PolicyClassAdmissionPolicies, PolicyClassAdmissionPolicy, RequestProgress,
+    RequestProgressUpdater, WorkerEligibility, WorkerPlacement,
 };
 use super::types::KvSchedulerError;
 use crate::protocols::WorkerWithDpRank;
@@ -525,6 +526,7 @@ impl<T> PolicyQueue<T> {
         session_id: Option<&str>,
         context_tokens: usize,
         pinned_worker: Option<WorkerWithDpRank>,
+        population: Option<AdmissionPopulationMember>,
         worker_eligibility: WorkerEligibility,
     ) -> Option<(AdmissionTicket, RequestProgressUpdater, AdmissionDecision)> {
         let policy = &mut self.classes[class_index].admission_policy.as_mut()?.policy;
@@ -534,9 +536,36 @@ impl<T> PolicyQueue<T> {
         let (progress, updater) = RequestProgress::new(context_tokens);
         let decision = policy.admit(
             AdmissionRequest::with_progress(id, session_id, progress, worker_eligibility)
-                .with_pinned_worker(pinned_worker),
+                .with_pinned_worker(pinned_worker)
+                .with_population(population),
         );
         Some((ticket, updater, decision))
+    }
+
+    pub(crate) fn close_admission_population(
+        &mut self,
+        class_index: usize,
+        close: AdmissionPopulationClose,
+    ) -> Result<Vec<ClassAdmissionAction>, KvSchedulerError> {
+        let class_name = self.classes[class_index].config.name.clone();
+        let Some(scheduled) = &mut self.classes[class_index].admission_policy else {
+            return Err(KvSchedulerError::BookingFailed(format!(
+                "policy class {class_name:?} has no admission policy"
+            )));
+        };
+        scheduled
+            .policy
+            .close_population(close)
+            .map(|actions| {
+                actions
+                    .into_iter()
+                    .map(|action| ClassAdmissionAction {
+                        class_index,
+                        action,
+                    })
+                    .collect()
+            })
+            .map_err(KvSchedulerError::BookingFailed)
     }
 
     pub(crate) fn dispatched(
@@ -1372,8 +1401,16 @@ policy_classes:
         .unwrap();
         let eligibility = || WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([]));
 
-        let first = queue.admit(0, None, 1, None, eligibility()).unwrap().0.id;
-        let second = queue.admit(1, None, 1, None, eligibility()).unwrap().0.id;
+        let first = queue
+            .admit(0, None, 1, None, None, eligibility())
+            .unwrap()
+            .0
+            .id;
+        let second = queue
+            .admit(1, None, 1, None, None, eligibility())
+            .unwrap()
+            .0
+            .id;
 
         assert_ne!(first, second);
     }

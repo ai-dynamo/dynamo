@@ -21,8 +21,8 @@ use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::{
-    AdmissionAction, AdmissionCohort, AdmissionDecision, AdmissionTicket, ClassAdmissionAction,
-    PolicyClassAdmissionPolicies, RequestProgressUpdater, WorkerEligibility,
+    AdmissionAction, AdmissionCohort, AdmissionDecision, AdmissionPopulationClose, AdmissionTicket,
+    ClassAdmissionAction, PolicyClassAdmissionPolicies, RequestProgressUpdater, WorkerEligibility,
     WorkerEligibilitySnapshot, WorkerPlacement,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
@@ -82,6 +82,11 @@ enum AdmissionCommand {
     Reconcile {
         force: bool,
         ack_tx: oneshot::Sender<()>,
+    },
+    ClosePopulation {
+        policy_class: String,
+        close: AdmissionPopulationClose,
+        ack_tx: oneshot::Sender<Result<(), KvSchedulerError>>,
     },
     Dispatched {
         request_id: String,
@@ -625,6 +630,30 @@ impl<
         self.send_reconcile(false).await;
     }
 
+    pub async fn close_admission_population(
+        &self,
+        policy_class: String,
+        close: AdmissionPopulationClose,
+    ) -> Result<(), KvSchedulerError> {
+        if !self.admission_enabled {
+            return Err(KvSchedulerError::BookingFailed(
+                "scheduler has no admission policy".to_string(),
+            ));
+        }
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.admission_tx
+            .send(AdmissionCommand::ClosePopulation {
+                policy_class,
+                close,
+                ack_tx,
+            })
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+        ack_rx
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
+    }
+
     async fn send_reconcile(&self, force: bool) {
         if !self.admission_enabled {
             self.update().await;
@@ -735,6 +764,24 @@ impl<
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(());
+                }
+                AdmissionCommand::ClosePopulation {
+                    policy_class,
+                    close,
+                    ack_tx,
+                } => {
+                    let result = self.handle_close_population(&policy_class, close);
+                    match result {
+                        Ok(made_ready) => {
+                            if made_ready {
+                                self.handle_update(None).await;
+                            }
+                            let _ = ack_tx.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = ack_tx.send(Err(error));
+                        }
+                    }
                 }
                 AdmissionCommand::Dispatched { request_id, ticket } => {
                     if self.handle_dispatched(&request_id, ticket)
@@ -852,6 +899,7 @@ impl<
                     request.session_id.as_deref(),
                     request.isl_tokens,
                     request.pinned_worker,
+                    request.admission_population.clone(),
                     worker_eligibility,
                 )
                 .map(|(ticket, progress, decision)| {
@@ -886,6 +934,10 @@ impl<
                     }
                 }
                 AdmissionDecision::Defer => deferred = true,
+                AdmissionDecision::Reject(message) => {
+                    request.respond(Err(KvSchedulerError::BookingFailed(message.clone())));
+                    return (self.abort_admission(request_admission.ticket), false);
+                }
             }
         }
 
@@ -985,6 +1037,27 @@ impl<
             false
         };
         (made_ready, true)
+    }
+
+    fn handle_close_population(
+        &mut self,
+        policy_class: &str,
+        close: AdmissionPopulationClose,
+    ) -> Result<bool, KvSchedulerError> {
+        let class_index = self
+            .profile
+            .classes()
+            .iter()
+            .position(|class| class.name == policy_class)
+            .ok_or_else(|| {
+                KvSchedulerError::BookingFailed(format!(
+                    "unknown admission policy class {policy_class:?}"
+                ))
+            })?;
+        let actions = self
+            .pending
+            .close_admission_population(class_index, close)?;
+        Ok(self.apply_admission_actions(actions))
     }
 
     fn should_queue(
@@ -1764,8 +1837,9 @@ mod tests {
     use crate::scheduling::OverlapSignals;
     use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
     use crate::scheduling::{
-        AdmissionEvent, AdmissionId, AdmissionRequest, PolicyClassAdmissionPolicy,
-        RankBalancedCohortAdmissionPolicy, RefreshedOverlap, RequestProgress, RouterPolicyConfig,
+        AdmissionEvent, AdmissionId, AdmissionPopulationClose, AdmissionPopulationMember,
+        AdmissionRequest, PolicyClassAdmissionPolicy, RankBalancedCohortAdmissionPolicy,
+        RefreshedOverlap, RequestProgress, RouterPolicyConfig,
     };
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -2315,6 +2389,7 @@ mod tests {
             strict_priority: 0,
             policy_class: None,
             session_id: None,
+            admission_population: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -2559,6 +2634,65 @@ policy_classes:
         (queue, slots)
     }
 
+    fn make_explicit_population_queue() -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let profile = policy_profile(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: standard
+    policy_family: standard
+    cache_bucket: all
+    prefill_busy_threshold: 0
+    quantum: 1
+"#,
+        );
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            16,
+            HashMap::from([(0, (0, 4))]),
+            false,
+            0,
+            "prefill",
+        ));
+        let (_cfg_tx, cfg_rx) = watch::channel(HashMap::from([(
+            0,
+            SimpleWorkerConfig {
+                data_parallel_size: 4,
+                max_num_batched_tokens: Some(1_000),
+                ..Default::default()
+            },
+        )]));
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert(
+            "standard".to_owned(),
+            Box::new(
+                RankBalancedCohortAdmissionPolicy::new_with_population_mode(4, 9, true).unwrap(),
+            ),
+        );
+        let queue = Arc::new(
+            SchedulerQueue::new_with_policy_profile(
+                Arc::clone(&slots),
+                cfg_rx,
+                profile,
+                16,
+                DefaultWorkerSelector::new(None, "prefill"),
+                None,
+                None,
+                None,
+                Duration::from_secs(60),
+                policies,
+            )
+            .unwrap(),
+        );
+        (queue, slots)
+    }
+
     #[tokio::test]
     async fn rank_balanced_cohort_is_placed_and_released_in_one_actor_turn() {
         let (queue, slots) = make_rank_balanced_queue();
@@ -2623,6 +2757,47 @@ policy_classes:
         assert_eq!(queue.pending_count(), 0);
 
         drop(lease);
+        queue.update().await;
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test]
+    async fn explicit_population_close_releases_partial_tail_through_actor() {
+        let (queue, slots) = make_explicit_population_queue();
+        let mut responses = Vec::new();
+        let mut leases = Vec::new();
+        for index in 0..3 {
+            let (mut request, response) = make_admission_request(&format!("tail-{index}"), 64);
+            request.admission_population =
+                Some(AdmissionPopulationMember::new("finite-tail".to_string(), index).unwrap());
+            leases.push(enqueue_with_lease(&queue, request).await);
+            responses.push(response);
+        }
+        assert_eq!(queue.pending_count(), 3);
+        assert!(responses.iter_mut().all(|response| matches!(
+            response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        )));
+
+        queue
+            .close_admission_population(
+                "standard".to_string(),
+                AdmissionPopulationClose::new("finite-tail".to_string(), 3).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        for response in responses {
+            let selected = tokio::time::timeout(Duration::from_secs(1), response)
+                .await
+                .expect("closed partial population was not released")
+                .unwrap()
+                .unwrap();
+            assert!(selected.admission_cohort.is_none());
+        }
+        assert_eq!(queue.pending_count(), 0);
+
+        drop(leases);
         queue.update().await;
         slots.assert_completely_drained(decay_now());
     }

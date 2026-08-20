@@ -11,8 +11,8 @@ use dynamo_kv_router::scheduling::{
     RankBalancedCohortAdmissionPolicy,
 };
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdmissionPopulationClose, KvSchedulerError, LocalScheduler, OverloadedWorkerProvider,
+    PotentialLoad, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -435,6 +435,19 @@ where
 
     pub fn pending_isl_tokens(&self) -> usize {
         self.inner.pending_isl_tokens()
+    }
+
+    pub async fn close_admission_population(
+        &self,
+        policy_class: String,
+        close: AdmissionPopulationClose,
+    ) -> Result<(), KvSchedulerError> {
+        let result = self
+            .inner
+            .close_admission_population(policy_class, close)
+            .await;
+        self.update_queue_metrics();
+        result
     }
 
     pub fn worker_type(&self) -> &'static str {

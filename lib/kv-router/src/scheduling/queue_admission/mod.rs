@@ -162,6 +162,78 @@ pub struct AdmissionCohort {
     index: u32,
 }
 
+/// One request's position in a producer-owned finite admission population.
+///
+/// Population indices are unique and zero-based within `id`. The producer may
+/// submit members concurrently and in any arrival order. It closes the
+/// population separately with [`AdmissionPopulationClose`], whose
+/// `final_count` defines the complete index range. This lets an admission
+/// policy distinguish a delayed member from a true terminal tail without a
+/// timer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionPopulationMember {
+    id: String,
+    index: u64,
+}
+
+const MAX_ADMISSION_POPULATION_ID_BYTES: usize = 256;
+
+impl AdmissionPopulationMember {
+    pub fn new(id: String, index: u64) -> Result<Self, String> {
+        if id.is_empty() {
+            return Err("admission population id must not be empty".to_string());
+        }
+        if id.len() > MAX_ADMISSION_POPULATION_ID_BYTES {
+            return Err(format!(
+                "admission population id exceeds {MAX_ADMISSION_POPULATION_ID_BYTES} bytes"
+            ));
+        }
+        Ok(Self { id, index })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn index(&self) -> u64 {
+        self.index
+    }
+}
+
+/// Producer declaration that no population member exists at or beyond
+/// `final_count`.
+///
+/// A close may race ahead of request arrival. Policies must not release a
+/// residual tail until every index in `0..final_count` has been observed or
+/// explicitly aborted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionPopulationClose {
+    id: String,
+    final_count: u64,
+}
+
+impl AdmissionPopulationClose {
+    pub fn new(id: String, final_count: u64) -> Result<Self, String> {
+        if id.is_empty() {
+            return Err("admission population id must not be empty".to_string());
+        }
+        if id.len() > MAX_ADMISSION_POPULATION_ID_BYTES {
+            return Err(format!(
+                "admission population id exceeds {MAX_ADMISSION_POPULATION_ID_BYTES} bytes"
+            ));
+        }
+        Ok(Self { id, final_count })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn final_count(&self) -> u64 {
+        self.final_count
+    }
+}
+
 impl AdmissionCohort {
     pub fn new(id: String, size: u32, index: u32) -> Result<Self, String> {
         if id.is_empty() {
@@ -203,6 +275,7 @@ pub struct AdmissionRequest<'a> {
     progress: RequestProgress,
     worker_eligibility: WorkerEligibility,
     pinned_worker: Option<WorkerWithDpRank>,
+    population: Option<AdmissionPopulationMember>,
 }
 
 impl<'a> AdmissionRequest<'a> {
@@ -231,11 +304,17 @@ impl<'a> AdmissionRequest<'a> {
             progress,
             worker_eligibility,
             pinned_worker: None,
+            population: None,
         }
     }
 
     pub(crate) fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
         self.pinned_worker = pinned_worker;
+        self
+    }
+
+    pub(crate) fn with_population(mut self, population: Option<AdmissionPopulationMember>) -> Self {
+        self.population = population;
         self
     }
 
@@ -266,6 +345,10 @@ impl<'a> AdmissionRequest<'a> {
     pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
         self.pinned_worker
     }
+
+    pub fn population(&self) -> Option<&AdmissionPopulationMember> {
+        self.population.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,13 +361,15 @@ pub enum WorkerPlacement {
     Exact(WorkerWithDpRank),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdmissionDecision {
     /// Continue through normal scheduling without a policy lifecycle.
     Bypass,
     Ready(WorkerPlacement),
     Defer,
+    /// Reject malformed or contradictory policy-owned lifecycle metadata.
+    Reject(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +424,16 @@ pub trait PolicyClassAdmissionPolicy: Send {
 
     fn on_event(&mut self, _event: AdmissionEvent) -> Vec<AdmissionAction> {
         Vec::new()
+    }
+
+    /// Close one producer-owned population. Implementations that use explicit
+    /// populations must validate duplicate or contradictory closes and return
+    /// every newly-ready action in the same actor turn.
+    fn close_population(
+        &mut self,
+        _close: AdmissionPopulationClose,
+    ) -> Result<Vec<AdmissionAction>, String> {
+        Err("admission policy does not support explicit populations".to_string())
     }
 
     /// Maximum time requested between reconciliation opportunities. A returned
@@ -458,5 +553,13 @@ mod tests {
         assert!(snapshot.structurally_allows(overloaded));
         assert!(snapshot.has_available_worker());
         assert!(snapshot.has_structural_worker());
+    }
+
+    #[test]
+    fn admission_population_ids_are_bounded() {
+        assert!(AdmissionPopulationMember::new("x".repeat(256), 0).is_ok());
+        assert!(AdmissionPopulationMember::new("x".repeat(257), 0).is_err());
+        assert!(AdmissionPopulationClose::new("x".repeat(256), 1).is_ok());
+        assert!(AdmissionPopulationClose::new("x".repeat(257), 1).is_err());
     }
 }

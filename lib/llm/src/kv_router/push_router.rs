@@ -5,7 +5,9 @@ use std::{sync::Arc, time::Duration};
 
 use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerWithDpRank},
-    scheduling::{AdmissionCohort, RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS},
+    scheduling::{
+        AdmissionCohort, AdmissionPopulationMember, RANK_BALANCED_COHORT_BYPASS_POLICY_CLASS,
+    },
 };
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
@@ -45,6 +47,34 @@ const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 const PREFILL_COHORT_ANNOTATION_PREFIX: &str = "sglang_prefill_cohort_v1:";
 const RANK_BALANCED_PASSTHROUGH_ANNOTATION: &str =
     "sglang_prefill_rank_balanced_admission_v1:passthrough";
+const ADMISSION_POPULATION_ID_METADATA_KEY: &str = "admission-population-id";
+const ADMISSION_POPULATION_INDEX_METADATA_KEY: &str = "admission-population-index";
+
+fn admission_population(
+    request: &SingleIn<PreprocessedRequest>,
+) -> Result<Option<AdmissionPopulationMember>, Error> {
+    let id = request.metadata().get(ADMISSION_POPULATION_ID_METADATA_KEY);
+    let index = request
+        .metadata()
+        .get(ADMISSION_POPULATION_INDEX_METADATA_KEY);
+    match (id, index) {
+        (None, None) => Ok(None),
+        (Some(id), Some(index)) => {
+            let index = index.parse::<u64>().map_err(|error| {
+                anyhow::anyhow!(
+                    "invalid {ADMISSION_POPULATION_INDEX_METADATA_KEY} {index:?}: {error}"
+                )
+            })?;
+            AdmissionPopulationMember::new(id.clone(), index)
+                .map(Some)
+                .map_err(anyhow::Error::msg)
+        }
+        _ => Err(anyhow::anyhow!(
+            "{ADMISSION_POPULATION_ID_METADATA_KEY} and \
+             {ADMISSION_POPULATION_INDEX_METADATA_KEY} must be provided together"
+        )),
+    }
+}
 
 fn append_prefill_admission_cohort(
     phase: RequestPhase,
@@ -198,6 +228,7 @@ impl KvPushRouter {
             .agent_context
             .as_ref()
             .map(|context| context.session_id.clone());
+        let admission_population = admission_population(request)?;
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
         let selection_future = self
@@ -211,6 +242,7 @@ impl KvPushRouter {
                     affinity_worker,
                     policy_class,
                     session_id,
+                    admission_population,
                 },
             )
             .instrument(tracing::info_span!("kv_router.select_worker"));
@@ -784,6 +816,35 @@ mod tests {
         assert!(annotations.is_empty());
     }
 
+    #[test]
+    fn admission_population_metadata_requires_an_exact_id_index_pair() {
+        let mut valid = Context::new(request());
+        valid.insert_metadata(ADMISSION_POPULATION_ID_METADATA_KEY, "producer-7");
+        valid.insert_metadata(ADMISSION_POPULATION_INDEX_METADATA_KEY, "42");
+        let member = admission_population(&valid).unwrap().unwrap();
+        assert_eq!(member.id(), "producer-7");
+        assert_eq!(member.index(), 42);
+
+        let mut missing_index = Context::new(request());
+        missing_index.insert_metadata(ADMISSION_POPULATION_ID_METADATA_KEY, "producer-7");
+        assert!(
+            admission_population(&missing_index)
+                .unwrap_err()
+                .to_string()
+                .contains("must be provided together")
+        );
+
+        let mut invalid_index = Context::new(request());
+        invalid_index.insert_metadata(ADMISSION_POPULATION_ID_METADATA_KEY, "producer-7");
+        invalid_index.insert_metadata(ADMISSION_POPULATION_INDEX_METADATA_KEY, "not-an-index");
+        assert!(
+            admission_population(&invalid_index)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid admission-population-index")
+        );
+    }
+
     struct NoopSequencePublisher;
 
     impl SequencePublisher for NoopSequencePublisher {
@@ -886,6 +947,7 @@ mod tests {
                     strict_priority: 0,
                     policy_class: None,
                     session_id: None,
+                    admission_population: None,
                     overlap: OverlapSignals::default(),
                     shared_cache_hits: None,
                 })

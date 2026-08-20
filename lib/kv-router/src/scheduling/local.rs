@@ -16,7 +16,7 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
-use super::queue_admission::PolicyClassAdmissionPolicies;
+use super::queue_admission::{AdmissionPopulationClose, PolicyClassAdmissionPolicies};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
@@ -269,6 +269,7 @@ where
             strict_priority,
             policy_class,
             session_id,
+            admission_population,
             overlap,
             shared_cache_hits,
         } = request;
@@ -287,6 +288,7 @@ where
             strict_priority,
             policy_class,
             session_id,
+            admission_population,
             overlap,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
@@ -444,6 +446,7 @@ where
             strict_priority,
             policy_class,
             session_id: None,
+            admission_population: None,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -499,6 +502,16 @@ where
 
     pub fn pending_isl_tokens(&self) -> usize {
         self.queue.pending_isl_tokens()
+    }
+
+    pub async fn close_admission_population(
+        &self,
+        policy_class: String,
+        close: AdmissionPopulationClose,
+    ) -> Result<(), KvSchedulerError> {
+        self.queue
+            .close_admission_population(policy_class, close)
+            .await
     }
 
     pub fn class_queue_stats(&self, class_index: usize) -> Option<ClassQueueStats> {
@@ -846,6 +859,7 @@ mod tests {
             strict_priority: 0,
             policy_class: None,
             session_id: None,
+            admission_population: None,
             overlap: OverlapSignals::default(),
             shared_cache_hits: None,
         }

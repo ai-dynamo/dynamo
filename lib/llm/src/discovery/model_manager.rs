@@ -216,6 +216,66 @@ impl ModelManager {
             .map(|entry| entry.value().clone())
     }
 
+    /// Resolve the sole decode-side prefill router for one model namespace.
+    ///
+    /// Admission-population control must target an exact deployment namespace;
+    /// it must never pick one of several topologies by discovery order.
+    pub fn get_prefill_router(
+        &self,
+        model_name: &str,
+        namespace: &str,
+    ) -> Result<Arc<crate::kv_router::PrefillRouter>, ModelManagerError> {
+        let model = self
+            .get_model(model_name)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model_name.to_string()))?;
+        let worker_set = model
+            .unique_prefill_routed_worker_set_in_namespace(namespace)
+            .map_err(|error| ModelManagerError::ModelUnavailable(error.to_string()))?
+            .ok_or_else(|| {
+                ModelManagerError::ModelUnavailable(format!(
+                    "model {model_name:?} namespace {namespace:?} has no active prefill-routed decode topology"
+                ))
+            })?;
+        worker_set.prefill_router.clone().ok_or_else(|| {
+            ModelManagerError::ModelUnavailable(format!(
+                "model {model_name:?} namespace {namespace:?} has no prefill router"
+            ))
+        })
+    }
+
+    /// Resolve an exact prefill topology, or require that the model has only
+    /// one prefill-routed namespace when the caller omits it.
+    pub fn resolve_prefill_router(
+        &self,
+        model_name: &str,
+        namespace: Option<&str>,
+    ) -> Result<(String, Arc<crate::kv_router::PrefillRouter>), ModelManagerError> {
+        if let Some(namespace) = namespace {
+            return self
+                .get_prefill_router(model_name, namespace)
+                .map(|router| (namespace.to_string(), router));
+        }
+
+        let model = self
+            .get_model(model_name)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model_name.to_string()))?;
+        let mut namespaces = model
+            .worker_sets()
+            .into_iter()
+            .filter(|worker_set| worker_set.prefill_router.is_some())
+            .map(|worker_set| worker_set.namespace().to_string())
+            .collect::<Vec<_>>();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        let [namespace] = namespaces.as_slice() else {
+            return Err(ModelManagerError::ModelUnavailable(format!(
+                "model {model_name:?} requires exactly one prefill-routed namespace when namespace is omitted; found {namespaces:?}"
+            )));
+        };
+        self.get_prefill_router(model_name, namespace)
+            .map(|router| (namespace.clone(), router))
+    }
+
     /// Remove a Model if it has no remaining WorkerSets.
     /// Uses atomic remove_if to avoid TOCTOU race between checking is_empty and removing.
     pub fn remove_model_if_empty(&self, model_name: &str) {
@@ -3010,6 +3070,49 @@ mod tests {
             name: "generate".to_string(),
         });
         worker_set
+    }
+
+    fn add_prefill_routed_topology(mm: &ModelManager, model: &str, namespace: &str) {
+        mm.add_worker_set(
+            model,
+            &format!("{namespace}:prefill"),
+            make_typed_endpoint_worker_set(
+                namespace,
+                "prefill",
+                crate::worker_type::WorkerType::Prefill,
+            ),
+        );
+        mm.add_worker_set(
+            model,
+            &format!("{namespace}:decode"),
+            make_endpoint_worker_set_with_prefill_router(namespace, "decode"),
+        );
+    }
+
+    #[test]
+    fn resolve_prefill_router_requires_unique_namespace_when_omitted() {
+        let mm = ModelManager::new();
+        add_prefill_routed_topology(&mm, "llama", "ns1");
+
+        let (namespace, _) = mm.resolve_prefill_router("llama", None).unwrap();
+        assert_eq!(namespace, "ns1");
+
+        add_prefill_routed_topology(&mm, "llama", "ns2");
+        let Err(error) = mm.resolve_prefill_router("llama", None) else {
+            panic!("omitted namespace must reject an ambiguous topology")
+        };
+        assert!(matches!(error, ModelManagerError::ModelUnavailable(_)));
+        assert!(error.to_string().contains("exactly one"));
+    }
+
+    #[test]
+    fn resolve_prefill_router_honors_explicit_namespace() {
+        let mm = ModelManager::new();
+        add_prefill_routed_topology(&mm, "llama", "ns1");
+        add_prefill_routed_topology(&mm, "llama", "ns2");
+
+        let (namespace, _) = mm.resolve_prefill_router("llama", Some("ns2")).unwrap();
+        assert_eq!(namespace, "ns2");
     }
 
     /// Calling deactivate on a non-existent model must not panic.

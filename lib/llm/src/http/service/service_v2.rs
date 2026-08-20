@@ -1084,6 +1084,10 @@ impl HttpServiceConfigBuilder {
                 state.clone(),
                 None,
             ));
+            system_routes.push(super::admission_population::admission_population_router(
+                state.clone(),
+                None,
+            ));
         } else {
             tracing::info!(
                 env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,

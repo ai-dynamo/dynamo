@@ -8,6 +8,7 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
+use dynamo_kv_router::scheduling::AdmissionPopulationClose;
 use dynamo_runtime::{
     pipeline::{ManyOut, SingleIn},
     protocols::{annotated::Annotated, maybe_error::MaybeError},
@@ -29,6 +30,25 @@ pub(super) enum InnerPrefillRouter {
 }
 
 impl InnerPrefillRouter {
+    pub(super) async fn close_admission_population(
+        &self,
+        policy_class: String,
+        close: AdmissionPopulationClose,
+    ) -> Result<()> {
+        match self {
+            InnerPrefillRouter::KvRouter(router) => {
+                router
+                    .chooser
+                    .close_admission_population(policy_class, close)
+                    .await?;
+                Ok(())
+            }
+            InnerPrefillRouter::SimpleRouter(_) => {
+                anyhow::bail!("explicit admission populations require a KV-aware prefill router")
+            }
+        }
+    }
+
     pub(super) async fn select_and_dispatch_prefill<M, F>(
         &self,
         request: SingleIn<PreprocessedRequest>,
@@ -49,6 +69,26 @@ impl InnerPrefillRouter {
 }
 
 impl PrefillRouter {
+    /// Close a producer-owned admission population on this prefill router.
+    ///
+    /// The close is serialized by the scheduler actor with member admission, so
+    /// it may safely race request arrival. `final_count` is the authoritative
+    /// zero-based index bound; no idle timer is used to infer the tail.
+    pub async fn close_admission_population(
+        &self,
+        policy_class: String,
+        close: AdmissionPopulationClose,
+    ) -> Result<()> {
+        if self.lifecycle_state() != super::PrefillLifecycleState::Active {
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        }
+        self.prefill_router
+            .get()
+            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?
+            .close_admission_population(policy_class, close)
+            .await
+    }
+
     pub(super) async fn consume_prefill_stream(
         mut prefill_response: ManyOut<Annotated<LLMEngineOutput>>,
         tracker: Option<Arc<RequestTracker>>,
