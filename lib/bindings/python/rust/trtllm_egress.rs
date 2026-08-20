@@ -1,7 +1,36 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use dynamo_runtime::dynamo_nvtx_range;
+use dynamo_runtime::protocols::annotated::Annotated;
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
+
+#[cfg(not(test))]
+use pyo3::exceptions::PyValueError;
+#[cfg(not(test))]
+use pyo3::prelude::*;
+#[cfg(not(test))]
+use pyo3::types::PyModule;
+#[cfg(not(test))]
+use pythonize::depythonize;
+
+#[cfg(not(test))]
+pub fn add_to_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<OwnedTokenEgress>()?;
+    Ok(())
+}
+
+pub(crate) trait OwnedFrameSink: Send + Sync {
+    fn send(&self, frame: Annotated<Value>) -> Result<(), String>;
+    fn close(&self);
+    fn close_with_error(&self, message: String);
+}
 
 #[derive(Debug)]
 pub(crate) struct EngineResponse {
@@ -9,6 +38,46 @@ pub(crate) struct EngineResponse {
     pub(crate) is_final: bool,
     pub(crate) finish_reasons: Option<Vec<Option<String>>>,
     pub(crate) stop_reasons: Option<Vec<Option<String>>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct MockEngineResponse {
+    client_id: u64,
+    #[serde(default)]
+    new_token_ids: Vec<Vec<u32>>,
+    #[serde(default)]
+    is_final: bool,
+    #[serde(default)]
+    finish_reasons: Option<Vec<Option<String>>>,
+    #[serde(default)]
+    stop_reasons: Option<Vec<Option<String>>>,
+    #[serde(default)]
+    error_msg: Option<String>,
+}
+
+#[cfg(test)]
+impl MockEngineResponse {
+    fn tokens(client_id: u64, new_token_ids: Vec<Vec<u32>>, is_final: bool) -> Self {
+        Self {
+            client_id,
+            new_token_ids,
+            is_final,
+            finish_reasons: None,
+            stop_reasons: None,
+            error_msg: None,
+        }
+    }
+
+    fn error(client_id: u64, error_msg: String) -> Self {
+        Self {
+            client_id,
+            new_token_ids: Vec::new(),
+            is_final: true,
+            finish_reasons: None,
+            stop_reasons: None,
+            error_msg: Some(error_msg),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -116,12 +185,283 @@ impl OwnedResponseState {
     }
 }
 
+struct RegisteredRequest {
+    response_state: OwnedResponseState,
+    sink: Arc<dyn OwnedFrameSink>,
+    calibrated_work_us: f64,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct BatchOutcome {
+    pub(crate) completed_client_ids: Vec<u64>,
+    pub(crate) responses_processed: usize,
+    pub(crate) responses_dropped: usize,
+    pub(crate) frames_sent: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct ProcessorCore {
+    requests: Mutex<HashMap<u64, Arc<Mutex<RegisteredRequest>>>>,
+    responses_processed: AtomicUsize,
+    responses_dropped: AtomicUsize,
+    frames_sent: AtomicUsize,
+}
+
+impl ProcessorCore {
+    pub(crate) fn register(
+        &self,
+        client_id: u64,
+        prompt_tokens: usize,
+        num_choices: usize,
+        sink: Arc<dyn OwnedFrameSink>,
+        calibrated_work_us: f64,
+    ) -> Result<(), String> {
+        if num_choices == 0 {
+            return Err("num_choices must be at least 1".to_string());
+        }
+        if !calibrated_work_us.is_finite() || calibrated_work_us < 0.0 {
+            return Err("calibrated_work_us must be finite and non-negative".to_string());
+        }
+
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if requests.contains_key(&client_id) {
+            return Err(format!("client {client_id} is already registered"));
+        }
+        requests.insert(
+            client_id,
+            Arc::new(Mutex::new(RegisteredRequest {
+                response_state: OwnedResponseState::new(prompt_tokens, num_choices),
+                sink,
+                calibrated_work_us,
+            })),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn process_batch(&self, responses: Vec<MockEngineResponse>) -> BatchOutcome {
+        let mut outcome = BatchOutcome::default();
+        for response in responses {
+            let client_id = response.client_id;
+            let request = {
+                self.requests
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&client_id)
+                    .cloned()
+            };
+            let Some(request) = request else {
+                outcome.responses_dropped += 1;
+                self.responses_dropped.fetch_add(1, Ordering::Relaxed);
+                continue;
+            };
+
+            outcome.responses_processed += 1;
+            self.responses_processed.fetch_add(1, Ordering::Relaxed);
+            let terminal = response.is_final || response.error_msg.is_some();
+            let mut request = request
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+            if let Some(error) = response.error_msg {
+                request.sink.close_with_error(error);
+            } else {
+                let _nvtx = dynamo_nvtx_range!("rust_egress.handle_build");
+                spin_for(request.calibrated_work_us);
+                let frames = request.response_state.apply(EngineResponse {
+                    new_token_ids: response.new_token_ids,
+                    is_final: response.is_final,
+                    finish_reasons: response.finish_reasons,
+                    stop_reasons: response.stop_reasons,
+                });
+                for frame in frames {
+                    let _send_nvtx = dynamo_nvtx_range!("rust_egress.send");
+                    match request.sink.send(Annotated::from_data(frame)) {
+                        Ok(()) => {
+                            outcome.frames_sent += 1;
+                            self.frames_sent.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(error) => {
+                            request.sink.close_with_error(error);
+                            break;
+                        }
+                    }
+                }
+                if response.is_final {
+                    request.sink.close();
+                }
+            }
+            drop(request);
+
+            if terminal {
+                self.remove(client_id);
+                outcome.completed_client_ids.push(client_id);
+            }
+        }
+        outcome
+    }
+
+    pub(crate) fn cancel(&self, client_id: u64) -> bool {
+        let request = self
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&client_id);
+        if let Some(request) = request {
+            request
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .sink
+                .close();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove(&self, client_id: u64) {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&client_id);
+    }
+
+    pub(crate) fn active_requests(&self) -> usize {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+}
+
+fn spin_for(work_us: f64) {
+    if work_us <= 0.0 {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs_f64(work_us / 1_000_000.0);
+    while Instant::now() < deadline {
+        std::hint::spin_loop();
+    }
+}
+
+#[cfg(not(test))]
+#[pyclass]
+pub struct OwnedTokenEgress {
+    core: Arc<ProcessorCore>,
+}
+
+#[cfg(not(test))]
+#[pymethods]
+impl OwnedTokenEgress {
+    #[new]
+    fn new() -> Self {
+        Self {
+            core: Arc::new(ProcessorCore::default()),
+        }
+    }
+
+    #[pyo3(signature = (client_id, prompt_tokens, num_choices, response_sender, calibrated_work_us=0.0))]
+    fn register(
+        &self,
+        client_id: u64,
+        prompt_tokens: usize,
+        num_choices: usize,
+        response_sender: PyRef<'_, crate::push_egress::ResponseSender>,
+        calibrated_work_us: f64,
+    ) -> PyResult<()> {
+        self.core
+            .register(
+                client_id,
+                prompt_tokens,
+                num_choices,
+                response_sender.owned_sink(),
+                calibrated_work_us,
+            )
+            .map_err(PyValueError::new_err)
+    }
+
+    fn process_mock_batch(
+        &self,
+        py: Python<'_>,
+        responses: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<u64>> {
+        let _convert_nvtx = dynamo_nvtx_range!("pybridge.owned_response_convert");
+        let responses = depythonize::<Vec<MockEngineResponse>>(responses).map_err(|error| {
+            PyValueError::new_err(format!("invalid mock engine response batch: {error}"))
+        })?;
+        drop(_convert_nvtx);
+
+        let core = self.core.clone();
+        let outcome = py.allow_threads(move || core.process_batch(responses));
+        Ok(outcome.completed_client_ids)
+    }
+
+    fn cancel(&self, client_id: u64) -> bool {
+        self.core.cancel(client_id)
+    }
+
+    #[getter]
+    fn active_requests(&self) -> usize {
+        self.core.active_requests()
+    }
+
+    #[getter]
+    fn responses_processed(&self) -> usize {
+        self.core.responses_processed.load(Ordering::Relaxed)
+    }
+
+    #[getter]
+    fn responses_dropped(&self) -> usize {
+        self.core.responses_dropped.load(Ordering::Relaxed)
+    }
+
+    #[getter]
+    fn frames_sent(&self) -> usize {
+        self.core.frames_sent.load(Ordering::Relaxed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EngineResponse, MockEngineResponse, OwnedResponseState, ProcessorCore};
-    use crate::push_egress::response_channel;
-    use futures::StreamExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use super::{
+        EngineResponse, MockEngineResponse, OwnedFrameSink, OwnedResponseState, ProcessorCore,
+    };
+    use dynamo_runtime::protocols::annotated::Annotated;
     use serde_json::json;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        frames: Mutex<Vec<Annotated<serde_json::Value>>>,
+        closed: AtomicBool,
+        errors: Mutex<Vec<String>>,
+    }
+
+    impl OwnedFrameSink for RecordingSink {
+        fn send(&self, frame: Annotated<serde_json::Value>) -> Result<(), String> {
+            self.frames
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(frame);
+            Ok(())
+        }
+
+        fn close(&self) {
+            self.closed.store(true, Ordering::Relaxed);
+        }
+
+        fn close_with_error(&self, message: String) {
+            self.errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(message);
+            self.closed.store(true, Ordering::Relaxed);
+        }
+    }
 
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}
 
@@ -216,13 +556,13 @@ mod tests {
     #[test]
     fn processor_interleaves_clients_without_reordering_each_stream() {
         let processor = ProcessorCore::default();
-        let (sender_a, stream_a) = response_channel::<serde_json::Value>(8);
-        let (sender_b, stream_b) = response_channel::<serde_json::Value>(8);
+        let sink_a = Arc::new(RecordingSink::default());
+        let sink_b = Arc::new(RecordingSink::default());
         processor
-            .register(10, 2, 1, sender_a.sink(), 0.0)
+            .register(10, 2, 1, sink_a.clone(), 0.0)
             .expect("register client 10");
         processor
-            .register(20, 1, 1, sender_b.sink(), 0.0)
+            .register(20, 1, 1, sink_b.clone(), 0.0)
             .expect("register client 20");
 
         let first = processor.process_batch(vec![
@@ -238,8 +578,14 @@ mod tests {
         ]);
         assert_eq!(final_batch.completed_client_ids, vec![20, 10]);
 
-        let frames_a = futures::executor::block_on(stream_a.collect::<Vec<_>>());
-        let frames_b = futures::executor::block_on(stream_b.collect::<Vec<_>>());
+        let frames_a = sink_a
+            .frames
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let frames_b = sink_b
+            .frames
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(
             frames_a[0].data,
             Some(json!({"token_ids": [1], "index": 0}))
@@ -253,15 +599,17 @@ mod tests {
             Some(json!({"token_ids": [7], "index": 0}))
         );
         assert_eq!(frames_b[1].data.as_ref().unwrap()["token_ids"], json!([8]));
+        assert!(sink_a.closed.load(Ordering::Relaxed));
+        assert!(sink_b.closed.load(Ordering::Relaxed));
         assert_eq!(processor.active_requests(), 0);
     }
 
     #[test]
     fn processor_closes_errors_and_ignores_late_responses() {
         let processor = ProcessorCore::default();
-        let (sender, stream) = response_channel::<serde_json::Value>(2);
+        let sink = Arc::new(RecordingSink::default());
         processor
-            .register(30, 0, 1, sender.sink(), 0.0)
+            .register(30, 0, 1, sink.clone(), 0.0)
             .expect("register client 30");
 
         let error = processor.process_batch(vec![MockEngineResponse::error(
@@ -273,24 +621,19 @@ mod tests {
             processor.process_batch(vec![MockEngineResponse::tokens(30, vec![vec![99]], true)]);
         assert_eq!(late.responses_dropped, 1);
 
-        let frames = futures::executor::block_on(stream.collect::<Vec<_>>());
-        assert_eq!(frames.len(), 1);
-        assert!(frames[0].is_error());
         assert!(
-            frames[0]
-                .error
-                .as_ref()
-                .unwrap()
-                .to_string()
+            sink.errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())[0]
                 .contains("engine failed")
         );
+        assert!(sink.closed.load(Ordering::Relaxed));
     }
 
     #[test]
     fn duplicate_registration_is_rejected() {
         let processor = ProcessorCore::default();
-        let (sender, _stream) = response_channel::<serde_json::Value>(2);
-        let sink = sender.sink();
+        let sink = Arc::new(RecordingSink::default());
         processor
             .register(40, 0, 1, sink.clone(), 0.0)
             .expect("first registration");

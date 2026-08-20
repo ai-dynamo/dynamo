@@ -69,6 +69,8 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 use crate::context::{Context, callable_accepts_kwarg};
 use crate::engine::{self, map_python_exception};
 use crate::python_payload::PythonPayload;
+#[cfg(not(test))]
+use crate::trtllm_egress::OwnedFrameSink;
 
 /// Environment variable that selects the push egress path. `"1"` enables it;
 /// anything else (including unset) leaves the pull path in place.
@@ -122,9 +124,12 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// be a single concrete Python type, while the channel's item type is chosen by
 /// the (generic) [`response_channel`] factory. Every method here is called with
 /// the GIL already held by the Python caller.
-trait ResponseSink: Send + Sync {
+pub(crate) trait ResponseSink: Send + Sync {
     /// Convert `obj` to an owned Rust value and enqueue it.
     fn send(&self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()>;
+
+    /// Enqueue a response that is already fully owned by Rust.
+    fn send_owned(&self, frame: Annotated<serde_json::Value>) -> Result<(), String>;
 
     /// Normal end of stream.
     fn close(&self);
@@ -253,6 +258,35 @@ where
         })
     }
 
+    fn send_owned(&self, frame: Annotated<serde_json::Value>) -> Result<(), String> {
+        let frame = Annotated {
+            data: frame
+                .data
+                .map(serde_json::from_value::<Resp>)
+                .transpose()
+                .map_err(|error| format!("failed to convert owned response frame: {error}"))?,
+            id: frame.id,
+            event: frame.event,
+            comment: frame.comment,
+            error: frame.error,
+        };
+
+        let Some(tx) = self.sender() else {
+            return Err("response stream is closed; send after close".to_string());
+        };
+        let frame = match tx.try_send(frame) {
+            Ok(()) => return Ok(()),
+            Err(mpsc::error::TrySendError::Full(frame)) => frame,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err("response stream consumer has closed".to_string());
+            }
+        };
+
+        let _nvtx_blocked = dynamo_nvtx_range!("rust_egress.send_blocked");
+        tx.blocking_send(frame)
+            .map_err(|_| "response stream consumer has closed".to_string())
+    }
+
     fn close(&self) {
         // Dropping the last sender is what ends the receiver stream. Idempotent
         // so the Rust-side safety net can close a stream the handler already
@@ -369,8 +403,35 @@ impl ResponseSender {
 impl ResponseSender {
     /// Rust-side handle to the same sink, for the safety net that terminates
     /// the stream if the handler coroutine raises.
-    fn sink(&self) -> Arc<dyn ResponseSink> {
+    pub(crate) fn sink(&self) -> Arc<dyn ResponseSink> {
         self.sink.clone()
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn owned_sink(&self) -> Arc<dyn OwnedFrameSink> {
+        Arc::new(OwnedSinkAdapter {
+            sink: self.sink.clone(),
+        })
+    }
+}
+
+#[cfg(not(test))]
+struct OwnedSinkAdapter {
+    sink: Arc<dyn ResponseSink>,
+}
+
+#[cfg(not(test))]
+impl OwnedFrameSink for OwnedSinkAdapter {
+    fn send(&self, frame: Annotated<serde_json::Value>) -> Result<(), String> {
+        self.sink.send_owned(frame)
+    }
+
+    fn close(&self) {
+        self.sink.close();
+    }
+
+    fn close_with_error(&self, message: String) {
+        self.sink.close_with_error(message);
     }
 }
 
