@@ -30,6 +30,7 @@ from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
 )
+from dynamo.common.utils.env import env_bool
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     EMBEDDING_CACHE_METRIC_PREFIX,
@@ -152,12 +153,21 @@ async def worker(argv: list[str] | None = None) -> None:
     )
 
     snapshot_engine = None
+    snapshot_pause_controller = None
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
         config = await refresh_snapshot_restore_config(
             config,
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
+        # Capture may have been an active engine. The target pod injects
+        # shadow/failover identity through restore-context env.
+        config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+        if config.gms_shadow_mode:
+            snapshot_pause_controller = snapshot_controller.pause_controller
+        else:
+            await snapshot_controller.pause_controller.resume()
+            snapshot_controller.pause_controller.mark_resumed()
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -190,6 +200,7 @@ async def worker(argv: list[str] | None = None) -> None:
         shutdown_event,
         shutdown_endpoints,
         snapshot_engine=snapshot_engine,
+        snapshot_pause_controller=snapshot_pause_controller,
     )
 
     logger.debug("Worker function completed, exiting...")

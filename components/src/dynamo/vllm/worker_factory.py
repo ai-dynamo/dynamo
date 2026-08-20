@@ -595,6 +595,11 @@ class WorkerFactory:
         self.register_vllm_model = register_vllm_model_fn
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
+        # Restore-shadow pause controller, if the snapshot engine is already
+        # application-paused. The active flock is process-scoped: the factory
+        # lives for endpoint serving, and process exit releases it.
+        self._snapshot_pause_controller: Any | None = None
+        self._failover_lock: Any | None = None
 
     async def create(
         self,
@@ -603,8 +608,11 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
         snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_pause_controller: Any | None = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
+
+        self._snapshot_pause_controller = snapshot_pause_controller
 
         if config.realtime:
             await self._create_realtime_worker(
@@ -640,6 +648,10 @@ class WorkerFactory:
                 runtime, config, shutdown_event, shutdown_endpoints
             )
         elif config.disaggregation_mode == DisaggregationMode.PREFILL:
+            if snapshot_engine is not None and config.gms_shadow_mode:
+                raise ValueError(
+                    "snapshot-backed shadow failover requires aggregated or decode mode"
+                )
             await self._create_prefill_worker(
                 runtime,
                 config,
@@ -1021,7 +1033,9 @@ class WorkerFactory:
         if config.gms_shadow_mode is not True:
             return False
 
-        await handler._pause_controller.pause(1)
+        pause_controller = handler._pause_controller
+        if not pause_controller.is_paused:
+            await pause_controller.pause(1)
         if failover_metrics is not None:
             failover_metrics.set_state("standby")
 
@@ -1036,6 +1050,7 @@ class WorkerFactory:
         engine_id = os.environ.get("ENGINE_ID", "0")
         lock = FlockFailoverLock(lock_path)
         await lock.acquire(engine_id=f"engine-{engine_id}")
+        self._failover_lock = lock
         was_failover = lock.was_contended
         logger.info("[Shadow] Lock acquired, waking engine")
         if failover_metrics is not None:
@@ -1044,8 +1059,8 @@ class WorkerFactory:
                 # Only a contended acquire is a failover; a bootup is not a switch.
                 failover_metrics.record_switch_attempt()
 
-        await handler._pause_controller.resume()
-        handler._pause_controller.mark_resumed()
+        await pause_controller.resume()
+        pause_controller.mark_resumed()
         logger.info("[Shadow] Engine awake, registering with discovery")
         return was_failover
 
@@ -1190,6 +1205,8 @@ class WorkerFactory:
             encode_worker_client=encode_worker_client,
         )
         lifecycle.handler = handler
+        if self._snapshot_pause_controller is not None:
+            handler._pause_controller = self._snapshot_pause_controller
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)

@@ -48,6 +48,7 @@ class SnapshotConfig:
         self,
         pause_controller: Any,
         *pause_args: object,
+        resume_on_restore: bool = True,
     ) -> bool:
         logger.info("Pausing model")
         await pause_controller.pause(*pause_args)
@@ -68,9 +69,15 @@ class SnapshotConfig:
 
         if event == "restore":
             logger.info("Restore sentinel detected")
-            logger.info("Resuming model after restore")
-            await pause_controller.resume()
-            pause_controller.mark_resumed()
+            if resume_on_restore:
+                logger.info("Resuming model after restore")
+                await pause_controller.resume()
+                pause_controller.mark_resumed()
+            else:
+                # Restore-time env is only available after CRIU resumes this
+                # process. Stay paused so the backend can refresh that env
+                # before deciding whether to resume or wait for leadership.
+                logger.info("Returning restored model application-paused")
             # The checkpoint is complete; post-restore model registration may
             # need normal Hugging Face cache/download behavior.
             os.environ.pop("HF_HUB_OFFLINE", None)
@@ -168,9 +175,11 @@ class EngineSnapshotController(Generic[EngineT]):
     pause_controller: Any
     snapshot_config: SnapshotConfig
     pause_args: tuple[object, ...] = ()
+    resume_on_restore: bool = True
 
     async def wait_for_restore(self) -> bool:
         return await self.snapshot_config.run_lifecycle(
             self.pause_controller,
             *self.pause_args,
+            resume_on_restore=self.resume_on_restore,
         )

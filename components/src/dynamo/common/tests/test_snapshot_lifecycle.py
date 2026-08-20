@@ -60,6 +60,34 @@ async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tm
                 await lifecycle
 
 
+async def test_snapshot_lifecycle_can_return_paused_after_restore(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    controller = _PauseController()
+    config = SnapshotConfig.from_env()
+    assert config is not None
+
+    lifecycle = asyncio.create_task(
+        config.run_lifecycle(controller, resume_on_restore=False)
+    )
+    try:
+        for _ in range(100):
+            if (tmp_path / READY_FOR_SNAPSHOT_FILE).exists():
+                break
+            await asyncio.sleep(0.01)
+
+        (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
+
+        assert await lifecycle is True
+        assert controller.resumed is False
+    finally:
+        if not lifecycle.done():
+            lifecycle.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await lifecycle
+
+
 async def test_snapshot_lifecycle_clears_capture_only_env_after_restore(
     monkeypatch, tmp_path
 ):

@@ -45,6 +45,7 @@ async def prepare_snapshot_engine(
         pause_controller=VllmEnginePauseController(engine[0]),
         snapshot_config=snapshot_config,
         pause_args=(None,),
+        resume_on_restore=False,
     )
     if not await snapshot_controller.wait_for_restore():
         logger.info("vLLM snapshot captured successfully")
