@@ -31,7 +31,9 @@ runs/<EXP_ID>/
 |-- analysis/
 |   |-- hypothesis-backlog.jsonl
 |   |-- challenger-reviews.jsonl
-|   `-- performance_findings.jsonl
+|   |-- performance_findings.jsonl
+|   |-- asks.jsonl
+|   `-- search-calibration.md
 |-- final/
 |   |-- recommended_config.md
 |   |-- reproduced_commands.sh
@@ -94,8 +96,10 @@ runs/<EXP_ID>/
   approval assigns it to the next deployment iteration.
 - `asks.jsonl` (under `EXP_ROOT/analysis/`): append-only operator-ask record with the question, blocked lever
   family, expected upside, status (`pending` or `answered`), and the answer once received. Deduplicate before
-  appending. A stop-request is not a separate file: it is the terminal search-calibration record in
-  `knowledge-consult.md` plus its challenger validation.
+  appending. A stop-request is not a separate file: it is the search-calibration ledger
+  (`EXP_ROOT/analysis/search-calibration.md`) in a terminal state, plus its challenger validation. The ledger is
+  the authoritative family table; the submitting iteration's `knowledge-consult.md` records only the stop-request
+  delta and cites the ledger path and the SHA256 of the ledger state submitted for validation.
 
 ## Deployment Directories
 

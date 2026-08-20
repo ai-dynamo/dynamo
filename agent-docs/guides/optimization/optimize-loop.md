@@ -123,7 +123,8 @@ only for a materialized proposal. The proposal must be backed by at least three 
 including AIPerf profiler data, and change one independently testable knob. A coupled bundle is allowed only when
 required for one functional mechanism or supported by evidence of an interaction.
 
-Give the unchanged consultation and draft to `hypothesis-challenger`. The challenger appends its hash-bound review to
+Give the unchanged consultation and draft to `hypothesis-challenger`, along with the current
+`EXP_ROOT/analysis/search-calibration.md` path. The challenger appends its hash-bound review to
 `EXP_ROOT/analysis/challenger-reviews.jsonl` and returns exactly one verdict:
 
 - `approve`: send the existing draft path, SHA256, and review ID to `recipe-deployer`, and preserve the approved
@@ -154,7 +155,8 @@ one of:
   continues. Deduplicate pending asks, surface only the highest-value few, and lead the next operator-facing response
   with them. Enter `PARKED_ON_ASKS` (a pause, not a stop) only when pending asks are the only remaining work, and
   record how deployed resources are held and when they scale down;
-- a **stop-request**: the search-calibration record in a terminal state, meaning every lever family is `tested`,
+- a **stop-request**: the search-calibration ledger (`EXP_ROOT/analysis/search-calibration.md`) in a terminal
+  state, meaning every lever family is `tested`,
   `asked` and answered, `ruled-out`, or `deferred`. Prepare the Finalize artifacts (section 7), including the
   recommendation's `Correctness status:` line, BEFORE submitting the stop-request — the stop-request references the
   draft recommendation, and operator grant closes the engagement rather than starting its write-up. A `ruled-out` row must cite a measurement, a sourced hard
@@ -162,7 +164,9 @@ one of:
   does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`. While
   more than half of any granted budget remains, `deferred` is not a terminal state for a family whose recorded
   expected upside is medium or higher: test it, ask about it, or rule it out with qualifying evidence before
-  requesting a stop. Hand the stop-request to `hypothesis-challenger` for evidence-class validation.
+  requesting a stop. Hand the stop-request to `hypothesis-challenger` for evidence-class validation, passing the
+  ledger path and the SHA256 of the submitted ledger state alongside the consultation; the challenger's verdict
+  binds to that SHA256.
 
 While a stop-request awaits challenger validation and operator grant (`STOP_REQUESTED`), continue confirmatory
 runs, cleanup, and any still-testable work; launch no new candidate families. If the challenger or operator returns

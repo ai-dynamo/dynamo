@@ -64,11 +64,14 @@ Do not:
 - current `<DEPLOY_ROOT>/benchmark/benchmark_audit.json`, `benchmark_summary.json`, and `performance_analysis.json`
 - exact `<DEPLOY_ROOT>/next-candidate/knowledge-consult.md` path
 - exact `<DEPLOY_ROOT>/next-candidate/deploy-draft.yaml` path
+- exact `<EXP_ROOT>/analysis/search-calibration.md` path (and, for a stop-request, the submitted ledger SHA256)
 - prior deployment, benchmark, hypothesis, and challenger-review history
 
 Review a materialized proposal or a stop-request. For a `no-proposal` or `blocked` consultation that carries no
-stop-request, return without creating a candidate review. For a stop-request, validate completeness and evidence
-class: every lever family carries a terminal disposition, every `ruled-out` row cites a measurement, a sourced
+stop-request, return without creating a candidate review. For a stop-request, first verify that the SHA256 cited
+in `knowledge-consult.md` matches the on-disk `<EXP_ROOT>/analysis/search-calibration.md` (reject on mismatch:
+the ledger moved after submission), then validate completeness and evidence class against the ledger — not the
+consult file, which carries only the delta: every lever family carries a terminal disposition, every `ruled-out` row cites a measurement, a sourced
 hard constraint, a confirmed incompatibility, or an explicit operator decision, no family with medium-or-higher
 recorded expected upside remains merely `deferred` while more than half of any granted budget remains (reject the
 stop-request and return that family as the required follow-up), and the draft recommendation

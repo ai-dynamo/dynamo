@@ -132,7 +132,9 @@ Before generating a hypothesis, determine whether a broad or narrow knob adjustm
 
 Maintain one persistent search-calibration ledger for the engagement at
 `EXP_ROOT/analysis/search-calibration.md` instead of regenerating a scan for every
-hypothesis; each iteration's `knowledge-consult.md` records only the delta applied to it. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
+hypothesis; each iteration's `knowledge-consult.md` records only the delta applied to it. The ledger is the
+authoritative family table. When submitting a stop-request, record in `knowledge-consult.md` the ledger path and
+the SHA256 of the ledger state being submitted; do not modify the ledger while that validation is pending. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
 (a topology adoption, new variance data, an answered ask). The ledger explicitly covers:
 
 1. deployment topology and fit, including model fit, parallelism, replication, aggregated versus disaggregated
