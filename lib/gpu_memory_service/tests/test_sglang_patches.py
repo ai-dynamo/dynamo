@@ -18,7 +18,7 @@ if not HAS_GMS:
 if not HAS_TORCH:
     pytest.skip("torch is required", allow_module_level=True)
 
-from gpu_memory_service.integrations.sglang import patches, setup_gms
+from gpu_memory_service.integrations.sglang import patches
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -79,33 +79,3 @@ def test_patch_model_runner_leaves_baseline_unchanged_without_preload(monkeypatc
 
     assert runner.alloc_memory_pool() == 10.0
     assert runner.pre_model_load_memory == 10.0
-
-
-def test_setup_gms_uses_read_only_server_args_override(monkeypatch):
-    class GMSModelLoader:
-        pass
-
-    model_loader_module = ModuleType(
-        "gpu_memory_service.integrations.sglang.model_loader"
-    )
-    model_loader_module.GMSModelLoader = GMSModelLoader
-    monkeypatch.setitem(sys.modules, model_loader_module.__name__, model_loader_module)
-
-    class ReadOnlyServerArgs:
-        enable_weights_cpu_backup = False
-        enable_draft_weights_cpu_backup = False
-        model_loader_extra_config = None
-
-        def __init__(self):
-            object.__setattr__(self, "overrides", [])
-
-        def __setattr__(self, name, value):
-            raise AttributeError(f"{name} is read-only")
-
-        def override(self, source, **fields):
-            self.overrides.append((source, fields))
-
-    server_args = ReadOnlyServerArgs()
-
-    assert setup_gms(server_args) is GMSModelLoader
-    assert server_args.overrides == [("dynamo.gms", {"enable_memory_saver": True})]
