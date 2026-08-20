@@ -748,10 +748,7 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
-    /// Shutdown signal handed to detached speculative-prefill tasks. `None`
-    /// for callers that have no runtime to derive a token from (the C
-    /// bindings, the ext-proc gateway, tests); those tasks are still bounded
-    /// by the module's own timeout.
+    /// Optional shutdown signal for detached speculative-prefill tasks.
     speculative_prefill_cancel: Option<CancellationToken>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
@@ -1407,10 +1404,7 @@ impl OpenAIPreprocessor {
         Self::new_with_parts_and_cancel(mdc, formatter, tokenizer, None)
     }
 
-    /// Same as [`OpenAIPreprocessor::new_with_parts`], plus the shutdown token
-    /// that detached speculative-prefill tasks watch. Pass the owning
-    /// runtime's token so those tasks end with the runtime; `None` leaves them
-    /// bounded only by their own timeout.
+    /// Builds a preprocessor with an optional speculative-prefill shutdown token.
     pub fn new_with_parts_and_cancel(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
