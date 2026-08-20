@@ -108,11 +108,15 @@ impl DiscoveredModel {
         let parallelism = self.server.parallelism.as_ref().ok_or_else(|| {
             client::protocol_error("RL discovery requires vLLM parallelism metadata")
         })?;
-        let world_size = parallelism
-            .tensor_parallel_size
-            .checked_mul(parallelism.pipeline_parallel_size)
+        let tensor_parallel_size = nonzero(parallelism.tensor_parallel_size)
+            .ok_or_else(|| client::protocol_error("vLLM reports a tensor-parallel size of zero"))?;
+        let pipeline_parallel_size =
+            nonzero(parallelism.pipeline_parallel_size).ok_or_else(|| {
+                client::protocol_error("vLLM reports a pipeline-parallel size of zero")
+            })?;
+        let world_size = tensor_parallel_size
+            .checked_mul(pipeline_parallel_size)
             .and_then(|size| size.checked_mul(parallelism.data_parallel_size))
-            .filter(|size| *size > 0)
             .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
         RlWorkerMetadata::new(world_size, admin_base_url)
             .map_err(|error| client::protocol_error(error.to_string()))
