@@ -13,7 +13,11 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 MODEL="${DYN_H3_MODEL:-MiniMaxAI/MiniMax-H3}"
 ULYSSES_DEGREE="${DYN_H3_ULYSSES_DEGREE:-4}"
 TEXT_ENCODER_TP_SIZE="${DYN_H3_TEXT_ENCODER_TP_SIZE:-4}"
-VAE_PATCH_PARALLEL_SIZE="${DYN_H3_VAE_PATCH_PARALLEL_SIZE:-4}"
+# H3's native patch-parallel VAE requires at least one spatial tile per rank.
+# Keep it single-rank by default so small supported resolutions (for example,
+# 448x256) do not leave ranks with empty tile lists. Larger workloads may opt
+# into the full DiT group size explicitly.
+VAE_PATCH_PARALLEL_SIZE="${DYN_H3_VAE_PATCH_PARALLEL_SIZE:-1}"
 ATTENTION_BACKEND="${DYN_H3_ATTENTION_BACKEND:-TRTLLM_ATTN}"
 EXTRA_ARGS=()
 
@@ -81,7 +85,7 @@ DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     --text-encoder-tp-size "$TEXT_ENCODER_TP_SIZE" \
     --vae-patch-parallel-size "$VAE_PATCH_PARALLEL_SIZE" \
     --vae-use-tiling \
-    --enable-cpu-offload \
+    --enable-distributed-layerwise-offload \
     --diffusion-attention-backend "$ATTENTION_BACKEND" \
     "${EXTRA_ARGS[@]}" &
 
