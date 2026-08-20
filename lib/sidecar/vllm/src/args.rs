@@ -15,4 +15,8 @@ pub(crate) struct Args {
     /// vLLM gRPC endpoint as host:port or an http:// URL.
     #[arg(long, env = "VLLM_GRPC_ENDPOINT")]
     pub vllm_endpoint: String,
+
+    /// Optional vLLM HTTP admin endpoint advertised for RL weight-transfer control.
+    #[arg(long, env = "VLLM_HTTP_ENDPOINT")]
+    pub vllm_http_endpoint: Option<String>,
 }
