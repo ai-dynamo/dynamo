@@ -353,10 +353,7 @@ func (r *dgdCheckpointsReconciler) syncCheckpointGMSResourceClaimTemplate(
 	gpuCount int,
 	deviceClassName string,
 ) error {
-	// This template changes controller deliberately: the DGD creates it here, and
-	// adoptCheckpointGMSResourceClaimTemplate hands it to the DynamoCheckpoint later in the same
-	// pass. Every reconcile after the first therefore re-enters this sync with the DGD as parent
-	// against an object the checkpoint now controls, which the ownership guard would refuse.
+	// The DynamoCheckpoint adopts this template after the DGD creates it.
 	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
 		return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dgd.Namespace, gpuCount, deviceClassName)
 	}, commoncontroller.WithSharedOwnership())

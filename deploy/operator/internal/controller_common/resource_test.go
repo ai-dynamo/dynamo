@@ -927,11 +927,6 @@ func TestGetSpecChangeResult_ConfigMap(t *testing.T) {
 	}
 }
 
-// The tests below cover the controller-ownership guard in SyncResource. They drive the helper
-// against a controller-runtime fake client so that every assertion about what was written can be
-// made by re-reading the stored object rather than by inspecting the in-memory copy SyncResource
-// returned.
-
 const (
 	ownershipTestNamespace   = "default"
 	ownershipTestServiceName = "shared-service"
@@ -968,8 +963,7 @@ func newOwnershipTestParent() *v1beta1.DynamoGraphDeployment {
 	}
 }
 
-// foreignControllerRef deliberately carries the parent's kind and name and differs only in UID,
-// which is the collision upstream referSameObject cannot detect.
+// foreignControllerRef differs from the parent only by UID.
 func foreignControllerRef() metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion:         v1beta1.GroupVersion.String(),
@@ -1003,8 +997,7 @@ func ownershipTestService(port int32) *corev1.Service {
 	}
 }
 
-// seedService returns a copy of svc annotated as if the operator had last applied exactly this
-// content, so that GetSpecChangeResult reports no update needed when svc is also the desired object.
+// seedService marks svc as the last applied content.
 func seedService(t *testing.T, svc *corev1.Service) *corev1.Service {
 	t.Helper()
 	existing := svc.DeepCopy()
@@ -1048,10 +1041,6 @@ func requireOwnershipConflict(t *testing.T, err error) {
 	assert.Equal(t, ownershipTestForeignUID, alreadyOwned.Owner.UID)
 }
 
-// TestSyncResource_ForeignControllerBlocksMutation covers the three paths that write or delete
-// once an object already exists. Each must refuse a foreign owner before touching anything: the
-// content-differs update, the delete, and the content-matches path that previously reported
-// success without ever attaching an owner reference.
 func TestSyncResource_ForeignControllerBlocksMutation(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1087,10 +1076,6 @@ func TestSyncResource_ForeignControllerBlocksMutation(t *testing.T) {
 	}
 }
 
-// TestSyncResource_SyncProceeds covers the cases the guard must let through: adoption of an
-// ownerless object, the controller that already owns the object, an opted-out nil parent, and the
-// shared-ownership opt-out. Every case also asserts that a second sync settles, since a write that
-// repeated on each pass would requeue the controller forever without ever converging.
 func TestSyncResource_SyncProceeds(t *testing.T) {
 	tests := []struct {
 		name          string

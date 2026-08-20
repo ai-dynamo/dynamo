@@ -88,10 +88,7 @@ func ReconcileModelServicesForComponents(
 			func(ctx context.Context) (*corev1.Service, bool, error) {
 				return headlessService, false, nil
 			},
-			// dynamo-model-{hash} is named after the base model, not after its owner, so every
-			// deployment serving the same base model in this namespace converges on the same
-			// Service and each passes a different owner. The ownership guard must not treat the
-			// second and later owners as a collision.
+			// Deployments that serve the same base model share this Service.
 			commonController.WithSharedOwnership(),
 		)
 		if err != nil {
