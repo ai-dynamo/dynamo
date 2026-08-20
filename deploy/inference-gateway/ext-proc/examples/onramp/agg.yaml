@@ -213,13 +213,6 @@ metadata:
     app: dynamo-epp
 spec:
   replicas: 2
-  # During the first upgrade from an image without the peer dump endpoint, two
-  # new EPP Pods must start together so they can recover from each other.
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 100%
   selector:
     matchLabels:
       app: dynamo-epp

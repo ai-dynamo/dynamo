@@ -490,14 +490,11 @@ without an attempt limit: serving with an empty or stale index is less safe than
 service. Alert on a prolonged `NOT_SERVING` period and inspect EndpointSlices, NetworkPolicies, and
 the `/dump` port before restarting replicas.
 
-The `agg.yaml` example uses a rolling-update strategy with `maxUnavailable: 0` and `maxSurge: 100%`.
-During the first upgrade from an EPP image without `selection-http`, this lets two new Pods start
-together and recover from each other's already-bound dump endpoints. The surge can temporarily double
-the EPP Pod count, so make sure the cluster has capacity for it. Later rollouts recover from an existing
-ready replica. The example assumes the Service's EndpointSlices expose a consistent pair of named
-ports during rollout; do not mix an image that lacks `selection-http` into the same peer Service without
-first applying the new manifest and planning the transition. If a mixed-version EndpointSlice omits the
-port, the new EPP remains out of service until the peer set is upgraded and the ports converge.
+The example uses the Deployment's default rolling-update strategy. A recovery source must already be
+serving (`serving=true`, not terminating), so a replica recovers only from an existing ready peer —
+never from a peer that is itself still bootstrapping. For the first upgrade from an EPP image without
+`selection-http`, apply the manifest (which adds the named port) before upgrading the image; an
+image-only upgrade degrades to no-recovery (the replica bootstraps empty) rather than failing startup.
 
 Recovery restores KV-index placement only. It does not restore active reservations or provide an atomic
 snapshot-plus-live-event handoff. Replica lifecycle synchronization and worker replay continue to converge

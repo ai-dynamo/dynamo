@@ -75,7 +75,16 @@ async fn try_recover_from_peer(
     peer_url: &str,
     registry: &WorkerRegistry,
 ) -> Result<()> {
-    let dump_url = format!("{peer_url}/dump");
+    // Pass the accepted budget to the peer so it can reject an over-budget
+    // snapshot with 413 *before* serializing/transmitting it. `0` means no
+    // budget (unbounded). The Content-Length check below remains as receiver
+    // defense in depth.
+    let max_dump_bytes = env_u64(MAX_DUMP_BYTES_ENV, DEFAULT_MAX_DUMP_BYTES);
+    let dump_url = if max_dump_bytes > 0 {
+        format!("{peer_url}/dump?max_bytes={max_dump_bytes}")
+    } else {
+        format!("{peer_url}/dump")
+    };
     tracing::info!(url = %dump_url, "fetching dump from peer");
 
     let resp = client
@@ -90,10 +99,11 @@ async fn try_recover_from_peer(
 
     // Fail fast on an oversized snapshot before reading the body: the dump is
     // materialized fully in memory on both sides, so a large body either OOMs
-    // or trips the request timeout and the retry loop. A clear error is more
-    // actionable than either.
-    let max_dump_bytes = env_u64(MAX_DUMP_BYTES_ENV, DEFAULT_MAX_DUMP_BYTES);
+    // or trips the request timeout and the retry loop. The peer already rejects
+    // over-budget bodies with 413, so this only fires for a peer without the
+    // budget-aware endpoint.
     if let Some(len) = resp.content_length()
+        && max_dump_bytes > 0
         && len > max_dump_bytes
     {
         anyhow::bail!(
@@ -119,6 +129,13 @@ async fn try_recover_from_peer(
             // peer's dump land in the matching lower-tier slot rather than the
             // device primary. The peer side retags lower-tier events in
             // `Indexer::dump_events`, so the `storage_tier` here is correct.
+            //
+            // Re-application is idempotent by construction: the radix index
+            // keys blocks by `tokens_hash`, so applying the same (or an
+            // overlapping) peer dump again is a no-op for blocks already
+            // present. A cancelled-then-retried attempt can therefore leave a
+            // partially applied snapshot that the next attempt safely re-applies
+            // on top of, without inflating or duplicating residency state.
             indexer
                 .apply_event_routed(event)
                 .await
