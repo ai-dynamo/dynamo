@@ -686,6 +686,7 @@ def test_router_decisions_vllm_dp(
 # No @pytest.mark.profiled_vram_gib here, deliberately: that marker moves a test
 # into the VRAM-aware parallel lane, which hands out exactly one device, while
 # this gpu_2 test pins its decode worker to absolute device 1.
+@pytest.mark.pre_merge
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.requested_vllm_kv_cache_bytes(DISAGG_KV_CACHE_MEMORY_BYTES)
