@@ -141,9 +141,14 @@ const testCases = [
     desc: 'sidecar README avoids container, Rust, Fern, and E2E checks'
   },
   {
-    file: '.github/workflows/shared-build-sidecar.yml',
+    file: '.github/workflows/shared-build-image.yml',
     expect: { sidecar: true, vllm_sidecar: true, sglang_sidecar: true, trtllm_sidecar: true, core: true },
-    desc: 'shared sidecar build workflow exercises all three container jobs'
+    desc: 'shared image build workflow exercises all three sidecar container jobs'
+  },
+  {
+    file: '.github/actions/docker-remote-build/action.yml',
+    expect: { sidecar: true, vllm_sidecar: true, sglang_sidecar: true, trtllm_sidecar: true, core: true },
+    desc: 'shared remote build action exercises all three sidecar container jobs'
   },
 
   // Doc files should be excluded from core (negation patterns)

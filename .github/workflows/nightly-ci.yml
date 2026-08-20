@@ -332,32 +332,59 @@ jobs:
   vllm-sidecar-build:
     name: vllm-sidecar
     needs: [create-fresh-builder, resolve-source-sha]
-    uses: ./.github/workflows/shared-build-sidecar.yml
+    uses: ./.github/workflows/shared-build-image.yml
     with:
+      framework: vllm
+      target: sidecar
+      dockerfile: lib/sidecar/vllm/Dockerfile
+      build_target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      sidecar: vllm
+      builder_flavor: general
+      build_only: true
+      extra_build_args: 'DOCKER_PROXY=${{ vars.ECR_REGISTRY }}/dockerhub/'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
+    secrets: inherit
 
   sglang-sidecar-build:
     name: sglang-sidecar
     needs: [create-fresh-builder, resolve-source-sha]
-    uses: ./.github/workflows/shared-build-sidecar.yml
+    uses: ./.github/workflows/shared-build-image.yml
     with:
+      framework: sglang
+      target: sidecar
+      dockerfile: lib/sidecar/sglang/Dockerfile
+      build_target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      sidecar: sglang
+      builder_flavor: general
+      build_only: true
+      extra_build_args: 'DOCKER_PROXY=${{ vars.ECR_REGISTRY }}/dockerhub/'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
+    secrets: inherit
 
   trtllm-sidecar-build:
     name: trtllm-sidecar
     needs: [create-fresh-builder, resolve-source-sha]
-    uses: ./.github/workflows/shared-build-sidecar.yml
+    uses: ./.github/workflows/shared-build-image.yml
     with:
+      framework: trtllm
+      target: sidecar
+      dockerfile: lib/sidecar/trtllm/Dockerfile
+      build_target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      sidecar: trtllm
+      builder_flavor: general
+      build_only: true
+      extra_build_args: 'DOCKER_PROXY=${{ vars.ECR_REGISTRY }}/dockerhub/'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
+    secrets: inherit
 
   # ============================================================================
   # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, snapshot agent,
