@@ -329,7 +329,7 @@ async fn recover_initial_index(
         cancel,
         initial_backoff,
         max_backoff,
-        |service, peers| Box::pin(service.recover_indexer_from_peers(peers)),
+        |service, peers| Box::pin(service.recover_indexer_from_peers_streaming(peers)),
     )
     .await
 }
@@ -573,9 +573,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
-    use axum::{
-        Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get,
-    };
+    use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort};
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
@@ -1002,10 +1000,11 @@ mod tests {
         release: Arc<Notify>,
     }
 
-    async fn gated_dump(State(gate): State<DumpGate>) -> Json<serde_json::Value> {
+    async fn gated_dump(State(gate): State<DumpGate>) -> axum::response::Response {
         gate.requested.notify_one();
         gate.release.notified().await;
-        Json(serde_json::json!({}))
+        // Empty body = an empty streaming (NDJSON) dump, a valid recovery.
+        axum::response::Response::new(axum::body::Body::empty())
     }
 
     #[derive(Clone)]
@@ -1019,7 +1018,8 @@ mod tests {
             state.first_failed.notify_one();
             (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
         } else {
-            Json(serde_json::json!({})).into_response()
+            // Empty body = an empty streaming (NDJSON) dump, a valid recovery.
+            axum::response::Response::new(axum::body::Body::empty()).into_response()
         }
     }
 
@@ -1057,7 +1057,10 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                Router::new().route("/dump", get(|| async { Json(serde_json::json!({})) })),
+                Router::new().route(
+                    "/dump",
+                    get(|| async { axum::response::Response::new(axum::body::Body::empty()) }),
+                ),
             )
             .await
         });
