@@ -67,17 +67,10 @@ VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
-# KV cache cap (2x safety over min=165_900_288), same figure the gpu_1 tests in
-# this file already run with on this model and max_model_len.
+# 2x the minimum TinyLlama cache for max_model_len=1024.
 DISAGG_KV_CACHE_MEMORY_BYTES = 331_801_000
 
-# Dedicated config for test_router_decisions_vllm_disagg, whose two prefill
-# workers share one GPU. A proportional gpu_memory_utilization leaves those
-# workers on vLLM's memory-profiling path, where the non-torch footprint is
-# measured as a *device-wide* delta: allocations a co-resident sibling makes
-# during this worker's profiling window are charged to this worker, and its KV
-# budget can come out negative. An absolute per-process byte budget makes vLLM
-# skip memory profiling altogether, so the racy branch is never taken.
+# Fixed sizing avoids racy device-wide profiling on shared GPU 0.
 VLLM_ARGS_DISAGG: Dict[str, Any] = {
     "block_size": BLOCK_SIZE,
     "model": MODEL_NAME,
@@ -95,13 +88,7 @@ def _vllm_gpu_mem_args(
     if args:
         return args
     if kv_cache_memory_bytes is not None:
-        # --gpu-memory-utilization 0.01 mirrors build_vllm_gpu_mem_args. The
-        # byte cap replaces the fraction for *sizing* the KV cache, but vLLM's
-        # startup admission check (request_memory in v1/worker/utils.py) is a
-        # separate step that rejects a launch when free VRAM is below
-        # total * gpu_memory_utilization and never consults the byte cap. It
-        # runs first, so co-resident workers would fail startup on the default
-        # fraction if this were omitted.
+        # vLLM checks this admission fraction before applying the byte cap.
         return [
             "--kv-cache-memory-bytes",
             str(kv_cache_memory_bytes),
@@ -145,13 +132,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             vllm_args: Configuration dict with keys:
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - gpu_memory_utilization: Fraction of GPU memory to allocate (optional)
-                - kv_cache_memory_bytes: Absolute KV cache budget in bytes
-                  (optional). vLLM applies it per GPU, so each rank gets this
-                  budget; with the one-GPU-per-worker layout these tests use it
-                  is also the per-process budget. It replaces
-                  gpu_memory_utilization for sizing the KV cache and makes vLLM
-                  skip memory profiling, but not for the startup free-memory
-                  check (see _vllm_gpu_mem_args)
+                - kv_cache_memory_bytes: Per-GPU cache budget (optional)
                 - num_gpu_blocks_override: Cap on number of KV cache blocks (optional)
                 - max_model_len: Maximum sequence length (optional)
                 - enforce_eager: Disable CUDA graphs (default: False)
@@ -683,10 +664,7 @@ def test_router_decisions_vllm_dp(
     )
 
 
-# No @pytest.mark.profiled_vram_gib here, deliberately: that marker moves a test
-# into the VRAM-aware parallel lane, which hands out exactly one device, while
-# this gpu_2 test pins its decode worker to absolute device 1.
-@pytest.mark.pre_merge
+# Keep sequential: this test pins its decode worker to GPU 1.
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.requested_vllm_kv_cache_bytes(DISAGG_KV_CACHE_MEMORY_BYTES)
