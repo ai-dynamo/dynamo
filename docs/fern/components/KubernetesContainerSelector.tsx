@@ -123,7 +123,8 @@ function commandFor(
     return [
       `export DYNAMO_VERSION=${CURRENT_TAG}`,
       `export DYNAMO_RUNTIME_VERSION=${runtimeVersionFor(dynamoVersion)}`,
-      'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:nightly"',
+      // Nightly planner images are a separate NGC repo, not a tag on dynamo-planner.
+      'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:latest"',
     ].join("\n");
   }
 

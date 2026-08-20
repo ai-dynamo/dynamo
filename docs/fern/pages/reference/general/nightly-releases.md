@@ -24,10 +24,13 @@ Dynamo publishes nightly builds from `main`. Nightlies let you try the latest fe
 
 Every night, the [Nightly CI pipeline](https://github.com/ai-dynamo/dynamo/blob/main/.github/workflows/nightly-ci.yml) builds `main` and publishes:
 
-- **Container images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, and `tensorrtllm-runtime-nightly` to NGC.
+- **Runtime images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, and `tensorrtllm-runtime-nightly` to NGC.
+- **Component images:** `dynamo-frontend-nightly`, `dynamo-planner-nightly`, `kubernetes-operator-nightly`, and `snapshot-agent-nightly` to NGC.
 - **Python wheels:** `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` to the NVIDIA prerelease index at [pypi.nvidia.com](https://pypi.nvidia.com/).
 
-Nightly deliberately does **not** publish EFA image variants, `dynamo-frontend`, `kubernetes-operator`, `dynamo-planner`, `snapshot-agent`, Helm charts, or Rust crates. For those, use a [stable or pre-release build](release-artifacts.mdx).
+Each nightly image repository is separate from its stable counterpart: the nightly planner is `dynamo-planner-nightly`, not a `nightly` tag on `dynamo-planner`.
+
+Nightly deliberately does **not** publish EFA image variants, Helm charts, or Rust crates. For those, use a [stable or pre-release build](release-artifacts.mdx).
 
 ## Installing Nightly Containers
 
