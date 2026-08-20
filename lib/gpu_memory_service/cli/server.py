@@ -19,12 +19,12 @@ import time
 from contextlib import closing
 
 from gpu_memory_service.cli.snapshot import start_per_device
-from gpu_memory_service.client.session import _GMSClientSession as _V0ClientSession
+from gpu_memory_service.client.session import _GMSClientSession as v0_session
 from gpu_memory_service.common.locks import RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path as _v0_socket_path
+from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
-from gpu_memory_service.v1.client.session import _GMSClientSession as _V1ClientSession
-from gpu_memory_service.v1.device import get_socket_path as _v1_socket_path
+from gpu_memory_service.v1.client.session import _GMSClientSession as v1_session
+from gpu_memory_service.v1.device import get_socket_path as v1_get_socket_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,37 +33,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_SECONDS = 0.5
-
-
-def _child_command(device: int, device_type: str, use_v1: bool = False) -> list[str]:
-    """Command for one child process serving every production tag on one GPU."""
-    command = [sys.executable, "-m", "gpu_memory_service"]
-    if use_v1:
-        command.append("--use-v1")
-    command.extend(["--device", str(device)])
-    if not use_v1:
-        command.extend(["--device-type", device_type])
-    return command
-
-
-def _probe_restore_ready(devices: list[int], use_v1: bool) -> None:
-    timeout_ms = int(_PROBE_TIMEOUT_SECONDS * 1000)
-    for device in devices:
-        if use_v1:
-            session = _V1ClientSession(
-                _v1_socket_path(device, "weights"),
-                RequestedLockType.RO,
-                connect_timeout=_PROBE_TIMEOUT_SECONDS,
-                admission_timeout=_PROBE_TIMEOUT_SECONDS,
-            )
-        else:
-            session = _V0ClientSession(
-                _v0_socket_path(device, "weights"),
-                RequestedLockType.RO,
-                timeout_ms,
-            )
-        with closing(session):
-            pass
 
 
 def _terminate_all(processes: list[subprocess.Popen]) -> None:
@@ -138,7 +107,23 @@ def main(argv: list[str] | None = None) -> None:
     vmm = get_vmm()
     devices = vmm.list_devices()
     if args.probe_restore_ready:
-        _probe_restore_ready(devices, use_v1=args.use_v1)
+        timeout_ms = int(_PROBE_TIMEOUT_SECONDS * 1000)
+        for device in devices:
+            if args.use_v1:
+                session = v1_session(
+                    v1_get_socket_path(device, "weights"),
+                    RequestedLockType.RO,
+                    connect_timeout=_PROBE_TIMEOUT_SECONDS,
+                    admission_timeout=_PROBE_TIMEOUT_SECONDS,
+                )
+            else:
+                session = v0_session(
+                    get_socket_path(device, "weights"),
+                    RequestedLockType.RO,
+                    timeout_ms,
+                )
+            with closing(session):
+                pass
         return
 
     servers: list[subprocess.Popen] = []
@@ -153,16 +138,20 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         for device in devices:
-            server = subprocess.Popen(
-                _child_command(device, args.device_type, use_v1=args.use_v1)
-            )
+            command = [sys.executable, "-m", "gpu_memory_service"]
+            if args.use_v1:
+                command.append("--use-v1")
+            command.extend(["--device", str(device)])
+            if not args.use_v1:
+                command.extend(["--device-type", args.device_type])
+            process = subprocess.Popen(command)
             logger.info(
                 "Started GMS%s device=%d pid=%d",
                 " V1" if args.use_v1 else "",
                 device,
-                server.pid,
+                process.pid,
             )
-            servers.append(server)
+            servers.append(process)
 
         if args.enable_loader is not None:
             loader_argv = list(args.enable_loader)
