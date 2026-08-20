@@ -13,6 +13,7 @@ pub use dynamo_kv_router::scheduling::{
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
 
+use super::SchedulerLoadSender;
 use super::metrics::{ROUTER_QUEUE_METRICS, RouterQueueMetricHandles, RouterRequestMetrics};
 use super::sequence::{
     RuntimeSequencePublisher, SequenceError, SequenceRequest, create_multi_worker_sequences,
@@ -64,6 +65,7 @@ where
         available_worker_provider: Option<WorkerAvailabilityProvider>,
         model_name: Option<&str>,
         worker_type: &'static str,
+        scheduler_load: SchedulerLoadSender,
         cancellation_token: CancellationToken,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
@@ -77,6 +79,7 @@ where
             kv_router_config.router_replica_sync,
             router_id,
             worker_type,
+            scheduler_load,
             cancellation_token.child_token(),
         )
         .await
@@ -539,6 +542,7 @@ mod tests {
             None,
             Some("test-model"),
             "decode",
+            super::super::routing_graph::scheduler_load_channel(cancellation_token.child_token()).0,
             cancellation_token.clone(),
         )
         .await

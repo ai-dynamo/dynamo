@@ -264,18 +264,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     fn flush_replica_batch_effects(&self, effects: &mut ReplicaBatchEffects) {
         let decay_now = Instant::now();
-        let mut active_loads = Vec::with_capacity(effects.worker_loads.len());
+        let mut scheduler_loads = Vec::with_capacity(effects.worker_loads.len());
         for (worker, pending) in effects.worker_loads.drain() {
             if pending.publish {
-                active_loads.push(self.observe_worker_load_snapshot(
+                scheduler_loads.push(self.observe_worker_load_snapshot(
                     worker,
                     pending.latest_load,
                     decay_now,
                 ));
             }
         }
-        if !active_loads.is_empty() {
-            self.publisher.publish_load_batch(active_loads);
+        if !scheduler_loads.is_empty() {
+            self.publisher.publish_scheduler_load_batch(scheduler_loads);
         }
 
         if std::mem::take(&mut effects.wake_scheduler) {

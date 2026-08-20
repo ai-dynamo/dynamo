@@ -1324,8 +1324,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::{
-        ActiveLoad, ActiveSequenceEvent, ExternalSequenceBlockHash, WorkerSelectionResult,
-        WorkerWithDpRank,
+        ActiveSequenceEvent, ExternalSequenceBlockHash, WorkerSelectionResult, WorkerWithDpRank,
     };
     use crate::router_hint::RouterHintRootCandidates;
     use crate::scheduling::OverlapSignals;
@@ -1366,7 +1365,7 @@ mod tests {
             Ok(())
         }
 
-        fn publish_load(&self, _load: ActiveLoad) {
+        fn publish_scheduler_load(&self, _load: crate::sequences::SchedulerLoadSnapshot) {
             self.response_rx.lock().unwrap().take();
         }
 
