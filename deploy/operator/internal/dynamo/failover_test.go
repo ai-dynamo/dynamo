@@ -878,7 +878,7 @@ func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
 			"only supported for an operator-generated DCD",
 			"disaggregation mode must be aggregated",
 			"request plane must be tcp",
-			"tensor parallel size must be 1",
+			"tensor parallel size must match the requested GPU count",
 			"pipeline parallel size must be 1",
 			"data parallel size must be 1",
 		} {
@@ -886,12 +886,15 @@ func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects a referenced DGD source", func(t *testing.T) {
+	// TEMPORARY, paired with the checkpointRef relaxation in failover.go --
+	// restore both together before upstreaming. checkpointRef is permitted under
+	// failover so an existing checkpoint can be restored instead of re-captured,
+	// which at GLM-5.2 TP=8 saves roughly nine minutes per iteration.
+	t.Run("permits a referenced DGD source", func(t *testing.T) {
 		source := component.DeepCopy()
 		source.Experimental.Checkpoint.CheckpointRef = ptr.To("foreign")
 		violations := ValidateAutomaticFailoverCheckpointSource(source, string(BackendFrameworkVLLM))
-		require.Len(t, violations, 1)
-		assert.ErrorContains(t, violations[0], "checkpointRef must be omitted")
+		assert.Empty(t, violations)
 	})
 }
 

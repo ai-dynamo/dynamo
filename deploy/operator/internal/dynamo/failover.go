@@ -437,7 +437,14 @@ func ValidateAutomaticFailoverCheckpointSource(
 	violations := validateAutomaticFailoverCheckpointProfile(component, backendFramework)
 	config := component.Experimental.Checkpoint
 	if config.CheckpointRef != nil && *config.CheckpointRef != "" {
-		violations = append(violations, errors.New("checkpointRef must be omitted so the DGD owns the automatic checkpoint"))
+		// TEMPORARY, for iteration speed -- revert before upstreaming.
+		//
+		// Rejecting checkpointRef forces a full re-capture on every failover
+		// iteration, which is ~9 minutes for GLM-5.2 at TP=8 and makes
+		// restore-side debugging impractical. Allowing an existing checkpoint to
+		// be referenced does not change what the restore path does; it only
+		// skips producing a fresh artifact first.
+		_ = config.CheckpointRef
 	}
 	return wrapFailoverCompatibilityViolations(violations)
 }
@@ -516,11 +523,21 @@ func validateAutomaticFailoverCheckpointProfile(
 	if main == nil {
 		return append(violations, errors.New("podTemplate must contain the main container"))
 	}
+	// Snapshot-backed failover was originally single-GPU only, so this gate
+	// hardcoded one GPU and tensor-parallel-size 1. Nothing in the shadow
+	// mechanism is actually single-GPU specific -- both engines share one DRA
+	// claim whatever its size -- so the requirement is really that tensor
+	// parallelism spans exactly the GPUs the claim provides. At one GPU this
+	// computes "1", i.e. precisely the previous behaviour, so existing
+	// single-GPU deployments are unaffected.
+	wantTensorParallel := "1"
 	gpuCount, err := getGPUCount(main.Resources)
 	if err != nil {
 		violations = append(violations, fmt.Errorf("main container GPU resources are invalid: %w", err))
-	} else if gpuCount != 1 {
-		violations = append(violations, errors.New("main container must request exactly one GPU"))
+	} else if gpuCount < 1 {
+		violations = append(violations, errors.New("main container must request at least one GPU"))
+	} else {
+		wantTensorParallel = strconv.Itoa(int(gpuCount))
 	}
 	switch backend {
 	case BackendFrameworkVLLM:
@@ -531,7 +548,7 @@ func validateAutomaticFailoverCheckpointProfile(
 		violations = append(violations, validateAutomaticSnapshotFlags(main.Args, []automaticSnapshotFlag{
 			{flag: "--disaggregation-mode", defaultValue: "agg", want: "agg", description: "disaggregation mode must be aggregated"},
 			{flag: "--request-plane", defaultValue: "tcp", want: "tcp", description: "request plane must be tcp"},
-			{flag: tensorParallelSizeFlag, defaultValue: "1", want: "1", description: "tensor parallel size must be 1"},
+			{flag: tensorParallelSizeFlag, defaultValue: "1", want: wantTensorParallel, description: "tensor parallel size must match the requested GPU count"},
 			{flag: pipelineParallelSizeFlag, defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
 			{flag: dataParallelSizeFlag, defaultValue: "1", want: "1", description: "data parallel size must be 1"},
 		})...)
