@@ -5,8 +5,8 @@ use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 use crate::{
     component::{
-        Client, DeviceType, Endpoint, Instance, RoutingInstances, RoutingOccupancyState,
-        get_or_create_routing_occupancy_state,
+        Client, DeviceType, Endpoint, Instance, OccupancyLease, RoutingInstances,
+        RoutingOccupancyState, get_or_create_routing_occupancy_state,
     },
     discovery::EndpointInstanceId,
     dynamo_nvtx_range,
@@ -18,8 +18,8 @@ use crate::{
     },
     protocols::{EndpointId, maybe_error::MaybeError},
     routing_policy::{
-        CandidateView, RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy,
-        RouteTarget,
+        CandidateView, RouteCandidate, RouteContext, RouteDevice, RouteLoad, RoutePicker,
+        RoutePolicy, RouteTarget,
     },
     traits::DistributedRuntimeProvider,
 };
@@ -69,30 +69,30 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
 }
 
 /// RAII handle for one in-flight unit of work charged against
-/// [`RoutingOccupancyState`]. The counter is incremented at construction; the
-/// matching decrement is emitted on drop (or by [`Self::into_tracked_stream`]).
+/// [`RoutingOccupancyState`]. The lease is charged at construction; the matching
+/// release is emitted on drop (or by [`Self::into_tracked_stream`]).
 struct OccupancyPermit {
     state: Arc<RoutingOccupancyState>,
     instance_id: u64,
-    counter: Arc<AtomicU64>,
+    lease: OccupancyLease,
     armed: bool,
 }
 
 impl OccupancyPermit {
-    fn acquire(state: Arc<RoutingOccupancyState>, instance_id: u64) -> Self {
-        let counter = state.increment(instance_id);
-        Self::from_counter(state, instance_id, counter)
+    fn acquire(state: Arc<RoutingOccupancyState>, instance_id: u64, weight: u64) -> Self {
+        let lease = state.increment(instance_id, weight);
+        Self::from_lease(state, instance_id, lease)
     }
 
-    fn from_counter(
+    fn from_lease(
         state: Arc<RoutingOccupancyState>,
         instance_id: u64,
-        counter: Arc<AtomicU64>,
+        lease: OccupancyLease,
     ) -> Self {
         Self {
             state,
             instance_id,
-            counter,
+            lease,
             armed: true,
         }
     }
@@ -101,10 +101,10 @@ impl OccupancyPermit {
         if self.instance_id == instance_id {
             return;
         }
-        let counter = self.state.increment(instance_id);
-        RoutingOccupancyState::decrement_counter(self.counter.as_ref());
+        let lease = self.state.increment(instance_id, self.lease.weight());
+        self.lease.release();
         self.instance_id = instance_id;
-        self.counter = counter;
+        self.lease = lease;
     }
 
     fn into_tracked_stream<U: Data + MaybeError>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
@@ -114,7 +114,7 @@ impl OccupancyPermit {
             Box::pin(OccupancyTrackedStream {
                 inner: stream,
                 instance_id: self.instance_id,
-                counter: self.counter.clone(),
+                lease: self.lease.clone(),
                 released: false,
             }),
             engine_ctx,
@@ -125,7 +125,7 @@ impl OccupancyPermit {
 impl Drop for OccupancyPermit {
     fn drop(&mut self) {
         if self.armed {
-            RoutingOccupancyState::decrement_counter(self.counter.as_ref());
+            self.lease.release();
         }
     }
 }
@@ -146,6 +146,12 @@ pub trait MultimodalCacheIndex: Send + Sync {
 }
 
 pub type MultimodalCacheKeyExtractor<T> = Arc<dyn Fn(&T) -> Vec<String> + Send + Sync>;
+
+/// Extracts the prompt-token weight a request should charge against per-worker occupancy.
+///
+/// Only consulted when token-aware least-loaded ordering is enabled; see
+/// [`DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE`](crate::config::environment_names::router::DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE).
+pub type RequestLoadWeight<T> = Arc<dyn Fn(&T) -> u64 + Send + Sync>;
 
 #[derive(Clone)]
 pub struct PushRouter<T, U>
@@ -197,6 +203,11 @@ where
 
     /// Optional typed request extractor for multimodal embedding cache keys.
     multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+
+    /// Optional typed request extractor for the prompt-token weight charged
+    /// against occupancy. Without it every request weighs zero and least-loaded
+    /// routing orders by in-flight request count alone.
+    load_weight: Option<RequestLoadWeight<T>>,
 
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
@@ -563,6 +574,7 @@ where
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
+            load_weight: None,
             _phantom: PhantomData,
         })
     }
@@ -637,6 +649,7 @@ where
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
+            load_weight: None,
             _phantom: PhantomData,
         };
 
@@ -685,8 +698,30 @@ where
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
+            load_weight: None,
             _phantom: PhantomData,
         })
+    }
+
+    /// Charge each request's prompt-token weight against per-worker occupancy.
+    ///
+    /// Only takes effect when token-aware least-loaded ordering is enabled via
+    /// [`DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE`](crate::config::environment_names::router::DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE);
+    /// otherwise the extractor is never called.
+    pub fn with_load_weight(mut self, load_weight: RequestLoadWeight<T>) -> Self {
+        self.load_weight = Some(load_weight);
+        self
+    }
+
+    /// The prompt-token weight to charge for `request`, or 0 when weights are not tracked.
+    fn request_weight(&self, state: &RoutingOccupancyState, request: &T) -> u64 {
+        if !state.is_token_aware() {
+            return 0;
+        }
+        self.load_weight
+            .as_ref()
+            .map(|extract| extract(request))
+            .unwrap_or(0)
     }
 
     /// `ResourceExhausted` when workers are routable but all overloaded;
@@ -729,7 +764,7 @@ where
             .select(
                 CandidateView::Workers(candidates),
                 RouteContext::default(),
-                |_| 0,
+                |_| RouteLoad::default(),
             )
             .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
         Ok((decision.target.worker_id, candidates.len()))
@@ -808,19 +843,21 @@ where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
         let state = self.occupancy_state()?;
-        let (instance_id, counter, candidate_count) = {
+        let weight = self.request_weight(&state, request.content());
+        let (instance_id, lease, candidate_count) = {
             let routing_instances = self.client.routing_instances();
             let candidates = routing_instances.free_ids();
-            let (decision, counter) = state
+            let (decision, lease) = state
                 .select_and_admit(
                     self.picker()?,
                     CandidateView::Workers(candidates),
                     RouteContext::default(),
+                    weight,
                 )
                 .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
             (
                 decision.target.worker_id,
-                counter.expect("P2C selection always requests occupancy admission"),
+                lease.expect("P2C selection always requests occupancy admission"),
                 candidates.len(),
             )
         };
@@ -828,10 +865,10 @@ where
             router_mode = "power-of-two-choices",
             worker_id = instance_id,
             candidate_count,
-            load = state.load(instance_id),
+            load = state.request_load(instance_id),
             "Selected worker"
         );
-        let permit = OccupancyPermit::from_counter(state, instance_id, counter);
+        let permit = OccupancyPermit::from_lease(state, instance_id, lease);
         self.dispatch_selected(instance_id, request, Some(permit), prepare)
             .await
     }
@@ -1037,16 +1074,17 @@ where
 
         // Only full cache hits bypass weighted accounting; partial hits still follow the
         // device-aware ratio because some image encoding remains for this request.
-        let (decision, counter) = state
+        let (decision, lease) = state
             .select_and_admit(
                 self.picker()?,
                 CandidateView::DeviceAware(&selection.candidates),
                 selection.context,
+                self.request_weight(&state, request.content()),
             )
             .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
         let instance_id = decision.target.worker_id;
-        let permit = counter
-            .map(|counter| OccupancyPermit::from_counter(state.clone(), instance_id, counter));
+        let permit =
+            lease.map(|lease| OccupancyPermit::from_lease(state.clone(), instance_id, lease));
         let is_cpu = selection.candidates.iter().any(|candidate| {
             candidate.target.worker_id == instance_id && candidate.device == RouteDevice::Cpu
         });
@@ -1054,7 +1092,7 @@ where
             router_mode = "device-aware-weighted",
             worker_id = instance_id,
             candidate_count = selection.candidates.len(),
-            load = state.load(instance_id),
+            load = state.request_load(instance_id),
             endpoint = %endpoint_id,
             is_cpu,
             embedding_cache_hit = selection.embedding_cache_hit,
@@ -1150,24 +1188,27 @@ where
         let state = self.occupancy_state()?;
         let routing_instances = self.client.routing_instances();
         let instance_ids = routing_instances.free_ids();
-        let (decision, counter) = state
+        let (decision, lease) = state
             .select_and_admit(
                 self.picker()?,
                 CandidateView::Workers(instance_ids),
                 RouteContext::default(),
+                self.request_weight(&state, request.content()),
             )
             .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
         let instance_id = decision.target.worker_id;
-        let permit = OccupancyPermit::from_counter(
+        let permit = OccupancyPermit::from_lease(
             state.clone(),
             instance_id,
-            counter.expect("least-loaded selection always requests occupancy admission"),
+            lease.expect("least-loaded selection always requests occupancy admission"),
         );
+        let load = state.load(instance_id);
         tracing::info!(
             router_mode = "least-loaded",
             worker_id = instance_id,
             candidate_count = instance_ids.len(),
-            load = state.load(instance_id),
+            load = load.requests,
+            queued_tokens = load.queued_tokens,
             "Selected worker"
         );
 
@@ -1187,7 +1228,7 @@ where
                 .select(
                     CandidateView::Workers(routing_instances.free_ids()),
                     RouteContext::default(),
-                    |_| 0,
+                    |_| RouteLoad::default(),
                 )
                 .map(|decision| decision.target.worker_id),
             RouterMode::PowerOfTwoChoices
@@ -1224,7 +1265,7 @@ where
                 .peek(
                     CandidateView::Workers(instance_ids),
                     RouteContext::default(),
-                    |_| 0,
+                    |_| RouteLoad::default(),
                 )
                 .map(|decision| decision.target.worker_id),
             RouterMode::LeastLoaded | RouterMode::PowerOfTwoChoices => self
@@ -1290,7 +1331,7 @@ where
     pub fn occupancy_for_test(&self, worker_id: u64) -> u64 {
         self.occupancy_state
             .as_deref()
-            .map(|state| state.load(worker_id))
+            .map(|state| state.request_load(worker_id))
             .unwrap_or(0)
     }
 
@@ -1312,7 +1353,8 @@ where
                 | RouterMode::PowerOfTwoChoices
                 | RouterMode::DeviceAwareWeighted => {
                     let state = self.occupancy_state()?;
-                    Some(OccupancyPermit::acquire(state, instance_id))
+                    let weight = self.request_weight(&state, request);
+                    Some(OccupancyPermit::acquire(state, instance_id, weight))
                 }
                 RouterMode::RoundRobin
                 | RouterMode::Random
@@ -1333,12 +1375,14 @@ where
                     return Err(self.empty_free_pool_error(&routing_instances));
                 }
 
-                let (decision, counter) = match self.router_mode {
+                let weight = self.request_weight(&state, request);
+                let (decision, lease) = match self.router_mode {
                     RouterMode::LeastLoaded | RouterMode::PowerOfTwoChoices => state
                         .select_and_admit(
                             self.picker()?,
                             CandidateView::Workers(instance_ids),
                             RouteContext::default(),
+                            weight,
                         )
                         .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?,
                     RouterMode::DeviceAwareWeighted => {
@@ -1348,14 +1392,15 @@ where
                                 self.picker()?,
                                 CandidateView::DeviceAware(&selection.candidates),
                                 selection.context,
+                                weight,
                             )
                             .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?
                     }
                     _ => unreachable!(),
                 };
                 let instance_id = decision.target.worker_id;
-                let permit = counter
-                    .map(|counter| OccupancyPermit::from_counter(state, instance_id, counter));
+                let permit =
+                    lease.map(|lease| OccupancyPermit::from_lease(state, instance_id, lease));
                 Ok((instance_id, permit))
             }
             RouterMode::RoundRobin => self
@@ -1782,7 +1827,7 @@ where
 struct OccupancyTrackedStream<U: Data + MaybeError> {
     inner: ManyOut<U>,
     instance_id: u64,
-    counter: Arc<AtomicU64>,
+    lease: OccupancyLease,
     released: bool,
 }
 
@@ -1791,7 +1836,7 @@ impl<U: Data + MaybeError> OccupancyTrackedStream<U> {
         if self.released {
             return;
         }
-        RoutingOccupancyState::decrement_counter(self.counter.as_ref());
+        self.lease.release();
         self.released = true;
     }
 }
@@ -1902,9 +1947,9 @@ mod tests {
     fn p2c_selects_lower_load_worker() {
         let state = RoutingOccupancyState::default();
         for _ in 0..10 {
-            state.increment(1);
+            state.increment(1, 0);
         }
-        state.increment(2);
+        state.increment(2, 0);
 
         // With only two workers, p2c_select_from must pick both and choose id=2 (lower load).
         let result = p2c_select_from(&state, &[1, 2]);
@@ -1919,12 +1964,16 @@ mod tests {
 
         let candidates = CandidateView::Workers(&[10, 20, 30, 40]);
         random
-            .select(candidates, RouteContext::default(), |_| 0)
+            .select(candidates, RouteContext::default(), |_| {
+                RouteLoad::default()
+            })
             .expect("random selection must have a candidate");
         let selected = (0..2)
             .map(|_| {
                 round_robin
-                    .select(candidates, RouteContext::default(), |_| 0)
+                    .select(candidates, RouteContext::default(), |_| {
+                        RouteLoad::default()
+                    })
                     .expect("round-robin selection must have a candidate")
                     .target
                     .worker_id
@@ -1943,7 +1992,7 @@ mod tests {
     fn p2c_treats_missing_counts_as_zero() {
         let state = RoutingOccupancyState::default();
         for _ in 0..5 {
-            state.increment(1);
+            state.increment(1, 0);
         }
         // Worker 2 has no entry — should be treated as 0, so it wins.
         let result = p2c_select_from(&state, &[1, 2]);
@@ -1954,8 +2003,8 @@ mod tests {
     fn p2c_returns_valid_worker_on_tie() {
         let state = RoutingOccupancyState::default();
         for _ in 0..3 {
-            state.increment(1);
-            state.increment(2);
+            state.increment(1, 0);
+            state.increment(2, 0);
         }
 
         for _ in 0..100 {
@@ -1967,33 +2016,33 @@ mod tests {
     #[test]
     fn occupancy_permit_decrements_before_stream_creation() {
         let state = Arc::new(RoutingOccupancyState::default());
-        let counter = state.increment(42);
-        let permit = OccupancyPermit::from_counter(state.clone(), 42, counter);
-        assert_eq!(state.load(42), 1);
+        let lease = state.increment(42, 0);
+        let permit = OccupancyPermit::from_lease(state.clone(), 42, lease);
+        assert_eq!(state.request_load(42), 1);
         drop(permit);
-        assert_eq!(state.load(42), 0);
+        assert_eq!(state.request_load(42), 0);
     }
 
     #[test]
     fn occupancy_tracked_stream_decrements_on_drop() {
         let state = Arc::new(RoutingOccupancyState::default());
-        let counter = state.increment(7);
-        let permit = OccupancyPermit::from_counter(state.clone(), 7, counter);
+        let lease = state.increment(7, 0);
+        let permit = OccupancyPermit::from_lease(state.clone(), 7, lease);
         let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
         let stream = permit.into_tracked_stream(ResponseStream::new(
             Box::pin(tokio_stream::iter(vec![TestResponse { error: None }])),
             ctx,
         ));
-        assert_eq!(state.load(7), 1);
+        assert_eq!(state.request_load(7), 1);
         drop(stream);
-        assert_eq!(state.load(7), 0);
+        assert_eq!(state.request_load(7), 0);
     }
 
     #[tokio::test]
     async fn occupancy_tracked_stream_decrements_on_completion() {
         let state = Arc::new(RoutingOccupancyState::default());
-        let counter = state.increment(7);
-        let permit = OccupancyPermit::from_counter(state.clone(), 7, counter);
+        let lease = state.increment(7, 0);
+        let permit = OccupancyPermit::from_lease(state.clone(), 7, lease);
         let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
         let mut stream = permit.into_tracked_stream(ResponseStream::new(
             Box::pin(tokio_stream::iter(vec![TestResponse { error: None }])),
@@ -2001,18 +2050,22 @@ mod tests {
         ));
 
         assert!(stream.next().await.unwrap().err().is_none());
-        assert_eq!(state.load(7), 1);
+        assert_eq!(state.request_load(7), 1);
         assert!(stream.next().await.is_none());
-        assert_eq!(state.load(7), 0);
+        assert_eq!(state.request_load(7), 0);
         drop(stream);
-        assert_eq!(state.load(7), 0, "drop must not release twice after EOF");
+        assert_eq!(
+            state.request_load(7),
+            0,
+            "drop must not release twice after EOF"
+        );
     }
 
     #[tokio::test]
     async fn occupancy_tracked_stream_releases_before_yielding_error() {
         let state = Arc::new(RoutingOccupancyState::default());
-        let counter = state.increment(7);
-        let permit = OccupancyPermit::from_counter(state.clone(), 7, counter);
+        let lease = state.increment(7, 0);
+        let permit = OccupancyPermit::from_lease(state.clone(), 7, lease);
         let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
         let error = DynamoError::builder()
             .error_type(ErrorType::WorkerOverloaded)
@@ -2028,7 +2081,7 @@ mod tests {
         let response = stream.next().await.expect("error response");
         assert!(response.err().is_some());
         assert_eq!(
-            state.load(7),
+            state.request_load(7),
             0,
             "occupancy must be released before retry observes the error"
         );
@@ -2037,21 +2090,21 @@ mod tests {
     #[test]
     fn old_reservation_cannot_decrement_readded_worker_counter() {
         let state = Arc::new(RoutingOccupancyState::default());
-        let old_counter = state.increment(7);
-        let old_permit = OccupancyPermit::from_counter(state.clone(), 7, old_counter);
+        let old_lease = state.increment(7, 0);
+        let old_permit = OccupancyPermit::from_lease(state.clone(), 7, old_lease);
 
         state.retain(&[]);
-        let new_counter = state.increment(7);
-        assert_eq!(state.load(7), 1);
+        let new_lease = state.increment(7, 0);
+        assert_eq!(state.request_load(7), 1);
 
         drop(old_permit);
         assert_eq!(
-            state.load(7),
+            state.request_load(7),
             1,
             "dropping an old incarnation must not touch the replacement counter"
         );
-        RoutingOccupancyState::decrement_counter(new_counter.as_ref());
-        assert_eq!(state.load(7), 0);
+        new_lease.release();
+        assert_eq!(state.request_load(7), 0);
     }
 
     /// A mid-generation stream end means the worker dropped the request, so it
@@ -2089,14 +2142,14 @@ mod tests {
         let mut permits = Vec::new();
         for _ in 0..5 {
             let selected = p2c_select_from(&state, &[1, 2]);
-            permits.push(OccupancyPermit::acquire(state.clone(), selected));
+            permits.push(OccupancyPermit::acquire(state.clone(), selected, 0));
         }
 
-        let total = state.load(1) + state.load(2);
+        let total = state.request_load(1) + state.request_load(2);
         assert_eq!(total, 5, "5 in-flight requests should be tracked");
 
         drop(permits);
-        let total = state.load(1) + state.load(2);
+        let total = state.request_load(1) + state.request_load(2);
         assert_eq!(total, 0, "All guards dropped, counts should be 0");
     }
 
@@ -2104,7 +2157,7 @@ mod tests {
     fn p2c_never_selects_dominated_worker() {
         let state = RoutingOccupancyState::default();
         for _ in 0..100 {
-            state.increment(3);
+            state.increment(3, 0);
         }
 
         let mut selected = [0u32; 3];
@@ -2127,29 +2180,30 @@ mod tests {
     #[tokio::test]
     async fn least_loaded_selects_exact_min_and_tracks_counts() {
         let state = Arc::new(RoutingOccupancyState::default());
-        state.increment(1);
-        state.increment(1);
-        state.increment(2);
+        state.increment(1, 0);
+        state.increment(1, 0);
+        state.increment(2, 0);
 
         let picker = RoutePicker::new(RoutePolicy::LeastLoaded);
-        let (decision, counter) = state
+        let (decision, lease) = state
             .select_and_admit(
                 &picker,
                 CandidateView::Workers(&[1, 2, 3]),
                 RouteContext::default(),
+                0,
             )
             .unwrap();
         let selected = decision.target.worker_id;
         assert_eq!(selected, 3);
 
-        let permit = OccupancyPermit::from_counter(
+        let permit = OccupancyPermit::from_lease(
             state.clone(),
             selected,
-            counter.expect("least-loaded selection must acquire a counter"),
+            lease.expect("least-loaded selection must acquire a lease"),
         );
-        assert_eq!(state.load(selected), 1);
+        assert_eq!(state.request_load(selected), 1);
         drop(permit);
-        assert_eq!(state.load(selected), 0);
+        assert_eq!(state.request_load(selected), 0);
     }
 
     #[tokio::test]
@@ -2311,6 +2365,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_weight_is_only_charged_when_the_state_tracks_tokens() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_load_weight".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
+            .await
+            .unwrap();
+        assert_eq!(
+            router.request_weight(&RoutingOccupancyState::new(true), &7u64),
+            0,
+            "a router without an extractor weighs every request at zero"
+        );
+
+        // The test request type is its own weight.
+        let router = router.with_load_weight(Arc::new(|request: &u64| *request));
+        assert_eq!(
+            router.request_weight(&RoutingOccupancyState::new(true), &7u64),
+            7
+        );
+        assert_eq!(
+            router.request_weight(&RoutingOccupancyState::new(false), &7u64),
+            0,
+            "the extractor must not run when the state does not track tokens"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn exact_selection_releases_occupancy_when_preparation_fails() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
@@ -2337,7 +2429,7 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(
-            state.load(worker_id),
+            state.request_load(worker_id),
             0,
             "preparation failure must release the selected worker"
         );
@@ -2373,7 +2465,7 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(
-            state.load(worker_id),
+            state.request_load(worker_id),
             0,
             "validation failure must release the selected worker"
         );
@@ -2808,7 +2900,7 @@ mod tests {
             .await
             .unwrap();
         let state = router.occupancy_state.clone().unwrap();
-        state.increment(real_id);
+        state.increment(real_id, 0);
         let state_for_prepare = state.clone();
         let observed = Arc::new(AtomicU64::new(0));
         let observed_for_prepare = observed.clone();
@@ -2816,8 +2908,8 @@ mod tests {
         let _ = tokio::time::timeout(
             std::time::Duration::from_millis(100),
             router.select_and_dispatch(SingleIn::new(42), move |_, worker_id| {
-                assert_eq!(state_for_prepare.load(stale_id), 0);
-                assert_eq!(state_for_prepare.load(worker_id), 2);
+                assert_eq!(state_for_prepare.request_load(stale_id), 0);
+                assert_eq!(state_for_prepare.request_load(worker_id), 2);
                 observed_for_prepare.store(worker_id, Ordering::Relaxed);
                 Ok(())
             }),
@@ -2825,7 +2917,7 @@ mod tests {
         .await;
 
         assert_eq!(observed.load(Ordering::Relaxed), real_id);
-        assert_eq!(state.load(real_id), 1);
+        assert_eq!(state.request_load(real_id), 1);
         state.decrement(real_id);
         rt.shutdown();
     }

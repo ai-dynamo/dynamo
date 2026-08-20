@@ -667,6 +667,11 @@ pub mod router {
 
     /// Stale active-request cleanup guard in seconds; this is not a request timeout.
     pub const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+
+    /// Order least-loaded routing by the queued prompt tokens of in-flight requests,
+    /// falling back to the in-flight request count only to break ties.
+    /// Set to "1", "true", "on", or "yes" to enable; unset keeps request-count ordering.
+    pub const DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE: &str = "DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE";
 }
 
 /// Request plane transport environment variables
@@ -964,6 +969,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            router::DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     AdmissionKind, CandidateView, RouteCandidate, RouteContext, RouteDecision, RouteDevice,
-    RoutePolicy, RouteTarget,
+    RouteLoad, RoutePolicy, RouteTarget,
 };
 
 #[derive(Debug)]
@@ -31,7 +31,7 @@ impl RoutePicker {
         &self,
         candidates: CandidateView<'_>,
         context: RouteContext,
-        load: impl Fn(u64) -> u64,
+        load: impl Fn(u64) -> RouteLoad,
     ) -> Option<RouteDecision> {
         if self.policy == RoutePolicy::Random {
             return random_decision(candidates);
@@ -45,7 +45,7 @@ impl RoutePicker {
         &self,
         candidates: CandidateView<'_>,
         context: RouteContext,
-        load: impl Fn(u64) -> u64,
+        load: impl Fn(u64) -> RouteLoad,
     ) -> Option<RouteDecision> {
         if self.policy == RoutePolicy::Random {
             return random_decision(candidates);
@@ -59,7 +59,7 @@ impl RoutePicker {
         &self,
         candidates: CandidateView<'_>,
         context: RouteContext,
-        load: &impl Fn(u64) -> u64,
+        load: &impl Fn(u64) -> RouteLoad,
         commit: bool,
         samples: &mut impl SampleSource,
     ) -> Option<RouteDecision> {
@@ -95,7 +95,9 @@ impl RoutePicker {
                 let second = (first + second_offset) % candidates.len();
                 let first_target = candidates.target(first);
                 let second_target = candidates.target(second);
-                let target = if load(first_target.worker_id) <= load(second_target.worker_id) {
+                let target = if load(first_target.worker_id).requests
+                    <= load(second_target.worker_id).requests
+                {
                     first_target
                 } else {
                     second_target
@@ -154,49 +156,29 @@ fn random_decision(candidates: CandidateView<'_>) -> Option<RouteDecision> {
 #[inline(always)]
 fn lowest_load(
     candidates: CandidateView<'_>,
-    load: &impl Fn(u64) -> u64,
+    load: &impl Fn(u64) -> RouteLoad,
     samples: &mut impl SampleSource,
 ) -> Option<RouteTarget> {
-    match candidates {
-        CandidateView::Workers(workers) => {
-            let mut best = None;
-            let mut best_load = u64::MAX;
-            let mut ties = 0usize;
-            for &worker_id in workers {
-                let target_load = load(worker_id);
-                if target_load < best_load {
-                    best = Some(RouteTarget::worker(worker_id));
-                    best_load = target_load;
-                    ties = 1;
-                } else if target_load == best_load {
-                    ties += 1;
-                    if samples.index(ties) == 0 {
-                        best = Some(RouteTarget::worker(worker_id));
-                    }
+    let mut best: Option<(RouteTarget, RouteLoad)> = None;
+    let mut ties = 0usize;
+    for index in 0..candidates.len() {
+        let target = candidates.target(index);
+        let target_load = load(target.worker_id);
+        match best {
+            Some((_, best_load)) if target_load > best_load => {}
+            Some((_, best_load)) if target_load == best_load => {
+                ties += 1;
+                if samples.index(ties) == 0 {
+                    best = Some((target, target_load));
                 }
             }
-            best
-        }
-        CandidateView::DeviceAware(candidates) => {
-            let mut best = None;
-            let mut best_load = u64::MAX;
-            let mut ties = 0usize;
-            for candidate in candidates {
-                let target_load = load(candidate.target.worker_id);
-                if target_load < best_load {
-                    best = Some(candidate.target);
-                    best_load = target_load;
-                    ties = 1;
-                } else if target_load == best_load {
-                    ties += 1;
-                    if samples.index(ties) == 0 {
-                        best = Some(candidate.target);
-                    }
-                }
+            _ => {
+                best = Some((target, target_load));
+                ties = 1;
             }
-            best
         }
     }
+    best.map(|(target, _)| target)
 }
 
 #[derive(Default)]
@@ -230,7 +212,7 @@ impl DeviceGroup {
 fn device_aware(
     candidates: &[RouteCandidate],
     context: RouteContext,
-    load: &impl Fn(u64) -> u64,
+    load: &impl Fn(u64) -> RouteLoad,
     samples: &mut impl SampleSource,
 ) -> Option<RouteDecision> {
     let mut cpu = DeviceGroup {
@@ -247,7 +229,9 @@ fn device_aware(
     };
 
     for candidate in candidates {
-        let target_load = load(candidate.target.worker_id);
+        // Device-aware balancing budgets CPU work against accelerator work by
+        // request count, so it reads the request-count component only.
+        let target_load = load(candidate.target.worker_id).requests;
         match candidate.device {
             RouteDevice::Cpu => cpu.consider(candidate.target, target_load, samples),
             RouteDevice::Accelerator => {
@@ -323,7 +307,8 @@ mod tests {
         for _ in 0..16 {
             assert_eq!(
                 picker
-                    .peek(candidates, RouteContext::default(), |_| 0)
+                    .peek(candidates, RouteContext::default(), |_| RouteLoad::default(
+                    ))
                     .unwrap()
                     .target
                     .worker_id,
@@ -333,7 +318,9 @@ mod tests {
         let selected = (0..4)
             .map(|_| {
                 picker
-                    .select(candidates, RouteContext::default(), |_| 0)
+                    .select(candidates, RouteContext::default(), |_| {
+                        RouteLoad::default()
+                    })
                     .unwrap()
                     .target
                     .worker_id
@@ -351,7 +338,7 @@ mod tests {
             .choose_with_samples(
                 candidates,
                 RouteContext::default(),
-                &|_| 0,
+                &|_| RouteLoad::default(),
                 false,
                 &mut samples,
             )
@@ -372,7 +359,7 @@ mod tests {
                 RouteContext::default(),
                 &|worker| {
                     reads.set(reads.get() + 1);
-                    if worker == 20 { 5 } else { 1 }
+                    RouteLoad::requests(if worker == 20 { 5 } else { 1 })
                 },
                 true,
                 &mut samples,
@@ -392,13 +379,79 @@ mod tests {
             .choose_with_samples(
                 candidates,
                 RouteContext::default(),
-                &|_| 3,
+                &|_| RouteLoad::requests(3),
                 true,
                 &mut samples,
             )
             .unwrap();
         assert_eq!(decision.target.worker_id, 30);
         assert_eq!(samples.consumed, 2);
+    }
+
+    #[test]
+    fn least_loaded_orders_by_queued_tokens_then_request_count() {
+        let picker = RoutePicker::new(RoutePolicy::LeastLoaded);
+        let candidates = CandidateView::Workers(&[10, 20, 30]);
+        let mut samples = ScriptedSamples::new(vec![0, 0, 0]);
+        let decision = picker
+            .choose_with_samples(
+                candidates,
+                RouteContext::default(),
+                &|worker| match worker {
+                    // Fewest requests, but by far the most queued prompt tokens.
+                    10 => RouteLoad {
+                        queued_tokens: 4096,
+                        requests: 1,
+                    },
+                    20 => RouteLoad {
+                        queued_tokens: 64,
+                        requests: 3,
+                    },
+                    _ => RouteLoad {
+                        queued_tokens: 64,
+                        requests: 9,
+                    },
+                },
+                true,
+                &mut samples,
+            )
+            .unwrap();
+        assert_eq!(
+            decision.target.worker_id, 20,
+            "queued tokens decide, and the request count only breaks the 20/30 tie"
+        );
+    }
+
+    #[test]
+    fn p2c_ignores_queued_tokens() {
+        let picker = RoutePicker::new(RoutePolicy::PowerOfTwoChoices);
+        let candidates = CandidateView::Workers(&[10, 20]);
+        let mut samples = ScriptedSamples::new(vec![0, 0]);
+        let decision = picker
+            .choose_with_samples(
+                candidates,
+                RouteContext::default(),
+                &|worker| {
+                    if worker == 10 {
+                        RouteLoad {
+                            queued_tokens: 4096,
+                            requests: 1,
+                        }
+                    } else {
+                        RouteLoad {
+                            queued_tokens: 0,
+                            requests: 2,
+                        }
+                    }
+                },
+                true,
+                &mut samples,
+            )
+            .unwrap();
+        assert_eq!(
+            decision.target.worker_id, 10,
+            "power-of-two-choices stays ordered by in-flight request count"
+        );
     }
 
     #[test]
@@ -431,7 +484,7 @@ mod tests {
                 },
                 |worker| {
                     reads.set(reads.get() + 1);
-                    worker
+                    RouteLoad::requests(worker)
                 },
             )
             .unwrap();
