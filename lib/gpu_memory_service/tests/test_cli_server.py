@@ -21,6 +21,7 @@ if not HAS_GMS:
 from gpu_memory_service.cli import args as cli_args
 from gpu_memory_service.cli import runner, server
 from gpu_memory_service.cli.args import parse_args
+from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.v1 import device as v1_device
 
 pytestmark = [
@@ -71,6 +72,58 @@ def test_v1_cli_dispatches_cuda_only_child(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         server.main(["--use-v1", "--device-type", "xpu"])
     assert "--use-v1 only supports --device-type=cuda" in capsys.readouterr().err
+
+
+def test_probe_restore_ready_uses_v0_session_without_use_v1(monkeypatch):
+    opened = []
+
+    class FakeVMM:
+        def list_devices(self):
+            return [2]
+
+    class FakeSession:
+        def __init__(self, path, lock, timeout_ms):
+            opened.append((path, lock, timeout_ms))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server, "init_vmm", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "get_vmm", lambda: FakeVMM())
+    monkeypatch.setattr(
+        server, "_v0_socket_path", lambda device, tag: f"/tmp/{device}-{tag}"
+    )
+    monkeypatch.setattr(server, "_V0ClientSession", FakeSession)
+
+    server.main(["--probe-restore-ready"])
+
+    assert opened == [("/tmp/2-weights", RequestedLockType.RO, 500)]
+
+
+def test_probe_restore_ready_uses_v1_session_with_use_v1(monkeypatch):
+    opened = []
+
+    class FakeVMM:
+        def list_devices(self):
+            return [2]
+
+    class FakeSession:
+        def __init__(self, path, lock, *, connect_timeout, admission_timeout):
+            opened.append((path, lock, connect_timeout, admission_timeout))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server, "init_vmm", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "get_vmm", lambda: FakeVMM())
+    monkeypatch.setattr(
+        server, "_v1_socket_path", lambda device, tag: f"/tmp/{device}-{tag}"
+    )
+    monkeypatch.setattr(server, "_V1ClientSession", FakeSession)
+
+    server.main(["--use-v1", "--probe-restore-ready"])
+
+    assert opened == [("/tmp/2-weights", RequestedLockType.RO, 0.5, 0.5)]
 
 
 def test_v1_socket_path_rejects_af_unix_overflow(monkeypatch):
