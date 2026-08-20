@@ -29,6 +29,14 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
+/// Runtime-data key indicating that a backend expects tool structural tags to
+/// exclude reasoning and manages grammar activation around reasoning itself.
+///
+/// Absence means `false` for compatibility with workers that expect the
+/// frontend's structural tag to model an already-opened reasoning block.
+pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_excludes_reasoning";
+
 /// Describes which request-token overflows the frontend may reject early.
 ///
 /// The combined limit already accounts for engine-reserved tokens. A false
@@ -70,6 +78,7 @@ pub enum StructuralTagScope {
 }
 
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
+pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 
 /// Worker-advertised support for Dynamo's vLLM-compatible
 /// `POST /inference/v1/generate` adapter.
@@ -200,6 +209,11 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_backend: Option<TokenizerBackend>,
 
+    /// Frontend tokenizer fallback override. When unset, direct Rust callers can still use
+    /// `DYN_TOKENIZER_FALLBACK`; when set, this explicit value wins over process environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_fallback_enabled: Option<bool>,
+
     /// Whether structural tag guided decoding is enabled for tool calls.
     #[serde(default)]
     pub structural_tag_mode: StructuralTagMode,
@@ -233,6 +247,14 @@ pub struct ModelRuntimeConfig {
     /// `None` indicates a legacy worker that does not declare this capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_publishing_enabled: Option<bool>,
+
+    /// Immutable KV event source mode for this worker lifecycle.
+    ///
+    /// Accepted values are `framework_v1` and `state_agent_v2`. Missing means the
+    /// legacy Worker-only source. Unknown explicit values must disable KV-aware
+    /// routing rather than falling back within the same worker lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_event_source_mode: Option<String>,
 
     /// Endpoint whose event sources describe this worker's KV state.
     ///
@@ -333,6 +355,7 @@ impl Default for ModelRuntimeConfig {
             reasoning_parser: None,
             tool_call_arguments_format: ToolCallArgumentsFormat::JsonString,
             tokenizer_backend: None,
+            tokenizer_fallback_enabled: None,
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
@@ -341,6 +364,7 @@ impl Default for ModelRuntimeConfig {
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
             kv_event_publishing_enabled: None,
+            kv_event_source_mode: None,
             kv_state_endpoint: None,
             runtime_data: HashMap::new(),
             disaggregated_endpoint: None,
@@ -573,6 +597,32 @@ impl ModelRuntimeConfig {
             .unwrap_or_else(TokenizerBackend::from_env_or_default)
     }
 
+    pub fn is_tokenizer_fallback_enabled(&self) -> anyhow::Result<bool> {
+        let enabled = if let Some(enabled) = self.tokenizer_fallback_enabled {
+            enabled
+        } else {
+            match std::env::var(ENV_TOKENIZER_FALLBACK) {
+                Ok(value) => dynamo_runtime::config::parse_bool(&value)
+                    .map_err(|error| anyhow::anyhow!("{ENV_TOKENIZER_FALLBACK}: {error}"))?,
+                Err(std::env::VarError::NotPresent) => true,
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    anyhow::bail!("{ENV_TOKENIZER_FALLBACK} must contain valid UTF-8")
+                }
+            }
+        };
+
+        if enabled && self.effective_tokenizer_backend() != TokenizerBackend::Default {
+            static TOKENIZER_FALLBACK_DEPRECATION_WARNED: std::sync::Once = std::sync::Once::new();
+            TOKENIZER_FALLBACK_DEPRECATION_WARNED.call_once(|| {
+                tracing::warn!(
+                    "Automatic tokenizer fallback is deprecated and will be disabled by default in a future release. Set tokenizer fallback to false (`--no-tokenizer-fallback` in the frontend) to adopt the future behavior now."
+                );
+            });
+        }
+
+        Ok(enabled)
+    }
+
     /// Resolve the KV-state endpoint, preserving the serving endpoint as the compatibility
     /// default for workers that do not advertise an explicit mapping.
     pub fn effective_kv_state_endpoint(&self, serving_endpoint: &EndpointId) -> EndpointId {
@@ -586,6 +636,11 @@ impl ModelRuntimeConfig {
         tokenizer_backend: Option<TokenizerBackend>,
     ) -> &mut Self {
         self.tokenizer_backend = tokenizer_backend;
+        self
+    }
+
+    pub fn set_tokenizer_fallback_enabled(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.tokenizer_fallback_enabled = enabled;
         self
     }
 
@@ -855,6 +910,59 @@ mod tests {
             let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.tokenizer_backend, Some(backend));
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tokenizer_fallback_env_default_and_explicit_config_precedence() {
+        temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("false"))], || {
+            let config = ModelRuntimeConfig::default();
+            assert!(!config.is_tokenizer_fallback_enabled().unwrap());
+
+            let config = ModelRuntimeConfig {
+                tokenizer_fallback_enabled: Some(true),
+                ..Default::default()
+            };
+            assert!(config.is_tokenizer_fallback_enabled().unwrap());
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("true"))], || {
+            let config = ModelRuntimeConfig {
+                tokenizer_fallback_enabled: Some(false),
+                ..Default::default()
+            };
+            assert!(!config.is_tokenizer_fallback_enabled().unwrap());
+        });
+
+        temp_env::with_vars_unset([ENV_TOKENIZER_FALLBACK], || {
+            let config = ModelRuntimeConfig::default();
+            assert!(config.is_tokenizer_fallback_enabled().unwrap());
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_FALLBACK, Some("flase"))], || {
+            let config = ModelRuntimeConfig::default();
+            let error = config.is_tokenizer_fallback_enabled().unwrap_err();
+            assert!(error.to_string().contains(ENV_TOKENIZER_FALLBACK));
+        });
+    }
+
+    #[test]
+    fn tokenizer_fallback_roundtrips_through_serde_json() {
+        for enabled in [true, false] {
+            let config = ModelRuntimeConfig {
+                tokenizer_fallback_enabled: Some(enabled),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            assert!(json.contains(&format!("\"tokenizer_fallback_enabled\":{enabled}")));
+            let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.tokenizer_fallback_enabled, Some(enabled));
+        }
+
+        let json = serde_json::to_string(&ModelRuntimeConfig::default()).unwrap();
+        assert!(!json.contains("tokenizer_fallback_enabled"));
+        let legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.tokenizer_fallback_enabled, None);
     }
 
     #[test]

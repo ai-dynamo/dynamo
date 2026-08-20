@@ -21,6 +21,8 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
+	"sync"
 
 	"emperror.dev/errors"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -35,6 +37,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8slabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -86,17 +89,18 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecs(
 	if err != nil {
 		return nil, nil, err
 	}
+	containerGPUs := r.containerGPUCount(ctx, dcd)
 
 	leaderLabels := make(map[string]string, len(podLabels))
 	maps.Copy(leaderLabels, podLabels)
-	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, dcd, leaderLabels)
+	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, dcd, leaderLabels, containerGPUs)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	workerLabels := make(map[string]string, len(podLabels))
 	maps.Copy(workerLabels, podLabels)
-	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, dcd, workerLabels)
+	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, dcd, workerLabels, containerGPUs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -104,12 +108,22 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecs(
 	return leaderPodTemplateSpec, workerPodTemplateSpec, nil
 }
 
+func (r *dcdWorkloadRenderer) containerGPUCount(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) dynamo.ContainerGPUCount {
+	return sync.OnceValues(func() (int64, error) {
+		return dynamo.ResolveContainerGPUs(ctx, r.reader, dcd.Namespace, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	})
+}
+
 func (r *dcdWorkloadRenderer) generateLeaderPodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	labels map[string]string,
+	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
-	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleLeader)
+	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleLeader, containerGPUs)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate leader pod template")
 	}
@@ -129,8 +143,9 @@ func (r *dcdWorkloadRenderer) generateWorkerPodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	labels map[string]string,
+	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
-	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleWorker)
+	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleWorker, containerGPUs)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate worker pod template")
 	}
@@ -150,6 +165,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	role dynamo.Role,
+	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
 	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
 	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
@@ -216,6 +232,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		role,
 		commonconsts.MultinodeDeploymentTypeLWS,
 		checkpointInfo,
+		containerGPUs,
 		dynamo.GenerateBasePodSpecForControllerOptions{
 			WorkloadComponentType: nvidiacomv1beta1.ComponentType(componentType),
 		},
@@ -288,6 +305,90 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		},
 		Spec: *podSpec,
 	}, nil
+}
+
+// scopeWorkerTopologySpreadConstraints mutates eligible constraints to select the template's exact worker generation.
+// podTemplate must be non-nil and carry its finalized workload labels.
+func scopeWorkerTopologySpreadConstraints(podTemplate *corev1.PodTemplateSpec) {
+	// Skip templates that are not hash-versioned worker components.
+	if !isHashVersionedWorkerTemplate(podTemplate) {
+		return
+	}
+	podLabels := podTemplate.Labels
+	workerHash := podLabels[commonconsts.KubeLabelDynamoWorkerHash]
+
+	// Scope only constraints whose explicit selectors match the finalized pod labels.
+	for i := range podTemplate.Spec.TopologySpreadConstraints {
+		constraint := &podTemplate.Spec.TopologySpreadConstraints[i]
+
+		// Preserve nil and namespace-wide selectors because they do not identify this workload specifically.
+		if constraint.LabelSelector == nil ||
+			(len(constraint.LabelSelector.MatchLabels) == 0 && len(constraint.LabelSelector.MatchExpressions) == 0) {
+			continue
+		}
+
+		// Leave invalid, unrelated, and user-scoped generation selectors unchanged.
+		selector, err := metav1.LabelSelectorAsSelector(constraint.LabelSelector)
+		if err != nil || !selector.Matches(k8slabels.Set(podLabels)) ||
+			labelSelectorReferencesKey(constraint.LabelSelector, commonconsts.KubeLabelDynamoWorkerHash) ||
+			slices.Contains(constraint.MatchLabelKeys, commonconsts.KubeLabelDynamoWorkerHash) {
+			continue
+		}
+
+		// Add the exact incoming generation so old pods cannot mask final skew during a rollout.
+		if constraint.LabelSelector.MatchLabels == nil {
+			constraint.LabelSelector.MatchLabels = map[string]string{}
+		}
+		constraint.LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
+}
+
+// scopeWorkerTopologySpreadWorkload marks a new-style workload and scopes each finalized worker template.
+// workload must be non-nil; nil pod templates are ignored.
+func scopeWorkerTopologySpreadWorkload(workload metav1.Object, podTemplates ...*corev1.PodTemplateSpec) {
+	hasWorkerTemplate := false
+
+	// Scope every hash-versioned template that belongs to the workload.
+	for _, podTemplate := range podTemplates {
+		if !isHashVersionedWorkerTemplate(podTemplate) {
+			continue
+		}
+		hasWorkerTemplate = true
+		scopeWorkerTopologySpreadConstraints(podTemplate)
+	}
+
+	// Mark only worker workloads so later reconciles can retain the scoped mode durably.
+	if !hasWorkerTemplate {
+		return
+	}
+	annotations := workload.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[commonconsts.KubeAnnotationDynamoWorkerTopologySpreadScoped] = commonconsts.KubeLabelValueTrue
+	workload.SetAnnotations(annotations)
+}
+
+// isHashVersionedWorkerTemplate reports whether a finalized pod template belongs to a worker generation.
+func isHashVersionedWorkerTemplate(podTemplate *corev1.PodTemplateSpec) bool {
+	return podTemplate != nil &&
+		dynamo.IsWorkerComponent(podTemplate.Labels[commonconsts.KubeLabelDynamoComponentType]) &&
+		podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] != ""
+}
+
+func labelSelectorReferencesKey(selector *metav1.LabelSelector, key string) bool {
+	// Check direct label matches before scanning expression requirements.
+	if _, exists := selector.MatchLabels[key]; exists {
+		return true
+	}
+
+	// Treat every expression on the key as user-owned selector behavior.
+	for _, expression := range selector.MatchExpressions {
+		if expression.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *dcdWorkloadRenderer) generateService(

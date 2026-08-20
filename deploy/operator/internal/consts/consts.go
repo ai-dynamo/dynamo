@@ -42,6 +42,11 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	// KubeAnnotationWorkloadProvider records the controller-owned immutable graph-level workload provider.
+	KubeAnnotationWorkloadProvider = "nvidia.com/workload-provider"
+	WorkloadProviderComponent      = "component"
+	WorkloadProviderGrove          = "grove"
+
 	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
 	// PodCliqueSet update strategy while the long-term DGD API is settled.
 	// Supported values match Grove exactly: "RollingRecreate" and "OnDelete".
@@ -82,6 +87,10 @@ const (
 	// recorded on the parent DGD. Older operators understand only the v1 value,
 	// so v1-compatible releases continue to generate new DCDs with the v1 value.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
+
+	// KubeAnnotationDynamoWorkerTopologySpreadScoped is a controller-owned marker
+	// for workload resources whose topology selectors are scoped by worker generation.
+	KubeAnnotationDynamoWorkerTopologySpreadScoped = "nvidia.com/dynamo-worker-topology-spread-scoped"
 
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
 	// lifecycle is tied to an owning DGD generation.

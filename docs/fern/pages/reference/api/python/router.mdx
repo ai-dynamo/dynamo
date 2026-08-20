@@ -16,7 +16,7 @@ CLI argument group for standalone router options.
 from dynamo.router.args import DynamoRouterArgGroup
 ```
 
-[`components/src/dynamo/router/args.py#L79`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L79)
+[`components/src/dynamo/router/args.py#L88`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L88)
 
 **Public methods**
 
@@ -28,7 +28,7 @@ add_arguments(parser) -> None
 
 Add router-owned arguments to parser.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L84)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L93)
 </Accordion>
 
 <Accordion id="api-dynamo-router-args-dynamorouterconfig" title="DynamoRouterConfig (class)">
@@ -60,7 +60,7 @@ Router search-space preparation and replay-spec materialization.
 from dynamo.router.simulation import DynamoRouterSweepConfigProvider
 ```
 
-[`components/src/dynamo/router/simulation/provider.py#L117`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L117)
+[`components/src/dynamo/router/simulation/provider.py#L116`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L116)
 
 **Public methods**
 
@@ -72,7 +72,7 @@ generate_search_space(search_spec: Mapping[str, JSONValue], context: SweepContex
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L124)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L123)
 
 <h4 id="api-dynamo-router-simulation-provider-dynamoroutersweepconfigprovider-materialize-replay">materialize_replay</h4>
 
@@ -82,7 +82,7 @@ materialize_replay(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue], 
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L150)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L149)
 </Accordion>
 
 <Accordion id="api-dynamo-router-args-build-aic-perf-config" title="build_aic_perf_config (function)">
@@ -96,7 +96,7 @@ from dynamo.router.args import build_aic_perf_config
 build_aic_perf_config(router_config: DynamoRouterConfig) -> AicPerfConfig | None
 ```
 
-[`components/src/dynamo/router/args.py#L126`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L126)
+[`components/src/dynamo/router/args.py#L135`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L135)
 </Accordion>
 
 <Accordion id="api-dynamo-router-args-build-kv-router-config" title="build_kv_router_config (function)">
@@ -110,7 +110,7 @@ from dynamo.router.args import build_kv_router_config
 build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig
 ```
 
-[`components/src/dynamo/router/args.py#L121`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L121)
+[`components/src/dynamo/router/args.py#L130`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L130)
 </Accordion>
 
 <Accordion id="api-dynamo-router-simulation-provider-create-provider" title="create_provider (function)">
@@ -124,7 +124,7 @@ from dynamo.router.simulation import create_provider
 create_provider() -> DynamoRouterSweepConfigProvider
 ```
 
-[`components/src/dynamo/router/simulation/provider.py#L191`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L191)
+[`components/src/dynamo/router/simulation/provider.py#L190`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L190)
 </Accordion>
 
 <Accordion id="api-dynamo-router-args-parse-args" title="parse_args (function)">
@@ -142,5 +142,5 @@ parse_args(argv: Optional[list[str]] = None) -> DynamoRouterConfig
 
 - `DynamoRouterConfig` — Parsed and validated configuration.
 
-[`components/src/dynamo/router/args.py#L134`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L134)
+[`components/src/dynamo/router/args.py#L143`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L143)
 </Accordion>
