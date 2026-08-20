@@ -236,31 +236,15 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         .list(DiscoveryQuery::NamespacedModels {
             namespace: config.namespace.clone(),
         })
-        .await?;
+        .await
+        .unwrap_or_default();
 
     let models = model_map(model_instances);
-    let rl_endpoints = endpoint_instances
-        .into_iter()
-        .filter_map(|instance| match instance {
-            DiscoveryInstance::Endpoint(endpoint) => Some(endpoint),
-            _ => None,
-        })
-        .filter(|endpoint| endpoint.endpoint == config.rl_endpoint)
-        .filter(|endpoint| {
-            config
-                .component_filter
-                .as_ref()
-                .map(|components| components.iter().any(|c| c == &endpoint.component))
-                .unwrap_or(true)
-        })
-        .filter(|endpoint| {
-            models.contains_key(&(
-                endpoint.namespace.clone(),
-                endpoint.component.clone(),
-                endpoint.instance_id,
-            ))
-        })
-        .collect::<Vec<_>>();
+    let rl_endpoints = rl_endpoint_instances(
+        endpoint_instances,
+        &config.rl_endpoint,
+        config.component_filter.as_deref(),
+    );
 
     // Bound the client cache (N2): drop clients for endpoints that are no longer
     // present. Live endpoints are retained, so the fan-out below still reuses their
@@ -308,6 +292,26 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
     });
 
     Ok(workers)
+}
+
+fn rl_endpoint_instances(
+    instances: Vec<DiscoveryInstance>,
+    rl_endpoint: &str,
+    component_filter: Option<&[String]>,
+) -> Vec<Instance> {
+    instances
+        .into_iter()
+        .filter_map(|instance| match instance {
+            DiscoveryInstance::Endpoint(endpoint) => Some(endpoint),
+            _ => None,
+        })
+        .filter(|endpoint| endpoint.endpoint == rl_endpoint)
+        .filter(|endpoint| {
+            component_filter
+                .map(|components| components.iter().any(|c| c == &endpoint.component))
+                .unwrap_or(true)
+        })
+        .collect()
 }
 
 async fn describe_worker(
@@ -461,10 +465,17 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
 
     let admin_base_url = value
         .get("admin_base_url")
-        .and_then(|url| url.as_str())
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(ToString::to_string);
+        .map(|value| {
+            let url = value.as_str().ok_or_else(|| {
+                anyhow::anyhow!("worker routes response has invalid 'admin_base_url'")
+            })?;
+            let url = url.trim();
+            if url.is_empty() {
+                anyhow::bail!("worker routes response has invalid 'admin_base_url'");
+            }
+            Ok(url.to_string())
+        })
+        .transpose()?;
 
     let world_size = value
         .get("world_size")
@@ -558,6 +569,23 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn endpoint_instance(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        instance_id: u64,
+    ) -> DiscoveryInstance {
+        DiscoveryInstance::Endpoint(Instance {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            endpoint: endpoint.to_string(),
+            instance_id,
+            transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        })
+    }
+
     fn model_instance(
         namespace: &str,
         component: &str,
@@ -628,6 +656,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_worker_routes_rejects_invalid_admin_base_url() {
+        for value in [json!("   "), json!(42)] {
+            let err = parse_worker_routes(json!({
+                "routes": [],
+                "admin_base_url": value,
+            }))
+            .unwrap_err();
+            assert!(err.to_string().contains("admin_base_url"));
+        }
+    }
+
+    #[test]
     fn parse_worker_routes_propagates_worker_error_status() {
         let err = parse_worker_routes(json!({ "status": "error", "message": "engine is dead" }))
             .unwrap_err();
@@ -693,5 +733,17 @@ mod tests {
             Some("lora-1"),
         )]);
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn rl_endpoint_instances_do_not_require_model_metadata() {
+        let endpoints = rl_endpoint_instances(
+            vec![endpoint_instance("dynamo", "backend", "rl", 1)],
+            "rl",
+            None,
+        );
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].instance_id, 1);
     }
 }
