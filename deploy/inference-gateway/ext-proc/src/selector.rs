@@ -283,25 +283,49 @@ impl Selector {
                 })?
                 .parse::<std::net::IpAddr>()
                 .context("POD_IP must be a valid IPv4 or IPv6 address")?;
-            crate::peer_http::spawn(
-                service.clone(),
-                replication.ports.selection_http,
-                self_ip,
-                cancel.clone(),
-            )
-            .await?;
-            Some(
-                crate::peer_discovery::spawn(
-                    service.clone(),
-                    &cfg.namespace,
-                    &replication.service_name,
-                    replication.ports.replica_sync,
-                    replication.ports.selection_http,
-                    self_ip.to_string(),
-                    cancel.clone(),
-                )
-                .await?,
-            )
+
+            match replication.ports.selection_http {
+                None => {
+                    // The Service does not declare `selection-http` (an
+                    // image-only upgrade from a deployment that predates the
+                    // dump endpoint). Degrade to no-recovery instead of failing
+                    // startup: the replica bootstraps empty and serves.
+                    tracing::warn!(
+                        service = %replication.service_name,
+                        "selection-http port not found; peer KV-index recovery disabled \
+                         (bootstrapping empty). Update the peer Service to add the \
+                         selection-http named port."
+                    );
+                    None
+                }
+                Some(selection_http_port) => {
+                    // Shared flag gating /dump: the endpoint answers 503 until
+                    // this replica's own recovery/bootstrap finishes, so a
+                    // stale-ready sibling cannot hand out an empty snapshot
+                    // mid-recovery.
+                    let recovered = Arc::new(AtomicBool::new(false));
+                    crate::peer_http::spawn(
+                        service.clone(),
+                        selection_http_port,
+                        self_ip,
+                        cancel.clone(),
+                        recovered.clone(),
+                    )
+                    .await?;
+                    crate::peer_discovery::spawn(
+                        service.clone(),
+                        &cfg.namespace,
+                        &replication.service_name,
+                        replication.ports.replica_sync,
+                        selection_http_port,
+                        self_ip.to_string(),
+                        cancel.clone(),
+                        recovered.clone(),
+                    )
+                    .await?;
+                    Some(recovered)
+                }
+            }
         } else {
             None
         };

@@ -7,13 +7,15 @@
 //! in-process [`SelectionService`] as sibling EPP replicas join or leave.
 
 use std::collections::BTreeSet;
+use std::collections::hash_map::RandomState;
 use std::future::Future;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use k8s_openapi::api::discovery::v1::EndpointSlice;
+use k8s_openapi::api::discovery::v1::{Endpoint, EndpointSlice};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -34,7 +36,11 @@ const MAX_RECOVERY_BACKOFF: std::time::Duration = std::time::Duration::from_secs
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PeerPorts {
     pub(crate) replica_sync: u16,
-    pub(crate) selection_http: u16,
+    /// `None` when the Service does not declare the `selection-http` port (an
+    /// image-only upgrade from a deployment that predates the dump endpoint).
+    /// Peer KV-index recovery is then disabled — the replica bootstraps empty
+    /// — rather than failing startup.
+    pub(crate) selection_http: Option<u16>,
 }
 
 type Store = kube::runtime::reflector::Store<EndpointSlice>;
@@ -63,8 +69,65 @@ fn peer_ports<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Result<Pee
     let slices: Vec<_> = slices.collect();
     Ok(PeerPorts {
         replica_sync: named_tcp_port(&slices, REPLICA_AGG_PORT_NAME)?,
-        selection_http: named_tcp_port(&slices, SELECTION_HTTP_PORT_NAME)?,
+        // `selection-http` is optional: a deployment upgraded before the dump
+        // endpoint existed declares only `replica-agg`. A missing dump port
+        // degrades to "no recovery" (bootstrap empty) instead of failing.
+        selection_http: optional_named_tcp_port(&slices, SELECTION_HTTP_PORT_NAME)?,
     })
+}
+
+/// Like [`named_tcp_port`], but returns `Ok(None)` when no EndpointSlice
+/// exposes the named port. Slices that omit the port are skipped; conflicting
+/// values or invalid ports still error.
+fn optional_named_tcp_port(slices: &[&EndpointSlice], port_name: &str) -> Result<Option<u16>> {
+    let mut resolved = BTreeSet::new();
+
+    for slice in slices {
+        let slice_name = slice.metadata.name.as_deref().unwrap_or("<unnamed>");
+        let mut matches = slice
+            .ports
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|port| port.name.as_deref() == Some(port_name));
+        let Some(endpoint_port) = matches.next() else {
+            continue;
+        };
+        anyhow::ensure!(
+            matches.next().is_none(),
+            "EndpointSlice {slice_name} exposes named port {port_name:?} more than once"
+        );
+        anyhow::ensure!(
+            endpoint_port
+                .protocol
+                .as_deref()
+                .is_none_or(|protocol| protocol.eq_ignore_ascii_case("TCP")),
+            "EndpointSlice {slice_name} named port {port_name:?} must use TCP"
+        );
+        let raw_port = endpoint_port.port.with_context(|| {
+            format!("EndpointSlice {slice_name} named port {port_name:?} has no port number")
+        })?;
+        let port = u16::try_from(raw_port).with_context(|| {
+            format!(
+                "EndpointSlice {slice_name} named port {port_name:?} has invalid port {raw_port}"
+            )
+        })?;
+        anyhow::ensure!(
+            port > 0,
+            "named port {port_name:?} must be greater than zero"
+        );
+        resolved.insert(port);
+    }
+
+    anyhow::ensure!(!slices.is_empty(), "peer Service has no EndpointSlices");
+    if resolved.is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        resolved.len() == 1,
+        "named port {port_name:?} resolves to inconsistent ports {resolved:?}"
+    );
+    Ok(resolved.first().copied())
 }
 
 fn named_tcp_port(slices: &[&EndpointSlice], port_name: &str) -> Result<u16> {
@@ -134,7 +197,8 @@ pub async fn spawn(
     selection_http_port: u16,
     self_ip: String,
     cancel: CancellationToken,
-) -> Result<Arc<AtomicBool>> {
+    recovered: Arc<AtomicBool>,
+) -> Result<()> {
     use futures::StreamExt;
     use kube::{Api, Client, runtime::WatchStreamExt, runtime::reflector, runtime::watcher};
 
@@ -219,7 +283,9 @@ pub async fn spawn(
     )
     .await?;
 
-    let peer_ready = Arc::new(AtomicBool::new(true));
+    // Recovery/bootstrap finished: the /dump endpoint may now serve a
+    // non-empty snapshot (see `peer_http` gating on this flag).
+    recovered.store(true, Ordering::Release);
     tracing::info!("EPP peer discovery and KV-index bootstrap complete");
 
     tokio::spawn(async move {
@@ -235,7 +301,7 @@ pub async fn spawn(
             reconcile_once(&service, &store, sync_port, &self_ip, &mut known).await;
         }
     });
-    Ok(peer_ready)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -286,7 +352,7 @@ where
 {
     let mut backoff = initial_backoff;
 
-    loop {
+    'attempt: loop {
         reconcile_once(service, store, sync_port, self_ip, known).await;
         let peers = recovery_peer_urls(store, self_ip, selection_http_port);
         if peers.is_empty() {
@@ -296,17 +362,29 @@ where
 
         let attempt = recover(service, &peers);
         tokio::pin!(attempt);
-        let result = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                anyhow::bail!("EPP peer discovery cancelled during KV-index recovery")
+
+        // Await the attempt, restarting only when the candidate set actually
+        // changes (or becomes empty). Unrelated EndpointSlice churn (readiness
+        // flips, metadata/zone updates) must not discard in-flight progress: a
+        // large dump under churn would otherwise be dropped repeatedly, leaving
+        // a partially applied snapshot that the next attempt re-applies.
+        let result = loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    anyhow::bail!("EPP peer discovery cancelled during KV-index recovery")
+                }
+                changed = changes_rx.changed() => {
+                    changed.context("EPP peer EndpointSlice watch ended during KV-index recovery")?;
+                    if recovery_peer_urls(store, self_ip, selection_http_port) != peers {
+                        // Candidate set changed: restart with the new set.
+                        backoff = initial_backoff;
+                        continue 'attempt;
+                    }
+                    // Unrelated churn: keep awaiting the same attempt.
+                }
+                result = &mut attempt => break result,
             }
-            changed = changes_rx.changed() => {
-                changed.context("EPP peer EndpointSlice watch ended during KV-index recovery")?;
-                backoff = initial_backoff;
-                continue;
-            }
-            result = &mut attempt => result,
         };
 
         match result {
@@ -375,15 +453,13 @@ fn live_peer_ips(store: &Store, self_ip: &str) -> BTreeSet<String> {
     ips
 }
 
-/// Recovery targets only already-serving siblings (EndpointSlice `ready` or
-/// `serving`). Not-ready siblings cannot contribute a meaningful index: this
+/// Recovery targets only siblings that are actively serving and not
+/// terminating. Not-ready siblings cannot contribute a meaningful index: this
 /// replica starts worker KV listeners only *after* recovery completes, so a
 /// not-ready sibling's index is empty by construction. Treating those as
 /// recovery candidates turns a cold start (all replicas empty, none serving)
-/// into a mutual-recovery deadlock — each replica rejects the other's empty
-/// dump via `require_events(0)` and retries forever, so no replica ever
-/// becomes Ready. With only serving peers as candidates, an empty set means
-/// "no eligible peer" and bootstraps an empty index immediately.
+/// into a mutual-recovery deadlock. An empty candidate set means "no eligible
+/// peer" and bootstraps an empty index immediately.
 fn recovery_peer_urls(store: &Store, self_ip: &str, port: u16) -> Vec<String> {
     let want_ipv6 = is_ipv6(self_ip);
     let mut peers = BTreeSet::new();
@@ -393,10 +469,7 @@ fn recovery_peer_urls(store: &Store, self_ip: &str, port: u16) -> Vec<String> {
             continue;
         }
         for endpoint in &slice.endpoints {
-            let is_serving = endpoint.conditions.as_ref().is_some_and(|conditions| {
-                conditions.ready == Some(true) || conditions.serving == Some(true)
-            });
-            if !is_serving {
+            if !is_eligible_recovery_endpoint(endpoint) {
                 continue;
             }
             for address in &endpoint.addresses {
@@ -407,10 +480,40 @@ fn recovery_peer_urls(store: &Store, self_ip: &str, port: u16) -> Vec<String> {
         }
     }
 
-    peers
+    // Shuffle so N simultaneously-joining replicas do not all deterministically
+    // pick the lowest-IP peer (BTreeSet order), concentrating dump work on one
+    // serving EPP. RandomState is seeded per process, so each bootstrap gets a
+    // different order; serial fallback through the shuffled list is retained.
+    let hasher = RandomState::new();
+    let mut urls: Vec<String> = peers
         .into_iter()
         .map(|ip| format!("http://{}", authority(&ip, port)))
-        .collect()
+        .collect();
+    urls.sort_by_cached_key(|url| {
+        let mut h = hasher.build_hasher();
+        url.hash(&mut h);
+        h.finish()
+    });
+    urls
+}
+
+/// A peer is an eligible recovery source only when it is actively serving and
+/// not terminating. `ready` alone is insufficient in both directions: with
+/// `publishNotReadyAddresses` an endpoint can be `ready=true, serving=false`
+/// (a live-but-cold replica that would return an empty dump), while a draining
+/// pod is `serving=true, terminating=true` and can vanish mid-transfer. When
+/// the `serving` condition is absent (legacy slices), fall back to `ready`.
+fn is_eligible_recovery_endpoint(endpoint: &Endpoint) -> bool {
+    let Some(conditions) = endpoint.conditions.as_ref() else {
+        return false;
+    };
+    if conditions.terminating == Some(true) {
+        return false;
+    }
+    match conditions.serving {
+        Some(serving) => serving,
+        None => conditions.ready == Some(true),
+    }
 }
 
 /// Format `host:port`, bracketing IPv6 literals (`fd00::1` -> `[fd00::1]`) so the
@@ -627,7 +730,7 @@ mod tests {
             peer_ports(slices.iter()).unwrap(),
             PeerPorts {
                 replica_sync: 9092,
-                selection_http: 9093,
+                selection_http: Some(9093),
             }
         );
     }
@@ -965,7 +1068,7 @@ mod tests {
         start_recovery(
             service.clone(),
             store,
-            ports.selection_http,
+            ports.selection_http.unwrap(),
             changes_rx,
             cancel.clone(),
         )
@@ -1198,6 +1301,59 @@ mod tests {
             recovery_peer_urls(&store, "10.0.0.9", 9093),
             vec!["http://10.0.0.3:9093".to_string()]
         );
+    }
+
+    #[test]
+    fn recovery_excludes_ready_but_not_serving_peer() {
+        // `publishNotReadyAddresses` can yield ready=true, serving=false for a
+        // live-but-cold replica: it would return an empty dump, so it must not
+        // be a recovery source.
+        let slice = EndpointSlice {
+            address_type: "IPv4".to_string(),
+            endpoints: vec![Endpoint {
+                addresses: vec!["10.0.0.2".to_string()],
+                conditions: Some(EndpointConditions {
+                    ready: Some(true),
+                    serving: Some(false),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (store, _writer) = store_and_writer(vec![slice]);
+        assert!(recovery_peer_urls(&store, "10.0.0.9", 9093).is_empty());
+    }
+
+    #[test]
+    fn recovery_excludes_terminating_serving_peer() {
+        // A draining pod is serving=true, terminating=true and can vanish
+        // mid-transfer, so it must not be a recovery source.
+        let slice = EndpointSlice {
+            address_type: "IPv4".to_string(),
+            endpoints: vec![Endpoint {
+                addresses: vec!["10.0.0.2".to_string()],
+                conditions: Some(EndpointConditions {
+                    serving: Some(true),
+                    terminating: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (store, _writer) = store_and_writer(vec![slice]);
+        assert!(recovery_peer_urls(&store, "10.0.0.9", 9093).is_empty());
+    }
+
+    #[test]
+    fn selection_http_port_is_optional() {
+        // A Service without `selection-http` (a deployment predating the dump
+        // endpoint) resolves with selection_http=None instead of failing.
+        let slice = slice_with_replica_port(Some(9092));
+        let ports = peer_ports([&slice].into_iter()).expect("resolve ports");
+        assert_eq!(ports.replica_sync, 9092);
+        assert_eq!(ports.selection_http, None);
     }
 
     #[test]
