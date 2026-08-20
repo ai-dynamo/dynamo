@@ -232,7 +232,6 @@ mod tests {
                 "system_url": "http://worker:8080",
                 "admin_base_url": "http://worker:8120",
                 "world_size": 4,
-                "weight_transfer_backend": "nccl",
             })
         );
         assert_eq!(
