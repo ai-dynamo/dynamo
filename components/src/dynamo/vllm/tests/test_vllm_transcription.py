@@ -7,7 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 
+from dynamo.llm import HttpError
+from dynamo.vllm import transcription_handler
 from dynamo.vllm.transcription_handler import TranscriptionWorkerHandler
 
 pytestmark = [
@@ -24,8 +27,40 @@ def make_handler() -> TranscriptionWorkerHandler:
     handler.config = SimpleNamespace(
         model="openai/whisper-tiny",
         served_model_name="whisper",
+        served_model_aliases=[],
     )
     return handler
+
+
+def test_handler_registers_served_model_aliases(monkeypatch):
+    registered = {}
+
+    class FakeModels:
+        def __init__(self, _engine, base_model_paths):
+            registered["base_model_paths"] = base_model_paths
+
+    monkeypatch.setattr(transcription_handler, "OpenAIServingModels", FakeModels)
+    monkeypatch.setattr(
+        transcription_handler,
+        "OpenAIServingTranscription",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        transcription_handler,
+        "VllmEngineMonitor",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    config = SimpleNamespace(
+        model="openai/whisper-tiny",
+        served_model_name="whisper",
+        served_model_aliases=["whisper-alias", "stt"],
+    )
+    TranscriptionWorkerHandler(runtime=object(), engine=object(), config=config)
+
+    paths = registered["base_model_paths"]
+    assert [path.name for path in paths] == ["whisper", "whisper-alias", "stt"]
+    assert {path.model_path for path in paths} == {"openai/whisper-tiny"}
 
 
 def test_decode_audio_rejects_invalid_base64():
@@ -83,6 +118,37 @@ async def _assert_generate_delegates_to_native_vllm_serving():
 
     assert chunks == [{"text": "hello", "usage": {"type": "duration", "seconds": 1}}]
     handler._run_with_cancellation.assert_awaited_once()
+
+
+def test_generate_preserves_native_vllm_error_status():
+    asyncio.run(_assert_generate_preserves_native_vllm_error_status())
+
+
+async def _assert_generate_preserves_native_vllm_error_status():
+    handler = make_handler()
+    handler._run_with_cancellation = AsyncMock(
+        return_value=ErrorResponse(
+            error=ErrorInfo(
+                message="The model does not exist",
+                type="NotFoundError",
+                code=404,
+            )
+        )
+    )
+
+    with pytest.raises(HttpError, match="The model does not exist") as error:
+        await anext(
+            handler.generate(
+                {
+                    "audio_b64": base64.b64encode(b"audio").decode("ascii"),
+                    "filename": "sample.wav",
+                    "response_format": "json",
+                },
+                object(),
+            )
+        )
+
+    assert error.value.code == 404
 
 
 @pytest.mark.timeout(5)

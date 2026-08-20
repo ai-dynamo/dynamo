@@ -11,11 +11,17 @@ use axum::{
     routing::post,
 };
 use base64::Engine as _;
+use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
+use tracing::Instrument;
 
 use super::{
     RouteDoc,
-    metrics::{Endpoint, ErrorType, process_response_and_observe_metrics, request_was_rejected},
+    disconnect::create_connection_monitor,
+    metrics::{
+        CancellationLabels, Endpoint, ErrorType, process_response_and_observe_metrics,
+        request_was_rejected,
+    },
     openai::{
         ErrorMessage, ErrorResponse, check_model_serving_ready, check_ready, context_from_headers,
         error_is_invalid_argument, extract_error_type_from_response, get_body_limit,
@@ -155,7 +161,7 @@ async fn audio_transcription(
         .map_err(|error| ErrorMessage::bad_request(format!("Invalid multipart body: {error}")))?;
     let mut request = TranscriptionForm::parse(multipart).await?.into_request()?;
 
-    let model = match request.model.clone() {
+    let model = match request.model.take() {
         Some(model) => model,
         None => state
             .manager()
@@ -171,6 +177,41 @@ async fn audio_transcription(
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
+    let cancellation_labels = CancellationLabels {
+        model: metric_model.clone(),
+        endpoint: Endpoint::Transcriptions.to_string(),
+        request_type: "unary".to_string(),
+    };
+    let (mut connection_handle, _stream_handle) = create_connection_monitor(
+        request.context(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
+
+    let response = tokio::spawn(
+        dispatch_audio_transcription(state, request, model, metric_model, request_id)
+            .in_current_span(),
+    )
+    .await
+    .map_err(|error| {
+        ErrorMessage::internal_server_error_with_details(
+            "Failed to await audio transcription task",
+            format!("{error:?}"),
+        )
+    })?;
+
+    connection_handle.disarm();
+    response
+}
+
+async fn dispatch_audio_transcription(
+    state: Arc<service_v2::State>,
+    request: Context<NvCreateAudioTranscriptionRequest>,
+    model: String,
+    metric_model: String,
+    request_id: String,
+) -> Result<Response, ErrorResponse> {
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &metric_model,
         Endpoint::Transcriptions,
