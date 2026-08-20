@@ -10,7 +10,7 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.sglang._compat import require_reasoning_kwargs
+from dynamo.sglang._compat import require_reasoning_kwargs, router_hint_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
@@ -191,6 +191,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, inner_request),
+                **router_hint_kwargs(self.engine, inner_request),
                 bootstrap_host=bootstrap_host,
                 bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,

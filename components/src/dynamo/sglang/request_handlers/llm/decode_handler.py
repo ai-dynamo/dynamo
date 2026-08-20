@@ -19,6 +19,7 @@ from dynamo.llm import HttpError
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
+    router_hint_kwargs,
 )
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
@@ -465,6 +466,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
+                **router_hint_kwargs(self.engine, request),
                 **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
@@ -537,6 +539,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
+                **router_hint_kwargs(self.engine, request),
                 **self._routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
