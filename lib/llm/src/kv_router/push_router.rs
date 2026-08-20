@@ -759,19 +759,23 @@ impl<Sel> AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngine
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    /// Generate method that handles KV-aware routing with three distinct behaviors:
+    /// Generate a request through the selected routing plane.
     ///
-    /// 1. **If `query_instance_id` annotation is set**:
+    /// On the KV plane, `query_instance_id` performs an advisory selection:
     ///    - Returns the best matching worker ID without routing the request
     ///    - Does NOT update any router local states
     ///    - Response includes worker_instance_id and token_data annotations
     ///
-    /// 2. **If a phase-specific worker or `backend_instance_id` is set in the request**:
+    /// The built-in Random and RoundRobin plane has no KV query path: it selects a worker and
+    /// dispatches the request. `query_instance_id` is therefore a KV-routing/disaggregation
+    /// annotation, not a request-execution suppressor for those modes.
+    ///
+    /// On the KV plane, a phase-specific worker or `backend_instance_id`:
     ///    - Query-only requests return that worker selection without state updates
     ///    - Requests route through the scheduler as an exact pin when dp_rank is resolved
     ///    - If dp_rank cannot be resolved, the request is rejected instead of treating rank 0 as a sentinel
     ///
-    /// 3. **If neither are set (default behavior)**:
+    /// Otherwise, KV routing:
     ///    - Finds the best worker based on KV cache overlap
     ///    - Updates router states to track the request
     ///    - Routes to the selected worker
