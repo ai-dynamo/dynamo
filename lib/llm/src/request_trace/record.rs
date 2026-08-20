@@ -56,6 +56,11 @@ pub(crate) fn emit_request_end(
     replay: RequestReplayMetrics,
 ) {
     let timing = tracker.get_timing_info();
+    let event_time_unix_ms = timing.total_time_ms.map_or_else(unix_time_ms, |elapsed| {
+        timing
+            .request_received_ms
+            .saturating_add(elapsed.max(0.0).round() as u64)
+    });
     let worker = tracker
         .get_worker_info()
         .map(|worker| RequestTraceWorkerInfo {
@@ -86,12 +91,6 @@ pub(crate) fn emit_request_end(
         finish_reason_metadata: None,
     };
     sanitize_request(&mut request);
-    let event_time_unix_ms = match (request.request_received_ms, request.total_time_ms) {
-        (Some(received_ms), Some(elapsed_ms)) => {
-            received_ms.saturating_add(elapsed_ms.max(0.0).round() as u64)
-        }
-        _ => unix_time_ms(),
-    };
 
     publish(RequestTraceRecord {
         schema: RequestTraceSchema::V1,
