@@ -11,49 +11,47 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct LoadCapacity {
     total_kv_blocks: Option<u64>,
-    max_num_batched_tokens: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct LoadObservation {
-    kv_used_blocks: Option<u64>,
-    active_decode_blocks: Option<u64>,
-    active_prefill_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct PoolLoadState {
     capacities: HashMap<WorkerWithDpRank, LoadCapacity>,
-    observations: HashMap<WorkerWithDpRank, LoadObservation>,
+    observations: HashMap<WorkerWithDpRank, u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LoadObservationOutcome {
+    UnknownRank,
+    IgnoredAdvisory,
+    Updated,
+}
+
+/// DC-wide load derived from worker-authoritative `kv_used_blocks` reports.
+///
+/// Router-local active decode and prefill lanes are intentionally excluded until
+/// their events carry publisher identity and can be aggregated across replicas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolLoadSnapshot {
     pub producer: ProducerIdentity,
-    pub kv_used_blocks: u64,
-    pub total_kv_blocks: u64,
+    /// Aggregate authoritative KV usage, available only after every declared rank
+    /// has reported at least once for the current capacity generation.
+    pub kv_used_blocks: Option<u64>,
+    /// Aggregate KV capacity, available only when every declared rank publishes a
+    /// non-zero capacity.
+    pub total_kv_blocks: Option<u64>,
+    /// Declared ranks that have published authoritative KV usage.
     pub kv_observed_ranks: usize,
+    /// Declared ranks whose KV capacity is known and non-zero.
+    pub kv_capacity_ranks: usize,
+    /// Worker ranks declared by the current runtime configuration.
     pub kv_expected_ranks: usize,
-    pub active_decode_blocks: u64,
-    pub decode_observed_ranks: usize,
-    pub decode_expected_ranks: usize,
-    pub active_prefill_tokens: u64,
-    pub prefill_token_capacity: u64,
-    pub prefill_observed_ranks: usize,
-    pub prefill_expected_ranks: usize,
 }
 
 impl PoolLoadSnapshot {
     pub fn has_degraded_coverage(self) -> bool {
-        if self.kv_expected_ranks == 0
-            && self.decode_expected_ranks == 0
-            && self.prefill_expected_ranks == 0
-        {
-            return true;
-        }
-        self.kv_observed_ranks < self.kv_expected_ranks
-            || self.decode_observed_ranks < self.decode_expected_ranks
-            || self.prefill_observed_ranks < self.prefill_expected_ranks
+        self.kv_expected_ranks == 0
+            || self.kv_observed_ranks < self.kv_expected_ranks
+            || self.kv_capacity_ranks < self.kv_expected_ranks
     }
 }
 
@@ -71,38 +69,44 @@ impl PoolLoadState {
         &mut self,
         runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
     ) -> anyhow::Result<bool> {
-        let capacities = load_ranks_from_configs(runtime_configs)?;
+        let capacities = match load_ranks_from_configs(runtime_configs) {
+            Ok(capacities) => capacities,
+            Err(error) => {
+                // Never leave the previously authoritative snapshot live after an
+                // invalid capacity refresh. The registry publishes this empty state
+                // before returning the error to its caller.
+                self.capacities.clear();
+                self.observations.clear();
+                return Err(error);
+            }
+        };
         if self.capacities == capacities {
             return Ok(false);
         }
-        self.observations
-            .retain(|rank, _| capacities.contains_key(rank));
+        self.observations.retain(|rank, _| {
+            self.capacities
+                .get(rank)
+                .is_some_and(|previous| capacities.get(rank) == Some(previous))
+        });
         self.capacities = capacities;
         Ok(true)
     }
 
-    pub(super) fn observe(&mut self, load: ActiveLoad) -> bool {
+    pub(super) fn observe(&mut self, load: ActiveLoad) -> LoadObservationOutcome {
         let rank = WorkerWithDpRank::new(load.worker_id, load.dp_rank);
         if !self.capacities.contains_key(&rank) {
-            return false;
+            return LoadObservationOutcome::UnknownRank;
         }
-        if load.kv_used_blocks.is_none()
-            && load.active_decode_blocks.is_none()
-            && load.active_prefill_tokens.is_none()
-        {
-            return true;
-        }
-        let observation = self.observations.entry(rank).or_default();
-        if let Some(value) = load.kv_used_blocks {
-            observation.kv_used_blocks = Some(value);
-        }
-        if let Some(value) = load.active_decode_blocks {
-            observation.active_decode_blocks = Some(value);
-        }
-        if let Some(value) = load.active_prefill_tokens {
-            observation.active_prefill_tokens = Some(value);
-        }
-        true
+        let Some(kv_used_blocks) = load.kv_used_blocks else {
+            // active_decode_blocks and active_prefill_tokens can be emitted by
+            // multiple router replicas without publisher identity. They are not a
+            // globally authoritative DC load signal and are intentionally ignored.
+            // Return a distinct accepted outcome so the collector does not
+            // misdiagnose an advisory report as an unknown-rank event.
+            return LoadObservationOutcome::IgnoredAdvisory;
+        };
+        self.observations.insert(rank, kv_used_blocks);
+        LoadObservationOutcome::Updated
     }
 
     pub(super) fn clear_observations(&mut self) -> bool {
@@ -114,48 +118,36 @@ impl PoolLoadState {
     }
 
     pub(super) fn snapshot(&self, producer: ProducerIdentity) -> PoolLoadSnapshot {
+        let mut kv_used_blocks = 0_u64;
+        let mut total_kv_blocks = 0_u64;
         let mut snapshot = PoolLoadSnapshot {
             producer,
-            kv_used_blocks: 0,
-            total_kv_blocks: 0,
+            kv_used_blocks: None,
+            total_kv_blocks: None,
             kv_observed_ranks: 0,
+            kv_capacity_ranks: 0,
             kv_expected_ranks: 0,
-            active_decode_blocks: 0,
-            decode_observed_ranks: 0,
-            decode_expected_ranks: 0,
-            active_prefill_tokens: 0,
-            prefill_token_capacity: 0,
-            prefill_observed_ranks: 0,
-            prefill_expected_ranks: 0,
         };
         for (rank, capacity) in &self.capacities {
-            let observation = self.observations.get(rank);
+            snapshot.kv_expected_ranks = snapshot.kv_expected_ranks.saturating_add(1);
             if let Some(total) = capacity.total_kv_blocks {
-                snapshot.kv_expected_ranks = snapshot.kv_expected_ranks.saturating_add(1);
-                snapshot.decode_expected_ranks = snapshot.decode_expected_ranks.saturating_add(1);
-                snapshot.total_kv_blocks = snapshot.total_kv_blocks.saturating_add(total);
-                if let Some(value) = observation.and_then(|value| value.kv_used_blocks) {
-                    snapshot.kv_observed_ranks = snapshot.kv_observed_ranks.saturating_add(1);
-                    snapshot.kv_used_blocks = snapshot.kv_used_blocks.saturating_add(value);
-                }
-                if let Some(value) = observation.and_then(|value| value.active_decode_blocks) {
-                    snapshot.decode_observed_ranks =
-                        snapshot.decode_observed_ranks.saturating_add(1);
-                    snapshot.active_decode_blocks =
-                        snapshot.active_decode_blocks.saturating_add(value);
-                }
+                snapshot.kv_capacity_ranks = snapshot.kv_capacity_ranks.saturating_add(1);
+                total_kv_blocks = total_kv_blocks.saturating_add(total);
             }
-            if let Some(total) = capacity.max_num_batched_tokens {
-                snapshot.prefill_expected_ranks = snapshot.prefill_expected_ranks.saturating_add(1);
-                snapshot.prefill_token_capacity =
-                    snapshot.prefill_token_capacity.saturating_add(total);
-                if let Some(value) = observation.and_then(|value| value.active_prefill_tokens) {
-                    snapshot.prefill_observed_ranks =
-                        snapshot.prefill_observed_ranks.saturating_add(1);
-                    snapshot.active_prefill_tokens =
-                        snapshot.active_prefill_tokens.saturating_add(value);
-                }
+            if let Some(value) = self.observations.get(rank) {
+                snapshot.kv_observed_ranks = snapshot.kv_observed_ranks.saturating_add(1);
+                kv_used_blocks = kv_used_blocks.saturating_add(*value);
             }
+        }
+        if snapshot.kv_expected_ranks != 0
+            && snapshot.kv_observed_ranks == snapshot.kv_expected_ranks
+        {
+            snapshot.kv_used_blocks = Some(kv_used_blocks);
+        }
+        if snapshot.kv_expected_ranks != 0
+            && snapshot.kv_capacity_ranks == snapshot.kv_expected_ranks
+        {
+            snapshot.total_kv_blocks = Some(total_kv_blocks);
         }
         snapshot
     }
@@ -185,17 +177,14 @@ fn load_ranks_from_configs(
                 anyhow::anyhow!("worker {worker_id} data-parallel rank range overflow")
             })?;
         // vLLM's Ray data-parallel backend cannot propagate num_gpu_blocks to the
-        // registering process and publishes total_kv_blocks=0 in its place, so a zero
-        // total is "capacity unknown", not a zero-block worker. Advertising it as real
-        // capacity would put the ranks in kv_expected_ranks with an unreachable total.
+        // registering process and uses zero as an unknown-capacity sentinel. Runtime
+        // config does not carry backend identity, and zero is never a usable pressure
+        // denominator for any backend, so normalize it fail-closed for every engine.
         let total_kv_blocks = config.total_kv_blocks.filter(|&total| total != 0);
         for dp_rank in config.data_parallel_start_rank..end {
             ranks.insert(
                 WorkerWithDpRank::new(worker_id, dp_rank),
-                LoadCapacity {
-                    total_kv_blocks,
-                    max_num_batched_tokens: config.max_num_batched_tokens,
-                },
+                LoadCapacity { total_kv_blocks },
             );
         }
     }
@@ -253,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn kv_only_capacity_reaches_full_coverage_without_prefill_ranks() {
+    fn authoritative_kv_reaches_full_coverage() {
         let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
             9,
             config(0, 1, Some(100), None),
@@ -262,15 +251,19 @@ mod tests {
         let mut report = load(9, 0);
         report.kv_used_blocks = Some(40);
         report.active_decode_blocks = Some(10);
-        assert!(state.observe(report));
+        assert_eq!(state.observe(report), LoadObservationOutcome::Updated);
 
         let snapshot = state.snapshot(producer());
-        assert_eq!(snapshot.prefill_expected_ranks, 0);
+        assert_eq!(snapshot.kv_used_blocks, Some(40));
+        assert_eq!(snapshot.total_kv_blocks, Some(100));
+        assert_eq!(snapshot.kv_observed_ranks, 1);
+        assert_eq!(snapshot.kv_capacity_ranks, 1);
+        assert_eq!(snapshot.kv_expected_ranks, 1);
         assert!(!snapshot.has_degraded_coverage());
     }
 
     #[test]
-    fn ray_dp_zero_kv_total_is_unknown_capacity_not_zero_blocks() {
+    fn unknown_capacity_preserves_observations_but_degrades_coverage() {
         let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
             9,
             config(0, 2, Some(0), Some(2_048)),
@@ -279,14 +272,21 @@ mod tests {
         let mut report = load(9, 0);
         report.kv_used_blocks = Some(40);
         report.active_prefill_tokens = Some(512);
-        assert!(state.observe(report));
+        assert_eq!(state.observe(report), LoadObservationOutcome::Updated);
+        let mut second_report = load(9, 1);
+        second_report.kv_used_blocks = Some(30);
+        assert_eq!(
+            state.observe(second_report),
+            LoadObservationOutcome::Updated
+        );
 
         let snapshot = state.snapshot(producer());
-        assert_eq!(snapshot.kv_expected_ranks, 0);
-        assert_eq!(snapshot.total_kv_blocks, 0);
-        assert_eq!(snapshot.kv_used_blocks, 0);
-        assert_eq!(snapshot.prefill_expected_ranks, 2);
-        assert_eq!(snapshot.active_prefill_tokens, 512);
+        assert_eq!(snapshot.kv_expected_ranks, 2);
+        assert_eq!(snapshot.kv_observed_ranks, 2);
+        assert_eq!(snapshot.kv_capacity_ranks, 0);
+        assert_eq!(snapshot.kv_used_blocks, Some(70));
+        assert_eq!(snapshot.total_kv_blocks, None);
+        assert!(snapshot.has_degraded_coverage());
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_reports_preserve_independent_latest_values() {
+    fn partial_reports_do_not_expose_partial_aggregate() {
         let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
             9,
             config(0, 2, Some(100), Some(2_048)),
@@ -309,21 +309,29 @@ mod tests {
         let mut first = load(9, 0);
         first.kv_used_blocks = Some(40);
         first.active_prefill_tokens = Some(512);
-        assert!(state.observe(first));
+        assert_eq!(state.observe(first), LoadObservationOutcome::Updated);
+        let mut scheduler_only = load(9, 0);
+        scheduler_only.active_prefill_tokens = Some(512);
+        scheduler_only.active_decode_blocks = Some(30);
+        assert_eq!(
+            state.observe(scheduler_only),
+            LoadObservationOutcome::IgnoredAdvisory
+        );
         let mut second = load(9, 0);
         second.active_decode_blocks = Some(30);
-        assert!(state.observe(second));
+        assert_eq!(
+            state.observe(second),
+            LoadObservationOutcome::IgnoredAdvisory
+        );
         let mut replacement = load(9, 0);
         replacement.kv_used_blocks = Some(42);
-        assert!(state.observe(replacement));
+        assert_eq!(state.observe(replacement), LoadObservationOutcome::Updated);
 
         let snapshot = state.snapshot(producer());
-        assert_eq!(snapshot.kv_used_blocks, 42);
-        assert_eq!(snapshot.active_decode_blocks, 30);
-        assert_eq!(snapshot.active_prefill_tokens, 512);
-        assert_eq!(snapshot.total_kv_blocks, 200);
-        assert_eq!(snapshot.prefill_token_capacity, 4_096);
+        assert_eq!(snapshot.kv_used_blocks, None);
+        assert_eq!(snapshot.total_kv_blocks, Some(200));
         assert_eq!(snapshot.kv_observed_ranks, 1);
+        assert_eq!(snapshot.kv_capacity_ranks, 2);
         assert_eq!(snapshot.kv_expected_ranks, 2);
         assert!(snapshot.has_degraded_coverage());
     }
@@ -337,32 +345,71 @@ mod tests {
         .unwrap();
         let mut unknown = load(9, 1);
         unknown.kv_used_blocks = Some(40);
-        assert!(!state.observe(unknown));
+        assert_eq!(state.observe(unknown), LoadObservationOutcome::UnknownRank);
         let mut known = load(9, 0);
         known.kv_used_blocks = Some(40);
-        assert!(state.observe(known));
+        assert_eq!(state.observe(known), LoadObservationOutcome::Updated);
+        assert_eq!(state.snapshot(producer()).kv_used_blocks, Some(40));
         assert_eq!(state.snapshot(producer()).kv_observed_ranks, 1);
         assert!(state.clear_observations());
+        assert_eq!(state.snapshot(producer()).kv_used_blocks, None);
         assert_eq!(state.snapshot(producer()).kv_observed_ranks, 0);
     }
 
     #[test]
-    fn capacity_change_drops_departed_rank_observations() {
-        let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
-            9,
-            config(0, 2, Some(100), Some(2_048)),
-        )]))
+    fn capacity_change_clears_only_affected_rank_observations() {
+        let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([
+            (9, config(0, 1, Some(100), Some(2_048))),
+            (10, config(0, 1, Some(100), Some(2_048))),
+        ]))
         .unwrap();
-        let mut departed = load(9, 1);
-        departed.kv_used_blocks = Some(40);
-        assert!(state.observe(departed));
+        let mut changed = load(9, 0);
+        changed.kv_used_blocks = Some(40);
+        assert_eq!(state.observe(changed), LoadObservationOutcome::Updated);
+        let mut unchanged = load(10, 0);
+        unchanged.kv_used_blocks = Some(30);
+        assert_eq!(state.observe(unchanged), LoadObservationOutcome::Updated);
+        assert_eq!(state.snapshot(producer()).kv_used_blocks, Some(70));
+
         assert!(
             state
-                .replace_capacity(&HashMap::from([(9, config(0, 1, Some(100), Some(2_048)),)]))
+                .replace_capacity(&HashMap::from([
+                    (9, config(0, 1, Some(200), Some(2_048))),
+                    (10, config(0, 1, Some(100), Some(2_048))),
+                ]))
                 .unwrap()
         );
         let snapshot = state.snapshot(producer());
-        assert_eq!(snapshot.kv_expected_ranks, 1);
+        assert_eq!(snapshot.kv_expected_ranks, 2);
+        assert_eq!(snapshot.kv_observed_ranks, 1);
+        assert_eq!(snapshot.kv_used_blocks, None);
+        assert_eq!(snapshot.total_kv_blocks, Some(300));
+        assert!(snapshot.has_degraded_coverage());
+    }
+
+    #[test]
+    fn invalid_capacity_clears_previous_authoritative_state() {
+        let mut state = PoolLoadState::from_runtime_configs(&HashMap::from([(
+            9,
+            config(0, 1, Some(100), None),
+        )]))
+        .unwrap();
+        let mut report = load(9, 0);
+        report.kv_used_blocks = Some(40);
+        assert_eq!(state.observe(report), LoadObservationOutcome::Updated);
+        assert!(!state.snapshot(producer()).has_degraded_coverage());
+
+        let error = state
+            .replace_capacity(&HashMap::from([(9, config(0, 0, Some(100), None))]))
+            .unwrap_err();
+        assert!(error.to_string().contains("zero data_parallel_size"));
+
+        let snapshot = state.snapshot(producer());
+        assert_eq!(snapshot.kv_used_blocks, None);
+        assert_eq!(snapshot.total_kv_blocks, None);
         assert_eq!(snapshot.kv_observed_ranks, 0);
+        assert_eq!(snapshot.kv_capacity_ranks, 0);
+        assert_eq!(snapshot.kv_expected_ranks, 0);
+        assert!(snapshot.has_degraded_coverage());
     }
 }

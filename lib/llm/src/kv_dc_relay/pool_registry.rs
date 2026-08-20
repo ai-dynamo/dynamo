@@ -20,7 +20,7 @@ use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, DcPoolCatalog, DcPoolDescriptor, DcRelayIdentity,
     KvQuerySemantics, ModelAlias, WorkerRole,
 };
-use super::load::{PoolLoadSnapshot, PoolLoadState};
+use super::load::{LoadObservationOutcome, PoolLoadSnapshot, PoolLoadState};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 const DEFAULT_CKF_ALLOCATION_CONCURRENCY: usize = 2;
@@ -187,15 +187,24 @@ impl PoolRegistry {
         );
         validate_registrations(&request.registrations)?;
         validate_roles(&request.roles)?;
-        let serving = request
-            .serving_facts
-            .as_ref()
-            .map(|facts| -> anyhow::Result<PoolServingState> {
-                Ok(PoolServingState {
-                    load: PoolLoadState::from_runtime_configs(&facts.runtime_configs)?,
-                })
-            })
-            .transpose()?;
+        let serving = request.serving_facts.as_ref().map(|facts| {
+            let load = match PoolLoadState::from_runtime_configs(&facts.runtime_configs) {
+                Ok(load) => load,
+                Err(error) => {
+                    // Load telemetry is supplemental to CKF materialization. Attach
+                    // the pool with an explicitly degraded snapshot rather than make
+                    // malformed capacity metadata block KV evidence publication.
+                    tracing::warn!(
+                        pool_id = %request.pool_id,
+                        endpoint = %request.endpoint,
+                        %error,
+                        "Ignoring invalid KV DC Relay pool load capacity during attach"
+                    );
+                    PoolLoadState::default()
+                }
+            };
+            PoolServingState { load }
+        });
 
         let layout_generation = {
             let mut state = self.state.lock();
@@ -422,10 +431,24 @@ impl PoolRegistry {
         let Some(serving) = entry.serving.as_mut() else {
             return Ok(false);
         };
-        if serving.load.replace_capacity(runtime_configs)? {
-            publish_load_if_changed(&state, &self.load_tx, pool_id);
+        let capacity_update = serving.load.replace_capacity(runtime_configs);
+        match capacity_update {
+            Ok(changed) => {
+                if changed {
+                    publish_load_if_changed(&state, &self.load_tx, pool_id);
+                }
+                // The caller uses true to record that this active generation accepted
+                // the full runtime config, including fields outside the load contract.
+                Ok(true)
+            }
+            Err(error) => {
+                // replace_capacity invalidates state before returning an error. Publish
+                // that degraded state immediately so the previous complete snapshot
+                // cannot remain authoritative while the caller retries metadata refresh.
+                publish_load_if_changed(&state, &self.load_tx, pool_id);
+                Err(error)
+            }
         }
-        Ok(true)
     }
 
     pub(super) fn observe_load(
@@ -444,11 +467,14 @@ impl PoolRegistry {
         let Some(serving) = entry.serving.as_mut() else {
             return false;
         };
-        if !serving.load.observe(load) {
-            return false;
+        match serving.load.observe(load) {
+            LoadObservationOutcome::UnknownRank => false,
+            LoadObservationOutcome::IgnoredAdvisory => true,
+            LoadObservationOutcome::Updated => {
+                publish_load_if_changed(&state, &self.load_tx, pool_id);
+                true
+            }
         }
-        publish_load_if_changed(&state, &self.load_tx, pool_id);
-        true
     }
 
     pub(super) fn clear_load_observations(&self, pool_id: PoolId, layout_generation: u64) -> bool {
@@ -1499,6 +1525,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_load_capacity_does_not_block_pool_attach() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let mut attach_request = request(pool(1), "fast.router.generate", "llama");
+        attach_request.serving_facts = Some(PoolServingFacts {
+            runtime_configs: HashMap::from([(
+                1,
+                ModelRuntimeConfig {
+                    data_parallel_size: 0,
+                    total_kv_blocks: Some(100),
+                    ..ModelRuntimeConfig::default()
+                },
+            )]),
+        });
+
+        let attachment = registry.attach(attach_request).await.unwrap();
+
+        assert_eq!(registry.catalog().pools().len(), 1);
+        let snapshots = registry.load_snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].kv_used_blocks, None);
+        assert_eq!(snapshots[0].total_kv_blocks, None);
+        assert_eq!(snapshots[0].kv_expected_ranks, 0);
+        assert!(snapshots[0].has_degraded_coverage());
+
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scheduler_only_load_is_accepted_without_changing_snapshot() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let mut attach_request = request(pool(1), "fast.router.generate", "llama");
+        attach_request.serving_facts = Some(PoolServingFacts {
+            runtime_configs: HashMap::from([(
+                1,
+                ModelRuntimeConfig {
+                    total_kv_blocks: Some(100),
+                    ..ModelRuntimeConfig::default()
+                },
+            )]),
+        });
+        let attachment = registry.attach(attach_request).await.unwrap();
+        let before = registry.load_snapshots();
+        let load_watch = registry.watch_load();
+        assert!(!load_watch.has_changed().unwrap());
+
+        assert!(registry.observe_load(
+            attachment.pool_id,
+            attachment.layout_generation,
+            ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(30),
+                active_prefill_tokens: Some(512),
+                ..ActiveLoad::default()
+            },
+        ));
+
+        assert_eq!(registry.load_snapshots(), before);
+        assert!(!load_watch.has_changed().unwrap());
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_capacity_refresh_withdraws_authoritative_load_snapshot() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let mut attach_request = request(pool(1), "fast.router.generate", "llama");
+        attach_request.serving_facts = Some(PoolServingFacts {
+            runtime_configs: HashMap::from([(
+                1,
+                ModelRuntimeConfig {
+                    total_kv_blocks: Some(100),
+                    ..ModelRuntimeConfig::default()
+                },
+            )]),
+        });
+        let attachment = registry.attach(attach_request).await.unwrap();
+        assert!(registry.observe_load(
+            attachment.pool_id,
+            attachment.layout_generation,
+            ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                kv_used_blocks: Some(40),
+                ..ActiveLoad::default()
+            },
+        ));
+        assert!(!registry.load_snapshots()[0].has_degraded_coverage());
+        let mut load_watch = registry.watch_load();
+
+        let error = registry
+            .replace_load_capacity(
+                attachment.pool_id,
+                attachment.layout_generation,
+                &HashMap::from([(
+                    1,
+                    ModelRuntimeConfig {
+                        data_parallel_size: 0,
+                        total_kv_blocks: Some(100),
+                        ..ModelRuntimeConfig::default()
+                    },
+                )]),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("zero data_parallel_size"));
+        assert!(load_watch.has_changed().unwrap());
+
+        let snapshots = load_watch.borrow_and_update().clone();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].kv_used_blocks, None);
+        assert_eq!(snapshots[0].total_kv_blocks, None);
+        assert_eq!(snapshots[0].kv_expected_ranks, 0);
+        assert!(snapshots[0].has_degraded_coverage());
+        assert_eq!(registry.catalog().pools().len(), 1);
+
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn load_is_generation_scoped_and_withdrawn_with_the_pool() {
         let registry = PoolRegistry::new(relay_identity(), config());
         let runtime_configs = HashMap::from([(
@@ -1527,6 +1671,9 @@ mod tests {
         assert_eq!(initial_load.len(), 1);
         assert_eq!(initial_load[0].kv_expected_ranks, 1);
         assert_eq!(initial_load[0].kv_observed_ranks, 0);
+        assert_eq!(initial_load[0].kv_used_blocks, None);
+        assert_eq!(initial_load[0].total_kv_blocks, Some(100));
+        assert!(initial_load[0].has_degraded_coverage());
 
         let mut load = ActiveLoad {
             worker_id: 1,
@@ -1538,9 +1685,8 @@ mod tests {
         load.active_prefill_tokens = Some(512);
         assert!(registry.observe_load(pool(1), old_generation, load));
         let observed = registry.load_snapshots()[0];
-        assert_eq!(observed.kv_used_blocks, 40);
-        assert_eq!(observed.active_decode_blocks, 30);
-        assert_eq!(observed.active_prefill_tokens, 512);
+        assert_eq!(observed.kv_used_blocks, Some(40));
+        assert_eq!(observed.total_kv_blocks, Some(100));
         assert!(!observed.has_degraded_coverage());
 
         assert!(

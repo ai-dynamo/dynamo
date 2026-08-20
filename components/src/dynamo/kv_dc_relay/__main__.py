@@ -8,6 +8,8 @@ import asyncio
 import hashlib
 import logging
 import os
+import sys
+from collections.abc import Mapping
 
 import uvloop
 
@@ -48,6 +50,32 @@ class KvDcRelayDiagnostics:
 
     async def health(self, _request):
         yield await self._relay.health()
+
+
+def _handle_relay_shutdown(health: Mapping[str, object]) -> None:
+    host_error = health.get("host_last_error")
+    if host_error is None:
+        logger.info("KV DC Relay host stopped during runtime shutdown")
+        return
+
+    logger.error("KV DC Relay host stopped: %s", host_error)
+    raise SystemExit(1)
+
+
+async def _shutdown_relay(
+    relay: KvDcRelay, *, classify_host_failure: bool
+) -> None:
+    try:
+        await relay.shutdown()
+    except BaseException:
+        if classify_host_failure:
+            raise
+        logger.exception(
+            "KV DC Relay shutdown also failed while preserving an endpoint exception"
+        )
+        return
+    if classify_host_failure:
+        _handle_relay_shutdown(await relay.health())
 
 
 @dynamo_worker()
@@ -121,17 +149,19 @@ async def worker(runtime: DistributedRuntime) -> None:
         done, _pending = await asyncio.wait(
             {relay_shutdown, *endpoint_tasks}, return_when=asyncio.FIRST_COMPLETED
         )
-        if relay_shutdown in done:
-            health = await relay.health()
-            logger.error("KV DC Relay host stopped: %s", health.get("host_last_error"))
-            raise SystemExit(1)
         for task in done:
-            task.result()
+            if task is not relay_shutdown:
+                task.result()
+        if relay_shutdown in done:
+            return
     finally:
+        classify_host_failure = sys.exc_info()[0] is None
         for task in (relay_shutdown, *endpoint_tasks):
             task.cancel()
         await asyncio.gather(relay_shutdown, *endpoint_tasks, return_exceptions=True)
-        await relay.shutdown()
+        await _shutdown_relay(
+            relay, classify_host_failure=classify_host_failure
+        )
         logger.info("KV DC Relay stopped")
 
 

@@ -143,28 +143,66 @@ fn endpoint_matches_prefix(endpoint: &EndpointId, prefix: &str) -> bool {
     parts.next().is_none()
 }
 
-/// A structural inconsistency that makes an endpoint unsafe to materialize.
+/// Which projection a discovery inconsistency invalidates.
+///
+/// Pool-materialization conflicts fence CKF publication but do not erase independently valid
+/// serving bindings from the topology. Serving-binding conflicts suppress only the binding that
+/// cannot be named or resolved; other bindings on the endpoint remain usable. Serving-topology
+/// conflicts fence both projections because the endpoint's workers cannot be assigned safely to
+/// request-facing models without adding more identity to the membership schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaterializationConflictScope {
+    PoolMaterialization,
+    ServingBinding,
+    ServingTopology,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MaterializationConflictSubject {
+    Endpoint(EndpointId),
+    Card(ModelCardInstanceId),
+    Worker(WorkerId),
+    Binding(CanonicalModelId),
+}
+
+/// A structural inconsistency found while projecting one endpoint.
 ///
 /// Invalid aliases and orphan adapter cards are soft discovery errors: they are omitted and
 /// logged, but do not create a conflict for an otherwise valid base endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MaterializationConflict {
-    Endpoint {
-        endpoint: EndpointId,
-        reason: String,
-    },
-    Card {
-        card: ModelCardInstanceId,
-        reason: String,
-    },
-    Worker {
-        worker_id: WorkerId,
-        reason: String,
-    },
-    Binding {
-        model: CanonicalModelId,
-        reason: String,
-    },
+pub(crate) struct MaterializationConflict {
+    pub(crate) scope: MaterializationConflictScope,
+    pub(crate) subject: MaterializationConflictSubject,
+    pub(crate) reason: String,
+}
+
+impl MaterializationConflict {
+    pub(crate) fn pool(subject: MaterializationConflictSubject, reason: impl Into<String>) -> Self {
+        Self {
+            scope: MaterializationConflictScope::PoolMaterialization,
+            subject,
+            reason: reason.into(),
+        }
+    }
+
+    fn serving(subject: MaterializationConflictSubject, reason: impl Into<String>) -> Self {
+        Self {
+            scope: MaterializationConflictScope::ServingBinding,
+            subject,
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn serving_topology(
+        subject: MaterializationConflictSubject,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            scope: MaterializationConflictScope::ServingTopology,
+            subject,
+            reason: reason.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +219,9 @@ pub(crate) struct AdapterWorkerMembership {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AdapterMembership {
     pub(crate) base_model: CanonicalModelId,
+    /// Runtime LoRA identity used to salt requests and cache hashes. This is independent from the
+    /// request-facing model name used as the key in `EndpointMembership::adapters`.
+    pub(crate) adapter: CanonicalModelId,
     pub(crate) workers: HashMap<WorkerId, AdapterWorkerMembership>,
 }
 
@@ -201,8 +242,26 @@ pub(crate) struct EndpointMembership {
 }
 
 impl EndpointMembership {
+    pub(crate) fn has_pool_materialization_conflict(&self) -> bool {
+        self.conflicts.iter().any(|conflict| {
+            matches!(
+                conflict.scope,
+                MaterializationConflictScope::PoolMaterialization
+                    | MaterializationConflictScope::ServingTopology
+            )
+        })
+    }
+
+    pub(crate) fn has_serving_topology_conflict(&self) -> bool {
+        self.conflicts
+            .iter()
+            .any(|conflict| conflict.scope == MaterializationConflictScope::ServingTopology)
+    }
+
     pub(crate) fn is_materializable(&self) -> bool {
-        self.domain.is_some() && !self.registrations.is_empty() && self.conflicts.is_empty()
+        self.domain.is_some()
+            && !self.registrations.is_empty()
+            && !self.has_pool_materialization_conflict()
     }
 }
 
@@ -215,7 +274,7 @@ pub(crate) struct DcMembershipView {
 struct ProjectedBaseCard<'a> {
     id: &'a ModelCardInstanceId,
     card: &'a ModelDeploymentCard,
-    domain: KvCacheDomainKey,
+    domain: Option<KvCacheDomainKey>,
     model: Option<CanonicalModelId>,
     aliases: Vec<ModelAlias>,
 }
@@ -499,13 +558,33 @@ impl MembershipState {
             let mut base_cards = Vec::new();
             let mut adapter_cards = Vec::new();
             let mut query_semantics_conflicts = Vec::new();
+            let mut serving_shape_conflicts = Vec::new();
             for (id, card) in cards {
-                if id.model_suffix.is_some() || card.lora.is_some() {
-                    adapter_cards.push((id, card));
-                    continue;
+                match (id.model_suffix.is_some(), card.lora.is_some()) {
+                    (true, true) => {
+                        adapter_cards.push((id, card));
+                        continue;
+                    }
+                    (false, false) => {}
+                    _ => {
+                        diagnostics.invalid_models.insert(id.clone());
+                        if !diagnostics.warned_invalid_models.contains(id) {
+                            tracing::warn!(
+                                endpoint = %endpoint,
+                                model = card.name(),
+                                card = %id.to_path(),
+                                "Ignoring model card whose LoRA discovery identity and metadata disagree"
+                            );
+                        }
+                        serving_shape_conflicts.push(MaterializationConflict::serving(
+                            MaterializationConflictSubject::Card(id.clone()),
+                            "LoRA discovery identity and card metadata disagree",
+                        ));
+                        continue;
+                    }
                 }
                 let domain = match resolve_indexer_domain(card, &endpoint) {
-                    Ok(domain) => domain,
+                    Ok(domain) => Some(domain),
                     Err(error) => {
                         diagnostics.invalid_query_semantics.insert(id.clone());
                         if !diagnostics.warned_invalid_query_semantics.contains(id) {
@@ -516,11 +595,11 @@ impl MembershipState {
                                 "Model card has invalid KV query semantics"
                             );
                         }
-                        query_semantics_conflicts.push(MaterializationConflict::Card {
-                            card: id.clone(),
-                            reason: error.to_string(),
-                        });
-                        continue;
+                        query_semantics_conflicts.push(MaterializationConflict::pool(
+                            MaterializationConflictSubject::Card(id.clone()),
+                            error.to_string(),
+                        ));
+                        None
                     }
                 };
                 let model = match CanonicalModelId::new(card.name().to_string()) {
@@ -553,19 +632,23 @@ impl MembershipState {
 
             let endpoint_domains: HashSet<_> = base_cards
                 .iter()
-                .map(|projection| projection.domain.clone())
+                .filter_map(|projection| projection.domain.clone())
                 .collect();
             let domain_count = endpoint_domains.len();
-            let domain = (domain_count == 1)
+            let all_domains_known = base_cards
+                .iter()
+                .all(|projection| projection.domain.is_some());
+            let domain = (all_domains_known && domain_count == 1)
                 .then(|| endpoint_domains.into_iter().next())
                 .flatten();
             let mut builder = EndpointMembershipBuilder::new(domain);
             builder.conflicts.extend(query_semantics_conflicts);
+            builder.conflicts.extend(serving_shape_conflicts);
             if domain_count > 1 {
-                builder.conflicts.push(MaterializationConflict::Endpoint {
-                    endpoint: endpoint.clone(),
-                    reason: "endpoint resolves to multiple indexer domains".to_string(),
-                });
+                builder.conflicts.push(MaterializationConflict::pool(
+                    MaterializationConflictSubject::Endpoint(endpoint.clone()),
+                    "endpoint resolves to multiple indexer domains",
+                ));
             }
 
             let base_models: HashSet<_> = base_cards
@@ -573,27 +656,39 @@ impl MembershipState {
                 .filter_map(|projection| projection.model.clone())
                 .collect();
             if base_models.len() > 1 {
-                builder.conflicts.push(MaterializationConflict::Endpoint {
-                    endpoint: endpoint.clone(),
-                    reason: "endpoint resolves to multiple canonical base models".to_string(),
-                });
+                builder
+                    .conflicts
+                    .push(MaterializationConflict::serving_topology(
+                        MaterializationConflictSubject::Endpoint(endpoint.clone()),
+                        "endpoint resolves to multiple canonical base models",
+                    ));
             }
 
-            let mut base_by_worker = HashMap::with_capacity(base_cards.len());
+            let mut base_candidates = HashMap::<WorkerId, Vec<&ProjectedBaseCard<'_>>>::new();
             for projection in &base_cards {
-                let worker_id = projection.id.instance_id;
-                if base_by_worker.insert(worker_id, projection).is_some() {
-                    builder.conflicts.push(MaterializationConflict::Worker {
-                        worker_id,
-                        reason: "worker publishes multiple base model cards".to_string(),
-                    });
+                base_candidates
+                    .entry(projection.id.instance_id)
+                    .or_default()
+                    .push(projection);
+            }
+
+            let mut base_by_worker = HashMap::with_capacity(base_candidates.len());
+            for (worker_id, projections) in base_candidates {
+                let [projection] = projections.as_slice() else {
+                    builder
+                        .conflicts
+                        .push(MaterializationConflict::serving_topology(
+                            MaterializationConflictSubject::Worker(worker_id),
+                            "worker publishes multiple base model cards",
+                        ));
                     continue;
-                }
+                };
+                base_by_worker.insert(worker_id, *projection);
                 let Some(model) = projection.model.clone() else {
-                    builder.conflicts.push(MaterializationConflict::Card {
-                        card: projection.id.clone(),
-                        reason: "invalid canonical model identity".to_string(),
-                    });
+                    builder.conflicts.push(MaterializationConflict::serving(
+                        MaterializationConflictSubject::Card(projection.id.clone()),
+                        "invalid canonical model identity",
+                    ));
                     continue;
                 };
                 builder
@@ -630,60 +725,76 @@ impl MembershipState {
                     continue;
                 };
                 let Some(base_model) = base.model.clone() else {
-                    builder.conflicts.push(MaterializationConflict::Card {
-                        card: id.clone(),
-                        reason: "adapter's backing base model identity is invalid".to_string(),
-                    });
+                    builder.conflicts.push(MaterializationConflict::serving(
+                        MaterializationConflictSubject::Card(id.clone()),
+                        "adapter's backing base model identity is invalid",
+                    ));
                     continue;
                 };
-                let adapter_name = card
-                    .lora
-                    .as_ref()
-                    .map(|lora| lora.name.as_str())
-                    .or(id.model_suffix.as_deref());
-                let Some(adapter_name) = adapter_name else {
-                    builder.conflicts.push(MaterializationConflict::Card {
-                        card: id.clone(),
-                        reason: "adapter card has no adapter identity".to_string(),
-                    });
+                let Some(lora) = card.lora.as_ref() else {
+                    builder.conflicts.push(MaterializationConflict::serving(
+                        MaterializationConflictSubject::Card(id.clone()),
+                        "adapter card has no runtime LoRA metadata",
+                    ));
                     continue;
                 };
-                let adapter = match CanonicalModelId::new(adapter_name.to_string()) {
+                let served_model = match CanonicalModelId::new(card.name().to_string()) {
+                    Ok(model) => model,
+                    Err(error) => {
+                        diagnostics.invalid_models.insert(id.clone());
+                        if !diagnostics.warned_invalid_models.contains(id) {
+                            tracing::warn!(
+                                endpoint = %endpoint,
+                                model = card.name(),
+                                %error,
+                                "Ignoring adapter card with invalid request-facing model identity"
+                            );
+                        }
+                        builder.conflicts.push(MaterializationConflict::serving(
+                            MaterializationConflictSubject::Card(id.clone()),
+                            "invalid adapter request-facing model identity",
+                        ));
+                        continue;
+                    }
+                };
+                let runtime_adapter = match CanonicalModelId::new(lora.name.clone()) {
                     Ok(adapter) => adapter,
                     Err(error) => {
                         diagnostics.invalid_models.insert(id.clone());
                         if !diagnostics.warned_invalid_models.contains(id) {
                             tracing::warn!(
                                 endpoint = %endpoint,
-                                model = adapter_name,
+                                model = card.name(),
+                                adapter = lora.name,
                                 %error,
-                                "Ignoring adapter card with invalid canonical model identity"
+                                "Ignoring adapter card with invalid runtime LoRA identity"
                             );
                         }
-                        builder.conflicts.push(MaterializationConflict::Card {
-                            card: id.clone(),
-                            reason: "invalid adapter model identity".to_string(),
-                        });
+                        builder.conflicts.push(MaterializationConflict::serving(
+                            MaterializationConflictSubject::Card(id.clone()),
+                            "invalid runtime LoRA identity",
+                        ));
                         continue;
                     }
                 };
-                let aliases = diagnostics.valid_aliases(id, card, &adapter, &endpoint);
+                let aliases = diagnostics.valid_aliases(id, card, &served_model, &endpoint);
                 let target = ModelTarget::Lora {
                     base_model: base_model.clone(),
-                    adapter: adapter.clone(),
+                    adapter: runtime_adapter.clone(),
                 };
                 builder.claims.push(RegistrationClaim {
                     binding: BindingIdentity {
-                        model: adapter.clone(),
+                        model: served_model.clone(),
                         target,
                     },
                     aliases,
                 });
-                let capacity = card.lora.as_ref().and_then(|lora| lora.max_gpu_lora_count);
-                match builder.adapters.entry(adapter) {
+                let capacity = lora.max_gpu_lora_count;
+                match builder.adapters.entry(served_model) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         entry.insert(AdapterMembership {
                             base_model,
+                            adapter: runtime_adapter,
                             workers: HashMap::from([(
                                 worker_id,
                                 AdapterWorkerMembership {
@@ -693,12 +804,13 @@ impl MembershipState {
                         });
                     }
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        if entry.get().base_model != base_model {
-                            builder.conflicts.push(MaterializationConflict::Card {
-                                card: id.clone(),
-                                reason: "adapter identity resolves to conflicting base models"
-                                    .to_string(),
-                            });
+                        if entry.get().base_model != base_model
+                            || entry.get().adapter != runtime_adapter
+                        {
+                            builder.conflicts.push(MaterializationConflict::serving(
+                                MaterializationConflictSubject::Card(id.clone()),
+                                "adapter request-facing model resolves to conflicting runtime targets",
+                            ));
                             continue;
                         }
                         let workers = &mut entry.get_mut().workers;
@@ -710,10 +822,10 @@ impl MembershipState {
                             .is_some_and(|previous| previous != facts)
                         {
                             workers.remove(&worker_id);
-                            builder.conflicts.push(MaterializationConflict::Worker {
-                                worker_id,
-                                reason: "worker publishes conflicting adapter capacity".to_string(),
-                            });
+                            builder.conflicts.push(MaterializationConflict::pool(
+                                MaterializationConflictSubject::Worker(worker_id),
+                                "worker publishes conflicting adapter capacity",
+                            ));
                         }
                     }
                 }
@@ -721,6 +833,9 @@ impl MembershipState {
             builders.insert(endpoint, builder);
         }
 
+        // The local ModelManager can resolve a collision by its local first-wins order. A Relay
+        // federates independently owned endpoints and has no safe canonical owner to choose, so
+        // any request-facing name with multiple targets is omitted from every endpoint.
         let mut lookup_owners = HashMap::<String, HashSet<BindingIdentity>>::new();
         for builder in builders.values() {
             for claim in &builder.claims {
@@ -746,11 +861,10 @@ impl MembershipState {
             let mut grouped_claims = HashMap::<BindingIdentity, HashSet<ModelAlias>>::new();
             for claim in builder.claims {
                 if ambiguous_names.contains(claim.binding.model.as_str()) {
-                    builder.conflicts.push(MaterializationConflict::Binding {
-                        model: claim.binding.model,
-                        reason: "request-facing model name resolves to conflicting targets"
-                            .to_string(),
-                    });
+                    builder.conflicts.push(MaterializationConflict::serving(
+                        MaterializationConflictSubject::Binding(claim.binding.model),
+                        "request-facing model name resolves to conflicting targets",
+                    ));
                     continue;
                 }
                 let aliases = grouped_claims.entry(claim.binding).or_default();
@@ -772,6 +886,16 @@ impl MembershipState {
                 })
                 .collect();
             registrations.sort_unstable();
+            builder.adapters.retain(|served_model, adapter| {
+                registrations.iter().any(|registration| {
+                    registration.model() == served_model
+                        && registration.target()
+                            == &ModelTarget::Lora {
+                                base_model: adapter.base_model.clone(),
+                                adapter: adapter.adapter.clone(),
+                            }
+                })
+            });
             let models = registrations
                 .iter()
                 .map(|registration| registration.model().as_str().to_string())
@@ -1289,6 +1413,19 @@ mod tests {
         &view.endpoints[endpoint]
     }
 
+    fn is_pool_endpoint_conflict(
+        conflict: &MaterializationConflict,
+        endpoint: &EndpointId,
+        reason: &str,
+    ) -> bool {
+        conflict.scope == MaterializationConflictScope::PoolMaterialization
+            && matches!(
+                &conflict.subject,
+                MaterializationConflictSubject::Endpoint(conflicted) if conflicted == endpoint
+            )
+            && conflict.reason.contains(reason)
+    }
+
     #[test]
     fn zero_block_size_is_not_materialized() {
         let filter = DcDiscoveryFilter::default();
@@ -1307,12 +1444,13 @@ mod tests {
         let membership = membership_for_endpoint(&view, &EndpointId::from("prod.backend.generate"));
         assert!(!membership.is_materializable());
         assert!(membership.domain.is_none());
-        assert!(
-            membership
-                .conflicts
-                .iter()
-                .any(|conflict| { matches!(conflict, MaterializationConflict::Card { .. }) })
-        );
+        assert!(membership.conflicts.iter().any(|conflict| {
+            conflict.scope == MaterializationConflictScope::PoolMaterialization
+                && matches!(&conflict.subject, MaterializationConflictSubject::Card(_))
+        }));
+        assert_eq!(membership.models, ["llama"]);
+        assert_eq!(membership.registrations.len(), 1);
+        assert!(membership.worker_topology.contains_key(&1));
     }
 
     #[test]
@@ -1376,11 +1514,7 @@ mod tests {
         assert!(membership.domain.is_none());
         assert!(!membership.is_materializable());
         assert!(membership.conflicts.iter().any(|conflict| {
-            matches!(
-                conflict,
-                MaterializationConflict::Endpoint { endpoint: conflicted, reason }
-                    if conflicted == &endpoint && reason.contains("multiple indexer domains")
-            )
+            is_pool_endpoint_conflict(conflict, &endpoint, "multiple indexer domains")
         }));
     }
 
@@ -1492,11 +1626,7 @@ mod tests {
         assert!(!membership.is_materializable());
         assert_eq!(membership.models, ["embed", "llama"]);
         assert!(membership.conflicts.iter().any(|conflict| {
-            matches!(
-                conflict,
-                MaterializationConflict::Endpoint { endpoint: conflicted, reason }
-                    if conflicted == &endpoint && reason.contains("multiple indexer domains")
-            )
+            is_pool_endpoint_conflict(conflict, &endpoint, "multiple indexer domains")
         }));
         let conflicted_generation = membership.generation;
 
@@ -1537,11 +1667,13 @@ mod tests {
         assert!(membership.domain.is_some());
         assert!(!membership.is_materializable());
         assert!(membership.conflicts.iter().any(|conflict| {
-            matches!(
-                conflict,
-                MaterializationConflict::Endpoint { endpoint: conflicted, reason }
-                    if conflicted == &endpoint && reason.contains("canonical base models")
-            )
+            conflict.scope == MaterializationConflictScope::ServingTopology
+                && matches!(
+                    &conflict.subject,
+                    MaterializationConflictSubject::Endpoint(conflicted)
+                        if conflicted == &endpoint
+                )
+                && conflict.reason.contains("canonical base models")
         }));
     }
 
@@ -1593,6 +1725,88 @@ mod tests {
     }
 
     #[test]
+    fn adapter_served_model_is_distinct_from_runtime_lora_identity() {
+        let filter = DcDiscoveryFilter::default();
+        let mut state = MembershipState::default();
+        state.apply(
+            DiscoveryEvent::Added(instance(
+                "generate",
+                1,
+                None,
+                card("llama", "meta/llama", 64),
+            )),
+            &filter,
+        );
+        let mut adapter = card("tenant-chat", "meta/llama", 64);
+        adapter.lora = Some(LoraInfo {
+            name: "org/runtime-adapter-v2".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        state.apply(
+            DiscoveryEvent::Added(instance("generate", 1, Some("adapter-v2"), adapter)),
+            &filter,
+        );
+
+        let view = state.view(&filter);
+        let membership = membership_for_endpoint(&view, &EndpointId::from("prod.backend.generate"));
+        let served_model = CanonicalModelId::new("tenant-chat").unwrap();
+        let runtime_adapter = CanonicalModelId::new("org/runtime-adapter-v2").unwrap();
+        let overlay = &membership.adapters[&served_model];
+        assert_eq!(overlay.adapter, runtime_adapter);
+        let registration = membership
+            .registrations
+            .iter()
+            .find(|registration| registration.model() == &served_model)
+            .expect("request-facing adapter registration");
+        assert_eq!(
+            registration.target(),
+            &ModelTarget::Lora {
+                base_model: CanonicalModelId::new("llama").unwrap(),
+                adapter: runtime_adapter,
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_adapter_shape_suppresses_only_that_binding() {
+        let filter = DcDiscoveryFilter::default();
+        let mut state = MembershipState::default();
+        state.apply(
+            DiscoveryEvent::Added(instance(
+                "generate",
+                1,
+                None,
+                card("llama", "meta/llama", 64),
+            )),
+            &filter,
+        );
+        let mut malformed = card("tenant-chat", "meta/llama", 64);
+        malformed.lora = Some(LoraInfo {
+            name: "org/runtime-adapter-v2".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        // The card says LoRA, but its discovery identity has no model suffix.
+        state.apply(
+            DiscoveryEvent::Added(instance("generate", 2, None, malformed)),
+            &filter,
+        );
+
+        let view = state.view(&filter);
+        let membership = membership_for_endpoint(&view, &EndpointId::from("prod.backend.generate"));
+        assert!(membership.is_materializable());
+        assert_eq!(membership.models, ["llama"]);
+        assert!(membership.adapters.is_empty());
+        assert!(membership.conflicts.iter().any(|conflict| {
+            conflict.scope == MaterializationConflictScope::ServingBinding
+                && matches!(
+                    &conflict.subject,
+                    MaterializationConflictSubject::Card(card) if card.instance_id == 2
+                )
+                && conflict.reason.contains("LoRA discovery identity")
+        }));
+    }
+
+    #[test]
     fn base_model_aliases_remain_attached_to_their_canonical_registration() {
         let filter = DcDiscoveryFilter::default();
         let mut state = MembershipState::default();
@@ -1617,5 +1831,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["chat", "instruct"]
         );
+    }
+
+    #[test]
+    fn federated_alias_collision_is_omitted_from_every_endpoint() {
+        let filter = DcDiscoveryFilter::default();
+        let mut state = MembershipState::default();
+        let mut llama = card("llama", "meta/llama", 64);
+        llama.aliases = vec!["shared-chat".to_string()];
+        let mut mistral = card("mistral", "mistral/model", 64);
+        mistral.aliases = vec!["shared-chat".to_string()];
+        state.replace_all(
+            vec![
+                instance("llama", 1, None, llama),
+                instance("mistral", 2, None, mistral),
+            ],
+            &filter,
+        );
+
+        let view = state.view(&filter);
+        for membership in view.endpoints.values() {
+            assert!(membership.is_materializable());
+            assert!(membership.aliases.is_empty());
+            assert_eq!(membership.registrations.len(), 1);
+            assert!(membership.registrations[0].aliases().is_empty());
+        }
     }
 }

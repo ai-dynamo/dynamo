@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod model;
-pub mod readiness;
+pub(crate) mod readiness;
 pub use model::Model;
 
 pub mod kv_source_membership;

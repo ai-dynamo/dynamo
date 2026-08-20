@@ -41,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 use super::actor::{ActorFault, DEFAULT_FAULT_CAPACITY, KvDcRelayHandle, KvDcRelayRecoveryTarget};
 use super::discovery::{
     DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
-    KvDcRelayDiscoveryConfig, MaterializationConflict,
+    KvDcRelayDiscoveryConfig, MaterializationConflict, MaterializationConflictSubject,
 };
 use super::identity::{CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity, WorkerRole};
 use super::load::PoolLoadSnapshot;
@@ -423,6 +423,16 @@ impl HostTerminalState {
     }
 }
 
+struct HostSupervisorCompletionGuard {
+    completion: CancellationToken,
+}
+
+impl Drop for HostSupervisorCompletionGuard {
+    fn drop(&mut self) {
+        self.completion.cancel();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActorBinding {
     domain: KvCacheDomainKey,
@@ -569,6 +579,7 @@ pub struct KvDcRelay {
     cancel: CancellationToken,
     membership: Mutex<Option<DcMembershipWatch>>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
+    supervisor_complete: CancellationToken,
     terminal: Arc<HostTerminalState>,
     statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
     pools: Arc<PoolRegistry>,
@@ -644,13 +655,15 @@ impl KvDcRelay {
             terminal.clone(),
             topology.clone(),
         ));
-        let supervisor = tokio::spawn(supervise_host_task(
+        let supervisor_complete = CancellationToken::new();
+        let supervisor = spawn_host_task_supervisor(
             host,
             cancel.clone(),
             terminal.clone(),
             pools.clone(),
             topology.clone(),
-        ));
+            supervisor_complete.clone(),
+        );
         Ok(Self {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id,
@@ -659,6 +672,7 @@ impl KvDcRelay {
             cancel,
             membership: Mutex::new(Some(membership)),
             supervisor: Mutex::new(Some(supervisor)),
+            supervisor_complete,
             terminal,
             statuses,
             pools,
@@ -684,7 +698,8 @@ impl KvDcRelay {
         self.topology.watch()
     }
 
-    /// Latest complete per-pool load snapshots (latest-wins per worker rank).
+    /// Latest authoritative per-pool worker KV occupancy and capacity. Each aggregate
+    /// remains `None` until all declared ranks have supplied the corresponding data.
     pub fn pool_load(&self) -> Vec<PoolLoadSnapshot> {
         self.pools.load_snapshots()
     }
@@ -796,7 +811,7 @@ impl KvDcRelay {
     }
 
     pub async fn wait_for_shutdown(&self) {
-        self.cancel.cancelled().await;
+        self.supervisor_complete.cancelled().await;
     }
 
     pub async fn shutdown(&self) -> Result<(), KvDcRelayError> {
@@ -907,6 +922,14 @@ async fn run_host_supervisor(
             let catalog_changed = async { catalog_rx.changed().await };
             tokio::select! {
                 biased;
+                slot_outcome = wait_for_active_endpoint_slot_outcome(
+                    &mut slots,
+                    &cancel,
+                    &fatal_cancel,
+                    &terminal,
+                ) => {
+                    break 'supervisor slot_outcome;
+                }
                 _ = cancel.cancelled() => break 'supervisor Ok(()),
                 changed = membership_rx.changed() => {
                     if changed.is_err() {
@@ -940,16 +963,26 @@ async fn run_host_supervisor(
         }
     };
 
+    // Withdraw serving state before potentially waiting on endpoint and pool drains.
+    topology.clear();
+    let mut outcome = outcome;
     for (endpoint, slot) in slots {
         slot.cancel.cancel();
         drop(slot.metadata);
-        report_endpoint_slot_exit(endpoint, slot.task.await);
+        let result = slot.task.await;
+        record_active_endpoint_slot_cleanup_failure(
+            &endpoint,
+            &result,
+            &mut outcome,
+            &fatal_cancel,
+            &terminal,
+        );
+        report_endpoint_slot_exit(endpoint, result);
     }
     while let Some(retired) = retired_slots.join_next().await {
         report_retired_endpoint_slot(Some(retired));
     }
     pools.shutdown().await;
-    topology.clear();
     outcome
 }
 
@@ -961,6 +994,45 @@ fn allocate_slot_incarnation(next: &mut u64) -> anyhow::Result<u64> {
     Ok(incarnation)
 }
 
+async fn wait_for_active_endpoint_slot_outcome(
+    slots: &mut HashMap<EndpointId, EndpointSlotTask>,
+    host_cancel: &CancellationToken,
+    fatal_cancel: &CancellationToken,
+    terminal: &HostTerminalState,
+) -> anyhow::Result<()> {
+    let (mut endpoints, tasks): (Vec<_>, Vec<_>) = slots
+        .iter_mut()
+        .map(|(endpoint, slot)| (endpoint.clone(), &mut slot.task))
+        .unzip();
+    if tasks.is_empty() {
+        return std::future::pending::<anyhow::Result<()>>().await;
+    }
+
+    let (result, index, remaining) = futures::future::select_all(tasks).await;
+    drop(remaining);
+    let endpoint = endpoints.swap_remove(index);
+    // select_all consumed this handle's output. Remove it so terminal cleanup cannot poll it
+    // again; dropping the slot also closes its metadata sender.
+    let Some(completed) = slots.remove(&endpoint) else {
+        let reason = format!(
+            "KV DC Relay endpoint slot {endpoint} disappeared while supervising its completion"
+        );
+        record_host_failure(fatal_cancel, terminal, reason.clone());
+        return Err(anyhow::anyhow!(reason));
+    };
+    completed.cancel.cancel();
+    drop(completed);
+    if result.is_ok() && host_cancel.is_cancelled() {
+        return Ok(());
+    }
+    let reason = match result {
+        Ok(()) => format!("KV DC Relay endpoint slot {endpoint} stopped unexpectedly"),
+        Err(error) => format!("KV DC Relay endpoint slot {endpoint} failed: {error}"),
+    };
+    record_host_failure(fatal_cancel, terminal, reason.clone());
+    Err(anyhow::anyhow!(reason))
+}
+
 async fn supervise_host_task(
     host: JoinHandle<anyhow::Result<()>>,
     cancel: CancellationToken,
@@ -969,18 +1041,33 @@ async fn supervise_host_task(
     topology: Arc<TopologyPublisher>,
 ) {
     let result = host.await;
-    if cancel.is_cancelled() {
-        return;
-    }
     let reason = match result {
+        Ok(Ok(())) if cancel.is_cancelled() => return,
         Ok(Ok(())) => "KV DC Relay host stopped unexpectedly".to_string(),
         Ok(Err(error)) => error.to_string(),
         Err(error) => format!("KV DC Relay host task failed: {error}"),
     };
     record_host_failure(&cancel, &terminal, reason);
-    pools.shutdown().await;
     // A panicked host never reaches the supervisor's own exit path.
     topology.clear();
+    pools.shutdown().await;
+}
+
+fn spawn_host_task_supervisor(
+    host: JoinHandle<anyhow::Result<()>>,
+    cancel: CancellationToken,
+    terminal: Arc<HostTerminalState>,
+    pools: Arc<PoolRegistry>,
+    topology: Arc<TopologyPublisher>,
+    completion: CancellationToken,
+) -> JoinHandle<()> {
+    let completion_guard = HostSupervisorCompletionGuard { completion };
+    tokio::spawn(async move {
+        // Construct the guard outside this future so aborting it before its first poll still
+        // wakes wait_for_shutdown callers.
+        let _completion_guard = completion_guard;
+        supervise_host_task(host, cancel, terminal, pools, topology).await;
+    })
 }
 
 fn record_host_failure(cancel: &CancellationToken, terminal: &HostTerminalState, reason: String) {
@@ -1019,12 +1106,10 @@ fn reject_duplicate_live_pools(view: &mut DcMembershipView, dc_id: dynamo_kv_rou
             let Some(membership) = memberships.get_mut(endpoint) else {
                 continue;
             };
-            membership
-                .conflicts
-                .push(MaterializationConflict::Endpoint {
-                    endpoint: endpoint.clone(),
-                    reason: format!("pool {pool_id} is claimed by multiple serving endpoints"),
-                });
+            membership.conflicts.push(MaterializationConflict::pool(
+                MaterializationConflictSubject::Endpoint(endpoint.clone()),
+                format!("pool {pool_id} is claimed by multiple serving endpoints"),
+            ));
         }
     }
 }
@@ -1032,7 +1117,7 @@ fn reject_duplicate_live_pools(view: &mut DcMembershipView, dc_id: dynamo_kv_rou
 fn inactive_slot_lifecycle(membership: Option<&EndpointMembership>) -> SlotLifecycle {
     match membership {
         None => SlotLifecycle::Lightweight,
-        Some(membership) if !membership.conflicts.is_empty() => SlotLifecycle::Fenced,
+        Some(membership) if membership.has_pool_materialization_conflict() => SlotLifecycle::Fenced,
         Some(_) => SlotLifecycle::Discovered,
     }
 }
@@ -1092,6 +1177,28 @@ fn report_endpoint_slot_exit(endpoint: EndpointId, result: Result<(), tokio::tas
     {
         tracing::warn!(%endpoint, %error, "KV DC Relay endpoint slot failed");
     }
+}
+
+fn record_active_endpoint_slot_cleanup_failure(
+    endpoint: &EndpointId,
+    result: &Result<(), tokio::task::JoinError>,
+    outcome: &mut anyhow::Result<()>,
+    fatal_cancel: &CancellationToken,
+    terminal: &HostTerminalState,
+) {
+    if outcome.is_err() {
+        return;
+    }
+    let Err(error) = result else {
+        return;
+    };
+    if error.is_cancelled() {
+        return;
+    }
+
+    let reason = format!("KV DC Relay endpoint slot {endpoint} failed: {error}");
+    record_host_failure(fatal_cancel, terminal, reason.clone());
+    *outcome = Err(anyhow::anyhow!(reason));
 }
 
 fn report_actor_fault(endpoint: &EndpointId, fault: &ActorFault) {
@@ -1272,7 +1379,7 @@ async fn run_endpoint_slot(
 
         if let (Some(active), Some(membership)) = (runtime.as_mut(), membership.as_ref())
             && !membership.registrations.is_empty()
-            && membership.conflicts.is_empty()
+            && !membership.has_pool_materialization_conflict()
             && active.registrations != membership.registrations
         {
             match refresh_pool_registrations(
@@ -1314,7 +1421,7 @@ async fn run_endpoint_slot(
             && !source_binding_pending
             && Some(&active.binding) == desired_binding.as_ref()
             && !membership.registrations.is_empty()
-            && membership.conflicts.is_empty()
+            && !membership.has_pool_materialization_conflict()
             && active.roles != membership.roles
         {
             match pools.replace_roles(&mut active.attachment, membership.roles.clone()) {
@@ -1736,8 +1843,7 @@ async fn start_endpoint_pool(
             return Err(error);
         }
     };
-    let serving = serving_facts.map(|facts| {
-        let load_cancel = load_cancel.expect("WAN facts create a load cancellation token");
+    let serving = serving_facts.zip(load_cancel).map(|(facts, load_cancel)| {
         let load_task = start_load_collector(
             component,
             endpoint,
@@ -2551,6 +2657,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unexpected_active_endpoint_slot_return_is_terminal() {
+        let endpoint = membership("prod.backend.generate", domain(1, "meta/llama")).endpoint;
+        let survivor = membership("prod.backend.other", domain(2, "meta/llama")).endpoint;
+        let (metadata, _metadata_rx) = watch::channel(None);
+        let (survivor_metadata, _survivor_metadata_rx) = watch::channel(None);
+        let survivor_cancel = CancellationToken::new();
+        let survivor_task_cancel = survivor_cancel.clone();
+        let mut slots = HashMap::from([
+            (
+                endpoint.clone(),
+                EndpointSlotTask {
+                    metadata,
+                    status: Arc::new(RwLock::new(EndpointSlotStatus::default())),
+                    cancel: CancellationToken::new(),
+                    task: tokio::spawn(async {}),
+                },
+            ),
+            (
+                survivor,
+                EndpointSlotTask {
+                    metadata: survivor_metadata,
+                    status: Arc::new(RwLock::new(EndpointSlotStatus::default())),
+                    cancel: survivor_cancel,
+                    task: tokio::spawn(async move { survivor_task_cancel.cancelled().await }),
+                },
+            ),
+        ]);
+        let host_cancel = CancellationToken::new();
+        let fatal_cancel = CancellationToken::new();
+        let terminal = HostTerminalState::default();
+
+        let error = wait_for_active_endpoint_slot_outcome(
+            &mut slots,
+            &host_cancel,
+            &fatal_cancel,
+            &terminal,
+        )
+        .await
+        .unwrap_err();
+        let reason = error.to_string();
+
+        assert!(fatal_cancel.is_cancelled());
+        assert_eq!(terminal.last_error().as_deref(), Some(reason.as_str()));
+        assert!(reason.contains(&endpoint.to_string()));
+        assert!(reason.contains("stopped unexpectedly"));
+
+        // The completed handle was consumed by select_all and must not be awaited again.
+        assert_eq!(slots.len(), 1);
+        for (endpoint, slot) in slots {
+            slot.cancel.cancel();
+            drop(slot.metadata);
+            report_endpoint_slot_exit(endpoint, slot.task.await);
+        }
+    }
+
+    #[tokio::test]
+    async fn unexpected_active_endpoint_slot_panic_is_terminal() {
+        let endpoint = membership("prod.backend.generate", domain(1, "meta/llama")).endpoint;
+        let (metadata, _metadata_rx) = watch::channel(None);
+        let mut slots = HashMap::from([(
+            endpoint.clone(),
+            EndpointSlotTask {
+                metadata,
+                status: Arc::new(RwLock::new(EndpointSlotStatus::default())),
+                cancel: CancellationToken::new(),
+                task: tokio::spawn(async { panic!("injected endpoint slot panic") }),
+            },
+        )]);
+        let host_cancel = CancellationToken::new();
+        host_cancel.cancel();
+        let fatal_cancel = CancellationToken::new();
+        let terminal = HostTerminalState::default();
+
+        let error = wait_for_active_endpoint_slot_outcome(
+            &mut slots,
+            &host_cancel,
+            &fatal_cancel,
+            &terminal,
+        )
+        .await
+        .unwrap_err();
+        let reason = error.to_string();
+
+        assert!(fatal_cancel.is_cancelled());
+        assert_eq!(terminal.last_error().as_deref(), Some(reason.as_str()));
+        assert!(reason.contains(&endpoint.to_string()));
+        assert!(reason.contains("injected endpoint slot panic"));
+        assert!(slots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_endpoint_slot_return_during_host_cancellation_is_graceful() {
+        let endpoint = membership("prod.backend.generate", domain(1, "meta/llama")).endpoint;
+        let (metadata, _metadata_rx) = watch::channel(None);
+        let mut slots = HashMap::from([(
+            endpoint,
+            EndpointSlotTask {
+                metadata,
+                status: Arc::new(RwLock::new(EndpointSlotStatus::default())),
+                cancel: CancellationToken::new(),
+                task: tokio::spawn(async {}),
+            },
+        )]);
+        let host_cancel = CancellationToken::new();
+        host_cancel.cancel();
+        let fatal_cancel = CancellationToken::new();
+        let terminal = HostTerminalState::default();
+
+        wait_for_active_endpoint_slot_outcome(&mut slots, &host_cancel, &fatal_cancel, &terminal)
+            .await
+            .unwrap();
+
+        assert!(slots.is_empty());
+        assert!(!fatal_cancel.is_cancelled());
+        assert!(terminal.last_error().is_none());
+    }
+
+    #[tokio::test]
+    async fn active_endpoint_slot_panic_during_cleanup_is_terminal() {
+        let endpoint = membership("prod.backend.generate", domain(1, "meta/llama")).endpoint;
+        let result = tokio::spawn(async { panic!("injected endpoint cleanup panic") }).await;
+        let mut outcome = Ok(());
+        let fatal_cancel = CancellationToken::new();
+        let terminal = HostTerminalState::default();
+
+        record_active_endpoint_slot_cleanup_failure(
+            &endpoint,
+            &result,
+            &mut outcome,
+            &fatal_cancel,
+            &terminal,
+        );
+
+        let reason = outcome.unwrap_err().to_string();
+        assert!(fatal_cancel.is_cancelled());
+        assert_eq!(terminal.last_error().as_deref(), Some(reason.as_str()));
+        assert!(reason.contains("injected endpoint cleanup panic"));
+    }
+
+    #[tokio::test]
     async fn repeated_relay_start_separates_drt_identity_from_relay_incarnation() {
         let component = test_component("incarnation").await;
         let first = KvDcRelay::start(
@@ -2584,15 +2830,16 @@ mod tests {
         let cancel = CancellationToken::new();
         let terminal = Arc::new(HostTerminalState::default());
         let pools = Arc::new(registry());
-
-        supervise_host_task(
+        let topology = test_topology();
+        let supervisor_complete = CancellationToken::new();
+        let supervisor = spawn_host_task_supervisor(
             tokio::spawn(async { Ok(()) }),
             cancel.clone(),
             terminal.clone(),
             pools.clone(),
-            test_topology(),
-        )
-        .await;
+            topology.clone(),
+            supervisor_complete.clone(),
+        );
 
         let relay = KvDcRelay {
             #[cfg(feature = "ckf-diagnostics")]
@@ -2601,11 +2848,12 @@ mod tests {
             relay_identity: DcRelayIdentity::new(11, 7),
             cancel,
             membership: Mutex::new(None),
-            supervisor: Mutex::new(None),
+            supervisor: Mutex::new(Some(supervisor)),
+            supervisor_complete,
             terminal,
             statuses: Arc::new(RwLock::new(HashMap::new())),
             pools,
-            topology: test_topology(),
+            topology,
         };
         tokio::time::timeout(Duration::from_millis(100), relay.wait_for_shutdown())
             .await
@@ -2616,6 +2864,7 @@ mod tests {
             health.host_last_error.as_deref(),
             Some("KV DC Relay host stopped unexpectedly")
         );
+        relay.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -2654,6 +2903,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_panic_racing_runtime_cancellation_remains_terminal() {
+        let cancel = CancellationToken::new();
+        let terminal = Arc::new(HostTerminalState::default());
+        let pools = Arc::new(registry());
+        let panic_gate = CancellationToken::new();
+        let host_panic_gate = panic_gate.clone();
+        let host = tokio::spawn(async move {
+            host_panic_gate.cancelled().await;
+            panic!("injected host shutdown-race panic");
+            #[allow(unreachable_code)]
+            Ok(())
+        });
+        let member = membership("prod.backend.generate", domain(1, "meta/llama"));
+        let topology = Arc::new(TopologyPublisher::new(
+            DcMembershipView {
+                endpoints: Arc::new(HashMap::from([(member.endpoint.clone(), member)])),
+            },
+            &DcPoolCatalog::new(DcRelayIdentity::new(0, 1), 0, Vec::new()),
+        ));
+        let supervisor_complete = CancellationToken::new();
+        let supervisor = spawn_host_task_supervisor(
+            host,
+            cancel.clone(),
+            terminal.clone(),
+            pools.clone(),
+            topology.clone(),
+            supervisor_complete.clone(),
+        );
+        let relay = KvDcRelay {
+            #[cfg(feature = "ckf-diagnostics")]
+            dc_id: Arc::from("test-dc"),
+            #[cfg(feature = "ckf-diagnostics")]
+            relay_identity: DcRelayIdentity::new(11, 7),
+            cancel: cancel.clone(),
+            membership: Mutex::new(None),
+            supervisor: Mutex::new(Some(supervisor)),
+            supervisor_complete,
+            terminal,
+            statuses: Arc::new(RwLock::new(HashMap::new())),
+            pools,
+            topology: topology.clone(),
+        };
+
+        cancel.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), relay.wait_for_shutdown())
+                .await
+                .is_err(),
+            "raw runtime cancellation must not bypass host outcome classification"
+        );
+        panic_gate.cancel();
+        tokio::time::timeout(Duration::from_millis(100), relay.wait_for_shutdown())
+            .await
+            .expect("host supervisor completion must wake Relay shutdown waiters");
+
+        let reason = relay
+            .health()
+            .await
+            .host_last_error
+            .expect("terminal host reason");
+        assert!(reason.contains("injected host shutdown-race panic"));
+        assert!(topology.snapshot().entries.is_empty());
+        relay.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn aborted_host_supervisor_still_signals_completion() {
+        let host_gate = CancellationToken::new();
+        let task_gate = host_gate.clone();
+        let host = tokio::spawn(async move {
+            task_gate.cancelled().await;
+            Ok(())
+        });
+        let completion = CancellationToken::new();
+        let supervisor = spawn_host_task_supervisor(
+            host,
+            CancellationToken::new(),
+            Arc::new(HostTerminalState::default()),
+            Arc::new(registry()),
+            test_topology(),
+            completion.clone(),
+        );
+
+        supervisor.abort();
+        let _ = supervisor.await;
+        tokio::time::timeout(Duration::from_millis(100), completion.cancelled())
+            .await
+            .expect("aborted supervisor must not strand shutdown waiters");
+        host_gate.cancel();
+    }
+
+    #[tokio::test]
     async fn normal_host_cancellation_records_no_terminal_error() {
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -2684,7 +3025,7 @@ mod tests {
 
         reject_duplicate_live_pools(&mut view, DcId::new(7));
         assert!(view.endpoints.values().all(|membership| {
-            !membership.conflicts.is_empty()
+            membership.has_pool_materialization_conflict()
                 && inactive_slot_lifecycle(Some(membership)) == SlotLifecycle::Fenced
         }));
 
@@ -2709,6 +3050,7 @@ mod tests {
             cancel: CancellationToken::new(),
             membership: Mutex::new(None),
             supervisor: Mutex::new(None),
+            supervisor_complete: CancellationToken::new(),
             terminal: Arc::new(HostTerminalState::default()),
             statuses,
             pools: Arc::new(registry()),
