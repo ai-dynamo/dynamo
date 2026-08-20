@@ -24,6 +24,8 @@ const (
 	placeholderMountNamespacePath = "/proc/self/ns/mnt"
 	cudaUVMFDSocketNamePrefix     = "\x00cuda-uvmfd-"
 	linuxUnixSocketStateListen    = 10
+	// A kernel autobind address is "\0" followed by exactly five hex digits.
+	autobindNameHexDigits = 5
 	linuxTCPStateEstablished      = 1
 	linuxTCPStateClose            = 7
 	linuxTCPStateListen           = 10
@@ -342,11 +344,11 @@ func closeFDs(fds []int) {
 }
 
 func rewriteCloneConflictingUnixSocketAddress(entry *sk_unix.UnixSkEntry, restoreID uint64) bool {
-	if !isCUDAUVMFDListener(entry) {
+	if !isCUDAUVMFDListener(entry) && !isAutoboundSocket(entry) {
 		return false
 	}
 
-	// CUDA retains this listener's FD, so only its clone-private address changes.
+	// Only the clone-private address changes; the file descriptor is preserved.
 	input := make([]byte, 8+len(entry.Name))
 	binary.BigEndian.PutUint64(input, restoreID)
 	copy(input[8:], entry.Name)
@@ -364,4 +366,40 @@ func isCUDAUVMFDListener(entry *sk_unix.UnixSkEntry) bool {
 		*entry.State == linuxUnixSocketStateListen &&
 		*entry.Peer == 0 &&
 		bytes.HasPrefix(entry.Name, []byte(cudaUVMFDSocketNamePrefix))
+}
+
+// isAutoboundSocket matches a socket the kernel named itself. bind() with a
+// zero-length address yields an abstract address of exactly "\0" followed by
+// five hex digits, so the name carries no meaning and no peer can resolve it:
+// it is anonymous by construction.
+//
+// Restoring one checkpoint into sibling containers otherwise rebuilds the same
+// autobind name in a shared namespace and the second bind fails with
+// EADDRINUSE -- which is exactly how intra-pod shadow failover fails:
+//
+//	unix: bind id 0x1fc ino 4156147439 addr :
+//	Error (criu/sk-unix.c:1691): unix: Can't bind ... Address already in use
+//
+// Giving each clone a distinct address is safe here in a way that renaming a
+// deliberately-named listener is not -- there is nothing to look the address up
+// with.
+//
+// Caveat: a datagram socket can be addressed by a sender that learned the
+// address at runtime without appearing as a peer. Such a sender would have to
+// live outside the checkpoint and have cached the address, which does not
+// happen for the per-process sockets observed here.
+func isAutoboundSocket(entry *sk_unix.UnixSkEntry) bool {
+	if entry == nil || entry.Peer == nil || *entry.Peer != 0 {
+		return false
+	}
+	name := bytes.TrimSuffix(entry.Name, []byte{0})
+	if len(name) != 1+autobindNameHexDigits || name[0] != 0 {
+		return false
+	}
+	for _, c := range name[1:] {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }

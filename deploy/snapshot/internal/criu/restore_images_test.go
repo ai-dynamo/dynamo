@@ -54,10 +54,19 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 		outbound.GetDstPort() != 0 {
 		t.Fatalf("outbound TCP socket was not disconnected: %v", outbound)
 	}
+	for _, i := range []int{11, 12} {
+		if got := restored[i].Usk.Name; !bytes.HasPrefix(got, []byte("\x00dynamo-")) {
+			t.Fatalf("autobound socket %d address = %q, want Dynamo abstract address", i, got)
+		}
+	}
+	if bytes.Equal(restored[11].Usk.Name, restored[12].Usk.Name) {
+		t.Fatal("autobound sockets were renamed to the same address")
+	}
+
 	for i, original := range entries {
 		want := proto.Clone(original).(*fdinfo.FileEntry)
 		switch i {
-		case 0:
+		case 0, 2, 3, 11, 12:
 			want.Usk.Name = restored[i].Usk.Name
 		case 5:
 			want.Isk.SrcPort = proto.Uint32(clientPort)
@@ -157,6 +166,14 @@ func observedSocketTopology() []*fdinfo.FileEntry {
 		dualStackListener,
 		dualStackClient,
 		dualStackServer,
+		// Real vLLM GMS checkpoints carry the CUDA UVM socket bound but not
+		// listening, one per process, named with the owning PID. Both engines
+		// of an intra-pod failover worker restore the same checkpoint and so
+		// rebuild identical names; the second bind failed with EADDRINUSE
+		// until this state was deconflicted too. Appended last so the existing
+		// positional assertions keep addressing the same entries.
+		newUnixSocketEntry(12, []byte("\x000014c"), 112, unix.SOCK_DGRAM, 7),
+		newUnixSocketEntry(13, []byte("\x0000152"), 113, unix.SOCK_DGRAM, 7),
 	}
 }
 
