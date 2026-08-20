@@ -23,6 +23,9 @@ const (
 	filesImageFilename            = "files.img"
 	placeholderMountNamespacePath = "/proc/self/ns/mnt"
 	cudaUVMFDSocketNamePrefix     = "\x00cuda-uvmfd-"
+	// NCCL's bootstrap sockets are abstract and named
+	// "\0tmp/nccl-socket-<rank>-<hash>", zero-padded to the full sun_path.
+	ncclAbstractSocketNamePrefix = "\x00tmp/nccl-"
 	linuxUnixSocketStateListen    = 10
 	// A kernel autobind address is "\0" followed by exactly five hex digits.
 	autobindNameHexDigits = 5
@@ -355,7 +358,7 @@ func closeFDs(fds []int) {
 }
 
 func rewriteCloneConflictingUnixSocketAddress(entry *sk_unix.UnixSkEntry, restoreID uint64) bool {
-	if !isCUDAUVMFDListener(entry) && !isAutoboundSocket(entry) {
+	if !isCUDAUVMFDListener(entry) && !isAutoboundSocket(entry) && !isNCCLAbstractSocket(entry) {
 		return false
 	}
 
@@ -413,4 +416,29 @@ func isAutoboundSocket(entry *sk_unix.UnixSkEntry) bool {
 		}
 	}
 	return true
+}
+
+// isNCCLAbstractSocket matches NCCL's abstract bootstrap sockets, named
+// "\0tmp/nccl-socket-<rank>-<hash>" and zero-padded to the full sun_path.
+//
+// Both engines of an intra-pod failover worker restore the same checkpoint, so
+// they rebuild identical NCCL socket names in a shared namespace and the second
+// bind fails with EADDRINUSE:
+//
+//	unix: Can't bind id 0x620 ino 1228807150 addr : Address already in use
+//
+// CRIU prints the address as empty because it is abstract -- the name begins
+// with a NUL and the printer stops there -- which makes these look exactly like
+// the autobind case in the log while having a completely different shape.
+//
+// Renaming is safe here for the same reason it is for the CUDA UVM listener:
+// the entry has no peer in the image, so nothing being restored resolves it by
+// name, and the engine rebuilds its collectives after restore anyway --
+// checkpoint_prepare tears the communicators down before the dump and
+// checkpoint_restore re-establishes them afterwards.
+func isNCCLAbstractSocket(entry *sk_unix.UnixSkEntry) bool {
+	return entry != nil &&
+		entry.Peer != nil &&
+		*entry.Peer == 0 &&
+		bytes.HasPrefix(entry.Name, []byte(ncclAbstractSocketNamePrefix))
 }
