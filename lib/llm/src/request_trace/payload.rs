@@ -14,18 +14,13 @@ use crate::protocols::openai::chat_completions::{
 /// Context key for the allowlisted headers captured at the HTTP layer.
 pub const HTTP_HEADERS_CONTEXT_KEY: &str = "request_trace.http.request.headers";
 
-/// Context key for the endpoint label planted by the HTTP layer. The HTTP
-/// handler is the last place that still knows which route the client called;
-/// downstream operators see one translated chat-completions request either way.
+/// Request-context key for the client-facing API route.
 pub const ENDPOINT_LABEL_CONTEXT_KEY: &str = "request_trace.endpoint";
 
-/// Endpoint label for requests that arrived on `/v1/chat/completions`. Also the
-/// default when no label was planted.
+/// Default endpoint label for requests without a route marker.
 pub const CHAT_COMPLETION_ENDPOINT_LABEL: &str = "openai.chat_completion";
 
-/// Endpoint label for requests that arrived on `/v1/responses`. Named after the
-/// OpenAI object (`response`), matching how `chat.completion` yields
-/// `openai.chat_completion`.
+/// Endpoint label for requests received through `/v1/responses`.
 pub const RESPONSES_ENDPOINT_LABEL: &str = "openai.response";
 
 /// True when payload records are being captured and a header allowlist is set.
@@ -109,11 +104,8 @@ impl RequestPayloadHandle {
     }
 }
 
-/// Create a payload handle for a request that carries no route marker, which
-/// resolves to [`CHAT_COMPLETION_ENDPOINT_LABEL`]. This is the stable public
-/// entry point; its signature is deliberately unchanged from before endpoint
-/// labelling existed, so out-of-tree callers keep compiling and keep the
-/// chat-completions default.
+/// Creates a payload handle using the chat-completions endpoint label.
+/// Its signature is preserved for external callers.
 pub fn create_handle(
     req: &NvCreateChatCompletionRequest,
     request_id: &str,
@@ -122,11 +114,7 @@ pub fn create_handle(
     create_handle_with_endpoint(req, request_id, None, http_request_headers)
 }
 
-/// `endpoint` is the route label planted by the HTTP layer under
-/// [`ENDPOINT_LABEL_CONTEXT_KEY`]; `None` means no marker was planted, which is
-/// the `/v1/chat/completions` path and resolves to
-/// [`CHAT_COMPLETION_ENDPOINT_LABEL`]. Crate-internal: only the preprocessor
-/// reads the marker back, so the endpoint-aware shape stays off the public API.
+/// Creates a payload handle with an optional internal route marker.
 pub(crate) fn create_handle_with_endpoint(
     req: &NvCreateChatCompletionRequest,
     request_id: &str,
@@ -391,7 +379,6 @@ mod tests {
         assert!(second_payload.response.is_none());
     }
 
-    /// Receive the `request_payload` record for `request_id` off the trace bus.
     async fn recv_payload_endpoint(
         rx: &mut tokio::sync::broadcast::Receiver<crate::request_trace::RequestTraceRecord>,
         request_id: &str,
@@ -418,9 +405,6 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn emit_labels_the_record_with_the_route_that_created_the_handle() {
-        // A handle built with the `/v1/responses` label must publish a record
-        // an auditor can attribute to that route. Before the fix `emit`
-        // hardcoded the chat label, so no input could produce this record.
         crate::request_trace::init_bus_for_test(8);
         let mut rx = crate::request_trace::subscribe();
 
@@ -446,9 +430,6 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn emit_labels_an_unmarked_request_as_a_chat_completion() {
-        // Negative control: `/v1/chat/completions` plants no marker, so the
-        // record must keep the pre-existing `openai.chat_completion` label that
-        // every downstream consumer already parses.
         crate::request_trace::init_bus_for_test(8);
         let mut rx = crate::request_trace::subscribe();
 
@@ -466,10 +447,7 @@ mod tests {
 
     #[test]
     fn endpoint_marker_survives_the_responses_to_chat_context_map() {
-        // The design depends on `Context::map` preserving the registry across
-        // the `NvCreateResponse` -> `NvCreateChatCompletionRequest` type change
-        // the responses handler performs. If the handoff were ever rewired onto
-        // a non-preserving path, the label would silently revert to chat.
+        // Context::map must preserve the route marker across request conversion.
         use dynamo_runtime::pipeline::Context;
 
         let mut request = Context::new("original-responses-request".to_string());

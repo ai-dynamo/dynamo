@@ -3259,9 +3259,6 @@ async fn responses(
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
     }
-    // Mark the route before dispatching into the shared chat-completions engine.
-    // This is the last point that still knows the client called `/v1/responses`;
-    // the request trace payload record is labelled from this marker downstream.
     request.insert(
         crate::request_trace::payload::ENDPOINT_LABEL_CONTEXT_KEY,
         crate::request_trace::payload::RESPONSES_ENDPOINT_LABEL.to_string(),

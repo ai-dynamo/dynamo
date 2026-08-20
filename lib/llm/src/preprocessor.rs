@@ -4920,8 +4920,6 @@ impl
         } else {
             None
         };
-        // The route label planted by the HTTP handler; absent for
-        // `/v1/chat/completions`, which resolves to the chat default.
         let payload_endpoint = context
             .get_optional::<String>(crate::request_trace::payload::ENDPOINT_LABEL_CONTEXT_KEY)
             .ok()
