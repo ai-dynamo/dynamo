@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name = "hypothesis_challenger"
 description = "Adversarially review one generated Dynamo optimization candidate before GPU spend."
 

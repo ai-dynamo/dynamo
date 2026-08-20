@@ -182,11 +182,5 @@ fern/components/install-selector-data.ts
 .worktrees/
 
 
-runs/
-sanitized*
-.agents/skills/dynamo-inter*
-.agents/skills/dynamo-rout*
-validate_skills/
-tests/test_recipe_tool_inventory.py
-.agent/skills/explore-dynamo-recipes/
-.agent/skills/learn-from-experience/
+# Optimization-run artifacts (EXP_ROOT lives at runs/<EXP_ID>/ in the repo root)
+/runs/

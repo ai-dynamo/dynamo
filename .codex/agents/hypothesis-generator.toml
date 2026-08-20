@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name = "hypothesis_generator"
 description = "Generate one evidence-backed Dynamo optimization proposal and challenger-ready DGD draft."
 

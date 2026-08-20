@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name = "perf_analyzer"
 description = "Configure, run, validate, and analyze AIPerf for one successfully deployed Dynamo candidate."
 

@@ -9,7 +9,9 @@ Use this reference after another agent has already selected a Dynamo `deploy.yam
 
 ## Artifact Setup
 
-Create `<EXP_ROOT>/artifacts/deploy-iter-<NNN>/applied_manifests/`. Copy every manifest used into it with a
+Create `<EXP_ROOT>/artifacts/deploy-iter-<NNN>/applied_manifests/`. This deployment iteration directory,
+`<EXP_ROOT>/artifacts/deploy-iter-<NNN>/`, is `DEPLOY_ROOT` in the commands below (see
+`agent-docs/rules/execution/run-artifacts.md` for the full definitions); export it before applying anything. Copy every manifest used into it with a
 stable filename and apply only those run-scoped copies. Update a copy in place when a compatibility fix is required and
 record the change in `deployment_ledger.json`; do not retain numbered intermediate copies. After a successful smoke
 test, keep exactly one final file per manifest type used. Create `logs/` only for targeted failure output that must be

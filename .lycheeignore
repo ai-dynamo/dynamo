@@ -55,3 +55,8 @@
 # The v1.4.0 release entry lands with the current-release promotion; the tag
 # URL 404s from CI until v1.4.0 is cut. Remove after the tag exists.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.4\.0$
+
+# agent-docs/ lands with PR #13557; these targets 404 on main until it merges.
+# Remove these two lines after the merge.
+^https://github\.com/ai-dynamo/dynamo/blob/main/agent-docs/guides/optimization/optimize-loop\.md$
+^https://github\.com/ai-dynamo/dynamo/tree/main/agent-docs/rules$
