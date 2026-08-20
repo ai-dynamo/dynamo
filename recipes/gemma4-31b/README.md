@@ -116,7 +116,7 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 | -------------------- | -------------------------- | ----- | ----------- | ----------------------- | ----------------------- | ------------- |
 | Agentic (15% subset) | Aggregated (8 workers)     | B200  | 192         | 1,109.489               | 60.10                   | 3,431.78      |
 | Agentic (15% subset) | Aggregated (8 workers)     | GB200 | 192         | 1,085.038               | 48.67                   | 378.79        |
-| Agentic (15% subset) | Aggregated (2 TP4 workers) | H200  | 16          | 99.277                  | 78.41                   | 217.62        |
+| Agentic (15% subset) | Aggregated (2 TP4 workers) | H200  | 32          | 136.441                 | 61.20                   | 1,579.68      |
 
 
 
