@@ -254,6 +254,8 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
         return "embedding"
     if dynamo_config.classify_worker:
         return "classify"
+    if dynamo_config.transcription_worker:
+        return "transcription"
     if dynamo_config.headless:
         return "headless"
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:

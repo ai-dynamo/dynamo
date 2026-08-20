@@ -40,6 +40,7 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        "transcription_worker": False,
         # Pin to the real Config default: an auto-created Mock attribute is
         # truthy, which enables the GMS shadow-mode path and imports the
         # optional gpu_memory_service package (absent in some test images).
@@ -738,6 +739,7 @@ class TestCreate:
         factory._create_prefill_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_decode_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_embedding_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_transcription_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_realtime_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_classify_worker = AsyncMock()  # type: ignore[assignment]
         return factory
@@ -790,6 +792,15 @@ class TestCreate:
         await factory.create(Mock(), config, shutdown_event, [])
 
         factory._create_multimodal_encode_worker.assert_called_once()  # type: ignore[union-attr]
+
+    async def test_transcription_worker_takes_priority(
+        self, factory: WorkerFactory
+    ) -> None:
+        config = _make_config(transcription_worker=True)
+        await factory.create(Mock(), config, asyncio.Event(), [])
+
+        factory._create_transcription_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
 
     async def test_embedding_worker_takes_priority(
         self, factory: WorkerFactory

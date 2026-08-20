@@ -62,6 +62,9 @@ bitflags! {
         /// mounts its `/pooling` alongside those surfaces for every
         /// pooling-runner model.
         const Pooling = 1 << 10;
+        /// Batch speech-to-text through the OpenAI `/v1/audio/transcriptions`
+        /// endpoint.
+        const Transcriptions = 1 << 11;
     }
 }
 
@@ -101,6 +104,9 @@ impl ModelType {
     pub fn supports_realtime(&self) -> bool {
         self.contains(ModelType::Realtime)
     }
+    pub fn supports_transcriptions(&self) -> bool {
+        self.contains(ModelType::Transcriptions)
+    }
     pub fn supports_classify(&self) -> bool {
         self.contains(ModelType::Classify)
     }
@@ -130,6 +136,9 @@ impl ModelType {
         }
         if self.supports_audios() {
             result.push("audios");
+        }
+        if self.supports_transcriptions() {
+            result.push("transcriptions");
         }
         if self.supports_videos() {
             result.push("videos");
@@ -170,6 +179,9 @@ impl ModelType {
         }
         if self.supports_audios() {
             result.push(ModelType::Audios);
+        }
+        if self.supports_transcriptions() {
+            result.push(ModelType::Transcriptions);
         }
         if self.supports_videos() {
             result.push(ModelType::Videos);
@@ -220,6 +232,9 @@ impl ModelType {
         }
         if self.contains(Self::Audios) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Audios);
+        }
+        if self.contains(Self::Transcriptions) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Transcriptions);
         }
         if self.contains(Self::Videos) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Videos);
@@ -345,6 +360,16 @@ mod tests {
         assert_eq!(
             ModelType::Realtime.as_endpoint_types(),
             vec![EndpointType::Realtime]
+        );
+    }
+
+    #[test]
+    fn transcriptions_capability_and_endpoint_mapping() {
+        assert_eq!(ModelType::Transcriptions.bits(), 1 << 11);
+        assert!(ModelType::Transcriptions.supports_transcriptions());
+        assert_eq!(
+            ModelType::Transcriptions.as_endpoint_types(),
+            vec![EndpointType::Transcriptions]
         );
     }
 

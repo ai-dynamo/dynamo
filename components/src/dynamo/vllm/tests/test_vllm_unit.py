@@ -1526,6 +1526,7 @@ def _make_dynamo_config(**overrides):
         "enable_local_indexer": True,
         "embedding_worker": False,
         "classify_worker": False,
+        "transcription_worker": False,
         "headless": False,
         "enable_multimodal": False,
         "fpm_trace": False,
@@ -1765,6 +1766,7 @@ class TestForwardPassMetricsActivation:
         [
             ({"embedding_worker": True}, "embedding"),
             ({"classify_worker": True}, "classify"),
+            ({"transcription_worker": True}, "transcription"),
             ({"headless": True}, "headless"),
             (
                 {"disaggregation_mode": DisaggregationMode.ENCODE},

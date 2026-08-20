@@ -28,6 +28,7 @@ pub mod pooling;
 pub mod responses;
 pub mod stream_aggregator;
 pub mod tools;
+pub mod transcriptions;
 pub mod validate;
 pub mod videos;
 

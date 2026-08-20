@@ -45,6 +45,7 @@ from .health_check import (
     VllmEmbeddingHealthCheckPayload,
     VllmHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
+    VllmTranscriptionHealthCheckPayload,
 )
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
@@ -52,6 +53,7 @@ from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
 from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
 from .state_agent import StateAgentLifecycle, state_agent_settings
+from .transcription_handler import TranscriptionWorkerHandler
 
 logger = logging.getLogger(__name__)
 
@@ -582,7 +584,7 @@ class _DecodeWorkerLifecycle:
 
 
 class WorkerFactory:
-    """Factory for creating and initializing multimodal vLLM workers."""
+    """Factory for creating and initializing vLLM workers."""
 
     def __init__(
         self,
@@ -645,7 +647,7 @@ class WorkerFactory:
         shutdown_endpoints: list,
         snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:
-        """Create the appropriate multimodal worker based on config flags."""
+        """Create the appropriate worker based on config flags."""
 
         if config.realtime:
             await self._create_realtime_worker(
@@ -654,6 +656,12 @@ class WorkerFactory:
                 shutdown_event,
                 shutdown_endpoints,
                 snapshot_engine=snapshot_engine,
+            )
+            return
+
+        if config.transcription_worker:
+            await self._create_transcription_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
             )
             return
 
@@ -843,6 +851,62 @@ class WorkerFactory:
             )
         except Exception as e:
             logger.error(f"Failed to serve encode worker endpoint: {e}")
+            raise
+        finally:
+            handler.cleanup()
+
+    async def _create_transcription_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+    ) -> None:
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        engine_client, vllm_config, _, _, _ = self.setup_vllm_engine(
+            config,
+            None,
+            fpm_worker_id=str(generate_endpoint.connection_id()),
+        )
+        handler = TranscriptionWorkerHandler(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            shutdown_event=shutdown_event,
+        )
+        model_name = config.served_model_name or config.model
+        health_payload = VllmTranscriptionHealthCheckPayload(model_name).to_dict()
+        metric_labels = [
+            (prometheus_names.labels.MODEL, model_name),
+            (prometheus_names.labels.MODEL_NAME, model_name),
+        ]
+
+        register_model_taint_route(runtime, generate_endpoint)
+        logger.info("Starting to serve the transcription worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=metric_labels,
+                    health_check_payload=health_payload,
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Transcriptions,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to serve transcription worker endpoint")
             raise
         finally:
             handler.cleanup()
