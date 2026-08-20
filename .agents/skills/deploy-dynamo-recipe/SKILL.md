@@ -81,9 +81,18 @@ Run read-only checks first:
 ```bash
 set -euo pipefail
 kubectl --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}"
-kubectl --context "${KUBE_CONTEXT}" get crd | grep -i dynamo || { echo "Dynamo CRDs missing"; exit 1; }
-kubectl --context "${KUBE_CONTEXT}" get storageclass
-kubectl --context "${KUBE_CONTEXT}" get nodes -o wide
+# CRD presence gate: a Forbidden here is tolerated because the server dry-run below
+# re-checks it authoritatively; a confirmed absence stops before any mutation.
+crds="$(kubectl --context "${KUBE_CONTEXT}" get crd 2>&1 || true)"
+case "${crds}" in
+  *Forbidden*) echo "WARN: cluster-scope CRD list forbidden for this identity; deferring to server dry-run" ;;
+  *dynamographdeployment*) : ;;
+  *) echo "Dynamo CRDs missing"; exit 1 ;;
+esac
+# Advisory reads: storage classes and node inventory inform sizing but a namespace-scoped
+# identity may lack cluster-scope list rights. Record a Forbidden as a run limitation; do not fail.
+kubectl --context "${KUBE_CONTEXT}" get storageclass || echo "WARN: storageclass list forbidden; record as limitation"
+kubectl --context "${KUBE_CONTEXT}" get nodes -o wide || echo "WARN: node list forbidden; record as limitation"
 ```
 
 Every kubectl call in this skill pins `--context "${KUBE_CONTEXT}"` (the contract's `kube_context`); never rely on
@@ -156,13 +165,14 @@ kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/m
 kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-download.yaml" -n "${NAMESPACE}"
 job_state=""
 for _ in $(seq 1 200); do  # 200 x 30s = 100 min bound
+  # NOTE: match by substring - a successful Job on Kubernetes 1.31+ carries BOTH
+  # SuccessCriteriaMet and Complete conditions, so the jsonpath returns them space-separated.
   job_state="$(kubectl --context "${KUBE_CONTEXT}" get "job/${DOWNLOAD_JOB}" -n "${NAMESPACE}" \
     -o jsonpath='{.status.conditions[?(@.status=="True")].type}')"
-  [ "${job_state}" = "Complete" ] && break
-  [ "${job_state}" = "Failed" ] && { echo "download job failed"; exit 1; }
+  case "${job_state}" in *Failed*) echo "download job failed"; exit 1;; *Complete*) break;; esac
   sleep 30
 done
-[ "${job_state}" = "Complete" ] || { echo "download job timed out"; exit 1; }
+case "${job_state}" in *Complete*) : ;; *) echo "download job timed out"; exit 1;; esac
 ```
 
 If a validation job exists, run it after download and before the DGD:
@@ -174,11 +184,10 @@ job_state=""
 for _ in $(seq 1 120); do  # 120 x 30s = 60 min bound
   job_state="$(kubectl --context "${KUBE_CONTEXT}" get "job/${VALIDATE_JOB}" -n "${NAMESPACE}" \
     -o jsonpath='{.status.conditions[?(@.status=="True")].type}')"
-  [ "${job_state}" = "Complete" ] && break
-  [ "${job_state}" = "Failed" ] && { echo "validate job failed"; exit 1; }
+  case "${job_state}" in *Failed*) echo "validate job failed"; exit 1;; *Complete*) break;; esac
   sleep 30
 done
-[ "${job_state}" = "Complete" ] || { echo "validate job timed out"; exit 1; }
+case "${job_state}" in *Complete*) : ;; *) echo "validate job timed out"; exit 1;; esac
 ```
 
 ### 5. Apply The Assigned DGD
@@ -215,6 +224,13 @@ diagnosis-backed patch remains, stop or hand off to troubleshooting; do not loop
 
 ### 7. Smoke Test
 
+Identify the OpenAI endpoint first: standard recipes expose a frontend Service; gateway-integrated (gaie)
+variants have NO frontend Service — the frontend runs as a sidecar in each worker pod, so port-forward a worker
+pod's port 8000 instead. Direct-routing sidecars additionally require the worker instance id the gateway
+would inject: pass `-H "x-dynamo-worker-instance-id: <decimal instance id>"` on completion requests (the id
+appears in the sidecar's registration logs; convert from hex). A 400 naming "Direct routing mode" means this
+header is missing, not that the deployment is broken.
+
 Run the port-forward and the smoke test in ONE shell session (the trap, `PF_PID`, and the captured bodies do not
 survive across separate command invocations). Capture HTTP status and response body separately; do not treat JSON
 parsing alone as success:
@@ -237,10 +253,18 @@ for _ in $(seq 1 30); do
 done
 [ "${ready}" = "1" ] || { echo "port-forward never became reachable"; exit 1; }
 
-models_code="$(curl -sS -o "${SMOKE_DIR}/models_body.json" -w '%{http_code}' http://127.0.0.1:8000/v1/models)"
-[ "${models_code}" -ge 200 ] && [ "${models_code}" -lt 300 ] || { echo "models endpoint ${models_code}"; exit 1; }
-jq -e --arg model "${SERVED_MODEL}" 'any(.data[]?; .id == $model)' "${SMOKE_DIR}/models_body.json" >/dev/null \
-  || { echo "served model not listed"; exit 1; }
+# Worker registration lags pod readiness (the frontend lists a model only after the
+# worker's generate endpoint registers with discovery); wait bounded, don't fail on the first poll.
+listed=0
+for _ in $(seq 1 30); do  # 5 min bound
+  models_code="$(curl -sS -o "${SMOKE_DIR}/models_body.json" -w '%{http_code}' http://127.0.0.1:8000/v1/models || true)"
+  if [ "${models_code}" -ge 200 ] && [ "${models_code}" -lt 300 ] && \
+     jq -e --arg model "${SERVED_MODEL}" 'any(.data[]?; .id == $model)' "${SMOKE_DIR}/models_body.json" >/dev/null; then
+    listed=1; break
+  fi
+  sleep 10
+done
+[ "${listed}" = "1" ] || { echo "served model never listed (last code ${models_code})"; exit 1; }
 
 api_request="$(jq -nc --arg model "${SERVED_MODEL}" '{
   model: $model,
