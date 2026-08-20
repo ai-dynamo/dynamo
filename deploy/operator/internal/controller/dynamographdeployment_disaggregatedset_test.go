@@ -242,6 +242,67 @@ func TestDeleteStaleDisaggregatedSetServicesRemovesUndesiredModelService(t *test
 	}
 }
 
+func TestDeleteOwnedSelectedDCDsUsesOwnerReference(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "demo-uid"},
+	}
+	owned := func(name string, labels map[string]string, owner *metav1.OwnerReference) *nvidiacomv1beta1.DynamoComponentDeployment {
+		var ownerReferences []metav1.OwnerReference
+		if owner != nil {
+			ownerReferences = []metav1.OwnerReference{*owner}
+		}
+		return &nvidiacomv1beta1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            name,
+				Namespace:       dgd.Namespace,
+				Labels:          labels,
+				OwnerReferences: ownerReferences,
+			},
+			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "prefill",
+				},
+			},
+		}
+	}
+	ownedByDGD := dgdControllerOwnerReference(dgd)
+	foreignOwner := ownedByDGD.DeepCopy()
+	foreignOwner.UID = "other-dgd-uid"
+	selected := disaggregatedSetSelection{componentToRole: map[string]string{"prefill": "prefill"}}
+	ownedWithoutGraphLabel := owned("owned-without-graph-label", nil, ownedByDGD)
+	ownedWithStaleGraphLabel := owned("owned-with-stale-graph-label", map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: "other-graph",
+	}, ownedByDGD)
+	foreignLabeled := owned("foreign-labeled", map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+	}, foreignOwner)
+	foreignUnlabeled := owned("foreign-unlabeled", nil, foreignOwner)
+
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(dgd, ownedWithoutGraphLabel, ownedWithStaleGraphLabel, foreignLabeled, foreignUnlabeled).
+		Build()
+	workloads := newDisaggregatedSetWorkloadsReconciler(
+		kubeClient,
+		events.NewFakeRecorder(10),
+		nil,
+		nil,
+		nil,
+		newDGDWorkerRolloutReconciler(kubeClient, events.NewFakeRecorder(10)),
+	)
+
+	require.NoError(t, workloads.deleteOwnedSelectedDCDs(t.Context(), dgd, selected))
+	for _, name := range []string{ownedWithoutGraphLabel.Name, ownedWithStaleGraphLabel.Name} {
+		err := kubeClient.Get(t.Context(), client.ObjectKey{Name: name, Namespace: dgd.Namespace}, &nvidiacomv1beta1.DynamoComponentDeployment{})
+		require.True(t, apierrors.IsNotFound(err), "owned selected DCD %s should be deleted", name)
+	}
+	for _, name := range []string{foreignLabeled.Name, foreignUnlabeled.Name} {
+		require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKey{Name: name, Namespace: dgd.Namespace}, &nvidiacomv1beta1.DynamoComponentDeployment{}))
+	}
+}
+
 func TestSelectDisaggregatedSetComponents(t *testing.T) {
 	t.Run("selects multinode worker roles", func(t *testing.T) {
 		dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
