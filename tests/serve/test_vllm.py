@@ -35,6 +35,7 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     kv_events_metrics_payload,
+    lmcache_mp_hit_metrics_payload,
     metric_payload_default,
     pooling_payload,
     router_cached_tokens_chat_payload,
@@ -295,6 +296,47 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         env={"LMCACHE_L1_SIZE_GB": "8"},
         request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+        ],
+    ),
+    "disaggregated_lmcache_mp": VLLMConfig(
+        name="disaggregated_lmcache_mp",
+        directory=vllm_dir,
+        script_name="disagg_lmcache_mp.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.lmcache,
+            pytest.mark.gpu_2,
+            pytest.mark.profiled_vram_gib(3.8),  # per worker, same cap as agg
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap per worker (2x safety over min=559_693_824)
+            pytest.mark.timeout(900),  # two engines boot before serving
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        # Distinct LMCache ports so this cannot collide with
+        # aggregated_lmcache_mp when both run on the same host.
+        env={
+            "LMCACHE_L1_SIZE_GB": "8",
+            "LMCACHE_PORT": "5556",
+            "LMCACHE_HTTP_PORT": "8180",
+        },
+        request_payloads=[
+            # First request of a prompt no worker has seen: the prefill-side
+            # lookup must miss, so any pool hit recorded before the next
+            # payload can only be the decode worker loading prefill-stored KV.
+            chat_payload(
+                "Describe the water cycle in two short sentences.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=32,
+            ),
+            # Cross-worker handoff proof: local recomputation never
+            # increments the MP server's hit counter.
+            lmcache_mp_hit_metrics_payload(port=8180),
             chat_payload_default(),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="vllm"),
