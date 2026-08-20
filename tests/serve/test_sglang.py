@@ -956,7 +956,9 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(17.6),
             pytest.mark.requested_sglang_vram_gib(17.6),
-            pytest.mark.timeout(180),
+            # Outer timeout covers up to 600s of deployment cold-start/readiness
+            # plus request and teardown; it is not an inference-latency target.
+            pytest.mark.timeout(720),
             pytest.mark.nightly,
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
