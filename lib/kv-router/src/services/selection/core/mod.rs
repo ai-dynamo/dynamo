@@ -273,12 +273,25 @@ impl SelectionCore {
         recovery::recover_from_peers(peers, &self.indexer_registry).await
     }
 
+    pub(crate) async fn recover_indexer_from_peers_streaming(
+        &self,
+        peers: &[String],
+    ) -> anyhow::Result<bool> {
+        recovery::recover_from_peers_streaming(peers, &self.indexer_registry).await
+    }
+
     pub(crate) fn signal_indexer_ready(&self) {
         self.indexer_registry.signal_ready();
     }
 
     pub(crate) async fn dump_indexer_events(&self) -> serde_json::Value {
         crate::services::indexer::server::dump_registry(&self.indexer_registry).await
+    }
+
+    pub(crate) async fn dump_indexer_records(
+        &self,
+    ) -> Result<Vec<crate::services::indexer::server::StreamDumpRecord>, String> {
+        crate::services::indexer::server::dump_registry_records(&self.indexer_registry).await
     }
 
     pub(crate) fn dispatch_replica_event(&self, envelope: ScopedReplicaEvent) {

@@ -517,6 +517,61 @@ pub(crate) async fn dump_registry(registry: &WorkerRegistry) -> serde_json::Valu
     serde_json::json!(result)
 }
 
+/// One NDJSON line of a streaming KV-index dump: a single `RouterEvent` with the
+/// routing partition and block size it belongs to. The streaming dump emits one
+/// of these per line so the receiver can apply each event and drop it instead of
+/// buffering the whole snapshot. `key` is `"model:routing_group"`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StreamDumpRecord {
+    pub key: String,
+    pub block_size: u32,
+    pub event: crate::protocols::RouterEvent,
+}
+
+/// Collect every indexer's events as structured records for a streaming dump.
+///
+/// Structured counterpart to [`dump_registry`]: the same snapshot, but one
+/// [`StreamDumpRecord`] per event so a caller can serialize and send records one
+/// at a time instead of building one JSON object. A failed indexer dump aborts
+/// the whole stream with an error.
+pub(crate) async fn dump_registry_records(
+    registry: &WorkerRegistry,
+) -> Result<Vec<StreamDumpRecord>, String> {
+    let all = registry.all_indexers_with_block_size();
+    let mut handles = Vec::with_capacity(all.len());
+
+    for (key, indexer, block_size) in all {
+        handles.push(tokio::spawn(async move {
+            let events = indexer.dump_events().await;
+            (key, events, block_size)
+        }));
+    }
+
+    let mut records = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok((key, Ok(events), block_size)) => {
+                let map_key = format!("{}:{}", key.model_name, key.routing_group);
+                for event in events {
+                    records.push(StreamDumpRecord {
+                        key: map_key.clone(),
+                        block_size,
+                        event,
+                    });
+                }
+            }
+            Ok((key, Err(e), _)) => {
+                let map_key = format!("{}:{}", key.model_name, key.routing_group);
+                return Err(format!("indexer {map_key} dump failed: {e}"));
+            }
+            Err(e) => {
+                return Err(format!("dump task join error: {e}"));
+            }
+        }
+    }
+    Ok(records)
+}
+
 async fn handle_health() -> StatusCode {
     StatusCode::OK
 }
