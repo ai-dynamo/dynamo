@@ -179,8 +179,6 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     _transfer_engine_handle: Option<CriticalTaskExecutionHandle>,
     /// Cache statistics tracker
     cache_stats: Arc<CacheStatsTracker>,
-    /// Owns the periodic cache-hit-rate reporter; dropped with this struct,
-    /// which stops the reporter task and releases the state it captured.
     _cache_stats_reporter: CacheStatsReporter,
     /// KVBM metrics for exposing cache hit rates
     #[allow(dead_code)]
@@ -207,9 +205,6 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        // Periodically update metrics and log cache hit rates. The returned
-        // reporter is stored on the struct so the task is retired when this
-        // manager is dropped.
         let cache_stats_reporter = CacheStatsReporter::spawn(
             &get_current_tokio_handle(),
             cache_stats.clone(),

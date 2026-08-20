@@ -4,9 +4,7 @@
 //! KVBM cache statistics tracking and periodic logging.
 //!
 //! This module provides cache statistics tracking with a sliding window
-//! approach for tracking host and disk cache hit rates, plus
-//! [`CacheStatsReporter`], the owned handle for the background task that
-//! periodically publishes those rates to Prometheus.
+//! approach for tracking host and disk cache hit rates.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -242,25 +240,13 @@ impl CacheStatsTracker {
     }
 }
 
-/// Owned handle for the background task that periodically publishes a
-/// [`CacheStatsTracker`]'s hit rates to Prometheus.
-///
-/// The reporter task is unbounded, so the only thing that stops it is this
-/// handle: dropping the reporter cancels and aborts the task, which releases
-/// the `Arc<CacheStatsTracker>` and the [`KvbmMetrics`] clone the task
-/// captured. Owners must therefore keep the reporter in a field for as long as
-/// they want the reporting to continue — a detached `JoinHandle` would keep the
-/// task, and its captured state, alive until the runtime itself shuts down.
+// Owns the periodic task; dropping it stops reporting and releases captured state.
 pub(crate) struct CacheStatsReporter {
     cancel: CancellationToken,
     handle: tokio::task::JoinHandle<()>,
 }
 
 impl CacheStatsReporter {
-    /// Spawn the periodic reporter on `rt` and return the handle that owns it.
-    ///
-    /// `rt` is a parameter rather than being read from the process-global pyo3
-    /// runtime so that this can be exercised from a plain `cargo test`.
     pub(crate) fn spawn(
         rt: &tokio::runtime::Handle,
         cache_stats: Arc<CacheStatsTracker>,
@@ -291,19 +277,8 @@ impl CacheStatsReporter {
 
 impl Drop for CacheStatsReporter {
     fn drop(&mut self) {
-        // `cancel()` is the graceful exit the select! arm takes; `abort()`
-        // covers the task parked on `interval.tick()`, which would otherwise
-        // sit out the rest of the period before noticing the token.
-        //
-        // Neither is synchronous. A task already inside the tick arm runs that
-        // arm to completion — it holds no `.await` for the runtime to cancel
-        // at — so one last publication can land just after this returns. That
-        // write carries the rates read at the moment it was taken and nothing
-        // follows it, so what a reader sees is a current value rather than a
-        // stale one. Closing the window instead of bounding it would mean
-        // fencing the tick arm against this drop and blocking here until the
-        // arm released it, which is a poor trade in a `Drop` that can run on a
-        // runtime worker.
+        // Abort is asynchronous, so a tick arm already publishing may finish once after drop.
+        // A synchronous fence would block Drop on a runtime worker.
         self.cancel.cancel();
         self.handle.abort();
     }
@@ -336,19 +311,12 @@ mod tests {
 
     use dynamo_llm::block_manager::metrics_kvbm::KvbmMetricsRegistry;
 
-    /// Virtual-clock period for the reporter tests. Real duration is irrelevant
-    /// under `start_paused`; only `tokio::time::advance` moves this clock.
     const TEST_PERIOD: Duration = Duration::from_millis(50);
 
-    /// `create_endpoint: false` makes this bind no port and start no HTTP
-    /// server, so the reporter tests need neither network nor a GPU.
     fn test_metrics() -> KvbmMetrics {
         KvbmMetrics::new(&KvbmMetricsRegistry::new(), false, 0)
     }
 
-    /// Give the runtime a few turns so an aborted task is actually reaped. The
-    /// abort itself is only a request; the runtime drops the future the next
-    /// time it polls the task.
     async fn settle() {
         for _ in 0..8 {
             tokio::task::yield_now().await;
@@ -367,7 +335,6 @@ mod tests {
             TEST_PERIOD,
         );
 
-        // The task now holds the only strong reference.
         settle().await;
         assert!(
             weak.upgrade().is_some(),
@@ -395,9 +362,6 @@ mod tests {
             TEST_PERIOD,
         );
 
-        // Negative control: prove the harness can observe the loop at all.
-        // Without this, the post-drop assertion below would also pass against a
-        // reporter that never ran.
         tracker.record(8, 2, 10);
         tokio::time::advance(TEST_PERIOD).await;
         settle().await;
@@ -411,8 +375,6 @@ mod tests {
         drop(reporter);
         settle().await;
 
-        // A retired reporter must not publish this: it would move the gauge
-        // from 0.8 to 8/20 = 0.4.
         tracker.record(0, 0, 10);
         assert!(
             (tracker.host_hit_rate() - 0.4).abs() < 0.01,
