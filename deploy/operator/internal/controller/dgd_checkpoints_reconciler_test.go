@@ -41,6 +41,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -59,6 +60,27 @@ func newTestDGDCheckpointsReconciler(
 		reconciler.RuntimeConfig,
 		reconciler.DockerSecretRetriever,
 	)
+}
+
+func containerEnvValue(container *corev1.Container, name string) string {
+	for _, env := range container.Env {
+		if env.Name == name {
+			return env.Value
+		}
+	}
+	return ""
+}
+
+func containerHasFlagValue(container *corev1.Container, flag, value string) bool {
+	for i, arg := range container.Args {
+		if arg == flag && i+1 < len(container.Args) && container.Args[i+1] == value {
+			return true
+		}
+		if arg == flag+"="+value {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T) {
@@ -80,7 +102,7 @@ func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
+			Identity: &identity,
 			Job: v1alpha1.DynamoCheckpointJobConfig{
 				PodTemplateSpec: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
@@ -201,7 +223,7 @@ func TestDGDCheckpointsReconciler_CreateDoesNotAdoptLegacyIdentityTemplate(t *te
 			UID:       types.UID("checkpoint-uid"),
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity:         identity,
+			Identity:         &identity,
 			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
 		},
 		Status: v1alpha1.DynamoCheckpointStatus{
@@ -314,6 +336,10 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 			Enabled: true,
 			Mode:    v1alpha1.GMSModeIntraPod,
 		},
+		Failover: &v1alpha1.FailoverSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeIntraPod,
+		},
 		Checkpoint: &v1alpha1.ServiceCheckpointConfig{
 			Enabled: true,
 			Mode:    v1alpha1.CheckpointModeAuto,
@@ -327,8 +353,10 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 		},
 		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 			MainContainer: &corev1.Container{
-				Name:  commonconsts.MainContainerName,
-				Image: "checkpoint-writer:latest",
+				Name:    commonconsts.MainContainerName,
+				Image:   "checkpoint-writer:latest",
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm"},
 			},
 		},
 	}
@@ -370,6 +398,9 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	}
 	main := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName)
 	require.NotNil(t, main)
+	assert.Equal(t, "false", containerEnvValue(main, "DYN_VLLM_GMS_SHADOW_MODE"))
+	assert.Empty(t, containerEnvValue(main, "DYN_FORWARDPASS_METRIC_PORT"))
+	assert.True(t, containerHasFlagValue(main, "--load-format", "gms"))
 	assert.Contains(t, main.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
 	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName))
@@ -629,18 +660,89 @@ func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *test
 	checkpointInfos := checkpointResult.Infos
 	require.NoError(t, err)
 
-	t.Log("Verify target-container restore state and managed checkpoint identity")
+	t.Log("Verify target-container restore state and identity-free managed checkpoint")
 	info := checkpointInfos["worker"]
 	require.NotNil(t, info)
 	assert.Equal(t, []string{"snapshot-me"}, info.RestoreTargetContainers)
-	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointName)
-	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointID)
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	expectedID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+	)
+	assert.Equal(t, expectedID, checkpointStatuses["worker"].CheckpointID)
+	assert.Equal(t, "checkpoint-"+expectedID, checkpointStatuses["worker"].CheckpointName)
 
 	ckpt := &v1alpha1.DynamoCheckpoint{}
 	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: checkpointStatuses["worker"].CheckpointName, Namespace: "default"}, ckpt))
 	assert.Equal(t, "snapshot-me", ckpt.Spec.Job.TargetContainerName)
-	assert.Equal(t, string(dynamo.BackendFrameworkVLLM), ckpt.Spec.Identity.BackendFramework)
-	assert.Equal(t, checkpointStatuses["worker"].CheckpointID, ckpt.Spec.Identity.ExtraParameters["checkpointID"])
+	assert.Nil(t, ckpt.Spec.Identity)
+	assert.Equal(t, expectedID, ckpt.Labels[snapshotprotocol.CheckpointIDLabel])
+}
+
+func TestDGDCheckpointsReconciler_FailoverRestoreTargets(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(deviceClass).
+			Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+		Recorder:      events.NewFakeRecorder(10),
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:    commonconsts.MainContainerName,
+						Image:   "main:latest",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.vllm"},
+						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+							corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+						}},
+					}},
+				}},
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+					Failover: &v1beta1.FailoverSpec{
+						Mode:       v1beta1.GMSModeIntraPod,
+						NumShadows: 1,
+					},
+				},
+			}},
+		},
+	}
+
+	for _, tt := range []struct {
+		numShadows int32
+		want       []string
+	}{
+		{numShadows: 1, want: []string{"engine-0", "engine-1"}},
+		{numShadows: 2, want: []string{"engine-0", "engine-1", "engine-2"}},
+	} {
+		dgd.Spec.Components[0].Experimental.Failover.NumShadows = tt.numShadows
+		result, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+		require.NoError(t, err)
+		require.NotNil(t, result.Infos["worker"])
+		assert.Equal(t, tt.want, result.Infos["worker"].RestoreTargetContainers)
+	}
 }
 
 func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(t *testing.T) {
@@ -869,7 +971,7 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 			}},
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: v1alpha1.DynamoCheckpointIdentity{
+			Identity: &v1alpha1.DynamoCheckpointIdentity{
 				Model:            "default/test-dgd",
 				BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			},
@@ -914,6 +1016,8 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 	assert.True(t, controller_common.ContainsFinalizer(updated))
 	assert.Equal(t, "test-dgd", updated.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
 	assert.Equal(t, "worker", updated.Labels[commonconsts.KubeLabelDynamoComponent])
+	require.NotNil(t, updated.Spec.Identity)
+	assert.Equal(t, "default/test-dgd", updated.Spec.Identity.Model)
 }
 
 func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
@@ -935,7 +1039,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
+			Identity: &identity,
 			Job: v1alpha1.DynamoCheckpointJobConfig{
 				PodTemplateSpec: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
@@ -1042,7 +1146,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
+			Identity: &identity,
 		},
 		Status: v1alpha1.DynamoCheckpointStatus{
 			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
@@ -1131,7 +1235,7 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity:         identity,
+			Identity:         &identity,
 			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
 		},
 		Status: v1alpha1.DynamoCheckpointStatus{
@@ -1213,7 +1317,7 @@ func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testi
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
+			Identity: &identity,
 		},
 		Status: v1alpha1.DynamoCheckpointStatus{
 			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
@@ -1285,7 +1389,7 @@ func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
+			Identity: &identity,
 		},
 		Status: v1alpha1.DynamoCheckpointStatus{
 			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
@@ -1379,7 +1483,7 @@ func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
+			Identity: &identity,
 			Job: v1alpha1.DynamoCheckpointJobConfig{
 				PodTemplateSpec: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
@@ -1531,15 +1635,31 @@ func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
 }
 
 func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
-	t.Log("Build automatic, retained, manual, and foreign checkpoint fixtures")
+	t.Log("Build owned, metadata-only, stale-owner, foreign-owner, manual, and retained checkpoints")
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
 		},
 	})
+	dgdOwner := *metav1.NewControllerRef(
+		dgd,
+		v1beta1.GroupVersion.WithKind("DynamoGraphDeployment"),
+	)
+	staleDGDOwner := dgdOwner
+	staleDGDOwner.UID = types.UID("stale-dgd-uid")
+	otherDGDOwner := dgdOwner
+	otherDGDOwner.Name = "other-dgd"
+	otherDGDOwner.UID = types.UID("other-dgd-uid")
+	unrelatedOwner := metav1.OwnerReference{
+		APIVersion: "v1",
+		Kind:       "ConfigMap",
+		Name:       "checkpoint-audit",
+		UID:        types.UID("checkpoint-audit-uid"),
+	}
 
 	auto := &v1alpha1.DynamoCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1551,11 +1671,24 @@ func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
 			Annotations: map[string]string{
 				commonconsts.CheckpointAutoAnnotation: commonconsts.KubeLabelValueTrue,
 			},
+			OwnerReferences: []metav1.OwnerReference{dgdOwner},
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
+			Identity: &v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
 		},
 	}
+	metadataOnly := auto.DeepCopy()
+	metadataOnly.Name = "metadata-only"
+	metadataOnly.OwnerReferences = nil
+
+	sameNameDifferentUID := auto.DeepCopy()
+	sameNameDifferentUID.Name = "same-name-different-uid"
+	sameNameDifferentUID.OwnerReferences = []metav1.OwnerReference{staleDGDOwner}
+
+	otherDGD := auto.DeepCopy()
+	otherDGD.Name = "other-dgd"
+	otherDGD.OwnerReferences = []metav1.OwnerReference{otherDGDOwner}
+
 	manual := &v1alpha1.DynamoCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "manual",
@@ -1563,9 +1696,10 @@ func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 			},
+			OwnerReferences: []metav1.OwnerReference{dgdOwner},
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
+			Identity: &v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
 		},
 	}
 	retained := &v1alpha1.DynamoCheckpoint{
@@ -1575,40 +1709,27 @@ func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: v1beta1.GroupVersion.String(),
-				Kind:       "DynamoGraphDeployment",
-				Name:       "test-dgd",
-				UID:        dgd.UID,
-			}},
+			OwnerReferences: []metav1.OwnerReference{dgdOwner, unrelatedOwner},
 			Annotations: map[string]string{
 				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
 				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyRetain),
 			},
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
-		},
-	}
-	otherDGD := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "other-dgd",
-			Namespace: "default",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "other-dgd",
-			},
-			Annotations: map[string]string{
-				commonconsts.CheckpointAutoAnnotation: commonconsts.KubeLabelValueTrue,
-			},
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
+			Identity: &v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
 		},
 	}
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
 			WithScheme(s).
-			WithObjects(auto, manual, retained, otherDGD).
+			WithObjects(
+				auto,
+				metadataOnly,
+				sameNameDifferentUID,
+				otherDGD,
+				manual,
+				retained,
+			).
 			Build(),
 	}
 
@@ -1621,7 +1742,13 @@ func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
 	if err := reconciler.Get(ctx, types.NamespacedName{Name: "auto", Namespace: "default"}, &v1alpha1.DynamoCheckpoint{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("auto checkpoint get err = %v, want not found", err)
 	}
-	for _, name := range []string{"manual", "retained", "other-dgd"} {
+	for _, name := range []string{
+		"metadata-only",
+		"same-name-different-uid",
+		"other-dgd",
+		"manual",
+		"retained",
+	} {
 		if err := reconciler.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &v1alpha1.DynamoCheckpoint{}); err != nil {
 			t.Fatalf("checkpoint %s should remain, get error = %v", name, err)
 		}
@@ -1630,9 +1757,7 @@ func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
 	if err := reconciler.Get(ctx, types.NamespacedName{Name: "retained", Namespace: "default"}, retainedAfter); err != nil {
 		t.Fatalf("retained checkpoint should remain, get error = %v", err)
 	}
-	if len(retainedAfter.OwnerReferences) != 0 {
-		t.Fatalf("retained checkpoint should be detached from DGD owner references, got %#v", retainedAfter.OwnerReferences)
-	}
+	require.Equal(t, []metav1.OwnerReference{unrelatedOwner}, retainedAfter.OwnerReferences)
 	if _, ok := retainedAfter.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]; ok {
 		t.Fatalf("retained checkpoint should not keep DGD label after finalizer detach")
 	}
