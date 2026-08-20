@@ -86,7 +86,7 @@ struct TopologyProjectionInputs {
     membership: DcMembershipView,
     availability: HashMap<EndpointId, Option<HashSet<WorkerId>>>,
     availability_owners: HashMap<EndpointId, u64>,
-    pools: HashMap<EndpointId, PoolId>,
+    pools: HashMap<(EndpointId, CanonicalModelId), PoolId>,
     revision: u64,
 }
 
@@ -202,22 +202,35 @@ fn publish_if_changed(
     }));
 }
 
-fn pool_links(catalog: &DcPoolCatalog) -> HashMap<EndpointId, PoolId> {
+/// Pool links are scoped by (endpoint, base model): membership and catalog are
+/// independently timed views, so an in-place model change must never pair the new
+/// model's topology entry with the previous generation's pool. Until the catalog
+/// commits the replacement descriptor, the new entry simply has no pool link.
+fn pool_links(catalog: &DcPoolCatalog) -> HashMap<(EndpointId, CanonicalModelId), PoolId> {
     let mut links = HashMap::with_capacity(catalog.pools().len());
     let mut duplicates = HashSet::new();
     for descriptor in catalog.pools() {
         let endpoint = descriptor.serving_endpoint();
-        if links.contains_key(endpoint) {
-            duplicates.insert(endpoint.clone());
-        } else {
-            links.insert(endpoint.clone(), descriptor.pool_id());
+        let base_models = descriptor
+            .registrations()
+            .iter()
+            .map(|registration| registration.target().base_model().clone())
+            .collect::<BTreeSet<_>>();
+        for base_model in base_models {
+            let key = (endpoint.clone(), base_model);
+            if links.contains_key(&key) {
+                duplicates.insert(key.clone());
+            } else {
+                links.insert(key, descriptor.pool_id());
+            }
         }
     }
-    for endpoint in duplicates {
-        links.remove(&endpoint);
+    for (endpoint, model) in duplicates {
+        links.remove(&(endpoint.clone(), model.clone()));
         tracing::error!(
             %endpoint,
-            "multiple Relay pools claim one serving endpoint; omitting its topology pool link"
+            model = model.as_str(),
+            "multiple Relay pools claim one serving model binding; omitting its topology pool link"
         );
     }
     links
@@ -226,7 +239,7 @@ fn pool_links(catalog: &DcPoolCatalog) -> HashMap<EndpointId, PoolId> {
 fn derive_topology(
     membership: &DcMembershipView,
     availability: &HashMap<EndpointId, Option<HashSet<WorkerId>>>,
-    pools: &HashMap<EndpointId, PoolId>,
+    pools: &HashMap<(EndpointId, CanonicalModelId), PoolId>,
 ) -> Vec<TopologyEntry> {
     let mut groups = BTreeMap::<(String, CanonicalModelId), TopologyAggregate>::new();
 
@@ -252,7 +265,7 @@ fn derive_topology(
             group.members.push(TopologyMember {
                 endpoint: endpoint.clone(),
                 roles: endpoint_membership.roles.clone(),
-                pool_id: pools.get(endpoint).copied(),
+                pool_id: pools.get(&(endpoint.clone(), base_model.clone())).copied(),
             });
             group
                 .units
@@ -561,7 +574,52 @@ mod tests {
             vec![descriptor(3, 1), descriptor(4, 2)],
         );
 
-        assert!(!pool_links(&catalog).contains_key(&endpoint));
+        let links = pool_links(&catalog);
+        assert!(
+            links
+                .keys()
+                .all(|(link_endpoint, _)| link_endpoint != &endpoint)
+        );
+    }
+
+    #[test]
+    fn in_place_model_swap_never_links_the_previous_generations_pool() {
+        let endpoint_name = "production.backend.generate";
+        let before = view(vec![endpoint(
+            endpoint_name,
+            "meta/llama-3-70b",
+            1,
+            Some(WorkerType::Aggregated),
+            Vec::new(),
+        )]);
+        let after = view(vec![endpoint(
+            endpoint_name,
+            "qwen/qwen3-32b",
+            1,
+            Some(WorkerType::Aggregated),
+            Vec::new(),
+        )]);
+
+        // Membership already shows the replacement model while the catalog still
+        // carries the previous generation's descriptor for the same endpoint.
+        let publisher = TopologyPublisher::new(after.clone(), &catalog(&before, 1));
+        for (endpoint, membership) in after.endpoints.iter() {
+            publisher.claim_availability(endpoint.clone(), membership.generation);
+        }
+        publish_live(&publisher, &after);
+
+        let snapshot = publisher.snapshot();
+        let stale_window = entry(&snapshot, "qwen/qwen3-32b");
+        assert_eq!(stale_window.state, TopologyReadinessState::Ready);
+        assert_eq!(stale_window.members[0].pool_id, None);
+
+        publisher.replace_catalog(&catalog(&after, 2));
+        let snapshot = publisher.snapshot();
+        assert!(
+            entry(&snapshot, "qwen/qwen3-32b").members[0]
+                .pool_id
+                .is_some()
+        );
     }
 
     fn publish_live(publisher: &TopologyPublisher, view: &DcMembershipView) {
