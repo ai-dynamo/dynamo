@@ -146,8 +146,7 @@ impl RequestTraceSink for JsonlRequestTraceSink {
     }
 
     async fn shutdown(&self) {
-        // Take the writer out under a short-lived guard so the drain below is
-        // not awaited while the lock is held. Taking also makes this idempotent.
+        // Taking the writer makes shutdown idempotent without holding the lock while draining.
         let writer = {
             let mut guard = self.writer.lock().await;
             guard.take()
@@ -392,9 +391,6 @@ mod tests {
         assert!(!content.contains("\"tool\""));
     }
 
-    /// Records accepted by `emit` must survive shutdown. The buffer is 1 MiB
-    /// and the flush interval 60s, so nothing but the shutdown drain can get
-    /// them to disk, and the file is read once with no sleep or polling.
     #[tokio::test]
     async fn jsonl_sink_shutdown_flushes_accepted_records() {
         const RECORDS: usize = 16;
@@ -419,7 +415,6 @@ mod tests {
             sink.emit(&record).await;
         }
 
-        // Shutting down twice must be harmless.
         RequestTraceSink::shutdown(&sink).await;
         RequestTraceSink::shutdown(&sink).await;
 
