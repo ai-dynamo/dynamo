@@ -381,14 +381,21 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
-    fn router_hints_enabled(&self) -> bool {
-        match self.runtime_data.get(ROUTER_HINT_RUNTIME_CAPABILITY_KEY) {
+    /// Check whether a runtime capability is explicitly enabled.
+    ///
+    /// Rust callers commonly store booleans, while compatibility cards may
+    /// carry string-encoded flags. Both representations use Dynamo's canonical
+    /// truthy vocabulary.
+    pub(crate) fn supports_runtime_capability(&self, capability: &str) -> bool {
+        match self.runtime_data.get(capability) {
             Some(serde_json::Value::Bool(true)) => true,
-            // Python ModelRuntimeConfig.set_engine_specific currently stores
-            // engine-specific values as strings.
             Some(serde_json::Value::String(value)) => is_truthy(value),
             _ => false,
         }
+    }
+
+    fn router_hints_enabled(&self) -> bool {
+        self.supports_runtime_capability(ROUTER_HINT_RUNTIME_CAPABILITY_KEY)
     }
 
     fn router_hint_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
@@ -1045,6 +1052,28 @@ mod tests {
             .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "false")
             .unwrap();
         assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+    }
+
+    #[test]
+    fn runtime_capability_support_accepts_boolean_and_string_truthy_values() {
+        const CAPABILITY: &str = "test_capability";
+
+        let mut config = ModelRuntimeConfig::default();
+        assert!(!config.supports_runtime_capability(CAPABILITY));
+
+        for enabled in [serde_json::json!(true), serde_json::json!(" yes ")] {
+            config.runtime_data.insert(CAPABILITY.to_string(), enabled);
+            assert!(config.supports_runtime_capability(CAPABILITY));
+        }
+
+        for disabled in [
+            serde_json::json!(false),
+            serde_json::json!("false"),
+            serde_json::json!(1),
+        ] {
+            config.runtime_data.insert(CAPABILITY.to_string(), disabled);
+            assert!(!config.supports_runtime_capability(CAPABILITY));
+        }
     }
 
     #[test]

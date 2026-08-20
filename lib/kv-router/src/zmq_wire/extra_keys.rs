@@ -141,4 +141,24 @@ mod tests {
             Some("adapter-a")
         );
     }
+
+    #[test]
+    fn offset_bearing_opaque_identifier_remains_unsupported() {
+        assert_eq!(
+            extra_keys_to_block_mm_infos(Some(vec![Some(vec![
+                ExtraKeyItem::HashWithUnsignedOffset(("opaque-renderer-image-0".to_string(), 3,)),
+            ])])),
+            None
+        );
+    }
+
+    #[test]
+    fn bare_opaque_identifier_remains_ambiguous() {
+        assert_eq!(
+            extra_keys_to_block_mm_infos(Some(vec![Some(vec![ExtraKeyItem::Hash(
+                "adapter-or-cache-key".to_string(),
+            )])])),
+            None
+        );
+    }
 }

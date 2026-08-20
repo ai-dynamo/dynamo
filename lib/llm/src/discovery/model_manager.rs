@@ -20,7 +20,7 @@ use dynamo_kv_router::{
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
+    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
@@ -1340,6 +1340,21 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine_for_capability(capability)
+    }
+
+    /// Select a Generate engine and its routing metadata from one worker set
+    /// that advertises `capability`.
+    pub fn get_generate_engine_for_capability_with_routing(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<GenerateEngineSelection, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine_for_capability_with_routing(capability)
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
