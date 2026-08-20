@@ -30,23 +30,7 @@ mod recovery;
 pub mod remote;
 mod side;
 
-/// Serializes tests that register discovery endpoints against the direct-ZMQ tests
-/// in `recovery::worker_query`.
-///
-/// `shared_zmq_context()` (`lib/runtime/src/transports/event_plane/zmq_transport.rs`)
-/// is a process-wide `OnceLock<Context>`: every PUB/SUB socket in this test binary
-/// shares one libzmq context and the background I/O threads it owns. Endpoint
-/// registration anywhere in the binary makes
-/// `direct_zmq_multi_node_replacement_isolated_by_global_rank` miss deliveries when
-/// the two run concurrently. The shared context is the actual defect and is outside
-/// this change's blast radius, so the tests on both sides of the interference take
-/// this gate instead. Remove it when the context is made per-runtime.
-///
-/// This is a `tokio` mutex rather than a `std` one for two reasons: each
-/// `#[tokio::test]` brings its own single-threaded runtime, so a blocking guard
-/// would park that runtime's only worker while it waits; and `std::sync::Mutex`
-/// poisons on the first panicking test, which would turn one real assertion failure
-/// into a cascade of unrelated ones.
+// Serializes tests that share the process-wide ZeroMQ context.
 #[cfg(test)]
 pub(crate) static ZMQ_TEST_ISOLATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

@@ -2864,9 +2864,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_zmq_multi_node_replacement_isolated_by_global_rank() {
-        // Taken before the timeout so the wait for the gate is not charged against it.
-        // See `ZMQ_TEST_ISOLATION` for why this test cannot run beside the tests that
-        // register discovery endpoints.
+        // Waiting for the shared ZeroMQ context is outside this test's timeout.
         let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
         tokio::time::timeout(Duration::from_secs(30), async {
             let store = tempfile::tempdir().unwrap();
