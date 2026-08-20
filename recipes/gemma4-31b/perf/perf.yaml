@@ -185,8 +185,8 @@ spec:
         # ~3s TTFT p50. The h200 variant cannot: bf16 weights plus a 16-bit KV
         # cache (fp8 KV is unavailable on Hopper for this model) leave far less
         # KV pool, so c=192 runs deep in admission queueing and TTFT p50 reaches
-        # ~5 minutes. Use CONCURRENCY=16 for h200, which keeps TTFT p50 well
-        # under a second at roughly two thirds of the saturated throughput.
+        # ~5 minutes. Use CONCURRENCY=32 for h200, which keeps TTFT p50 at
+        # ~1.6s while reaching most of the achievable throughput.
         - name: CONCURRENCY
           value: "192"
         # h200 variant serves bf16 weights, so use google/gemma-4-31B-it there.
