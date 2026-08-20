@@ -417,20 +417,12 @@ impl Discovery for KubeDiscoveryClient {
             stream_id,
         ));
 
-        // Convert receiver to stream
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
         Ok(Box::pin(stream))
     }
 }
 
-/// Translate metadata snapshots into discovery events for one `list_and_watch` stream.
-///
-/// Runs until the first of: `event_tx` is closed by the consumer dropping the stream,
-/// `cancel_token` fires, or the daemon drops its snapshot sender.
-///
-/// This is a free function rather than an inline closure so it can be driven over synthetic
-/// channels in tests; `KubeDiscoveryClient` itself cannot be built without a live
-/// `kube::Client`.
+/// Run a snapshot watch until its output, input, or cancellation token closes.
 async fn run_metadata_watch(
     mut watch_rx: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
     query: DiscoveryQuery,
@@ -438,12 +430,8 @@ async fn run_metadata_watch(
     event_tx: tokio::sync::mpsc::UnboundedSender<Result<DiscoveryEvent>>,
     stream_id: uuid::Uuid,
 ) {
-    // Initialize from current snapshot state
-    // This is critical: watch_rx.changed() only fires on FUTURE changes,
-    // so we must capture the current state first to detect removals correctly
     let initial_snapshot = watch_rx.borrow_and_update().clone();
 
-    // Build initial map: DiscoveryInstanceId -> DiscoveryInstance
     let initial: HashMap<DiscoveryInstanceId, DiscoveryInstance> = initial_snapshot
         .instances
         .values()
@@ -458,7 +446,6 @@ async fn run_metadata_watch(
         query
     );
 
-    // Emit initial Added events (the "list" part of list_and_watch)
     for instance in initial.values() {
         tracing::info!(
             stream_id = %stream_id,
@@ -480,11 +467,7 @@ async fn run_metadata_watch(
     // Track complete values so same-ID model taint updates are observable.
     let mut known = initial;
 
-    // Both of these resolve at most once over the task's life, so build them once and
-    // reborrow each pass instead of reconstructing them on every loop iteration. The
-    // cancellation future degrades to one that never resolves when no token was supplied,
-    // so both arms are always armed. `watch_rx.changed()` stays inside the loop because it
-    // advances receiver state and must be re-armed after each snapshot.
+    // Pin the one-shot closure and cancellation futures; changed() must be rearmed per snapshot.
     let mut receiver_closed = std::pin::pin!(event_tx.closed());
     let mut cancelled = std::pin::pin!(async {
         match cancel_token.as_ref() {
@@ -500,8 +483,6 @@ async fn run_metadata_watch(
             "Watch loop waiting for changes"
         );
 
-        // Wait for the next snapshot, for the consumer to drop the stream, or for
-        // cancellation.
         let watch_result = tokio::select! {
             result = watch_rx.changed() => result,
             _ = receiver_closed.as_mut() => {
@@ -522,10 +503,8 @@ async fn run_metadata_watch(
 
         match watch_result {
             Ok(()) => {
-                // Get latest snapshot
                 let snapshot = watch_rx.borrow_and_update().clone();
 
-                // Build current map: DiscoveryInstanceId -> DiscoveryInstance
                 let current: HashMap<DiscoveryInstanceId, DiscoveryInstance> = snapshot
                     .instances
                     .values()
@@ -543,7 +522,6 @@ async fn run_metadata_watch(
 
                 let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
 
-                // Log diff results (even if empty, for debugging)
                 if events.is_empty() {
                     tracing::debug!(
                         stream_id = %stream_id,
@@ -858,8 +836,6 @@ mod tests {
 
     #[tokio::test]
     async fn kube_watch_producer_stops_when_stream_is_dropped() {
-        // The daemon's snapshot sender outlives any individual stream, so `_watch_tx` is held
-        // for the whole test: `watch_rx.changed()` can never resolve on its own here.
         let (_watch_tx, watch_rx) = tokio::sync::watch::channel(snapshot_with(
             vec![endpoint_instance(1, "127.0.0.1:8000")],
             1,

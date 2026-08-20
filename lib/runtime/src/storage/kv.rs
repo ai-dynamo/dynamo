@@ -333,12 +333,7 @@ impl Manager {
         }
     }
 
-    /// Returns a receiver that will receive all the existing keys, and
-    /// then block and receive new keys as they are created.
-    ///
-    /// Starts a task that watches the store until the first of: the returned receiver is
-    /// dropped, `cancel_token` fires, or the backend watch stream ends. Callers that only
-    /// hold the receiver therefore do not need to cancel the token to reclaim the task.
+    /// Returns existing keys, then updates, until the receiver, token, or backend closes.
     pub fn watch(
         self: Arc<Self>,
         bucket_name: &str,
@@ -362,9 +357,7 @@ impl Manager {
             // after a newer snapshot.
             let mut stream = bucket.watch().await?;
 
-            // `tx` is the only sender, so this resolves exactly when the receiver returned to
-            // the caller is dropped. Without it the task parks in `stream.next()` on an idle
-            // bucket and never learns that nobody is listening.
+            // Detect receiver drop even while the backend stream is idle.
             let receiver_closed = tx.closed();
             tokio::pin!(receiver_closed);
 
@@ -618,7 +611,6 @@ mod tests {
             .clone()
             .watch(BUCKET_NAME, None, cancel_token.clone());
 
-        // Consume the initial snapshot so the task is parked waiting on an idle bucket.
         let initial = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap()
