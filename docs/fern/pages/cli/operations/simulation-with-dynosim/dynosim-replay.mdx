@@ -27,7 +27,6 @@ bindings if they are not already available:
 ```bash
 .venv/bin/maturin develop --release -m lib/bindings/python/Cargo.toml --features aic-forward-pass
 uv pip install -e .
-DYNOSIM_ENGINE_ARGS='{"block_size":512,"num_gpu_blocks":100000,"aic_backend":"vllm","aic_system":"h200_sxm","aic_backend_version":"0.19.0","aic_tp_size":1,"aic_model_path":"Qwen/Qwen3-32B"}'
 ```
 
 The release build is recommended because the simulation is CPU-bound.
@@ -37,6 +36,8 @@ The release build is recommended because the simulation is CPU-bound.
 Start with a small aggregated simulation:
 
 ```bash
+DYNOSIM_ENGINE_ARGS='{"block_size":512,"num_gpu_blocks":100000,"aic_backend":"vllm","aic_system":"h200_sxm","aic_backend_version":"0.19.0","aic_tp_size":1,"aic_model_path":"Qwen/Qwen3-32B"}'
+
 .venv/bin/python -m aisimulate.replay \
   --input-tokens 2048 \
   --output-tokens 128 \
@@ -56,6 +57,8 @@ The command prints a latency and throughput table. Confirm that all requests com
 Run a second synthetic workload with shared prefixes and three turns per session:
 
 ```bash
+DYNOSIM_ENGINE_ARGS='{"block_size":512,"num_gpu_blocks":100000,"aic_backend":"vllm","aic_system":"h200_sxm","aic_backend_version":"0.19.0","aic_tp_size":1,"aic_model_path":"Qwen/Qwen3-32B"}'
+
 .venv/bin/python -m aisimulate.replay \
   --input-tokens 5000 \
   --output-tokens 500 \
@@ -87,6 +90,8 @@ curl -sL \
 Replay it with the trace block size used by the dataset:
 
 ```bash
+DYNOSIM_ENGINE_ARGS='{"block_size":512,"num_gpu_blocks":100000,"aic_backend":"vllm","aic_system":"h200_sxm","aic_backend_version":"0.19.0","aic_tp_size":1,"aic_model_path":"Qwen/Qwen3-32B"}'
+
 .venv/bin/python -m aisimulate.replay /tmp/toolagent_trace.jsonl \
   --trace-block-size 512 \
   --replay-mode offline \
@@ -100,9 +105,12 @@ the simulated KV-cache block size, so the two values do not need to match.
 
 </Step>
 <Step title="Compare routing modes" id="compare-routing-modes">
-Run the same trace through the KV router. Change only the routing settings:
+Run the same trace through the Dynamo-owned KV router. Keep the engine configuration and worker
+count fixed; the Dynamo entry point is required for this routing mode:
 
 ```bash
+DYNOSIM_ENGINE_ARGS='{"block_size":512,"num_gpu_blocks":100000,"aic_backend":"vllm","aic_system":"h200_sxm","aic_backend_version":"0.19.0","aic_tp_size":1,"aic_model_path":"Qwen/Qwen3-32B"}'
+
 .venv/bin/python -m dynamo.replay /tmp/toolagent_trace.jsonl \
   --trace-block-size 512 \
   --replay-mode offline \
