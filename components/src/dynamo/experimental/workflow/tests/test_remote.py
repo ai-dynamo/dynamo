@@ -20,13 +20,7 @@ from dynamo.experimental.workflow import (
     WorkflowValidationError,
     compile_workflow,
 )
-from dynamo.experimental.workflow.remote import (
-    STAGE_REQUEST_SCHEMA,
-    RemoteStageClient,
-    RemoteStageServer,
-    StageRequestEnvelope,
-    StageResponseEnvelope,
-)
+from dynamo.experimental.workflow.remote import RemoteStageClient, RemoteStageServer
 
 pytestmark = [
     pytest.mark.unit,
@@ -54,34 +48,6 @@ def _context(timeout=None, request_context=None):
         _cancelled=asyncio.Event(),
         request_context=request_context,
     )
-
-
-def test_request_envelope_round_trip_is_strict_and_versioned() -> None:
-    envelope = StageRequestEnvelope(
-        workflow_name="remote-wire",
-        stage_id="normalize",
-        contract_id="normalize",
-        attempt_id="request-1",
-        invocation_id="request-1:normalize",
-        timeout_seconds=1.5,
-        inputs={"text": "HELLO"},
-    )
-
-    assert StageRequestEnvelope.from_dict(envelope.to_dict()) == envelope
-    bad = envelope.to_dict()
-    bad["extra"] = True
-    with pytest.raises(WorkflowExecutionError, match="unknown fields"):
-        StageRequestEnvelope.from_dict(bad)
-
-    bad = envelope.to_dict()
-    bad["schema"] = f"{STAGE_REQUEST_SCHEMA}.future"
-    with pytest.raises(WorkflowExecutionError, match="unsupported.*schema"):
-        StageRequestEnvelope.from_dict(bad)
-
-    bad = envelope.to_dict()
-    bad["version"] = 0.0
-    with pytest.raises(WorkflowExecutionError, match="unsupported.*version"):
-        StageRequestEnvelope.from_dict(bad)
 
 
 class _Client:
@@ -116,6 +82,9 @@ class _ChildContext:
     def is_killed(self) -> bool:
         return False
 
+    def id(self) -> str:
+        return self.context_id
+
     async def async_killed_or_stopped(self) -> bool:
         await self._stopped.wait()
         return True
@@ -131,36 +100,19 @@ class _ParentContext:
         return child
 
 
-async def test_remote_client_sends_identity_and_accepts_one_terminal_response() -> None:
-    response = StageResponseEnvelope(
-        stage_id="normalize",
-        contract_id="normalize",
-        attempt_id="request-1",
-        invocation_id="request-1:normalize",
-        outputs={"normalized": "hello"},
-    )
-    transport = _Client([response.to_dict()])
+async def test_remote_client_sends_inputs_and_accepts_one_response_mapping() -> None:
+    transport = _Client([{"normalized": "hello"}])
 
     result = await RemoteStageClient(transport).run(
         "normalize", CONTRACT, {"text": "HELLO"}, _context(timeout=1.0)
     )
 
     assert result == {"normalized": "hello"}
-    assert transport.request is not None
-    assert transport.request["attempt"] == "request-1"
-    assert transport.request["invocation"] == "request-1:normalize"
-    assert 0 < transport.request["timeout_seconds"] <= 1.0
+    assert transport.request == {"text": "HELLO"}
 
 
 async def test_remote_client_creates_an_invocation_scoped_transport_context() -> None:
-    response = StageResponseEnvelope(
-        stage_id="normalize",
-        contract_id="normalize",
-        attempt_id="request-1",
-        invocation_id="request-1:normalize",
-        outputs={"normalized": "hello"},
-    )
-    transport = _Client([response.to_dict()])
+    transport = _Client([{"normalized": "hello"}])
     parent = _ParentContext()
 
     await RemoteStageClient(transport).run(
@@ -174,20 +126,28 @@ async def test_remote_client_creates_an_invocation_scoped_transport_context() ->
     assert transport.context is parent.children[0]
 
 
-async def test_remote_client_rejects_missing_or_duplicate_terminal_response() -> None:
+async def test_remote_client_rejects_missing_or_duplicate_response_mapping() -> None:
     client = RemoteStageClient(_Client([]))
-    with pytest.raises(WorkflowExecutionError, match="no terminal response"):
+    with pytest.raises(WorkflowExecutionError, match="no response mapping"):
         await client.run("normalize", CONTRACT, {"text": "HELLO"}, _context())
 
-    response = StageResponseEnvelope(
-        stage_id="normalize",
-        contract_id="normalize",
-        attempt_id="request-1",
-        invocation_id="request-1:normalize",
-        outputs={"normalized": "hello"},
-    ).to_dict()
+    response = {"normalized": "hello"}
     client = RemoteStageClient(_Client([response, response]))
-    with pytest.raises(WorkflowExecutionError, match="multiple terminal responses"):
+    parent = _ParentContext()
+    with pytest.raises(WorkflowExecutionError, match="multiple response mappings"):
+        await client.run(
+            "normalize",
+            CONTRACT,
+            {"text": "HELLO"},
+            _context(request_context=parent),
+        )
+    assert parent.children[0].is_stopped()
+
+
+async def test_remote_client_rejects_non_mapping_response() -> None:
+    client = RemoteStageClient(_Client(["hello"]))
+
+    with pytest.raises(WorkflowExecutionError, match="non-mapping response"):
         await client.run("normalize", CONTRACT, {"text": "HELLO"}, _context())
 
 
@@ -195,55 +155,25 @@ class _Runner:
     contract = CONTRACT
 
     async def run(self, inputs, context):
-        assert context.workflow_name == "remote-wire"
+        assert context.workflow_name is None
+        assert context.stage_id == "normalize"
+        assert context.attempt_id == "request-1:normalize"
+        assert context.invocation_id == "request-1:normalize"
+        assert context.deadline is None
         return {"normalized": inputs["text"].strip().lower()}
 
 
 async def test_remote_server_validates_and_runs_stage_contract() -> None:
-    request = StageRequestEnvelope(
-        workflow_name="remote-wire",
-        stage_id="normalize",
-        contract_id="normalize",
-        attempt_id="request-1",
-        invocation_id="request-1:normalize",
-        timeout_seconds=None,
-        inputs={"text": " HELLO "},
-    )
+    transport_context = _ChildContext("request-1:normalize")
 
     responses = [
         response
         async for response in RemoteStageServer("normalize", _Runner()).generate(
-            request.to_dict()
+            {"text": " HELLO "}, context=transport_context
         )
     ]
 
-    assert len(responses) == 1
-    assert StageResponseEnvelope.from_dict(responses[0]).outputs == {
-        "normalized": "hello"
-    }
-
-
-async def test_remote_server_enforces_deadline() -> None:
-    class BlockingRunner:
-        contract = CONTRACT
-
-        async def run(self, inputs, context):
-            await asyncio.Event().wait()
-
-    request = StageRequestEnvelope(
-        workflow_name="remote-wire",
-        stage_id="normalize",
-        contract_id="normalize",
-        attempt_id="request-1",
-        invocation_id="request-1:normalize",
-        timeout_seconds=0.01,
-        inputs={"text": "hello"},
-    )
-
-    with pytest.raises(asyncio.TimeoutError):
-        await RemoteStageServer("normalize", BlockingRunner()).generate(
-            request.to_dict()
-        ).__anext__()
+    assert responses == [{"normalized": "hello"}]
 
 
 async def test_remote_server_cancels_runner_when_transport_stops() -> None:
@@ -265,18 +195,9 @@ async def test_remote_server_cancels_runner_when_transport_stops() -> None:
 
     runner = BlockingRunner()
     transport_context = _ChildContext("request-1:normalize")
-    request = StageRequestEnvelope(
-        workflow_name="remote-wire",
-        stage_id="normalize",
-        contract_id="normalize",
-        attempt_id="request-1",
-        invocation_id="request-1:normalize",
-        timeout_seconds=None,
-        inputs={"text": "hello"},
-    )
     response = asyncio.create_task(
         RemoteStageServer("normalize", runner)
-        .generate(request.to_dict(), transport_context)
+        .generate({"text": "hello"}, context=transport_context)
         .__anext__()
     )
     await runner.started.wait()
@@ -409,7 +330,7 @@ class _Runtime:
         return _Endpoint(self._clients[endpoint_id])
 
 
-async def test_three_remote_stages_fan_out_and_join_through_envelopes() -> None:
+async def test_three_remote_stages_fan_out_and_join_through_direct_mappings() -> None:
     workflow = Workflow("remote-text-fanout")
     text = workflow.input("text", ValueSpec(type="text"))
     encoder = workflow.stage("encoder", TEXT_ENCODER, text=text)

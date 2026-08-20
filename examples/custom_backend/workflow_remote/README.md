@@ -13,3 +13,5 @@ examples/custom_backend/workflow_remote/launch.sh
 The client waits for all three endpoint populations, invokes the encoder once,
 fans its token list into classifier and generator calls, joins both terminal
 responses, and verifies the final result.
+
+Each stage implements unary `StageRunner.run(...)` and returns one mapping. `RemoteStageServer` adapts that method to Dynamo's streaming endpoint contract, so stage implementations do not write `yield` or handle transport streams.
