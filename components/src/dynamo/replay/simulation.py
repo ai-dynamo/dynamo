@@ -29,6 +29,7 @@ from aisimulate.sweeper.replay import (
 from dynamo.llm import KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.deprecation import suppress_engine_only_api_warning
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -116,12 +117,13 @@ class DynamoReplayRunner:
             **self._goodput_sla_kwargs(spec),
         }
 
-        if self._is_trace(spec):
-            common["trace_block_size"] = self.trace_block_size
-            report = self._run_trace(spec, common)
-        else:
-            common.update(self._synthetic_kwargs(spec))
-            report = self._run_synthetic(spec, common)
+        with suppress_engine_only_api_warning():
+            if self._is_trace(spec):
+                common["trace_block_size"] = self.trace_block_size
+                report = self._run_trace(spec, common)
+            else:
+                common.update(self._synthetic_kwargs(spec))
+                report = self._run_synthetic(spec, common)
 
         metrics, metadata = self._normalize_report(report, output_requirements)
         self._require_goodput_metric(metrics, spec)

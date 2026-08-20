@@ -36,7 +36,7 @@ The release build is recommended because the simulation is CPU-bound.
 Start with a small aggregated simulation:
 
 ```bash
-.venv/bin/python -m dynamo.replay \
+.venv/bin/python -m aisimulate.replay \
   --input-tokens 2048 \
   --output-tokens 128 \
   --request-count 100 \
@@ -55,7 +55,7 @@ The command prints a latency and throughput table. Confirm that all requests com
 Run a second synthetic workload with shared prefixes and three turns per session:
 
 ```bash
-.venv/bin/python -m dynamo.replay \
+.venv/bin/python -m aisimulate.replay \
   --input-tokens 5000 \
   --output-tokens 500 \
   --request-count 200 \
@@ -86,10 +86,9 @@ curl -sL \
 Replay it with the trace block size used by the dataset:
 
 ```bash
-.venv/bin/python -m dynamo.replay /tmp/toolagent_trace.jsonl \
+.venv/bin/python -m aisimulate.replay /tmp/toolagent_trace.jsonl \
   --trace-block-size 512 \
   --replay-mode offline \
-  --router-mode round_robin \
   --num-workers 4 \
   --extra-engine-args '{"block_size":64}' \
   --report-json /tmp/dynosim-trace.json

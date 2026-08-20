@@ -13,6 +13,7 @@ from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
+from dynamo.replay.deprecation import uses_dynamo_integration, warn_engine_only_replay
 from dynamo.replay.report import PlannerReplayDetails, ReplayReport
 
 
@@ -90,8 +91,7 @@ def run_trace_replay(
     *,
     replay_mode: Literal["offline"] = "offline",
     **kwargs: Unpack[_TraceReplayOptions],
-) -> ReplayReport:
-    ...
+) -> ReplayReport: ...
 
 
 @overload
@@ -100,8 +100,7 @@ def run_trace_replay(
     *,
     replay_mode: Literal["online"],
     **kwargs: Unpack[_TraceReplayOptions],
-) -> dict[str, Any]:
-    ...
+) -> dict[str, Any]: ...
 
 
 @overload
@@ -110,8 +109,7 @@ def run_trace_replay(
     *,
     replay_mode: str,
     **kwargs: Unpack[_TraceReplayOptions],
-) -> ReplayReport | dict[str, Any]:
-    ...
+) -> ReplayReport | dict[str, Any]: ...
 
 
 def run_trace_replay(
@@ -149,6 +147,18 @@ def run_trace_replay(
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
     """
+    if not uses_dynamo_integration(
+        replay_mode=replay_mode,
+        router_mode=router_mode,
+        router_config=router_config,
+        aic_perf_config=aic_perf_config,
+        planner_config=planner_config,
+        model_name=model_name,
+    ):
+        warn_engine_only_replay(
+            "dynamo.replay.run_trace_replay()",
+            "aisimulate.EngineReplayRunnerFactory with aisimulate.ReplaySpec",
+        )
     trace_files = _normalize_trace_files(trace_files)
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
@@ -243,8 +253,7 @@ def run_synthetic_trace_replay(
     *,
     replay_mode: Literal["offline"] = "offline",
     **kwargs: Unpack[_SyntheticReplayOptions],
-) -> ReplayReport:
-    ...
+) -> ReplayReport: ...
 
 
 @overload
@@ -255,8 +264,7 @@ def run_synthetic_trace_replay(
     *,
     replay_mode: Literal["online"],
     **kwargs: Unpack[_SyntheticReplayOptions],
-) -> dict[str, Any]:
-    ...
+) -> dict[str, Any]: ...
 
 
 @overload
@@ -267,8 +275,7 @@ def run_synthetic_trace_replay(
     *,
     replay_mode: str,
     **kwargs: Unpack[_SyntheticReplayOptions],
-) -> ReplayReport | dict[str, Any]:
-    ...
+) -> ReplayReport | dict[str, Any]: ...
 
 
 def run_synthetic_trace_replay(
@@ -305,6 +312,18 @@ def run_synthetic_trace_replay(
     capture_planner_details=True,
 ) -> ReplayReport | dict[str, Any]:
     """Run synthetic replay with the same timing boundary as trace replay."""
+    if not uses_dynamo_integration(
+        replay_mode=replay_mode,
+        router_mode=router_mode,
+        router_config=router_config,
+        aic_perf_config=aic_perf_config,
+        planner_config=planner_config,
+        model_name=model_name,
+    ):
+        warn_engine_only_replay(
+            "dynamo.replay.run_synthetic_trace_replay()",
+            "aisimulate.EngineReplayRunnerFactory with aisimulate.ReplaySpec",
+        )
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
