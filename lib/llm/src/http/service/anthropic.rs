@@ -29,7 +29,7 @@ use futures::StreamExt;
 use tracing::Instrument;
 
 use super::{
-    RouteDoc,
+    RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
         ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_activity,
     },
@@ -507,13 +507,10 @@ async fn anthropic_messages(
 
     let request = context.map(|_req| chat_request);
 
-    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
-    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
-    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
-        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
-            request.inner.tool_choice.as_ref(),
-        ),
-    );
+    // Anthropic requests are converted to the same chat request contract. Keep
+    // parser activation identical to the OpenAI Chat Completions and Responses
+    // entry points so content-only turns cannot be reclassified as tool calls.
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
 
     // Same backstop as the chat handler, so the two aggregation entry points
     // cannot drift. See `wants_reasoning_as_content_when_empty`.

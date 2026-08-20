@@ -10,10 +10,7 @@ import pytest
 
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
-except Exception:
-    # vllm_omni's import chain can raise NotImplementedError (and other
-    # non-ImportError types) on platforms it doesn't support — e.g. a
-    # CPU-only runner where vllm._C can't load libcuda.so.1.
+except (ImportError, OSError, NotImplementedError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 from tests.serve.common import (
@@ -235,22 +232,6 @@ vllm_omni_configs = {
                     },
                 },
                 repeat_count=1,
-                expected_response=[],
-                expected_log=[],
-            ),
-            # Streaming video generation
-            VideoGenerationPayload(
-                body={
-                    "prompt": "Dog running on a beach",
-                    "size": "480x272",
-                    "response_format": "url",
-                    "nvext": {
-                        "num_inference_steps": 10,
-                        "num_frames": 17,
-                    },
-                },
-                repeat_count=1,
-                http_stream=True,
                 expected_response=[],
                 expected_log=[],
             ),

@@ -15,7 +15,12 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
+        - args:
+          - -m
+          - dynamo.frontend
+          command:
+          - python3
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
           name: main
     replicas: 1
     type: frontend
