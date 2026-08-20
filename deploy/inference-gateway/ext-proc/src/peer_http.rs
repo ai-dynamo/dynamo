@@ -5,13 +5,33 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{
+    Router,
+    extract::{Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::services::selection::SelectionService;
+
+#[derive(Clone)]
+struct AppState {
+    service: Arc<SelectionService>,
+    recovered: Arc<AtomicBool>,
+}
+
+#[derive(serde::Deserialize)]
+struct DumpQuery {
+    /// Caller's accepted snapshot budget in bytes. The peer rejects over-budget
+    /// snapshots with 413 *before* writing the body. Absent or `0` = unbounded.
+    max_bytes: Option<u64>,
+}
 
 /// Bind the dump listener before returning so peer recovery cannot race server startup.
 pub(crate) async fn spawn(
@@ -19,12 +39,14 @@ pub(crate) async fn spawn(
     port: u16,
     pod_ip: IpAddr,
     cancel: CancellationToken,
+    recovered: Arc<AtomicBool>,
 ) -> Result<()> {
     let address = listener_addr(pod_ip, port);
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("binding EPP peer HTTP server on {address}"))?;
-    let app = Router::new().route("/dump", get(dump)).with_state(service);
+    let state = AppState { service, recovered };
+    let app = Router::new().route("/dump", get(dump)).with_state(state);
 
     tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, app)
@@ -44,8 +66,45 @@ fn listener_addr(pod_ip: IpAddr, port: u16) -> SocketAddr {
     }
 }
 
-async fn dump(State(service): State<Arc<SelectionService>>) -> Json<serde_json::Value> {
-    Json(service.indexer_snapshot().await)
+async fn dump(State(state): State<AppState>, Query(query): Query<DumpQuery>) -> Response {
+    // Do not serve a snapshot until local recovery/bootstrap has finished: the
+    // index is empty during recovery, and an early /dump could let a sibling
+    // latch onto an empty index while a warm one exists elsewhere.
+    if !state.recovered.load(Ordering::Acquire) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "peer KV index not yet recovered",
+        )
+            .into_response();
+    }
+    let snapshot = state.service.indexer_snapshot().await;
+    let bytes = match serde_json::to_vec(&snapshot) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "Failed to serialize peer KV-index snapshot");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "snapshot serialization failed",
+            )
+                .into_response();
+        }
+    };
+    if let Some(max) = query.max_bytes
+        && max > 0
+        && bytes.len() as u64 > max
+    {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "peer KV index snapshot exceeds max_bytes",
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        bytes,
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -83,6 +142,7 @@ mod tests {
             port,
             "127.0.0.1".parse().unwrap(),
             cancel.clone(),
+            Arc::new(AtomicBool::new(true)),
         )
         .await
         .expect("spawn peer HTTP server");
@@ -104,6 +164,7 @@ mod tests {
             port,
             "127.0.0.1".parse().unwrap(),
             cancel.clone(),
+            Arc::new(AtomicBool::new(true)),
         )
         .await
         .expect("spawn peer HTTP server");
@@ -115,6 +176,55 @@ mod tests {
             .await
             .expect("decode dump");
         assert_eq!(response, service.indexer_snapshot().await);
+
+        cancel.cancel();
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dump_returns_503_until_recovered() {
+        let service = service().await;
+        let cancel = CancellationToken::new();
+        let port = free_tcp_port();
+        spawn(
+            service.clone(),
+            port,
+            "127.0.0.1".parse().unwrap(),
+            cancel.clone(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("spawn peer HTTP server");
+
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/dump"))
+            .await
+            .expect("request dump");
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        cancel.cancel();
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dump_rejects_over_budget_snapshot() {
+        let service = service().await;
+        let cancel = CancellationToken::new();
+        let port = free_tcp_port();
+        spawn(
+            service.clone(),
+            port,
+            "127.0.0.1".parse().unwrap(),
+            cancel.clone(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .await
+        .expect("spawn peer HTTP server");
+
+        // max_bytes=1 is smaller than any serialized snapshot ("{}" is 2 bytes).
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/dump?max_bytes=1"))
+            .await
+            .expect("request dump");
+        assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
 
         cancel.cancel();
         service.shutdown().await;
