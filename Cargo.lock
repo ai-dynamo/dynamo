@@ -34,6 +34,8 @@ dependencies = [
 [[package]]
 name = "aisimulate-core"
 version = "0.1.0-dev.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ec4febc5409e1597811a8ac6abbe2d193eb71bf2f9757c401a3813b48ac715e"
 dependencies = [
  "anyhow",
  "blake3",
@@ -41,27 +43,14 @@ dependencies = [
  "derive_builder",
  "indicatif 0.18.4",
  "rand 0.9.4",
- "rstest 0.18.2",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "slotmap",
- "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
  "xxhash-rust",
-]
-
-[[package]]
-name = "aisimulate-python"
-version = "0.1.0-dev.1"
-dependencies = [
- "aisimulate-core",
- "anyhow",
- "pyo3",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -4829,15 +4818,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "indoc"
-version = "2.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "inlinable_string"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7588,69 +7568,6 @@ dependencies = [
  "num-traits",
  "pest",
  "pest_derive",
-]
-
-[[package]]
-name = "pyo3"
-version = "0.23.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7778bffd85cf38175ac1f545509665d0b9b92a198ca7941f131f85f7a4f9a872"
-dependencies = [
- "cfg-if",
- "indoc",
- "libc",
- "memoffset 0.9.1",
- "once_cell",
- "portable-atomic",
- "pyo3-build-config",
- "pyo3-ffi",
- "pyo3-macros",
- "unindent",
-]
-
-[[package]]
-name = "pyo3-build-config"
-version = "0.23.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94f6cbe86ef3bf18998d9df6e0f3fc1050a8c5efa409bf712e661a4366e010fb"
-dependencies = [
- "once_cell",
- "target-lexicon",
-]
-
-[[package]]
-name = "pyo3-ffi"
-version = "0.23.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f1b4c431c0bb1c8fb0a338709859eed0d030ff6daa34368d3b152a63dfdd8d"
-dependencies = [
- "libc",
- "pyo3-build-config",
-]
-
-[[package]]
-name = "pyo3-macros"
-version = "0.23.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbc2201328f63c4710f68abdf653c89d8dbc2858b88c5d88b0ff38a75288a9da"
-dependencies = [
- "proc-macro2",
- "pyo3-macros-backend",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "pyo3-macros-backend"
-version = "0.23.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fca6726ad0f3da9c9de093d6f116a93c1a38e417ed73bf138472cf4064f72028"
-dependencies = [
- "heck 0.5.0",
- "proc-macro2",
- "pyo3-build-config",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -10688,12 +10605,6 @@ dependencies = [
  "phf_codegen",
  "rand 0.8.6",
 ]
-
-[[package]]
-name = "unindent"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
 
 [[package]]
 name = "unit-prefix"
