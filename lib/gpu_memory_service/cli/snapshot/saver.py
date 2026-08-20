@@ -152,9 +152,7 @@ def main(argv: list[str] | None = None) -> None:
     devices = vmm.list_devices()
     if args.device is not None:
         if args.device not in devices:
-            parser.error(
-                f"--device {args.device} is not visible (visible={devices})"
-            )
+            parser.error(f"--device {args.device} is not visible (visible={devices})")
         devices = [args.device]
     logger.info(
         "Starting GMS save for %d devices lock_timeout_ms=%d sharded_ssd_roots=%s",

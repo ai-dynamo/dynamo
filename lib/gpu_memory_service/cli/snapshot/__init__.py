@@ -23,7 +23,7 @@ def start_per_device(
         for argument in argv
     )
     processes = []
-    for device in ([None] if scoped else devices):
+    for device in [None] if scoped else devices:
         extra = [] if device is None else ["--device", str(device)]
         process = subprocess.Popen([sys.executable, "-m", module, *argv, *extra])
         logger.info("Started %s device=%s pid=%d", module, device, process.pid)
