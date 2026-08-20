@@ -41,7 +41,7 @@ Aggregated no-MTP fallback manifests are also included under `vllm/agg-*-256k-no
 
 ### Refresh Profiles
 
-Refresh profiles add 256K and 1M aggregated and disaggregated agentic configurations for B200, GB200, and H200. The selected 256K B200 and GB200 deployments use 1P2D; the other selected disaggregated deployments use 1P1D. They use the released runtime image:
+Refresh profiles add 256K and 1M aggregated and disaggregated agentic configurations for B200, GB200, and H200. The selected 256K disaggregated deployments use 1P2D; the selected 1M disaggregated deployments use 1P1D. They use the released runtime image:
 
 ```text
 nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
@@ -59,14 +59,14 @@ nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff931046210249
 | B200 | 1M | 1P TP4 + 1D TP4 | disabled | 256 | 49152 | 38 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
 | GB200 | 256K | 1P TP4 + 2D TP4 | disabled | 256 | 32768 | 140 | `vllm/disagg-gb200-agentic-256k-1p2d/deploy.yaml` |
 | GB200 | 1M | 1P TP4 + 1D TP4 | disabled | 256 | 49152 | 48 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
-| H200 | 256K | 1P TP8 + 1D TP8 | disabled | 256 | 24576 | 42 | `vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml` |
+| H200 | 256K | 1P TP8 + 2D TP8 | disabled | 256 | 24576 | 72 | `vllm/disagg-h200-agentic-256k-1p2d/deploy.yaml` |
 | H200 | 1M | 1P TP8 + 1D TP8 | disabled | 256 | 24576 | 30 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
 
 The Refresh manifests enable KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and hybrid KV cache management. Expert Parallelism is disabled.
 
 The H200 and B200 disaggregated profiles use UCX/RDMA and request one `rdma/ib` resource per GPU. The qualified GB200 profiles use GKE multi-network MRDMA and request the four `networking.gke.io.networks/rdma-*` interfaces used by the measured GCP deployment.
 
-The B200 and GB200 256K 1P2D profiles use FlashInfer attention; the H200 256K 1P1D profile uses FlashAttention. These explicit backends are part of the qualified configurations.
+The B200 and GB200 256K 1P2D profiles use FlashInfer attention; the H200 256K 1P2D profile uses FlashAttention. These explicit backends are part of the qualified configurations.
 
 The selected disaggregated reference concurrencies passed the complete trace and release SLA gates. H200 1M selects CC30; CC32 is its first rejected point. Detailed performance results are maintained outside this recipe PR.
 
@@ -273,7 +273,7 @@ recipes/nemotron-3-ultra/
     disagg-b200-agentic-1m-1p1d/deploy.yaml
     disagg-gb200-agentic-256k-1p2d/deploy.yaml
     disagg-gb200-agentic-1m-1p1d/deploy.yaml
-    disagg-h200-agentic-256k-1p1d/deploy.yaml
+    disagg-h200-agentic-256k-1p2d/deploy.yaml
     disagg-h200-agentic-1m-1p1d/deploy.yaml
   perf/
     README.md                 # benchmark workflow

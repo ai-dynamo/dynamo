@@ -376,12 +376,12 @@ targets:
   recommended: true
   hardware:
     gpu: H200
-    count: 16
+    count: 24
   runtime:
     framework: vLLM
   topology: disaggregated
   techniques:
-  - 1p1d
+  - 1p2d
   - tp8-per-role
   - kv-aware-routing
   - pd-kv-transfer
@@ -389,9 +389,9 @@ targets:
   - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 42
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 72
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-256k-1p1d/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-256k-1p2d/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
