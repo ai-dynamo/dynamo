@@ -276,6 +276,36 @@ RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
     bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat
 ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+
+# The compat directory above carries NIXL's UCX dependencies, not libnixl*.so
+# itself -- those live in the wheel's meson-python directory, which is on no
+# loader path. Python consumers reach them through the extension module's
+# RPATH; Rust nixl-sys does not, because it resolves libnixl_capi.so with a
+# plain dlopen(). Without this, any process that uses NIXL without importing
+# the nixl Python package first -- notably dynamo.frontend built with
+# --frontend-decoding -- silently falls back to stub mode. Expose the same
+# stable prefix vLLM uses (cf. templates/vllm_runtime.Dockerfile).
+#
+# Select the wheel by CUDA major rather than globbing. In THIS image a glob
+# would in fact be unambiguous -- discover_nixl_ucx_layout.py, run by the
+# compat step above, already exits non-zero on more than one nixl-cu*
+# distribution ("expected one nixl-cu* distribution, found N"). Naming the
+# major is still the better contract: it keeps one interface with vLLM
+# (cf. templates/vllm_runtime.Dockerfile), and it states which NIXL this image
+# is meant to load instead of inferring it from whatever happens to be
+# installed. The installer fails the build if that wheel is not laid out as
+# expected, which is what a CUDA-major bump should do -- not produce an image
+# that hangs at startup.
+ARG CUDA_MAJOR
+RUN --mount=type=bind,source=./container/deps/vllm/install_nixl_from_wheel.sh,target=/tmp/install_nixl_from_wheel.sh,readonly \
+    bash /tmp/install_nixl_from_wheel.sh \
+        --cuda-major "${CUDA_MAJOR}" \
+        --site-packages "$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
+        --prefix /opt/dynamo/nixl \
+        --skip-headers
+# Appended, not prepended: the compat directory stays first, as its installer
+# requires.
+ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}/opt/dynamo/nixl:/opt/dynamo/nixl/plugins
 {% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership
