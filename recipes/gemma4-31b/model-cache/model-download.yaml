@@ -45,17 +45,20 @@ spec:
               value: /model-cache
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
-          # Adjust the below `hf download` invocations as appropriate for the SKU.
+          # Download only the checkpoints required by the target SKU.
           args:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub==1.16.4
+              # B200 and GB200: NVFP4 target model and MTP assistant model.
               hf download nvidia/Gemma-4-31B-IT-NVFP4
               hf download google/gemma-4-31B-it-assistant
+              # H200: comment out the two commands above and uncomment this one.
+              # hf download google/gemma-4-31B-it
           volumeMounts:
             - name: model-cache
               mountPath: /model-cache
       volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: shared-model-cache
+            claimName: model-cache

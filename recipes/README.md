@@ -50,6 +50,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/disagg-h200-agentic/)** | vLLM | Disaggregated | 3x H200 | ✅ | ✅ | Hybrid GDN+MoE, 1P2D over NIXL, KV-aware routing, no MTP; agentic profile | ❌ |
 | **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill, stable SGLang runtime image | ❌ |
 | **[GLM-5.2](glm-5.2/)** | SGLang | Aggregated + Disaggregated | 16x/20x B200 or 24x/16x H200 | ✅ | ✅ | B200 NVFP4 or H200 FP8 with FP8 KV, KV-aware routing, EAGLE, B200 HiCache CPU offload, agentic trace profile | ❌ |
+| **[Gemma 4 31B](gemma4-31b/)** | TensorRT-LLM | Aggregated | 8x B200 / 8x GB200 / 8x H200 | ✅ | ✅ | NVFP4 + FP8 KV on B200/GB200; BF16 + 16-bit KV and TP4 on H200; KV-aware routing; MTP on B200/GB200, not yet verified on H200; agentic profile | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | TP=8, single-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |

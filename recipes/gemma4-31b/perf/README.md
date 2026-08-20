@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Gemma 4 31B Benchmark Recipe
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job,
-[`perf.yaml`](perf.yaml), covers the Gemma 4 31B DGD. Set `ENDPOINT`,
+[`perf.yaml`](perf.yaml), covers all three Gemma 4 31B DGDs. Set `ENDPOINT`,
 `TARGET_MODEL`, `TRACE_FILE`, and `CONCURRENCY` for the target variant.
 
 The Job waits for the target model on the Dynamo frontend, runs a short warmup,
@@ -23,6 +23,8 @@ name so the benchmark pod is co-located with the correct frontend.
 | Variant | DGD affinity | `ENDPOINT` | `TARGET_MODEL` | `TRACE_FILE` | `CONCURRENCY` |
 | --- | --- | --- | --- | --- | --- |
 | B200 aggregate agentic | `gemma4-31b-agg-b200-agentic` | `gemma4-31b-agg-b200-agentic-frontend:8000` | `nvidia/Gemma-4-31B-IT-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | `192` |
+| GB200 aggregate agentic | `gemma4-31b-agg-gb200-agentic` | `gemma4-31b-agg-gb200-agentic-frontend:8000` | `nvidia/Gemma-4-31B-IT-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | |
+| H200 aggregate agentic | `gemma4-31b-agg-h200-agentic` | `gemma4-31b-agg-h200-agentic-frontend:8000` | `google/gemma-4-31B-it` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | |
 
 <!--
 When adding a variant, add its values to this table and keep the matching
@@ -60,7 +62,8 @@ export NAMESPACE=your-namespace
 ### 1. Deploy Gemma 4
 
 Follow the deployment instructions in the [Gemma 4 recipe README](../README.md)
-and wait for `gemma4-31b-agg-b200-agentic` to become ready.
+and wait for the selected DGD to become ready. Use the DGD affinity value from
+the target table when configuring `perf.yaml`.
 
 ### 2. Stage the trace
 
@@ -123,7 +126,7 @@ router state:
 ```bash
 kubectl delete job gemma4-31b-bench -n ${NAMESPACE} --ignore-not-found
 
-DGD=gemma4-31b-agg-b200-agentic
+DGD=gemma4-31b-agg-b200-agentic # Choose a DGD affinity value from the target table.
 kubectl delete pods -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD}
 kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
@@ -143,10 +146,10 @@ errored, and unfinished requests before reporting aggregate throughput.
 
 | Variable | Initial value | Notes |
 | --- | --- | --- |
-| `ENDPOINT` | `gemma4-31b-agg-b200-agentic-frontend:8000` | Gemma aggregate frontend service |
+| `ENDPOINT` | `gemma4-31b-agg-b200-agentic-frontend:8000` | Change per DGD variant |
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request agentic trace |
-| `CONCURRENCY` | `192` | Starting point from the current recipe result |
-| `TARGET_MODEL` | `nvidia/Gemma-4-31B-IT-NVFP4` | Must match `--served-model-name` in the DGD |
+| `CONCURRENCY` | `192` | B200 starting point; sweep and record a value for GB200 or H200 |
+| `TARGET_MODEL` | `nvidia/Gemma-4-31B-IT-NVFP4` | Change per DGD variant; must match `--served-model-name` |
 
 ## Artifacts
 
@@ -155,7 +158,7 @@ Results are written under:
 ```text
 /model-cache/perf/<epoch>_gemma4-31b-bench/
   warmup/
-  Gemma-4-31B-IT-NVFP4_trace_c<concurrency>_<timestamp>/
+  <model-name>_trace_c<concurrency>_<timestamp>/
     profile_export_aiperf.json
     inputs.json
     ...
