@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
@@ -33,17 +32,6 @@ const dgdWorkerHashPlaceholderValue = "worker-hash-placeholder"
 
 // Preserve hashes for runtimes released before version hashing.
 var minimumHashedRuntimeVersion = runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}
-
-// ComputeLegacyAlphaDGDWorkersSpecHash returns the v1alpha1 worker hash that a
-// pre-v1beta1 controller would compute for the DGD's current spec. Conversion
-// must preserve every v1alpha1 hash input shape this depends on.
-func ComputeLegacyAlphaDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, error) {
-	alpha := &v1alpha1.DynamoGraphDeployment{}
-	if err := alpha.ConvertFrom(dgd); err != nil {
-		return "", err
-	}
-	return v1alpha1.ComputeDGDWorkersSpecHash(alpha)
-}
 
 // participatesInWorkerSpecHash reports whether a generated DCD contributes to the
 // canonical worker-spec hash.
