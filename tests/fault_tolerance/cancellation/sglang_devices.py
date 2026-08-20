@@ -5,7 +5,7 @@
 def resolve_sglang_disaggregated_devices(
     cuda_visible_devices: str | None,
 ) -> tuple[str, str]:
-    """Return the decode and prefill tokens for a two-GPU SGLang deployment."""
+    """Return scheduler device tokens in established prefill, decode order."""
     if cuda_visible_devices is None:
         devices = ("0", "1")
     else:

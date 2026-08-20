@@ -20,13 +20,17 @@ pytestmark = [
     "visible_devices,expected",
     [
         pytest.param(None, ("0", "1"), id="unset-default"),
-        pytest.param("3,5", ("3", "5"), id="numeric-scheduler-assignment"),
+        pytest.param("3,5", ("3", "5"), id="prefill-then-decode-numeric"),
         pytest.param(
-            "GPU-decode,GPU-prefill,GPU-spare",
-            ("GPU-decode", "GPU-prefill"),
-            id="uuid-scheduler-assignment",
+            "GPU-prefill,GPU-decode,GPU-spare",
+            ("GPU-prefill", "GPU-decode"),
+            id="prefill-then-decode-uuid",
         ),
-        pytest.param(" MIG-decode , MIG-prefill ", ("MIG-decode", "MIG-prefill")),
+        pytest.param(
+            " MIG-prefill , MIG-decode ",
+            ("MIG-prefill", "MIG-decode"),
+            id="prefill-then-decode-mig",
+        ),
     ],
 )
 def test_resolve_sglang_disaggregated_devices(visible_devices, expected):

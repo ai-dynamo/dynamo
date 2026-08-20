@@ -137,9 +137,10 @@ class DynamoWorkerProcess(ManagedProcess):
         request.addfinalizer(lambda port=self.fpm_port: deallocate_port(port))
         env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
-        # Preserve scheduler-assigned device tokens (including GPU/MIG UUIDs).
+        # Preserve scheduler-assigned device tokens (including GPU/MIG UUIDs)
+        # while retaining the established prefill-first, decode-second topology.
         if mode in ("prefill", "decode"):
-            decode_device, prefill_device = resolve_sglang_disaggregated_devices(
+            prefill_device, decode_device = resolve_sglang_disaggregated_devices(
                 env.get("CUDA_VISIBLE_DEVICES")
             )
             env["CUDA_VISIBLE_DEVICES"] = (
