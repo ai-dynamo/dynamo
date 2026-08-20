@@ -26,5 +26,5 @@ wait_for_worker_log encoder-1 "Starting to serve the encode worker endpoint"
 launch pd "${PD_ENV[@]}" \
     python3 -m dynamo.vllm \
     "${COMMON_ARGS[@]}" "${PD_MEM_ARGS[@]}" \
-    --route-to-encoder --enable-mm-embeds
+    --route-to-encoder --enable-mm-embeds --disaggregation-mode pd
 wait_for_exit

@@ -15,10 +15,10 @@ launch frontend "${FRONTEND_ENV[@]}" \
 
 # Encoder workers
 launch encoder-0 "${ENCODER0_ENV[@]}" \
-    python3 -m dynamo.sglang "${ENCODER_ARGS[@]}"
+    python3 -m dynamo.sglang "${ENCODER_ARGS[@]}" --disaggregation-mode encode
 
 launch encoder-1 "${ENCODER1_ENV[@]}" \
-    python3 -m dynamo.sglang "${ENCODER_ARGS[@]}"
+    python3 -m dynamo.sglang "${ENCODER_ARGS[@]}" --disaggregation-mode encode
 
 # PD worker
 launch pd "${PD_ENV[@]}" \
