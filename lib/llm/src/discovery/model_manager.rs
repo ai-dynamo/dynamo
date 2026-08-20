@@ -1903,7 +1903,7 @@ impl ModelManager {
             Some(WorkerType::Prefill) => crate::kv_router::RouterLoadSource::Prefill,
             Some(WorkerType::Aggregated) => crate::kv_router::RouterLoadSource::Aggregated,
             Some(WorkerType::Decode) => crate::kv_router::RouterLoadSource::Decode,
-            Some(WorkerType::Encode) => anyhow::bail!("encode endpoints do not support KV routing"),
+            Some(WorkerType::Encode) => crate::kv_router::RouterLoadSource::Encode,
             None if metric_worker_type == crate::protocols::common::timing::WORKER_TYPE_PREFILL => {
                 crate::kv_router::RouterLoadSource::Prefill
             }
