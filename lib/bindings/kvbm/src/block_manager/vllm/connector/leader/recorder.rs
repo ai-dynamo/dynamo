@@ -124,10 +124,8 @@ struct ActionRecorderIngress<T: Send + 'static> {
     tx: mpsc::Sender<T>,
     dropped: Arc<AtomicU64>,
     capacity: usize,
-    // Held rather than detached so the forwarding task's lifetime is tied to
-    // this value. It is never aborted: dropping `tx` ends the loop only after
-    // it has drained the actions it already accepted. The loop can also end
-    // on its own, when the recorder's channel closes under it.
+    // Held rather than detached: dropping `tx` ties the forwarding task's
+    // lifetime to this value, which drains before exiting rather than aborting.
     _forwarder: JoinHandle<()>,
 }
 
@@ -273,10 +271,8 @@ impl KvConnectorLeaderRecorder {
             .unwrap();
 
         // todo(kvbm): make this a critical task
-        // The queue in front of the writer is bounded, so if writes to
-        // `output_path` cannot keep pace the trace loses actions rather than
-        // accumulating them: expect gaps in that file, counted and logged by
-        // `ActionRecorderIngress`.
+        // The queue in front of the writer is bounded: a slow `output_path` write
+        // drops actions instead of buffering unbounded, counted by `ActionRecorderIngress`.
         let ingress = ActionRecorderIngress::new(
             &get_current_tokio_handle(),
             recorder.event_sender(),
@@ -565,10 +561,8 @@ mod tests {
         drop(ingress);
         let retained = drain(&mut downstream_rx).await;
 
-        // Ceiling: the ingress queue, plus the one action the forwarding task
-        // holds while parked on the downstream `send`, plus the one the
-        // downstream channel itself buffers. Deliberately an inequality --
-        // whether the forwarder had already parked is a scheduling detail.
+        // Ceiling: queue capacity, plus one in-flight action held by the forwarder,
+        // plus one buffered downstream -- an inequality since parking timing varies.
         assert!(
             retained.len() <= CAPACITY + 2,
             "retained {} actions, which exceeds the {} the queue can hold",
@@ -667,10 +661,8 @@ mod tests {
             ingress.record(i);
         }
 
-        // The forwarding task has to be polled before it can notice the
-        // closure, so the accounting settles asynchronously. The timeout is a
-        // failure bound, not a delay -- it is reached only if some action was
-        // neither delivered nor counted.
+        // Accounting settles asynchronously once the forwarding task is polled;
+        // the timeout is a failure bound, reached only if an action goes uncounted.
         let settled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while ingress.dropped_count() != PUSHED as u64 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
