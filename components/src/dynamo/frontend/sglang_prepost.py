@@ -957,6 +957,7 @@ class SglangStreamingPostProcessor:
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
         eos_token_ids: list[int] | None = None,
+        allow_parallel_tool_calls: bool = True,
         prompt_token_ids: list[int] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
@@ -979,6 +980,7 @@ class SglangStreamingPostProcessor:
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
         self._eos_token_ids = set(eos_token_ids or [])
+        self._allow_parallel_tool_calls = allow_parallel_tool_calls
 
         # Keep a small, known-complete prompt suffix as decode context. Generated
         # tokens are promoted to context only after they decode without a
@@ -1443,6 +1445,14 @@ class SglangStreamingPostProcessor:
                     "Dropping incomplete SGLang tool calls with no valid arguments: %s",
                     dropped_names,
                 )
+
+            if not self._allow_parallel_tool_calls and self._tool_call_names:
+                first_idx = min(self._tool_call_names)
+                self._tool_call_ids = {first_idx: self._tool_call_ids[first_idx]}
+                self._tool_call_names = {first_idx: self._tool_call_names[first_idx]}
+                self._tool_call_args = {
+                    first_idx: self._tool_call_args.get(first_idx, [])
+                }
 
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []
