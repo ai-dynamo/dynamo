@@ -1334,6 +1334,7 @@ where
     pub fn select_target_with_load(
         &self,
         pinned_worker: Option<u64>,
+        is_load_eligible: impl Fn(u64) -> bool,
         load: impl Fn(u64) -> u64,
     ) -> anyhow::Result<u64> {
         if !matches!(
@@ -1345,6 +1346,12 @@ where
 
         let routing_instances = self.client.routing_instances();
         if let Some(worker_id) = pinned_worker {
+            if !is_load_eligible(worker_id) {
+                anyhow::bail!(
+                    "instance_id={worker_id} has no caller-owned load configuration for endpoint {}",
+                    self.client.endpoint.id()
+                );
+            }
             if !routing_instances.routable_ids().contains(&worker_id) {
                 anyhow::bail!(
                     "instance_id={worker_id} is not routable for endpoint {}",
@@ -1354,9 +1361,22 @@ where
             return Ok(worker_id);
         }
 
+        let candidates = routing_instances
+            .free_ids()
+            .iter()
+            .copied()
+            .filter(|worker_id| is_load_eligible(*worker_id))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            anyhow::bail!(
+                "no caller-owned-load-eligible instances for endpoint {}",
+                self.client.endpoint.id()
+            );
+        }
+
         self.picker()?
             .select(
-                CandidateView::Workers(routing_instances.free_ids()),
+                CandidateView::Workers(&candidates),
                 RouteContext::default(),
                 load,
             )
@@ -2399,17 +2419,42 @@ mod tests {
                 .unwrap();
         client.override_instance_avail(vec![1, 2, 3]);
         let selected = router
-            .select_target_with_load(None, |worker_id| match worker_id {
-                1 => 8,
-                2 => 1,
-                3 => 4,
-                _ => unreachable!(),
-            })
+            .select_target_with_load(
+                None,
+                |_| true,
+                |worker_id| match worker_id {
+                    1 => 8,
+                    2 => 1,
+                    3 => 4,
+                    _ => unreachable!(),
+                },
+            )
             .unwrap();
 
         assert_eq!(selected, 2);
         assert_eq!(router.occupancy_for_test(2), 0);
-        assert_eq!(router.select_target_with_load(Some(3), |_| 0).unwrap(), 3);
+        assert_eq!(
+            router
+                .select_target_with_load(Some(3), |_| true, |_| 0)
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            router
+                .select_target_with_load(
+                    None,
+                    |worker_id| worker_id != 2,
+                    |worker_id| {
+                        match worker_id {
+                            1 => 8,
+                            3 => 4,
+                            _ => unreachable!(),
+                        }
+                    }
+                )
+                .unwrap(),
+            3
+        );
         rt.shutdown();
     }
 

@@ -255,21 +255,28 @@ where
         }
     }
 
-    fn retarget_worker(&mut self, worker_id: u64) -> Result<(), Error> {
+    fn retarget_worker(&mut self, worker_id: u64) -> Result<Option<WorkerWithDpRank>, Error> {
         match self {
-            Self::Kv(_) => debug_assert!(false, "KV cleanup target cannot be retargeted"),
-            Self::Stateless { worker_id: current } => *current = worker_id,
+            Self::Kv(_) => {
+                debug_assert!(false, "KV cleanup target cannot be retargeted");
+                Ok(None)
+            }
+            Self::Stateless { worker_id: current } => {
+                *current = worker_id;
+                Ok(None)
+            }
             Self::Load {
                 worker_id: current,
                 reservation,
             } => {
-                if let Some(reservation) = reservation {
-                    reservation.retarget(worker_id)?;
-                }
+                let worker = reservation
+                    .as_mut()
+                    .map(|reservation| reservation.retarget(worker_id))
+                    .transpose()?;
                 *current = worker_id;
+                Ok(worker)
             }
         }
-        Ok(())
     }
 
     async fn finish(&mut self) {
@@ -682,7 +689,10 @@ where
         }
     }
 
-    pub(super) fn retarget_worker(&mut self, worker_id: u64) -> Result<(), Error> {
+    pub(super) fn retarget_worker(
+        &mut self,
+        worker_id: u64,
+    ) -> Result<Option<WorkerWithDpRank>, Error> {
         self.cleanup.retarget_worker(worker_id)
     }
 

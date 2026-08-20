@@ -623,7 +623,7 @@ where
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(&request, phase)?;
         let uses_load = required_inputs.contains(WorkerInputs::LOAD);
-        let (initial_worker, load_reservation) = if uses_load {
+        let (initial_worker, reserved_target, load_reservation) = if uses_load {
             let load_state = self
                 .load_state
                 .as_ref()
@@ -634,7 +634,12 @@ where
                 request.content(),
                 explicit.map(|target| (target.worker_id, target.dp_rank)),
             )?;
-            (reservation.worker().worker_id, Some(reservation))
+            let worker = reservation.worker();
+            (
+                worker.worker_id,
+                Some(route_target(worker)),
+                Some(reservation),
+            )
         } else {
             let worker_id = match explicit {
                 Some(target) => {
@@ -643,7 +648,7 @@ where
                 }
                 None => self.inner.select_stateless_worker()?,
             };
-            (worker_id, None)
+            (worker_id, None, None)
         };
         let mut guard: RequestGuard<Sel> = RequestGuard::new_builtin(
             self.request_metrics.clone(),
@@ -661,6 +666,7 @@ where
         guard.start_dispatch(&phase_label);
         guard.record_prefill_start();
         let dispatch_result = if let Some(target) = explicit {
+            let target = reserved_target.unwrap_or(target);
             request.routing_mut().dp_rank = target.dp_rank;
             let metadata = match prepare(&mut request, target) {
                 Ok(metadata) => metadata,
@@ -684,9 +690,11 @@ where
                     initial_worker,
                     None,
                     |request, worker_id| {
-                        guard.retarget_worker(worker_id)?;
-                        let target = AffinityTarget::new(worker_id, None);
-                        request.routing_mut().dp_rank = None;
+                        let worker = guard.retarget_worker(worker_id)?.ok_or_else(|| {
+                            anyhow::anyhow!("load-aware builtin request lost its reservation")
+                        })?;
+                        let target = route_target(worker);
+                        request.routing_mut().dp_rank = target.dp_rank;
                         prepare(request, target).map(|metadata| (metadata, target))
                     },
                 ),
@@ -1114,10 +1122,11 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
             .await
             .unwrap();
-        let (_workers_tx, workers) = watch::channel(HashMap::from([
-            (1, ModelRuntimeConfig::default()),
-            (2, ModelRuntimeConfig::default()),
-        ]));
+        let mut config = ModelRuntimeConfig::default();
+        config.data_parallel_start_rank = 3;
+        config.data_parallel_size = 2;
+        let (_workers_tx, workers) =
+            watch::channel(HashMap::from([(1, config.clone()), (2, config)]));
         let load_state = RoutingLoadState::start(
             endpoint,
             16,
@@ -1145,6 +1154,7 @@ mod tests {
             .select_and_reserve(&host.inner, "request-1", &request, None)
             .unwrap();
         let worker = reservation.worker();
+        assert_eq!(worker.dp_rank, 3);
         assert_eq!(load_state.active_request_count_for_test(worker), 1);
         assert_eq!(load_state.active_blocks_for_test(worker), 2);
         assert_eq!(load_state.active_tokens_for_test(worker), 32);
@@ -1154,11 +1164,57 @@ mod tests {
             Some(reservation),
             &request,
         );
+        assert_eq!(
+            guard.retarget_worker(worker.worker_id).unwrap(),
+            Some(worker)
+        );
         guard.abort().await;
         assert_eq!(load_state.active_request_count_for_test(worker), 0);
 
         drop(host);
         runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn builtin_load_selection_ignores_routable_workers_without_configs() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("builtin-load-configured-workers".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        let inner = PushRouter::from_client(client.clone(), RouterMode::LeastLoaded)
+            .await
+            .unwrap();
+        client.override_discovered_instances(vec![1, 2]);
+        client.override_instance_avail(vec![1, 2]);
+        let (_workers_tx, workers) =
+            watch::channel(HashMap::from([(1, ModelRuntimeConfig::default())]));
+        let load_state = RoutingLoadState::start(
+            endpoint,
+            16,
+            workers,
+            KvRouterConfig::default(),
+            WORKER_TYPE_DECODE,
+        )
+        .await
+        .unwrap();
+        let request = request();
+        let first = load_state
+            .select_and_reserve(&inner, "request-1", &request, Some((1, None)))
+            .unwrap();
+        let second = load_state
+            .select_and_reserve(&inner, "request-2", &request, None)
+            .unwrap();
+
+        assert_eq!(first.worker().worker_id, 1);
+        assert_eq!(second.worker().worker_id, 1);
     }
 
     #[tokio::test]
