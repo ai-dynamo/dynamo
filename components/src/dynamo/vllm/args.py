@@ -299,6 +299,14 @@ def update_engine_config_with_dynamo(
                 "Pooling-family worker: defaulting --enable-prefix-caching to False"
             )
             engine_config.enable_prefix_caching = False
+        elif dynamo_config.transcription_worker:
+            # Whisper is an encoder-decoder model. vLLM does not support
+            # prefix caching for cross-attention KV caches, and enabling it
+            # causes the first transcription request to terminate EngineCore.
+            logger.debug(
+                "Transcription worker: defaulting --enable-prefix-caching to False"
+            )
+            engine_config.enable_prefix_caching = False
         else:
             logger.debug(
                 "--enable-prefix-caching or --no-enable-prefix-caching not specified. "

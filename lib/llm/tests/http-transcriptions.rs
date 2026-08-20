@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use anyhow::Error;
@@ -23,6 +26,22 @@ const MODEL: &str = "test-whisper";
 
 struct TestTranscriptionEngine {
     fail: bool,
+}
+
+struct LongRunningTranscriptionEngine {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl LongRunningTranscriptionEngine {
+    fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn was_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }
 
 #[async_trait]
@@ -69,6 +88,45 @@ impl
     }
 }
 
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioTranscriptionRequest>,
+        ManyOut<Annotated<NvAudioTranscriptionResponse>>,
+        Error,
+    > for LongRunningTranscriptionEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioTranscriptionRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioTranscriptionResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let context = context.context();
+        let cancelled = self.cancelled.clone();
+        let stream_context = context.clone();
+
+        let stream = async_stream::stream! {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                    yield Annotated::from_data(NvAudioTranscriptionResponse {
+                        text: "completed".to_string(),
+                        usage: None,
+                        language: None,
+                        duration: None,
+                        segments: None,
+                        words: None,
+                    });
+                }
+                _ = stream_context.stopped() => {
+                    cancelled.store(true, Ordering::Release);
+                }
+            }
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
 struct TestService {
     base_url: String,
     client: reqwest::Client,
@@ -78,6 +136,17 @@ struct TestService {
 
 impl TestService {
     async fn start(fail: bool) -> Self {
+        Self::start_with_engine(Arc::new(TestTranscriptionEngine { fail })).await
+    }
+
+    async fn start_with_engine<E>(engine: Arc<E>) -> Self
+    where
+        E: AsyncEngine<
+                SingleIn<NvCreateAudioTranscriptionRequest>,
+                ManyOut<Annotated<NvAudioTranscriptionResponse>>,
+                Error,
+            > + 'static,
+    {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("failed to bind test listener");
@@ -95,7 +164,7 @@ impl TestService {
             .expect("failed to enable transcription endpoint");
         service
             .model_manager()
-            .add_transcriptions_model(MODEL, "0", Arc::new(TestTranscriptionEngine { fail }))
+            .add_transcriptions_model(MODEL, "0", engine)
             .expect("failed to register transcription model");
 
         let cancel = CancellationToken::new();
@@ -180,5 +249,24 @@ async fn annotated_invalid_argument_returns_bad_request() {
     let response = service.transcribe().await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn client_disconnect_cancels_transcription() {
+    let engine = Arc::new(LongRunningTranscriptionEngine::new());
+    let service = TestService::start_with_engine(engine.clone()).await;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), service.transcribe()).await;
+    assert!(result.is_err(), "long-running request should time out");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !engine.was_cancelled() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("client disconnect did not cancel transcription inference");
+
     service.shutdown().await;
 }
