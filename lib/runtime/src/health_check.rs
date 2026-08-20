@@ -83,11 +83,6 @@ impl HealthCheckManager {
         let canary_wait = self.config.canary_wait_time;
         let endpoint_subject_clone = endpoint_subject.clone();
 
-        // Get the handles for the registration this task monitors.
-        //
-        // Their absence is not a bug: registration announces the endpoint on a channel, and
-        // the endpoint can be released again — a start that rolls back, a shutdown —
-        // before this monitor gets to it. There is then nothing left to monitor.
         let Some(CanaryHandles {
             notifier,
             registration: watched,
@@ -116,11 +111,6 @@ impl HealthCheckManager {
                         // Timeout - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
-                        // Get the payload to probe with, and the registration it belongs to,
-                        // in one read. Whichever registration is serving the subject now is
-                        // the one this probe is about, so its verdict is filed against that
-                        // one rather than against whatever holds the subject when the probe
-                        // finally answers.
                         let handles = manager.drt.system_health().lock().get_canary_handles(&endpoint_subject);
 
                         if let Some(handles) = handles {
@@ -128,9 +118,6 @@ impl HealthCheckManager {
                                 error!("Failed to send health check for {}: {}", endpoint_subject, e);
                             }
                         } else {
-                            // The target is gone because the endpoint was released: it shut
-                            // down, or a start rolled back. That is the ordinary end of an
-                            // endpoint's life, so this task ends with it.
                             debug!(
                                 "Health check target for {} is gone; endpoint is no longer registered, stopping health check task",
                                 endpoint_subject
@@ -143,9 +130,6 @@ impl HealthCheckManager {
                         // Activity detected - reset timer for this endpoint only.
                         // A notification means push_handler successfully streamed
                         // a non-error response chunk, proving the engine is healthy.
-                        // The notifier belongs to the registration this task was spawned for,
-                        // so the activity it reports is that registration's. Filed against it,
-                        // and dropped if the subject has moved on to another one.
                         debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
                         manager.drt.system_health().lock().set_endpoint_health_status_for(
                             &endpoint_subject,
@@ -156,8 +140,6 @@ impl HealthCheckManager {
                 }
             }
 
-            // Drop the bookkeeping entry with the task, so a subject whose endpoint has
-            // gone away does not look like it is still being monitored.
             manager.forget_endpoint_task(&endpoint_subject, tokio::task::id());
 
             info!("Health check task for {} exiting", endpoint_subject);
@@ -174,10 +156,7 @@ impl HealthCheckManager {
         );
     }
 
-    /// Drop the recorded task for `endpoint_subject`, but only while it is still `task_id`'s
-    ///
-    /// A re-arm replaces the entry for a subject, so a task that outlives its own
-    /// replacement must not remove the entry that succeeded it.
+    /// Remove this task without deleting a newer replacement.
     fn forget_endpoint_task(&self, endpoint_subject: &str, task_id: tokio::task::Id) {
         let mut tasks = self.endpoint_tasks.lock();
         if tasks
@@ -188,10 +167,7 @@ impl HealthCheckManager {
         }
     }
 
-    /// Spawn a task to monitor for newly registered endpoints
-    ///
-    /// Returns an error if the registration receiver has already been taken, since only one
-    /// monitor may own it.
+    /// Spawn the sole monitor for newly registered endpoints.
     async fn spawn_new_endpoint_monitor(self: &Arc<Self>) -> anyhow::Result<()> {
         let manager = self.clone();
 
@@ -214,12 +190,7 @@ impl HealthCheckManager {
                     endpoint_subject
                 );
 
-                // A registration for a subject that already has a task is a re-arm, not an
-                // error: an endpoint that restarts under the same name registers again, and
-                // the running task is monitoring on behalf of an incarnation that is gone.
-                // Retire it and monitor the new one. This loop must keep running whatever
-                // arrives — it is the only path by which any later endpoint, under any
-                // name, is ever monitored.
+                // Re-registration replaces the task for the previous registration.
                 let previous = manager.endpoint_tasks.lock().remove(&endpoint_subject);
                 if let Some(previous) = previous {
                     debug!(
@@ -243,12 +214,7 @@ impl HealthCheckManager {
         Ok(())
     }
 
-    /// Send a health check request via the local endpoint registry (in-process).
-    ///
-    /// `probed` names the registration the payload came from. The request outlives the read
-    /// that issued it — it can still be in flight when that registration is released and
-    /// another takes the subject — so every verdict below is filed against `probed` and
-    /// discarded if it is no longer the one serving.
+    /// Send a health check and attribute its result to the probed registration.
     async fn send_health_check_request(
         &self,
         endpoint_subject: &str,

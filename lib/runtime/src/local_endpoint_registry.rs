@@ -26,14 +26,7 @@ pub type LocalAsyncEngine = Arc<
 /// and allows them to be called directly without going through the network transport layer.
 #[derive(Clone, Default)]
 pub struct LocalEndpointRegistry {
-    /// Map of endpoint name to the engines outstanding under it, oldest first
-    ///
-    /// A name can carry more than one registration at a time — a restart that overlaps the
-    /// outgoing incarnation's cleanup, or two components whose endpoints share a name — and
-    /// the last one registered is the one that serves. The others stay so that a release can
-    /// re-expose whichever registration it displaced, the way the health check target map
-    /// does; a plain overwrite would leave a still-running endpoint undispatchable once the
-    /// endpoint that displaced it stopped.
+    /// Endpoint registrations in insertion order; the last entry serves.
     engines: Arc<DashMap<String, Vec<LocalAsyncEngine>>>,
 }
 
@@ -45,12 +38,7 @@ impl LocalEndpointRegistry {
         }
     }
 
-    /// Register a local endpoint
-    ///
-    /// The registration joins any others outstanding under the same name and takes over
-    /// serving. It is withdrawn by [`remove_registration`](Self::remove_registration), which
-    /// identifies it by the `engine` handed in here.
-    ///
+    /// Register a local endpoint.
     /// # Arguments
     ///
     /// * `endpoint_name` - Name of the endpoint (e.g., "load_lora", "generate")
@@ -60,23 +48,14 @@ impl LocalEndpointRegistry {
         self.engines.entry(endpoint_name).or_default().push(engine);
     }
 
-    /// Get the local endpoint serving under `endpoint_name`
-    ///
-    /// The most recent registration, or None when the name has none.
+    /// Get the most recently registered endpoint under this name.
     pub fn get(&self, endpoint_name: &str) -> Option<LocalAsyncEngine> {
         self.engines
             .get(endpoint_name)
             .and_then(|outstanding| outstanding.last().cloned())
     }
 
-    /// Remove every registration under `endpoint_name`
-    ///
-    /// Returns the engine that was serving, if any. An endpoint that has stopped must be
-    /// removed: the canary health check dispatches through this registry, so an engine left
-    /// behind stays callable for an endpoint that no longer has a request-plane or discovery
-    /// presence. A caller withdrawing one endpoint's own registration wants
-    /// [`remove_registration`](Self::remove_registration) instead — this drops the
-    /// registrations of any other endpoint sharing the name along with it.
+    /// Remove every registration under this name and return the serving engine.
     pub fn remove(&self, endpoint_name: &str) -> Option<LocalAsyncEngine> {
         tracing::debug!("Removing local endpoint: {endpoint_name}");
         self.engines
@@ -84,13 +63,7 @@ impl LocalEndpointRegistry {
             .and_then(|(_, mut outstanding)| outstanding.pop())
     }
 
-    /// Withdraw the registration `engine` was registered under, wherever it now sits
-    ///
-    /// Returns it if it was still outstanding. Identity is the receipt: each start builds its
-    /// own engine, so `Arc::ptr_eq` tells one registration apart from another under a shared
-    /// name. Whichever registration remains on top afterwards serves — so cleanup for a
-    /// replaced endpoint does not evict the replacement, and an endpoint that stops re-exposes
-    /// the one it displaced rather than leaving the name undispatchable.
+    /// Withdraw one engine registration by identity.
     pub fn remove_registration(
         &self,
         endpoint_name: &str,
@@ -114,8 +87,6 @@ impl LocalEndpointRegistry {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    //! An engine for tests that only care about which registration is in place.
-
     use super::LocalAsyncEngine;
     use crate::engine::{AsyncEngine, AsyncEngineContextProvider};
     use crate::pipeline::{ManyOut, ResponseStream, SingleIn};
@@ -145,8 +116,6 @@ pub(crate) mod test_support {
         }
     }
 
-    /// A fresh engine. Each call returns a distinct `Arc`, so identity comparison
-    /// distinguishes one registration from another.
     pub(crate) fn stub_engine() -> LocalAsyncEngine {
         Arc::new(StubEngine)
     }
@@ -201,11 +170,6 @@ mod tests {
         assert!(registry.get(ENDPOINT).is_none());
     }
 
-    /// The other order. When the endpoint that took the name stops first, the one it
-    /// displaced is still running and must become dispatchable again — the registry has to
-    /// re-expose it the way the health check target map re-exposes its target. Overwriting
-    /// on registration lost it, so the name went undispatchable while an endpoint was still
-    /// serving under it.
     #[test]
     fn withdrawing_the_serving_registration_re_exposes_the_one_it_displaced() {
         let registry = LocalEndpointRegistry::new();
