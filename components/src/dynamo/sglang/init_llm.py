@@ -14,6 +14,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import set_resolved_server_args
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -71,7 +72,11 @@ async def init_decode(
                 "created before the endpoint existed, so its FPM publisher bound "
                 "a different IPC path than the relay would subscribe to."
             )
-            server_args.enable_forward_pass_metrics = False
+            set_resolved_server_args(
+                server_args,
+                "dynamo_snapshot_mode",
+                enable_forward_pass_metrics=False,
+            )
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -227,7 +232,11 @@ async def init_prefill(
                 "created before the endpoint existed, so its FPM publisher bound "
                 "a different IPC path than the relay would subscribe to."
             )
-            server_args.enable_forward_pass_metrics = False
+            set_resolved_server_args(
+                server_args,
+                "dynamo_snapshot_mode",
+                enable_forward_pass_metrics=False,
+            )
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()

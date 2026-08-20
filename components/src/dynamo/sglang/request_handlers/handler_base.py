@@ -45,6 +45,7 @@ from dynamo.llm import (
 )
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import set_resolved_server_args
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
@@ -871,7 +872,11 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         if req.abort_all_requests:
             self.engine.tokenizer_manager.abort_request(abort_all=True)
 
-        self.engine.tokenizer_manager.server_args.weight_version = req.new_version
+        set_resolved_server_args(
+            self.engine.tokenizer_manager.server_args,
+            "dynamo_update_weight_version",
+            weight_version=req.new_version,
+        )
         return {
             "success": True,
             "message": f"Weight version updated to {req.new_version}",

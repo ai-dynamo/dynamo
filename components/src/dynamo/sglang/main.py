@@ -15,6 +15,7 @@ from dynamo.common.snapshot.restore_context import (
 )
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang._compat import set_resolved_server_args
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
@@ -44,7 +45,11 @@ async def worker(argv: list[str] | None = None):
     if config.server_args.load_format == "gms":
         from gpu_memory_service.integrations.sglang import setup_gms
 
-        config.server_args.load_format = setup_gms(config.server_args)
+        set_resolved_server_args(
+            config.server_args,
+            "dynamo_gms_load_format",
+            load_format=setup_gms(config.server_args),
+        )
 
     # Snapshot mode: engine must be created before runtime so CRIU captures no
     # NATS/etcd connections.

@@ -79,3 +79,55 @@ def test_patch_model_runner_leaves_baseline_unchanged_without_preload(monkeypatc
 
     assert runner.alloc_memory_pool() == 10.0
     assert runner.pre_model_load_memory == 10.0
+
+
+class _FrozenServerArgs(SimpleNamespace):
+    """SGLang >= 0.5.17 rejects bare assignment on a resolved ``ServerArgs``."""
+
+    def __setattr__(self, name, value):
+        raise AttributeError(
+            f"server_args.{name} assigned after resolution; server_args is read-only"
+        )
+
+    def override(self, source, **fields):
+        self.overrides.append((source, dict(fields)))
+        for name, value in fields.items():
+            object.__setattr__(self, name, value)
+
+
+def test_setup_gms_enables_memory_saver_through_override():
+    """``--load-format gms`` runs after resolution, so this cannot bare-assign."""
+    from gpu_memory_service.integrations.sglang import setup_gms
+
+    server_args = _FrozenServerArgs(
+        overrides=[],
+        enable_weights_cpu_backup=False,
+        enable_draft_weights_cpu_backup=False,
+        model_loader_extra_config=None,
+        enable_memory_saver=False,
+        load_format="gms",
+    )
+
+    loader = setup_gms(server_args)
+
+    assert loader is not None
+    assert server_args.enable_memory_saver is True
+    assert server_args.overrides == [("gms", {"enable_memory_saver": True})]
+    # load_format stays the caller's to apply.
+    assert server_args.load_format == "gms"
+
+
+def test_setup_gms_falls_back_to_assignment_without_override():
+    """SGLang < 0.5.16 has neither ``override`` nor the guard."""
+    from gpu_memory_service.integrations.sglang import setup_gms
+
+    server_args = SimpleNamespace(
+        enable_weights_cpu_backup=False,
+        enable_draft_weights_cpu_backup=False,
+        model_loader_extra_config=None,
+        enable_memory_saver=False,
+        load_format="gms",
+    )
+
+    assert setup_gms(server_args) is not None
+    assert server_args.enable_memory_saver is True

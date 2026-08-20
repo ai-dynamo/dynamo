@@ -3,6 +3,7 @@
 
 """Unit tests for SGLang backend components."""
 
+import json
 import logging
 import os
 import re
@@ -25,6 +26,7 @@ from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
+    set_resolved_server_args,
 )
 from dynamo.sglang.args import (
     _forward_pass_metrics_source,
@@ -38,6 +40,7 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.publisher import set_forward_pass_metrics_worker_id
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
@@ -1424,3 +1427,179 @@ async def test_lora_registration_model_type_gate(
     assert captured["kv_cache_block_size"] == 32
     assert captured["runtime_config"] is lora_runtime_config
     assert "token_budget" in captured["runtime_config"].runtime_data
+
+
+class _ResolvedServerArgs:
+    """Stands in for SGLang >= 0.5.17's frozen ``ServerArgs``.
+
+    Mirrors the upstream guard: any bare assignment after resolution raises,
+    and ``override`` is the sanctioned entry point, recording the source it was
+    given.
+    """
+
+    def __init__(self, **fields):
+        object.__setattr__(self, "_overrides", [])
+        for name, value in fields.items():
+            object.__setattr__(self, name, value)
+
+    def __setattr__(self, name, value):
+        raise AttributeError(
+            f"server_args.{name} assigned after resolution; server_args is "
+            "read-only -- use get_context().override(source, ...) to change "
+            "resolved config."
+        )
+
+    def override(self, source, **fields):
+        self._overrides.append((source, dict(fields)))
+        for name, value in fields.items():
+            object.__setattr__(self, name, value)
+
+
+def test_resolved_server_args_rejects_bare_assignment():
+    """Guards the premise: without the helper these call sites would raise."""
+    server_args = _ResolvedServerArgs(enable_memory_saver=False)
+
+    with pytest.raises(AttributeError, match="assigned after resolution"):
+        server_args.enable_memory_saver = True
+
+
+def test_set_resolved_server_args_uses_override_when_available():
+    server_args = _ResolvedServerArgs(
+        forward_pass_metrics_worker_id=None, forward_pass_metrics_ipc_name=None
+    )
+
+    set_resolved_server_args(
+        server_args,
+        "dynamo_forward_pass_metrics",
+        forward_pass_metrics_worker_id="worker-1",
+        forward_pass_metrics_ipc_name="ipc:///tmp/fpm",
+    )
+
+    assert server_args.forward_pass_metrics_worker_id == "worker-1"
+    assert server_args.forward_pass_metrics_ipc_name == "ipc:///tmp/fpm"
+    assert server_args._overrides == [
+        (
+            "dynamo_forward_pass_metrics",
+            {
+                "forward_pass_metrics_worker_id": "worker-1",
+                "forward_pass_metrics_ipc_name": "ipc:///tmp/fpm",
+            },
+        )
+    ]
+
+
+def test_set_resolved_server_args_falls_back_without_override():
+    """SGLang 0.5.15 has neither the guard nor ``override``."""
+    server_args = SimpleNamespace(enable_memory_saver=False)
+
+    set_resolved_server_args(
+        server_args, "dynamo_snapshot_memory_saver", enable_memory_saver=True
+    )
+
+    assert server_args.enable_memory_saver is True
+
+
+def test_set_resolved_server_args_repeats_a_source_across_call_sites():
+    """The source string is provenance, not a key: reuse must not be rejected."""
+    server_args = _ResolvedServerArgs(enable_forward_pass_metrics=True)
+
+    set_resolved_server_args(
+        server_args, "dynamo_forward_pass_metrics", enable_forward_pass_metrics=False
+    )
+    set_resolved_server_args(
+        server_args, "dynamo_forward_pass_metrics", enable_forward_pass_metrics=True
+    )
+
+    assert server_args.enable_forward_pass_metrics is True
+    assert [source for source, _ in server_args._overrides] == [
+        "dynamo_forward_pass_metrics",
+        "dynamo_forward_pass_metrics",
+    ]
+
+
+def test_set_forward_pass_metrics_worker_id_on_resolved_server_args():
+    """The publisher path end to end against a frozen ``ServerArgs``."""
+    server_args = _ResolvedServerArgs(
+        enable_forward_pass_metrics=True,
+        forward_pass_metrics_worker_id=None,
+        forward_pass_metrics_ipc_name=None,
+    )
+    endpoint = SimpleNamespace(connection_id=lambda: 4242)
+
+    set_forward_pass_metrics_worker_id(server_args, endpoint)
+
+    try:
+        assert server_args.forward_pass_metrics_worker_id == "4242"
+        assert server_args.forward_pass_metrics_ipc_name.startswith("ipc://")
+    finally:
+        # NamedTemporaryFile(delete=False) leaves the placeholder behind.
+        Path(server_args.forward_pass_metrics_ipc_name[len("ipc://") :]).unlink(
+            missing_ok=True
+        )
+
+
+def _resolved_server_args(tmp_path):
+    """A real, resolved ``ServerArgs`` from the installed SGLang."""
+    from sglang.srt.server_args import ServerArgs
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "num_hidden_layers": 2,
+                "max_position_embeddings": 128,
+                "vocab_size": 32,
+                "torch_dtype": "float16",
+            }
+        )
+    )
+    try:
+        return ServerArgs(
+            model_path=str(tmp_path),
+            tokenizer_path=str(tmp_path),
+            device="cpu",
+            skip_tokenizer_init=True,
+        )
+    except Exception as exc:  # pragma: no cover - environment dependent
+        pytest.skip(f"cannot resolve ServerArgs here: {exc}")
+
+
+def test_real_server_args_rejects_bare_assignment(tmp_path, monkeypatch):
+    """The regression itself, against the installed SGLang rather than a double.
+
+    0.5.16 -- the version pinned here -- reads SGLANG_STRICT_CONFIG_MUTATION on
+    every assignment and only guards when it is set; 0.5.17 guards
+    unconditionally and ignores the variable. Setting it covers both.
+    """
+    server_args = _resolved_server_args(tmp_path)
+    if not hasattr(server_args, "override"):
+        pytest.skip("SGLang < 0.5.16 has no ServerArgs.override")
+    monkeypatch.setenv("SGLANG_STRICT_CONFIG_MUTATION", "1")
+
+    # Match only the wording common to both: 0.5.16 says "use
+    # server_args.override(source, ...) instead", 0.5.17 says "server_args is
+    # read-only -- use get_context().override(source, ...)".
+    with pytest.raises(AttributeError, match="assigned after resolution"):
+        server_args.enable_memory_saver = True
+
+
+def test_set_resolved_server_args_applies_fields_on_real_server_args(tmp_path):
+    """A multi-field override on a real resolved instance, as publisher.py does."""
+    server_args = _resolved_server_args(tmp_path)
+    if not hasattr(server_args, "override"):
+        pytest.skip("SGLang < 0.5.16 has no ServerArgs.override")
+
+    set_resolved_server_args(
+        server_args,
+        "dynamo_test",
+        load_format="dummy",
+        enable_memory_saver=True,
+    )
+
+    assert server_args.load_format == "dummy"
+    assert server_args.enable_memory_saver is True
