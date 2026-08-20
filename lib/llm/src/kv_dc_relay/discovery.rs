@@ -1010,13 +1010,16 @@ fn decode_card(instance: DiscoveryInstance) -> Option<(ModelCardInstanceId, Stor
         return None;
     };
     match instance.deserialize_model::<ModelDeploymentCard>() {
-        Ok(card) => Some((
-            id,
-            StoredModelCard {
-                card,
-                serialized: card_json.clone(),
-            },
-        )),
+        Ok(mut card) => {
+            crate::discovery::readiness::normalize_legacy_prefill_topology(&mut card);
+            Some((
+                id,
+                StoredModelCard {
+                    card,
+                    serialized: card_json.clone(),
+                },
+            ))
+        }
         Err(error) => {
             tracing::warn!(instance = %id.to_path(), %error, "Ignoring malformed KV DC Relay model card");
             None

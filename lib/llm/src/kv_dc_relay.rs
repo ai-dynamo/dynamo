@@ -32,5 +32,4 @@ pub use identity::{
 pub use load::PoolLoadSnapshot;
 pub use topology::{
     AdapterReadiness, TopologyEntry, TopologyMember, TopologyReadinessState, TopologySnapshot,
-    TopologyUnit,
 };

@@ -14,6 +14,7 @@ use tokio::sync::watch;
 
 use super::discovery::{DcMembershipView, EndpointMembership};
 use super::identity::{CanonicalModelId, DcPoolCatalog, ModelTarget, WorkerRole};
+use crate::discovery::readiness::{ReadinessEval, ReadinessUnit, evaluate_readiness};
 use crate::worker_type::WorkerType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,89 +57,14 @@ pub struct TopologySnapshot {
     pub entries: Vec<TopologyEntry>,
 }
 
-/// Normalized equivalent of one Dynamo WorkerSet for readiness evaluation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TopologyUnit {
-    pub(crate) worker_type: Option<WorkerType>,
-    pub(crate) live_count: usize,
-    pub(crate) needs: Vec<Vec<WorkerType>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TopologyEvaluation {
-    pub(crate) ready: bool,
-    pub(crate) present_roles: Vec<WorkerRole>,
-    pub(crate) missing_roles: Vec<WorkerRole>,
-    pub(crate) has_legacy: bool,
-}
-
-/// Mirrors `Model::evaluate_namespace` without depending on private WorkerSet state.
-pub(crate) fn evaluate_topology(units: &[TopologyUnit]) -> TopologyEvaluation {
-    let mut present = HashSet::new();
-    let mut missing = HashSet::new();
-    let mut has_legacy = false;
-    let mut has_live_worker = false;
-
-    for unit in units {
-        has_live_worker |= unit.live_count != 0;
-        match unit.worker_type {
-            Some(worker_type) if unit.live_count != 0 => {
-                present.insert(worker_type);
-            }
-            Some(_) => {}
-            None => has_legacy = true,
-        }
-    }
-
-    if has_legacy {
-        return TopologyEvaluation {
-            ready: has_live_worker,
-            present_roles: sorted_worker_roles(present),
-            missing_roles: Vec::new(),
-            has_legacy,
-        };
-    }
-
-    for unit in units {
-        let Some(worker_type) = unit.worker_type else {
-            continue;
-        };
-        if !present.contains(&worker_type) {
-            missing.insert(worker_type);
-        }
-        if unit.live_count == 0 || unit.needs.is_empty() {
-            continue;
-        }
-        let satisfied = unit
-            .needs
-            .iter()
-            .any(|alternative| alternative.iter().all(|needed| present.contains(needed)));
-        if !satisfied {
-            for needed in unit.needs.iter().flatten() {
-                if !present.contains(needed) {
-                    missing.insert(*needed);
-                }
-            }
-        }
-    }
-
-    TopologyEvaluation {
-        ready: has_live_worker && missing.is_empty(),
-        present_roles: sorted_worker_roles(present),
-        missing_roles: sorted_worker_roles(missing),
-        has_legacy,
-    }
-}
-
 #[derive(Default)]
 struct AdapterAggregate {
-    has_live_member: bool,
-    live_roles: HashSet<WorkerRole>,
+    units: Vec<ReadinessUnit>,
 }
 
 #[derive(Default)]
 struct TopologyAggregate {
-    units: Vec<TopologyUnit>,
+    units: Vec<ReadinessUnit>,
     members: Vec<TopologyMember>,
     adapters: BTreeMap<CanonicalModelId, AdapterAggregate>,
     availability_authoritative: bool,
@@ -303,8 +229,6 @@ fn derive_topology(
     pools: &HashMap<EndpointId, PoolId>,
 ) -> Vec<TopologyEntry> {
     let mut groups = BTreeMap::<(String, CanonicalModelId), TopologyAggregate>::new();
-    let mut live_endpoint_types =
-        HashMap::<(String, CanonicalModelId), HashMap<WorkerType, usize>>::new();
 
     for (endpoint, endpoint_membership) in membership.endpoints.iter() {
         if !endpoint_membership.conflicts.is_empty() {
@@ -333,12 +257,6 @@ fn derive_topology(
             group
                 .units
                 .extend(topology_units(endpoint_membership, endpoint_availability));
-            let counts = live_endpoint_types
-                .entry((endpoint_membership.namespace.clone(), base_model.clone()))
-                .or_default();
-            for worker_type in live_worker_types(endpoint_membership, endpoint_availability) {
-                *counts.entry(worker_type).or_default() += 1;
-            }
             collect_adapter_membership(
                 group,
                 endpoint_membership,
@@ -351,27 +269,18 @@ fn derive_topology(
     groups
         .into_iter()
         .map(|((namespace, model), mut group)| {
-            let duplicate_role_endpoints = duplicate_role_endpoints(
-                live_endpoint_types
-                    .remove(&(namespace.clone(), model.clone()))
-                    .unwrap_or_default(),
-            );
             group.members.sort_unstable_by(|left, right| {
                 left.endpoint.to_string().cmp(&right.endpoint.to_string())
             });
-            let evaluation = evaluate_topology(&group.units);
-            // Parity with `Model::evaluate_namespace`: an ambiguous topology (more than one
-            // live endpoint serving a non-Aggregated role) is not ready in the core either.
+            let evaluation = evaluate_readiness(&group.units);
             let state = if !group.availability_authoritative {
                 TopologyReadinessState::Unknown
-            } else if evaluation.ready
-                && (evaluation.has_legacy || duplicate_role_endpoints.is_empty())
-            {
+            } else if evaluation.ready {
                 TopologyReadinessState::Ready
             } else {
                 TopologyReadinessState::Unavailable
             };
-            let adapters = derive_adapters(&group.adapters, &group.members, state, &evaluation);
+            let adapters = derive_adapters(&group.adapters, state);
             TopologyEntry {
                 namespace,
                 model,
@@ -379,15 +288,15 @@ fn derive_topology(
                 present_roles: if state == TopologyReadinessState::Unknown {
                     Vec::new()
                 } else {
-                    evaluation.present_roles
+                    sorted_worker_roles(evaluation.present)
                 },
                 missing_roles: if state == TopologyReadinessState::Unknown {
                     Vec::new()
                 } else {
-                    evaluation.missing_roles
+                    sorted_worker_roles(evaluation.missing)
                 },
                 members: group.members,
-                duplicate_role_endpoints,
+                duplicate_role_endpoints: sorted_worker_roles(evaluation.ambiguous),
                 legacy_fallback_active: evaluation.has_legacy,
                 adapters,
             }
@@ -398,7 +307,7 @@ fn derive_topology(
 fn topology_units(
     membership: &EndpointMembership,
     live_workers: Option<&HashSet<WorkerId>>,
-) -> Vec<TopologyUnit> {
+) -> Vec<ReadinessUnit> {
     let mut groups = HashMap::<(Option<WorkerType>, Vec<Vec<WorkerType>>), usize>::new();
     for (&worker_id, topology) in &membership.worker_topology {
         let live = live_workers.is_some_and(|workers| workers.contains(&worker_id));
@@ -409,7 +318,7 @@ fn topology_units(
     }
     groups
         .into_iter()
-        .map(|((worker_type, needs), live_count)| TopologyUnit {
+        .map(|((worker_type, needs), live_count)| ReadinessUnit {
             worker_type,
             live_count,
             needs,
@@ -428,65 +337,48 @@ fn collect_adapter_membership(
             continue;
         }
         let aggregate = group.adapters.entry(adapter.clone()).or_default();
+        // Adapter units mirror the base unit construction, restricted to workers that
+        // advertise the adapter: the serving gate's alternative-route semantics then
+        // apply to adapters unchanged (an adapter on a live Aggregated route is ready
+        // even when a disaggregated route also exists, and a Decode-only adapter still
+        // needs an adapter-carrying Prefill peer).
+        let mut units = HashMap::<(Option<WorkerType>, Vec<Vec<WorkerType>>), usize>::new();
         for worker_id in adapter_membership.workers.keys() {
-            if !live_workers.is_some_and(|workers| workers.contains(worker_id)) {
+            let Some(topology) = membership.worker_topology.get(worker_id) else {
                 continue;
-            }
-            aggregate.has_live_member = true;
-            if let Some(role) = membership
-                .worker_topology
-                .get(worker_id)
-                .and_then(|topology| topology.worker_type)
-                .map(|worker_type| WorkerRole::from_worker_type(Some(worker_type)))
-                && role != WorkerRole::Encode
-            {
-                aggregate.live_roles.insert(role);
-            }
+            };
+            let live = live_workers.is_some_and(|workers| workers.contains(worker_id));
+            let live_count = units
+                .entry((topology.worker_type, topology.needs.clone()))
+                .or_default();
+            *live_count += usize::from(live);
         }
+        aggregate
+            .units
+            .extend(
+                units
+                    .into_iter()
+                    .map(|((worker_type, needs), live_count)| ReadinessUnit {
+                        worker_type,
+                        live_count,
+                        needs,
+                    }),
+            );
     }
 }
 
 fn derive_adapters(
     adapters: &BTreeMap<CanonicalModelId, AdapterAggregate>,
-    members: &[TopologyMember],
     base_state: TopologyReadinessState,
-    evaluation: &TopologyEvaluation,
 ) -> Vec<AdapterReadiness> {
-    let required_roles = members
-        .iter()
-        .flat_map(|member| member.roles.iter().copied())
-        .filter(|role| {
-            matches!(
-                role,
-                WorkerRole::Prefill | WorkerRole::Decode | WorkerRole::Aggregated
-            )
-        })
-        .collect::<BTreeSet<_>>();
-
     adapters
         .iter()
         .map(|(model, aggregate)| {
-            let mut missing = required_roles
-                .iter()
-                .copied()
-                .filter(|role| !aggregate.live_roles.contains(role))
-                .collect::<BTreeSet<_>>();
-            missing.extend(evaluation.missing_roles.iter().copied());
+            let evaluation = evaluate_readiness(&aggregate.units);
             let state = match base_state {
                 TopologyReadinessState::Unknown => TopologyReadinessState::Unknown,
                 TopologyReadinessState::Unavailable => TopologyReadinessState::Unavailable,
-                TopologyReadinessState::Ready if evaluation.has_legacy => {
-                    if aggregate.has_live_member {
-                        TopologyReadinessState::Ready
-                    } else {
-                        TopologyReadinessState::Unavailable
-                    }
-                }
-                TopologyReadinessState::Ready
-                    if missing.is_empty() && aggregate.has_live_member =>
-                {
-                    TopologyReadinessState::Ready
-                }
+                TopologyReadinessState::Ready if evaluation.ready => TopologyReadinessState::Ready,
                 TopologyReadinessState::Ready => TopologyReadinessState::Unavailable,
             };
             AdapterReadiness {
@@ -495,35 +387,10 @@ fn derive_adapters(
                 missing_roles: if state == TopologyReadinessState::Unknown {
                     Vec::new()
                 } else {
-                    missing.into_iter().collect()
+                    sorted_worker_roles(evaluation.missing)
                 },
             }
         })
-        .collect()
-}
-
-/// Non-Aggregated roles served by more than one live endpoint. The core treats this
-/// topology as ambiguous and not ready; the role list explains the gate to consumers.
-fn duplicate_role_endpoints(live_endpoint_counts: HashMap<WorkerType, usize>) -> Vec<WorkerRole> {
-    let mut roles = live_endpoint_counts
-        .into_iter()
-        .filter(|&(worker_type, endpoints)| worker_type != WorkerType::Aggregated && endpoints > 1)
-        .map(|(worker_type, _)| WorkerRole::from_worker_type(Some(worker_type)))
-        .collect::<Vec<_>>();
-    roles.sort_unstable();
-    roles
-}
-
-/// Worker types with at least one live worker on this endpoint, deduplicated.
-fn live_worker_types(
-    membership: &EndpointMembership,
-    live_workers: Option<&HashSet<WorkerId>>,
-) -> HashSet<WorkerType> {
-    membership
-        .worker_topology
-        .iter()
-        .filter(|(worker_id, _)| live_workers.is_some_and(|workers| workers.contains(worker_id)))
-        .filter_map(|(_, topology)| topology.worker_type)
         .collect()
 }
 
@@ -552,18 +419,6 @@ mod tests {
     use super::super::resolution::resolve_indexer_domain;
     use super::*;
     use crate::model_card::ModelDeploymentCard;
-
-    fn unit(
-        worker_type: Option<WorkerType>,
-        live_count: usize,
-        needs: Vec<Vec<WorkerType>>,
-    ) -> TopologyUnit {
-        TopologyUnit {
-            worker_type,
-            live_count,
-            needs,
-        }
-    }
 
     fn model(value: &str) -> CanonicalModelId {
         CanonicalModelId::new(value).unwrap()
@@ -726,84 +581,6 @@ mod tests {
             .iter()
             .find(|entry| entry.model.as_str() == canonical_model)
             .expect("topology entry")
-    }
-
-    #[test]
-    fn evaluator_matches_aggregated_pd_epd_and_dead_worker_semantics() {
-        let aggregated = evaluate_topology(&[unit(Some(WorkerType::Aggregated), 1, vec![])]);
-        assert!(aggregated.ready);
-        assert_eq!(aggregated.present_roles, [WorkerRole::Aggregated]);
-
-        let pd = evaluate_topology(&[
-            unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
-            unit(Some(WorkerType::Decode), 1, vec![vec![WorkerType::Prefill]]),
-        ]);
-        assert!(pd.ready);
-
-        let epd = evaluate_topology(&[
-            unit(
-                Some(WorkerType::Encode),
-                1,
-                vec![
-                    vec![WorkerType::Prefill, WorkerType::Decode],
-                    vec![WorkerType::Aggregated],
-                ],
-            ),
-            unit(Some(WorkerType::Prefill), 1, vec![]),
-            unit(Some(WorkerType::Decode), 1, vec![]),
-        ]);
-        assert!(epd.ready);
-
-        let missing_decode = evaluate_topology(&[
-            unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
-            unit(Some(WorkerType::Decode), 0, vec![vec![WorkerType::Prefill]]),
-        ]);
-        assert!(!missing_decode.ready);
-        assert_eq!(missing_decode.missing_roles, [WorkerRole::Decode]);
-    }
-
-    #[test]
-    fn evaluator_matches_legacy_fallback_for_legacy_only_and_mixed_inputs() {
-        for units in [
-            vec![unit(None, 1, vec![])],
-            vec![
-                unit(None, 1, vec![]),
-                unit(Some(WorkerType::Decode), 0, vec![vec![WorkerType::Prefill]]),
-            ],
-        ] {
-            let evaluation = evaluate_topology(&units);
-            assert!(evaluation.ready);
-            assert!(evaluation.has_legacy);
-            assert!(evaluation.missing_roles.is_empty());
-        }
-        let unavailable = evaluate_topology(&[unit(None, 0, vec![])]);
-        assert!(!unavailable.ready);
-        assert!(unavailable.has_legacy);
-    }
-
-    #[test]
-    fn evaluator_ignores_needs_of_dead_workers_but_reports_their_declared_role() {
-        let evaluation = evaluate_topology(&[
-            unit(Some(WorkerType::Aggregated), 1, vec![]),
-            unit(
-                Some(WorkerType::Encode),
-                0,
-                vec![vec![WorkerType::Prefill, WorkerType::Decode]],
-            ),
-        ]);
-        assert!(!evaluation.ready);
-        assert_eq!(evaluation.missing_roles, [WorkerRole::Encode]);
-        assert!(!evaluation.missing_roles.contains(&WorkerRole::Prefill));
-        assert!(!evaluation.missing_roles.contains(&WorkerRole::Decode));
-    }
-
-    #[test]
-    fn empty_topology_is_not_ready() {
-        let evaluation = evaluate_topology(&[]);
-        assert!(!evaluation.ready);
-        assert!(!evaluation.has_legacy);
-        assert!(evaluation.present_roles.is_empty());
-        assert!(evaluation.missing_roles.is_empty());
     }
 
     #[test]
@@ -1088,7 +865,9 @@ mod tests {
 
         assert_eq!(topology.state, TopologyReadinessState::Ready);
         assert!(topology.legacy_fallback_active);
-        assert_eq!(topology.duplicate_role_endpoints, [WorkerRole::Prefill]);
+        // The core COMPAT branch does not evaluate ambiguity for legacy namespaces,
+        // so the fact list stays empty rather than reporting the duplicate prefill.
+        assert!(topology.duplicate_role_endpoints.is_empty());
     }
 
     #[test]
@@ -1302,6 +1081,85 @@ mod tests {
             topology.adapters[0].state,
             TopologyReadinessState::Unavailable
         );
+    }
+
+    #[test]
+    fn adapter_on_a_live_aggregated_route_is_ready_in_a_mixed_namespace() {
+        let view = view(vec![
+            with_adapter(
+                endpoint(
+                    "production.agg.generate",
+                    "llama",
+                    1,
+                    Some(WorkerType::Aggregated),
+                    Vec::new(),
+                ),
+                "llama",
+                "tenant-a",
+                1,
+            ),
+            endpoint(
+                "production.prefill.generate",
+                "llama",
+                2,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            endpoint(
+                "production.decode.generate",
+                "llama",
+                3,
+                Some(WorkerType::Decode),
+                vec![vec![WorkerType::Prefill]],
+            ),
+        ]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let snapshot = publisher.snapshot();
+        let topology = entry(&snapshot, "llama");
+
+        assert_eq!(topology.state, TopologyReadinessState::Ready);
+        assert_eq!(topology.adapters.len(), 1);
+        // The adapter's own aggregated route is a complete alternative; the P/D
+        // route existing in the namespace must not be imposed as a conjunction.
+        assert_eq!(topology.adapters[0].state, TopologyReadinessState::Ready);
+        assert!(topology.adapters[0].missing_roles.is_empty());
+    }
+
+    #[test]
+    fn decode_only_adapter_in_a_pd_namespace_is_missing_its_prefill_peer() {
+        let view = view(vec![
+            endpoint(
+                "production.prefill.generate",
+                "llama",
+                1,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            with_adapter(
+                endpoint(
+                    "production.decode.generate",
+                    "llama",
+                    2,
+                    Some(WorkerType::Decode),
+                    vec![vec![WorkerType::Prefill]],
+                ),
+                "llama",
+                "tenant-a",
+                2,
+            ),
+        ]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let snapshot = publisher.snapshot();
+        let topology = entry(&snapshot, "llama");
+
+        assert_eq!(topology.state, TopologyReadinessState::Ready);
+        assert_eq!(
+            topology.adapters[0].state,
+            TopologyReadinessState::Unavailable
+        );
+        assert_eq!(topology.adapters[0].missing_roles, [WorkerRole::Prefill]);
     }
 
     #[test]
