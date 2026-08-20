@@ -43,6 +43,11 @@ impl RlWorkerMetadata {
                 if value.is_empty() {
                     anyhow::bail!("RL admin base URL must not be blank");
                 }
+                let parsed = url::Url::parse(value)
+                    .map_err(|error| anyhow::anyhow!("invalid RL admin base URL: {error}"))?;
+                if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                    anyhow::bail!("RL admin base URL must use HTTP or HTTPS");
+                }
                 Ok(value.to_string())
             })
             .transpose()?;
@@ -222,5 +227,7 @@ mod tests {
     fn rl_worker_metadata_rejects_invalid_values() {
         assert!(RlWorkerMetadata::new(0, None).is_err());
         assert!(RlWorkerMetadata::new(1, Some("   ".to_string())).is_err());
+        assert!(RlWorkerMetadata::new(1, Some("worker:8120".to_string())).is_err());
+        assert!(RlWorkerMetadata::new(1, Some("ftp://worker:8120".to_string())).is_err());
     }
 }

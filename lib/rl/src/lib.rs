@@ -240,11 +240,21 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         .unwrap_or_default();
 
     let models = model_map(model_instances);
-    let rl_endpoints = rl_endpoint_instances(
-        endpoint_instances,
-        &config.rl_endpoint,
-        config.component_filter.as_deref(),
-    );
+    let rl_endpoints = endpoint_instances
+        .into_iter()
+        .filter_map(|instance| match instance {
+            DiscoveryInstance::Endpoint(endpoint) => Some(endpoint),
+            _ => None,
+        })
+        .filter(|endpoint| endpoint.endpoint == config.rl_endpoint)
+        .filter(|endpoint| {
+            config
+                .component_filter
+                .as_ref()
+                .map(|components| components.iter().any(|c| c == &endpoint.component))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
 
     // Bound the client cache (N2): drop clients for endpoints that are no longer
     // present. Live endpoints are retained, so the fan-out below still reuses their
@@ -292,26 +302,6 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
     });
 
     Ok(workers)
-}
-
-fn rl_endpoint_instances(
-    instances: Vec<DiscoveryInstance>,
-    rl_endpoint: &str,
-    component_filter: Option<&[String]>,
-) -> Vec<Instance> {
-    instances
-        .into_iter()
-        .filter_map(|instance| match instance {
-            DiscoveryInstance::Endpoint(endpoint) => Some(endpoint),
-            _ => None,
-        })
-        .filter(|endpoint| endpoint.endpoint == rl_endpoint)
-        .filter(|endpoint| {
-            component_filter
-                .map(|components| components.iter().any(|c| c == &endpoint.component))
-                .unwrap_or(true)
-        })
-        .collect()
 }
 
 async fn describe_worker(
@@ -489,6 +479,9 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
                 .ok_or_else(|| anyhow::anyhow!("worker routes response has invalid 'world_size'"))
         })
         .transpose()?;
+    if admin_base_url.is_some() && world_size.is_none() {
+        anyhow::bail!("worker routes response has 'admin_base_url' without valid 'world_size'");
+    }
     Ok(WorkerRoutes {
         routes,
         system_url,
@@ -567,23 +560,38 @@ fn model_map(instances: Vec<DiscoveryInstance>) -> HashMap<ModelKey, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::{
+        discovery::DiscoverySpec,
+        pipeline::{
+            AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, async_trait,
+            network::Ingress,
+        },
+    };
+    use futures::stream;
     use serde_json::json;
 
-    fn endpoint_instance(
-        namespace: &str,
-        component: &str,
-        endpoint: &str,
-        instance_id: u64,
-    ) -> DiscoveryInstance {
-        DiscoveryInstance::Endpoint(Instance {
-            namespace: namespace.to_string(),
-            component: component.to_string(),
-            endpoint: endpoint.to_string(),
-            instance_id,
-            transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
-            device_type: None,
-            request_plane_codec: None,
-        })
+    struct TestRoutesHandler;
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<serde_json::Value>,
+            ManyOut<Annotated<serde_json::Value>>,
+            anyhow::Error,
+        > for TestRoutesHandler
+    {
+        async fn generate(
+            &self,
+            input: SingleIn<serde_json::Value>,
+        ) -> anyhow::Result<ManyOut<Annotated<serde_json::Value>>> {
+            let (_, context) = input.into_parts();
+            Ok(ResponseStream::new(
+                Box::pin(stream::once(async {
+                    Annotated::from_data(json!({"status": "ok", "routes": []}))
+                })),
+                context.context(),
+            ))
+        }
     }
 
     fn model_instance(
@@ -668,6 +676,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_worker_routes_requires_world_size_with_admin_base_url() {
+        let err = parse_worker_routes(json!({
+            "routes": [],
+            "admin_base_url": "http://worker:8120",
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("world_size"));
+
+        let parsed = parse_worker_routes(json!({ "routes": [], "world_size": 1 }))
+            .expect("world size does not require an admin URL");
+        assert_eq!(parsed.world_size, Some(1));
+        assert!(parsed.admin_base_url.is_none());
+    }
+
+    #[test]
     fn parse_worker_routes_propagates_worker_error_status() {
         let err = parse_worker_routes(json!({ "status": "error", "message": "engine is dead" }))
             .unwrap_err();
@@ -735,15 +758,62 @@ mod tests {
         assert!(map.is_empty());
     }
 
-    #[test]
-    fn rl_endpoint_instances_do_not_require_model_metadata() {
-        let endpoints = rl_endpoint_instances(
-            vec![endpoint_instance("dynamo", "backend", "rl", 1)],
-            "rl",
-            None,
+    #[tokio::test]
+    async fn list_workers_keeps_endpoints_without_unambiguous_model_metadata() {
+        let runtime = dynamo_runtime::Runtime::from_current().expect("test runtime");
+        let distributed = Arc::new(
+            DistributedRuntime::new(
+                runtime,
+                dynamo_runtime::distributed::DistributedConfig::process_local(),
+            )
+            .await
+            .expect("distributed runtime"),
         );
+        let ingress = Ingress::for_engine(Arc::new(TestRoutesHandler)).expect("test ingress");
+        let started = distributed
+            .namespace("dynamo")
+            .expect("namespace")
+            .component("backend")
+            .expect("component")
+            .endpoint("rl")
+            .endpoint_builder()
+            .handler(ingress)
+            .start_with_registration()
+            .await
+            .expect("RL endpoint");
+        let state = RlDiscoveryState::new(RlDiscoveryConfig {
+            runtime: distributed.clone(),
+            namespace: "dynamo".to_string(),
+            rl_endpoint: "rl".to_string(),
+            component_filter: None,
+            request_timeout: Duration::from_secs(1),
+            max_concurrent_probes: 1,
+        });
 
-        assert_eq!(endpoints.len(), 1);
-        assert_eq!(endpoints[0].instance_id, 1);
+        let workers = list_workers(&state).await.expect("workers without models");
+        assert_eq!(workers.len(), 1);
+        assert!(workers[0].model.is_none());
+
+        for (endpoint, display_name) in [("generate", "model-a"), ("embed", "model-b")] {
+            distributed
+                .discovery()
+                .register(DiscoverySpec::Model {
+                    namespace: "dynamo".to_string(),
+                    component: "backend".to_string(),
+                    endpoint: endpoint.to_string(),
+                    card_json: json!({"display_name": display_name}),
+                    model_suffix: None,
+                })
+                .await
+                .expect("model registration");
+        }
+
+        let workers = list_workers(&state)
+            .await
+            .expect("workers with ambiguous models");
+        assert_eq!(workers.len(), 1);
+        assert!(workers[0].model.is_none());
+
+        started.shutdown().await.expect("endpoint shutdown");
     }
 }
