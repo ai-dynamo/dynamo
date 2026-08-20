@@ -223,6 +223,7 @@ enum TransportFallback<'a> {
     Allow,
     Deny,
     Within(&'a HashSet<u64>),
+    Matching(&'a (dyn Fn(u64) -> bool + Sync)),
 }
 
 struct DeviceAwareCandidates {
@@ -914,6 +915,47 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
+        let fallback = allowed_fallback
+            .map(TransportFallback::Within)
+            .unwrap_or(TransportFallback::Allow);
+        self.direct_prepared_with_fallback(instance_id, request, fallback, prepare)
+            .await
+    }
+
+    /// Like [`Self::direct_within_prepared`], but filters transport fallbacks with a predicate.
+    ///
+    /// The predicate is evaluated only when the originally selected instance disappears before
+    /// dispatch. This lets callers retain their own, potentially live eligibility view.
+    pub async fn direct_matching_prepared<M, F, P>(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        is_fallback_allowed: P,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        P: Fn(u64) -> bool + Sync,
+    {
+        self.direct_prepared_with_fallback(
+            instance_id,
+            request,
+            TransportFallback::Matching(&is_fallback_allowed),
+            prepare,
+        )
+        .await
+    }
+
+    async fn direct_prepared_with_fallback<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         // Fallback-enabled dispatch still honors a selected worker while it remains in
         // discovery. Local inhibition only filters worker selection owned by this router;
         // fallback is considered only if the selected worker disappears after this check.
@@ -933,10 +975,6 @@ where
             worker_id = instance_id,
             "Selected worker"
         );
-
-        let fallback = allowed_fallback
-            .map(TransportFallback::Within)
-            .unwrap_or(TransportFallback::Allow);
         self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
             .await
     }
@@ -1611,25 +1649,28 @@ where
         if let Some((addr, kind, inst)) = lookup(instance_id) {
             return Ok((instance_id, addr, kind, inst));
         }
-        let allowed_fallback = match fallback {
-            TransportFallback::Allow => None,
-            TransportFallback::Deny => {
-                return Err(DynamoError::builder()
-                    .error_type(ErrorType::CannotConnect)
-                    .message(format!(
-                        "instance_id={instance_id} not found for endpoint {}",
-                        self.client.endpoint.id()
-                    ))
-                    .build()
-                    .into());
-            }
-            TransportFallback::Within(allowed) => Some(allowed),
-        };
+        if matches!(fallback, TransportFallback::Deny) {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::CannotConnect)
+                .message(format!(
+                    "instance_id={instance_id} not found for endpoint {}",
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into());
+        }
 
         let routing_instances = self.client.routing_instances();
-        let fallback_id = routing_instances.free_ids().iter().copied().find(|&id| {
-            id != instance_id && allowed_fallback.is_none_or(|allowed| allowed.contains(&id))
-        });
+        let fallback_id = routing_instances
+            .free_ids()
+            .iter()
+            .copied()
+            .find(|&id| match fallback {
+                TransportFallback::Allow => id != instance_id,
+                TransportFallback::Deny => false,
+                TransportFallback::Within(allowed) => id != instance_id && allowed.contains(&id),
+                TransportFallback::Matching(is_allowed) => id != instance_id && is_allowed(id),
+            });
         match fallback_id {
             Some(id) => {
                 tracing::warn!(
@@ -3057,6 +3098,20 @@ mod tests {
                 .resolve_transport(stale_id, TransportFallback::Within(&allowed))
                 .is_ok(),
             "constrained dispatch should fall back within the allowed worker set"
+        );
+        let is_allowed = |id| id == real_id;
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Matching(&is_allowed))
+                .is_ok(),
+            "predicate-constrained dispatch should fall back to an eligible worker"
+        );
+        let is_rejected = |_| false;
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Matching(&is_rejected))
+                .is_err(),
+            "predicate-constrained dispatch should not fall back outside its eligible workers"
         );
         let disallowed = HashSet::new();
         let disallowed_error = router
