@@ -5,6 +5,16 @@
 
 const ARTICLES = [
   {
+    title: "Faster LLM Inference Recovery with Dynamo Shadow Engines",
+    description:
+      "A pre-initialized shadow engine shares GPU-resident weights with the active one and takes over in seconds, turning a three-node cascade from a 150-second outage into 17 failed requests.",
+    href: "/dynamo/dev/digest/dynamo-bulwark",
+    date: "August 13, 2026",
+    readTime: "11 min read",
+    category: "Engineering",
+    art: "bulwark",
+  },
+  {
     title: "DynoSim: Simulating the Pareto Frontier",
     description:
       "Explore serving configurations with a workload-driven Dynamo simulator before committing scarce GPU time to cluster validation.",
