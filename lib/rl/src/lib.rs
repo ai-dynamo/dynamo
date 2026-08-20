@@ -112,8 +112,6 @@ pub struct RlWorkerInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub world_size: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub weight_transfer_backend: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -355,7 +353,6 @@ struct WorkerRoutes {
     system_url: Option<String>,
     admin_base_url: Option<String>,
     world_size: Option<u32>,
-    weight_transfer_backend: Option<String>,
 }
 
 async fn call_worker_routes(
@@ -481,26 +478,11 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
                 .ok_or_else(|| anyhow::anyhow!("worker routes response has invalid 'world_size'"))
         })
         .transpose()?;
-    let weight_transfer_backend = value
-        .get("weight_transfer_backend")
-        .map(|value| {
-            let value = value.as_str().ok_or_else(|| {
-                anyhow::anyhow!("worker routes response has invalid 'weight_transfer_backend'")
-            })?;
-            let value = value.trim();
-            if value.is_empty() {
-                anyhow::bail!("worker routes response has invalid 'weight_transfer_backend'");
-            }
-            Ok(value.to_string())
-        })
-        .transpose()?;
-
     Ok(WorkerRoutes {
         routes,
         system_url,
         admin_base_url,
         world_size,
-        weight_transfer_backend,
     })
 }
 
@@ -525,7 +507,6 @@ fn worker_info(
         model,
         routes: discovered.routes,
         world_size: discovered.world_size,
-        weight_transfer_backend: discovered.weight_transfer_backend,
         error,
     }
 }
@@ -611,7 +592,6 @@ mod tests {
         assert_eq!(parsed.system_url.as_deref(), Some("http://worker:8080"));
         assert_eq!(parsed.admin_base_url.as_deref(), Some("http://worker:8120"));
         assert_eq!(parsed.world_size, Some(4));
-        assert_eq!(parsed.weight_transfer_backend.as_deref(), Some("nccl"));
     }
 
     #[test]
@@ -645,12 +625,6 @@ mod tests {
     fn parse_worker_routes_rejects_invalid_rl_metadata() {
         let zero = parse_worker_routes(json!({ "routes": [], "world_size": 0 })).unwrap_err();
         assert!(zero.to_string().contains("world_size"));
-        let blank = parse_worker_routes(json!({
-            "routes": [],
-            "weight_transfer_backend": "  ",
-        }))
-        .unwrap_err();
-        assert!(blank.to_string().contains("weight_transfer_backend"));
     }
 
     #[test]
