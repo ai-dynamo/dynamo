@@ -31,6 +31,8 @@ use dynamo_runtime::protocols::annotated::Annotated;
 /// This deliberately owns the same slot tracker used by KV scheduling. Builtin policies may read
 /// only active requests today, but the capability retains active prefill tokens and decode blocks
 /// as well so `LOAD` has one meaning across all routing policies.
+// TODO: P2C and least-loaded can be further optimized with an active-request-only tracker if it
+// preserves atomic selection and reservation.
 pub(crate) struct RoutingLoadState {
     slots: Arc<ActiveSequencesMulti>,
     // This snapshot is published only after `slots` has reconciled the same topology, so
