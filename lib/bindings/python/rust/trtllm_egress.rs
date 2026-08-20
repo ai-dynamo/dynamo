@@ -428,8 +428,11 @@ impl OwnedTokenEgress {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
+    use std::time::Duration;
 
     use super::{
         EngineResponse, MockEngineResponse, OwnedFrameSink, OwnedResponseState, ProcessorCore,
@@ -461,6 +464,60 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(message);
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingSink {
+        entered: (Mutex<bool>, Condvar),
+        released: (Mutex<bool>, Condvar),
+        closed: AtomicBool,
+    }
+
+    impl BlockingSink {
+        fn wait_until_send_blocks(&self) {
+            let (lock, ready) = &self.entered;
+            let mut entered = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            while !*entered {
+                entered = ready
+                    .wait(entered)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        }
+
+        fn release(&self) {
+            let (lock, ready) = &self.released;
+            *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            ready.notify_all();
+        }
+    }
+
+    impl OwnedFrameSink for BlockingSink {
+        fn send(&self, _frame: Annotated<serde_json::Value>) -> Result<(), String> {
+            let (entered_lock, entered_ready) = &self.entered;
+            *entered_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            entered_ready.notify_all();
+
+            let (release_lock, release_ready) = &self.released;
+            let mut released = release_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while !*released {
+                released = release_ready
+                    .wait(released)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            Ok(())
+        }
+
+        fn close(&self) {
+            self.closed.store(true, Ordering::Relaxed);
+        }
+
+        fn close_with_error(&self, _message: String) {
+            self.close();
         }
     }
 
@@ -673,6 +730,43 @@ mod tests {
                 .as_slice(),
             ["consumer disconnected"]
         );
+    }
+
+    #[test]
+    fn cancellation_does_not_wait_for_a_backpressured_send() {
+        let processor = Arc::new(ProcessorCore::default());
+        let sink = Arc::new(BlockingSink::default());
+        processor
+            .register(36, 0, 1, sink.clone(), 0.0)
+            .expect("register client 36");
+
+        let processing = {
+            let processor = processor.clone();
+            thread::spawn(move || {
+                processor.process_batch(vec![MockEngineResponse::tokens(
+                    36,
+                    vec![vec![1]],
+                    false,
+                )])
+            })
+        };
+        sink.wait_until_send_blocks();
+
+        let (cancelled_tx, cancelled_rx) = mpsc::channel();
+        let cancelling = {
+            let processor = processor.clone();
+            thread::spawn(move || {
+                let _ = cancelled_tx.send(processor.cancel(36));
+            })
+        };
+        let cancelled_without_waiting = cancelled_rx.recv_timeout(Duration::from_millis(100));
+
+        sink.release();
+        let _ = processing.join();
+        let _ = cancelling.join();
+
+        assert_eq!(cancelled_without_waiting, Ok(true));
+        assert!(sink.closed.load(Ordering::Relaxed));
     }
 
     #[test]
