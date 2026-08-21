@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+steps:
+  - label: ":docker: Verify hosted remote builder"
+    key: verify-remote-builder
+    command: .buildkite/scripts/verify-remote-builder.sh
+    agents:
+      queue: linux-large
+    timeout_in_minutes: 15
+    artifact_paths:
+      - artifacts/buildkite/remote-builder/**/*
+
+  - label: ":nvidia: Build Dynamo CUDA stage (cold)"
+    key: build-dynamo-image-cold
+    depends_on: verify-remote-builder
+    command: .buildkite/scripts/build-image.sh
+    env:
+      CACHE_RUN: cold
+    agents:
+      queue: linux-large
+    timeout_in_minutes: 120
+    artifact_paths:
+      - artifacts/buildkite/image-build/cold/**/*
+
+  - label: ":zap: Build Dynamo CUDA stage (warm)"
+    key: build-dynamo-image-warm
+    depends_on: build-dynamo-image-cold
+    command: .buildkite/scripts/build-image.sh
+    env:
+      CACHE_RUN: warm
+    agents:
+      queue: linux-large
+    timeout_in_minutes: 120
+    artifact_paths:
+      - artifacts/buildkite/image-build/warm/**/*
+
+  - label: ":bar_chart: Compare build times"
+    key: compare-build-times
+    depends_on: build-dynamo-image-warm
+    command: .buildkite/scripts/compare-builds.sh
+    agents:
+      queue: linux-small
+    timeout_in_minutes: 10
+    artifact_paths:
+      - artifacts/buildkite/comparison/**/*
