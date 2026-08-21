@@ -1379,3 +1379,66 @@ fn remove_after_split_and_children_clear_scrubs_lookup() {
     apply_direct(&index, &mut l2, remove_event(2, 103, 0, w2_leaf));
     assert_eq!(worker_lookup_len(&l2, w2), Some(0));
 }
+
+#[test]
+fn successful_repair_does_not_restore_scrubbed_other_worker_entries() {
+    let index = ConcurrentRadixTreeCompressed::new();
+    let scrubbed_worker = worker(1);
+    let repairing_worker = worker(2);
+    let mut shared_lookup = direct_lookup();
+    let mut splitter_lookup = direct_lookup();
+
+    apply_direct(
+        &index,
+        &mut shared_lookup,
+        make_store_event(1, &[1, 2, 3, 4]),
+    );
+    apply_direct(
+        &index,
+        &mut shared_lookup,
+        make_store_event(2, &[1, 2, 3, 4]),
+    );
+
+    // A split from another event thread leaves both local lookups pointing at
+    // the old prefix node for the [3, 4] suffix.
+    apply_direct(
+        &index,
+        &mut splitter_lookup,
+        make_store_event(3, &[1, 2, 9]),
+    );
+    let suffix_hashes = remove_hashes_with_parent(&[1, 2], &[3, 4]);
+
+    // A resolve-miss remove scrubs lookup state but cannot update coverage on
+    // the node it failed to find. Model that boundary directly while keeping
+    // the resolved live node's coverage intact.
+    let scrubbed_lookup = shared_lookup.get_mut(&scrubbed_worker).unwrap();
+    for hash in &suffix_hashes {
+        scrubbed_lookup.remove(hash);
+    }
+    assert_eq!(worker_lookup_len(&shared_lookup, scrubbed_worker), Some(2));
+    assert_direct_score(&index, &[1, 2, 3, 4], scrubbed_worker, 4);
+
+    // A different worker's stale lookup successfully resolves the suffix and
+    // repairs the event thread's shared lookup map.
+    let resolved = index
+        .resolve_lookup(
+            &mut shared_lookup,
+            repairing_worker,
+            suffix_hashes[0],
+            LookupRepairDirection::TowardTail,
+        )
+        .expect("repairing worker should resolve the split suffix");
+
+    let repairing_lookup = shared_lookup.get(&repairing_worker).unwrap();
+    for hash in &suffix_hashes {
+        assert!(Arc::ptr_eq(repairing_lookup.get(hash).unwrap(), &resolved));
+    }
+
+    let scrubbed_lookup = shared_lookup.get(&scrubbed_worker).unwrap();
+    for hash in suffix_hashes {
+        assert!(
+            !scrubbed_lookup.contains_key(&hash),
+            "repair for another worker restored a scrubbed lookup entry"
+        );
+    }
+}
