@@ -97,6 +97,7 @@ Do not delete the namespace until required traces, logs, image/model identities,
 ```bash
 kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/stock-dgd.yaml --ignore-not-found
 kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/thunderagent-dgd.yaml --ignore-not-found
+kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/benchmark-mocker-dgd.yaml --ignore-not-found
 kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/storage-and-gpu.yaml
 kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/network-policy.yaml
 kubectl get all,configmap,secret,pvc,serviceaccount,role,rolebinding,networkpolicy,resourceclaimtemplate,resourceclaim,dynamographdeployment -n anish-agent-well-lit-path -o wide
@@ -106,3 +107,34 @@ kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/namespace.ya
 The platform admission layer creates `acr-token-secret` and the `shared-model-cache` PVC in this namespace; Kubernetes creates the default ServiceAccount and root CA ConfigMap, and the Dynamo operator creates the `planner-serviceaccount` plus `planner-serviceaccount-binding` for the cluster planner role. They are not authored or directly deleted by this branch. The final inventory must contain no project pods, graphs, claims, project RBAC, or unexpected user objects. Stop and investigate rather than deleting the namespace if anything beyond these documented platform and namespace-baseline objects remains. Namespace deletion is intentionally broader than the direct cleanup above and removes them along with every other namespaced object.
 
 Deleting `agent-well-lit-model-cache` removes the project-owned model cache, and deleting the namespace removes the admission-created `shared-model-cache` too. Preserve the project cache between stock and ThunderAgent arms when reproducibility and startup cost matter; do not point either arm at another namespace's cache.
+
+## Internal controlled-load extension
+
+The files prefixed `benchmark-` are an internal qualification extension for the cluster named above. They are not part of the cluster-agnostic operator guides. They keep the public contract recipe-first while providing a reproducible two-worker endpoint for the shared `agent-loadgen` campaign.
+
+`benchmark-mocker-dgd.yaml` is the zero-GPU transport fixture. Use it first to validate endpoint discovery, the campaign runner, AIPerf, and harness-specific request shapes when shared GPU capacity is unavailable. It advertises two mock workers from one CPU process and is explicitly unsuitable for latency, throughput, cache-benefit, routing-benefit, or capacity claims. The tested result and cleanup record are in `evidence/2026-08-21-benchmark-smoke.md`.
+
+```bash
+kubectl apply -f examples/agent_harnesses/shared_nscale/kubernetes/storage-and-gpu.yaml
+kubectl apply -f examples/agent_harnesses/shared_nscale/kubernetes/benchmark-mocker-dgd.yaml
+kubectl wait -n anish-agent-well-lit-path --for=condition=Ready dynamographdeployment/agent-well-lit-benchmark-mocker --timeout=10m
+kubectl -n anish-agent-well-lit-path port-forward --address 127.0.0.1 svc/agent-well-lit-benchmark-mocker-frontend 8000:8000
+```
+
+Delete the Mocker DGD and wait for both CPU pods to disappear before starting any GPU arm.
+
+The stock graph is paired with exactly one router ConfigMap at a time. `benchmark-no-affinity-config.yaml` and `benchmark-session-affinity-config.yaml` both use the KV router and differ only by the 300-second session-affinity TTL, making the first arm a controlled no-affinity baseline. Delete the graph and ConfigMap between arms so the frontend starts with a clean router state.
+
+Both stock and ThunderAgent graphs request two classic GPUs. Required self-affinity places both worker replicas on one unprotected GPU node; the CPU frontend, and the co-located ThunderAgent router when present, occupy at most one additional CPU node. The pods tolerate only the standard GPU taint, so nodes protected by another team's reservation taint remain ineligible. Recalculate allocation immediately before every apply and stop if one unprotected GPU node no longer has two free devices.
+
+Apply the model cache from `storage-and-gpu.yaml`, but do not apply either older one-GPU graph. Run the three benchmark arms sequentially:
+
+```bash
+kubectl apply -f examples/agent_harnesses/shared_nscale/kubernetes/storage-and-gpu.yaml
+kubectl apply -f examples/agent_harnesses/shared_nscale/kubernetes/benchmark-no-affinity-config.yaml
+kubectl apply -f examples/agent_harnesses/shared_nscale/kubernetes/benchmark-stock-dgd.yaml
+```
+
+After preserving the first result, delete `agent-well-lit-benchmark-stock` and `agent-well-lit-benchmark-router`, verify that all project GPU pods are gone, then repeat with `benchmark-session-affinity-config.yaml` and the same stock graph. After the affinity result, clean the graph and ConfigMap again before applying `benchmark-thunderagent-dgd.yaml`. Never overlap two arms.
+
+These four-request smoke campaigns validate endpoint compatibility, causal scheduling, headers, result capture, and bounded concurrency. They are not enough for a routing-performance claim. The larger concurrency and saturation series, repetitions, telemetry bundle, and failure campaign remain separate gates.
