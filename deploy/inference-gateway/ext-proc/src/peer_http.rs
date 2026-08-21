@@ -9,22 +9,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use axum::{
-    Router,
-    body::Body,
+    Json, Router,
     extract::State,
-    http::{StatusCode, header::CONTENT_TYPE},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
 };
-use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::services::indexer::server::StreamDumpRecord;
 use dynamo_kv_router::services::selection::SelectionService;
-
-/// Media type of the streaming NDJSON dump (one [`StreamDumpRecord`] per line).
-const STREAM_DUMP_MEDIA_TYPE: &str = "application/x-ndjson";
 
 #[derive(Clone)]
 struct AppState {
@@ -77,41 +71,25 @@ async fn dump(State(state): State<AppState>) -> Response {
             .into_response();
     }
 
-    let records = match state.service.indexer_stream_records().await {
-        Ok(records) => records,
-        Err(error) => {
-            tracing::warn!(%error, "Failed to collect peer KV-index dump records");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "peer KV-index snapshot generation failed",
-            )
-                .into_response();
-        }
-    };
+    let snapshot = state.service.indexer_snapshot().await;
+    // `dump_registry` embeds per-model `{"error": ...}` entries when an indexer
+    // dump fails; surface those as a whole-snapshot 500 so the recovery consumer
+    // does not deserialize an incompatible entry (and fall back to empty state).
+    let failed = snapshot
+        .as_object()
+        .into_iter()
+        .flatten()
+        .any(|(_key, entry)| entry.get("error").is_some());
+    if failed {
+        tracing::warn!("peer KV-index snapshot contains a failed indexer dump");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "peer KV-index snapshot generation failed",
+        )
+            .into_response();
+    }
 
-    // Stream NDJSON, one record per line. The receiver applies each event and
-    // drops it, so the whole snapshot is never buffered on either side and no
-    // max-bytes budget is needed.
-    let stream = futures::stream::iter(records).map(|record: StreamDumpRecord| {
-        match serde_json::to_vec(&record) {
-            Ok(mut bytes) => {
-                bytes.push(b'\n');
-                Ok::<_, std::convert::Infallible>(bytes)
-            }
-            Err(error) => {
-                tracing::warn!(%error, "Failed to serialize dump record");
-                // Signal a mid-stream failure with an empty frame; the receiver
-                // treats a truncated record as an error and retries.
-                Ok::<_, std::convert::Infallible>(Vec::new())
-            }
-        }
-    });
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, STREAM_DUMP_MEDIA_TYPE)
-        .body(Body::from_stream(stream))
-        .expect("static response builder")
+    (StatusCode::OK, Json(snapshot)).into_response()
 }
 
 #[cfg(test)]
@@ -162,7 +140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_dump_emits_ndjson_records() {
+    async fn dump_returns_json_snapshot() {
         let service = service().await;
         let cancel = CancellationToken::new();
         let port = free_tcp_port();
@@ -184,17 +162,17 @@ mod tests {
             resp.headers()
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok()),
-            Some("application/x-ndjson")
+            Some("application/json")
         );
         let body = resp.text().await.expect("read body");
-        // An empty index yields an empty stream; every non-empty line must be a
-        // parseable StreamDumpRecord.
-        for line in body.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            serde_json::from_str::<StreamDumpRecord>(line).expect("valid NDJSON record");
-        }
+        // An empty index yields an empty snapshot object; it must parse as the
+        // `HashMap<String, DumpEntry>` shape `recover_from_peers` consumes.
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&body).expect("dump body must be valid JSON");
+        assert!(
+            snapshot.is_object(),
+            "snapshot must be a JSON object, got: {snapshot}"
+        );
 
         cancel.cancel();
         service.shutdown().await;
