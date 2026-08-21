@@ -842,6 +842,21 @@ where
             // OpenAI surfaces. Build each declared surface independently:
             // ModelType is a bitflag, so choosing one mutually-exclusive branch
             // would silently omit engines for mixed-capability cards.
+            let load_thresholds =
+                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let routing_graph = TypedRoutingGraph::start(
+                client,
+                RouterLoadSource::from_worker_type(effective_worker_type(
+                    card.worker_type,
+                    card.model_type,
+                )),
+                load_thresholds.clone(),
+                &cancellation,
+                Some(allocator_trim.clone()),
+            )
+            .await?;
+            let client = routing_graph.client().clone();
+
             if card.model_type.supports_embedding() {
                 let push_router = PushRouter::<
                     NvCreateEmbeddingRequest,
@@ -949,6 +964,9 @@ where
                     card.model_type
                 );
             }
+
+            worker_set.load_thresholds = Some(load_thresholds);
+            worker_set.set_routing_graph(routing_graph);
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
             // Create preprocessing pipeline similar to Backend
@@ -1436,7 +1454,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn text_pooling_family_preserves_chat_engine() {
+    async fn text_routes_retain_graph_and_preserve_declared_surfaces() {
         use dynamo_runtime::{Runtime, distributed::DistributedConfig};
 
         let runtime = Runtime::from_current().unwrap();
@@ -1444,10 +1462,17 @@ mod tests {
             .await
             .unwrap();
         let manager = Arc::new(ModelManager::new());
+        let router_config = RouterConfig {
+            load_threshold_config: crate::discovery::LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(0.8),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let watcher = Arc::new(ModelWatcher::new(
             drt,
             manager.clone(),
-            RouterConfig::default(),
+            router_config.clone(),
             0,
             None,
             None,
@@ -1477,7 +1502,7 @@ mod tests {
             key: mcid.to_path(),
             mcid,
             endpoint_id,
-            fingerprint: materialization_fingerprint(&card, &RouterConfig::default()).unwrap(),
+            fingerprint: materialization_fingerprint(&card, &router_config).unwrap(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             card,
             group_key: key.clone(),
@@ -1493,6 +1518,13 @@ mod tests {
             .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
             .await
             .unwrap();
+        let worker_set = prepared.worker_set.as_ref().unwrap();
+        let graph = worker_set
+            .routing_graph()
+            .expect("Text routing must retain its typed graph");
+        assert_eq!(graph.source(), RouterLoadSource::Aggregated);
+        assert!(graph.monitor().is_some());
+        assert_eq!(graph.client().endpoint.id(), desired.endpoint_id);
         watcher
             .commit_group(&spec, prepared, &[desired], &[])
             .unwrap();
@@ -1501,6 +1533,13 @@ mod tests {
         assert!(model.has_chat_engine());
         assert!(model.has_classify_engine());
         assert!(model.has_pooling_engine());
+        assert_eq!(
+            model
+                .load_threshold_config(None)
+                .unwrap()
+                .active_decode_blocks_threshold,
+            Some(0.8)
+        );
     }
 
     #[tokio::test]

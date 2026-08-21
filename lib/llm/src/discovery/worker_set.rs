@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
-    kv_router::{EncoderRouter, prefill_router::PrefillRouterLifecycle},
+    kv_router::{EncoderRouter, TypedRoutingGraph, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -159,6 +159,9 @@ pub struct WorkerSet {
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
+    /// Owns load monitoring for routed surfaces that do not use `RoutingHost`.
+    routing_graph: Option<Arc<TypedRoutingGraph>>,
+
     /// Shared configuration handle for this typed routing graph's load monitor.
     pub(crate) load_thresholds: Option<LoadThresholdHandle>,
 
@@ -201,6 +204,7 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
+            routing_graph: None,
             load_thresholds: None,
             prefill_router: None,
             encoder_router: None,
@@ -222,6 +226,15 @@ impl WorkerSet {
     pub(crate) fn set_topology_endpoint(&mut self, endpoint: Endpoint) {
         self.endpoint_id = Some(endpoint.id());
         self.topology_endpoint = Some(endpoint);
+    }
+
+    pub(crate) fn set_routing_graph(&mut self, graph: Arc<TypedRoutingGraph>) {
+        self.routing_graph = Some(graph);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn routing_graph(&self) -> Option<&Arc<TypedRoutingGraph>> {
+        self.routing_graph.as_ref()
     }
 
     pub(crate) fn topology_endpoint(&self) -> Option<&Endpoint> {
@@ -428,6 +441,7 @@ impl WorkerSet {
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
             generate_engine,
+            routing_graph: self.routing_graph.clone(),
             load_thresholds: self.load_thresholds.clone(),
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
