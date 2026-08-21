@@ -445,6 +445,7 @@ fn server_info() -> pb::ServerInfo {
             data_parallel_size: 2,
             data_parallel_rank: 0,
             decode_context_parallel_size: 1,
+            world_size: 2,
         }),
         max_model_len: 8192,
         kv_block_size: 16,
@@ -493,6 +494,20 @@ fn rl_worker_metadata_includes_prefill_context_parallelism() {
         model.rl_worker_metadata(None).expect("valid RL metadata"),
         RlWorkerMetadata::new(60, None).expect("valid expected metadata")
     );
+}
+
+#[test]
+fn rl_worker_metadata_rejects_missing_engine_world_size() {
+    let mut server = server_info();
+    server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+
+    let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
+    let error = model.rl_worker_metadata(None).unwrap_err();
+    assert!(error.to_string().contains("engine world size"));
 }
 
 #[test]
