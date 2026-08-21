@@ -892,6 +892,21 @@ class ModelRuntimeConfig:
         """Get an engine-specific runtime configuration value"""
         ...
 
+    def set_nixl_push_endpoint(
+        self,
+        engine_id: str,
+        host: str,
+        port: int,
+        tensor_parallel_size: int,
+        pipeline_parallel_size: int,
+    ) -> None:
+        """Advertise this prefill engine's NIXL push coordinates.
+
+        ``engine_id`` must be the identity vLLM gives the NIXL agent, which is
+        DP-rank-suffixed for a data-parallel engine.
+        """
+        ...
+
     def set_structural_tag_mode(self, mode: str) -> None:
         """Set structural tag mode ("off" or "on")."""
         ...

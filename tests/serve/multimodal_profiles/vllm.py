@@ -269,7 +269,24 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 single_gpu=True,
                 profiled_vram_gib=15.7,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    # Push mode cannot overlap a multimodal request: decode needs
+                    # `embedding_params`, which prefill derives from its own
+                    # output, so the router has nothing to synthesize them from
+                    # and must fall back to the sequential handoff. Without that
+                    # fallback decode raises MissingMultimodalHandoffError, so
+                    # this fails loudly rather than silently losing the overlap.
+                    # The overlapped path is genuinely reached here: both workers
+                    # share a host and VLLM_NIXL_SIDE_CHANNEL_HOST defaults to
+                    # localhost, so prefill advertises push coordinates. Were it
+                    # not advertising, this case would pass vacuously.
+                    MmCase(
+                        suffix="nixl_push",
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--kv-push"],
+                    ),
+                ],
             ),
         },
     ),
