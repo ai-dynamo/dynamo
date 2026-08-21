@@ -13,7 +13,7 @@ logic but do not share the same serialization, RPC, or process boundaries.
    ```
    dynamo.frontend
      -> Rust OpenAIPreprocessor
-     -> in-process Rust KvPushRouter / KvRouter
+     -> in-process Rust RoutingHost / KvRouter
      -> worker
      -> Rust DeltaGenerator
    ```
@@ -27,7 +27,7 @@ logic but do not share the same serialization, RPC, or process boundaries.
    dynamo.frontend
      -> Python VllmProcessor or SglangProcessor
      -> PyO3 RoutedEngine
-     -> in-process Rust KvPushRouter / KvRouter
+     -> in-process Rust RoutingHost / KvRouter
      -> worker
      -> Python postprocessor
    ```

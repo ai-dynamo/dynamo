@@ -43,7 +43,7 @@ where
         match &binding.router {
             InnerPrefillRouter::KvRouter(router) => {
                 let outcome = router
-                    .chooser
+                    .kv_router()
                     .find_best_match_details(
                         None,
                         token_ids,
@@ -89,7 +89,7 @@ where
         if let Some(binding) = self.binding.load_full()
             && let InnerPrefillRouter::KvRouter(router) = &binding.router
         {
-            router.chooser.register_workers(worker_ids);
+            router.kv_router().register_workers(worker_ids);
         }
     }
 }
