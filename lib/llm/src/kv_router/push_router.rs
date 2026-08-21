@@ -1235,6 +1235,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_load_reservations_survive_worker_config_flap() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("builtin-load-topology-flap".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        let inner = PushRouter::from_client(client.clone(), RouterMode::LeastLoaded)
+            .await
+            .unwrap();
+        client.override_discovered_instances(vec![1]);
+        client.override_instance_avail(vec![1]);
+        let config = ModelRuntimeConfig::default();
+        let (workers_tx, workers) = watch::channel(HashMap::from([(1, config.clone())]));
+        let load_state = RoutingLoadState::start(
+            endpoint,
+            16,
+            workers,
+            KvRouterConfig::default(),
+            WORKER_TYPE_DECODE,
+        )
+        .await
+        .unwrap();
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_load(
+            inner,
+            Some(load_state.clone()),
+        )
+        .unwrap();
+        let request = request();
+        let first = load_state
+            .select_and_reserve(&host.inner, "request-1", &request, Some((1, None)))
+            .unwrap();
+        let second = load_state
+            .select_and_reserve(&host.inner, "request-2", &request, Some((1, None)))
+            .unwrap();
+        let worker = first.worker();
+        assert_eq!(load_state.active_request_count_for_test(worker), 2);
+
+        workers_tx.send_replace(HashMap::new());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while load_state.is_configured_worker(1) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        workers_tx.send_replace(HashMap::from([(1, config)]));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !load_state.is_configured_worker(1) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(load_state.active_request_count_for_test(worker), 2);
+        let third = load_state
+            .select_and_reserve(&host.inner, "request-3", &request, Some((1, None)))
+            .unwrap();
+        assert_eq!(load_state.active_request_count_for_test(worker), 3);
+
+        drop(third);
+        drop(second);
+        drop(first);
+        drop(host);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     #[serial_test::serial]
     async fn terminal_item_does_not_skip_transport_eof() {
         let (router, runtime) = router(None).await;
