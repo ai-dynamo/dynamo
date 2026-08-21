@@ -135,7 +135,6 @@ struct Attachment {
     raw_topic: String,
     ingress_protocol: KvStateIngressProtocol,
     ready: bool,
-    cache_readable: bool,
     ready_at_outbound_cursor: u64,
 }
 
@@ -145,7 +144,6 @@ impl Attachment {
             generation: self.generation,
             worker: self.worker,
             ready: self.ready,
-            cache_readable: self.cache_readable,
             ready_at_outbound_cursor: self.ready_at_outbound_cursor,
         }
     }
@@ -218,12 +216,6 @@ enum ControlCommand {
         generation: u64,
         reason: &'static str,
         response: oneshot::Sender<()>,
-    },
-    SetCacheReadable {
-        generation: u64,
-        readable: bool,
-        ready_at_outbound_cursor: Option<u64>,
-        response: oneshot::Sender<Result<Attachment>>,
     },
     AbortAttach {
         generation: u64,
@@ -318,17 +310,6 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 let _ = response.send(());
                 false
             }
-            ControlCommand::SetCacheReadable {
-                generation,
-                readable,
-                ready_at_outbound_cursor,
-                response,
-            } => {
-                let result =
-                    self.set_cache_readable(generation, readable, ready_at_outbound_cursor);
-                let _ = response.send(result);
-                false
-            }
             ControlCommand::AbortAttach {
                 generation,
                 response,
@@ -386,10 +367,9 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         attachment.ready_at_outbound_cursor = barrier_cursor;
         self.ingress_generation = Some(attachment.generation);
         attachment.ready = true;
-        // NOTE: Resetting this per-attachment cursor does not prove KVCR continuity.
-        // CacheOwner remains advisory in this foundation. Future authoritative
-        // reattachment must prove at-least-once cross-incarnation delivery before
-        // CacheOwner becomes ready.
+        // Resetting this per-attachment cursor does not prove KVCR continuity.
+        // CacheOwner remains advisory; authoritative cross-incarnation replay is
+        // separate from attachment readiness.
         self.source_cursor = SourceCursorState::default();
         self.attachment = Some(attachment.clone());
         self.publish_status();
@@ -453,31 +433,6 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         self.ingress_generation = None;
         tracing::warn!(generation, reason, "Quarantining vLLM KV ingress");
         self.publish_status();
-    }
-
-    fn set_cache_readable(
-        &mut self,
-        generation: u64,
-        readable: bool,
-        ready_at_outbound_cursor: Option<u64>,
-    ) -> Result<Attachment> {
-        let attachment = self
-            .attachment
-            .as_mut()
-            .context("KV state agent is not attached")?;
-        if attachment.generation != generation {
-            anyhow::bail!("stale attachment generation {generation}");
-        }
-        if readable && self.cache_owner_domain_failed {
-            anyhow::bail!("CacheOwner domain is unavailable for this publisher incarnation");
-        }
-        attachment.cache_readable = readable;
-        if let Some(cursor) = ready_at_outbound_cursor {
-            attachment.ready_at_outbound_cursor = cursor;
-        }
-        let attachment = attachment.clone();
-        self.publish_status();
-        Ok(attachment)
     }
 
     async fn handle_ingress(&mut self, batch: IngressBatch) -> Result<()> {
@@ -1076,7 +1031,6 @@ impl KvStateAgent {
                 raw_topic: vllm_source.topic.clone(),
                 ingress_protocol: vllm_source.ingress_protocol,
                 ready: false,
-                cache_readable: false,
                 ready_at_outbound_cursor: 0,
             },
         )
@@ -1148,77 +1102,6 @@ impl KvStateAgent {
         *self.attachment.lock().await = Some(attachment.clone());
         *self.vllm_listener.lock().await = Some(listener);
         Ok(attachment.status())
-    }
-
-    /// Change CacheOwner projection eligibility for the current attachment.
-    ///
-    /// The false state is committed before discovery withdrawal. A true
-    /// advertisement is registered before the callable status becomes true,
-    /// so every cross-plane observation window fails closed.
-    pub async fn set_cache_readable(&self, generation: u64, readable: bool) -> Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
-        let current = self
-            .attachment
-            .lock()
-            .await
-            .clone()
-            .context("KV state agent is not attached")?;
-        if current.generation != generation {
-            anyhow::bail!("stale attachment generation {generation}");
-        }
-
-        let mut staged = send_cache_readable(
-            &self.control_tx,
-            generation,
-            false,
-            Some(self.status().outbound_cursor),
-        )
-        .await?;
-        unregister_required(
-            &self.component,
-            &self.attachment_source,
-            "attachment advertisement",
-            &self.cancel,
-        )
-        .await?;
-
-        staged.cache_readable = readable;
-        let advertisement =
-            attachment_advertisement(&self.identity, &self.recovery_target, &staged);
-        let source = match register_advertisement(
-            &self.component,
-            EventScope::Endpoint {
-                endpoint: self.kv_state_endpoint.clone(),
-            },
-            KV_STATE_ATTACHMENT_TOPIC_V2,
-            attachment_record_id(self.identity.publisher_id, generation),
-            &advertisement,
-        )
-        .await
-        {
-            Ok(source) => source,
-            Err(error) => {
-                return Err(error)
-                    .context("failed to replace CacheOwner readability advertisement");
-            }
-        };
-
-        if readable
-            && let Err(error) = send_cache_readable(
-                &self.control_tx,
-                generation,
-                true,
-                Some(staged.ready_at_outbound_cursor),
-            )
-            .await
-        {
-            let _ = self.component.drt().discovery().unregister(source).await;
-            return Err(error).context("failed to commit CacheOwner readability");
-        }
-        *self.attachment_source.lock().await = Some(source);
-        staged.cache_readable = readable;
-        *self.attachment.lock().await = Some(staged);
-        Ok(())
     }
 
     pub async fn detach(&self, generation: u64) -> Result<u64> {
@@ -1442,27 +1325,6 @@ async fn rollback_started_attach(
     Ok(())
 }
 
-async fn send_cache_readable(
-    control_tx: &mpsc::Sender<ControlCommand>,
-    generation: u64,
-    readable: bool,
-    ready_at_outbound_cursor: Option<u64>,
-) -> Result<Attachment> {
-    let (response, received) = oneshot::channel();
-    control_tx
-        .send(ControlCommand::SetCacheReadable {
-            generation,
-            readable,
-            ready_at_outbound_cursor,
-            response,
-        })
-        .await
-        .context("state-agent coordinator is closed")?;
-    received
-        .await
-        .context("state-agent readability update was dropped")?
-}
-
 fn attachment_advertisement(
     identity: &KvStateAgentIdentity,
     recovery_target: &dynamo_runtime::component::Instance,
@@ -1480,7 +1342,6 @@ fn attachment_advertisement(
         ingress_protocol: attachment.ingress_protocol,
         raw_zmq_endpoint: attachment.vllm_zmq_endpoint.clone(),
         raw_topic: attachment.raw_topic.clone(),
-        cache_readable: attachment.cache_readable,
         ready_at_outbound_cursor: attachment.ready_at_outbound_cursor,
     }
 }
@@ -2013,7 +1874,6 @@ mod tests {
             raw_topic: "kv-events-v2".to_string(),
             ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
             ready: false,
-            cache_readable: true,
             ready_at_outbound_cursor: 0,
         }
     }
