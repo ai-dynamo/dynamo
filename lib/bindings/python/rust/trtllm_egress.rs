@@ -721,7 +721,10 @@ mod tests {
     use dynamo_runtime::protocols::annotated::Annotated;
     use serde_json::json;
 
-    use super::{EngineChoice, EngineResponse, FrameSendError, OwnedFrameSink, ShardedProcessor};
+    use super::{
+        ChoiceDelta, FrameSendError, RequestStreamState, ResponseEvent, ResponseFrameSink,
+        ShardedResponseEgress,
+    };
 
     #[derive(Default)]
     struct RecordingSink {
@@ -730,7 +733,7 @@ mod tests {
         errors: Mutex<Vec<String>>,
     }
 
-    impl OwnedFrameSink for RecordingSink {
+    impl ResponseFrameSink for RecordingSink {
         fn send(
             &self,
             frame: Annotated<serde_json::Value>,
@@ -787,7 +790,7 @@ mod tests {
         }
     }
 
-    impl OwnedFrameSink for GateSink {
+    impl ResponseFrameSink for GateSink {
         fn send(
             &self,
             _frame: Annotated<serde_json::Value>,
@@ -851,7 +854,7 @@ mod tests {
         frames: AtomicUsize,
     }
 
-    impl OwnedFrameSink for PausingSink {
+    impl ResponseFrameSink for PausingSink {
         fn send(
             &self,
             _frame: Annotated<serde_json::Value>,
@@ -888,25 +891,25 @@ mod tests {
 
     #[test]
     fn rejects_zero_shards_and_zero_queue_depth() {
-        assert!(ShardedProcessor::new(0, 1).is_err());
-        assert!(ShardedProcessor::new(1, 0).is_err());
+        assert!(ShardedResponseEgress::new(0, 1).is_err());
+        assert!(ShardedResponseEgress::new(1, 0).is_err());
     }
 
     #[test]
     fn builds_delta_frames_with_python_semantic_parity() {
-        let mut state = super::OwnedResponseState::new(3, 2);
+        let mut state = RequestStreamState::new(3, 2);
 
         let first = state
-            .apply(EngineResponse {
+            .apply(ResponseEvent {
                 client_id: 1,
                 outputs: vec![
-                    EngineChoice {
+                    ChoiceDelta {
                         index: 0,
                         new_token_ids: vec![10],
                         finish_reason: None,
                         stop_reason: None,
                     },
-                    EngineChoice {
+                    ChoiceDelta {
                         index: 1,
                         new_token_ids: vec![20],
                         finish_reason: None,
@@ -926,16 +929,16 @@ mod tests {
         );
 
         let final_frames = state
-            .apply(EngineResponse {
+            .apply(ResponseEvent {
                 client_id: 1,
                 outputs: vec![
-                    EngineChoice {
+                    ChoiceDelta {
                         index: 0,
                         new_token_ids: vec![11, 12],
                         finish_reason: Some("stop".to_string()),
                         stop_reason: None,
                     },
-                    EngineChoice {
+                    ChoiceDelta {
                         index: 1,
                         new_token_ids: vec![21],
                         finish_reason: Some("length".to_string()),
@@ -978,19 +981,19 @@ mod tests {
 
     #[test]
     fn reordered_partial_choices_emit_only_supplied_indices() {
-        let mut state = super::OwnedResponseState::new(0, 3);
+        let mut state = RequestStreamState::new(0, 3);
 
         let frames = state
-            .apply(EngineResponse {
+            .apply(ResponseEvent {
                 client_id: 1,
                 outputs: vec![
-                    EngineChoice {
+                    ChoiceDelta {
                         index: 2,
                         new_token_ids: vec![20],
                         finish_reason: None,
                         stop_reason: None,
                     },
-                    EngineChoice {
+                    ChoiceDelta {
                         index: 0,
                         new_token_ids: vec![10],
                         finish_reason: None,
@@ -1013,17 +1016,17 @@ mod tests {
 
     #[test]
     fn duplicate_choice_indices_are_rejected_before_state_mutation() {
-        let mut state = super::OwnedResponseState::new(0, 1);
-        let invalid = state.apply(EngineResponse {
+        let mut state = RequestStreamState::new(0, 1);
+        let invalid = state.apply(ResponseEvent {
             client_id: 1,
             outputs: vec![
-                EngineChoice {
+                ChoiceDelta {
                     index: 0,
                     new_token_ids: vec![1],
                     finish_reason: None,
                     stop_reason: None,
                 },
-                EngineChoice {
+                ChoiceDelta {
                     index: 0,
                     new_token_ids: vec![2],
                     finish_reason: None,
@@ -1036,7 +1039,7 @@ mod tests {
         assert!(invalid.is_err());
 
         let valid = state
-            .apply(EngineResponse::tokens(1, vec![vec![3]], false))
+            .apply(ResponseEvent::tokens(1, vec![vec![3]], false))
             .expect("state remains usable");
         assert_eq!(valid, vec![json!({"token_ids": [3], "index": 0})]);
     }
