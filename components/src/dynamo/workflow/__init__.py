@@ -9,11 +9,7 @@ from dynamo.workflow.ir import StageIR, WorkflowIR
 from dynamo.workflow.orchestrator import WorkflowOrchestrator
 from dynamo.workflow.plan import ExecutionPlan, InlineBinding
 from dynamo.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
-from dynamo.workflow.types import (
-    StageContract,
-    ValueRef,
-    WorkflowValidationError,
-)
+from dynamo.workflow.types import StageContract, ValueRef, WorkflowValidationError
 
 __all__ = [
     "DeploymentSpec",
