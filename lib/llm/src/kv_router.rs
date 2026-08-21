@@ -73,7 +73,6 @@ pub use dynamo_kv_router::scheduling::{
 pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
-pub(crate) use push_router::is_builtin_router_mode;
 pub use push_router::{DirectRoutingRouter, KvPushRouter, RoutingHost};
 
 use crate::{

@@ -28,16 +28,6 @@ impl BuiltinWorkerSelector {
         Some(Self { mode, picker })
     }
 
-    pub(super) fn telemetry_name(&self) -> &'static str {
-        match self.mode {
-            RouterMode::RoundRobin => "round-robin",
-            RouterMode::Random => "random",
-            RouterMode::PowerOfTwoChoices => "power-of-two-choices",
-            RouterMode::LeastLoaded => "least-loaded",
-            _ => unreachable!("builtin selector cannot contain a non-builtin mode"),
-        }
-    }
-
     pub(super) fn peek_worker(
         &self,
         input: WorkerSelectionInput<'_, ModelRuntimeConfig>,

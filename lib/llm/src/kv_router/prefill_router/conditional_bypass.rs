@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
@@ -335,7 +337,7 @@ where
             .routing
             .as_ref()
             .and_then(|routing| routing.expected_output_tokens);
-        let allowed_worker_ids = req
+        let mut allowed_worker_ids = req
             .routing
             .as_ref()
             .and_then(|routing| routing.allowed_worker_ids.clone());
@@ -349,10 +351,25 @@ where
         if let Some(session_affinity) = session_affinity {
             probe_context.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
         }
-        let pinned_worker = router
-            .query_affinity_worker(&probe_context, RequestPhase::Prefill)
+        let affinity_target = router
+            .query_affinity_target(&probe_context, RequestPhase::Prefill)
             .ok()
             .flatten();
+        if let Some(AffinityTarget {
+            worker_id,
+            dp_rank: None,
+        }) = affinity_target
+        {
+            match &mut allowed_worker_ids {
+                Some(allowed_workers) => allowed_workers.retain(|id| *id == worker_id),
+                None => allowed_worker_ids = Some(HashSet::from([worker_id])),
+            }
+        }
+        let pinned_worker = affinity_target.and_then(|target| {
+            target
+                .dp_rank
+                .map(|dp_rank| WorkerWithDpRank::new(target.worker_id, dp_rank))
+        });
 
         let outcome = kv_router
             .find_best_match_details_without_admission(
