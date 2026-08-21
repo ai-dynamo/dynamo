@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -43,6 +44,13 @@ class _Renderer(Protocol):
         ...
 
 
+class _EngineBasedStreamingParser(Protocol):
+    engine_based_streaming: bool
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        ...
+
+
 @dataclass
 class PreprocessResult:
     request_for_sampling: ChatCompletionRequest
@@ -51,10 +59,15 @@ class PreprocessResult:
     engine_prompt: dict[str, Any]
     prompt_token_ids: list[int]
     guided_decoding: dict[str, Any] | None = None
+    uses_dynamo_json_tool_call_fallback: bool = False
 
 
 _ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
+
+
+def _reject_non_finite_json(value: str) -> Any:
+    raise ValueError(f"non-finite JSON number: {value}")
 
 
 def _is_named_tool_choice(tool_choice: Any) -> bool:
@@ -170,12 +183,8 @@ def _should_build_tool_call_guidance(
         return False
     if structural_tag_scope == "always":
         return True
-    # TODO: parallel_tool_calls only decides whether a structural tag is attempted;
-    # it does not bound call count in the forced-choice JSON fallback below.
-    # get_json_schema_from_tools emits {"type": "array", "minItems": 1} with no
-    # maxItems, matching build_required_schema in protocols/openai/tools.rs, so
-    # parallel_tool_calls=false can still produce several calls. sglang_prepost.py
-    # is the only path that forwards the flag into its schema builder.
+    # An explicit single-call request is enough to attempt structural-tag
+    # guidance. Forced-choice JSON guidance also bounds its array schema below.
     explicit_single_call = (
         "parallel_tool_calls" in request.model_fields_set
         and request.parallel_tool_calls is False
@@ -253,6 +262,11 @@ def build_tool_call_guided_decoding(
         # _validate_chat_completion_request.
         json_schema = get_json_schema_from_tools(tool_choice, request.tools)
         if json_schema is not None:
+            if (
+                request.parallel_tool_calls is False
+                and json_schema.get("type") == "array"
+            ):
+                json_schema["maxItems"] = 1
             return {"json": json_schema}
     return None
 
@@ -602,6 +616,19 @@ async def preprocess_chat_request(
         if assistant_guided_decoding is not None and not is_forced_tool_choice
         else tool_guided_decoding
     )
+    # build_tool_call_guided_decoding falls back to Dynamo's generic JSON schema
+    # when a forced tool choice has no parser-provided grammar.  That can happen
+    # both without a parser and with parsers (for example Hermes) whose
+    # adjust_request() leaves structured_outputs unchanged.  In either case the
+    # model emits Dynamo's bare JSON wire format, which must bypass the parser's
+    # native-syntax decoder during postprocessing.
+    uses_dynamo_json_tool_call_fallback = (
+        is_forced_tool_choice
+        and parser_guided_decoding is None
+        and guided_decoding is tool_guided_decoding
+        and isinstance(tool_guided_decoding, dict)
+        and "json" in tool_guided_decoding
+    )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
 
@@ -622,6 +649,7 @@ async def preprocess_chat_request(
         engine_prompt=engine_prompt,
         prompt_token_ids=tokens,
         guided_decoding=guided_decoding,
+        uses_dynamo_json_tool_call_fallback=uses_dynamo_json_tool_call_fallback,
     )
 
 
@@ -636,13 +664,17 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
+        reasoning_ended: bool | None = None,
         stream_response: bool = True,
+        uses_dynamo_json_tool_call_fallback: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.request_for_sampling = request_for_sampling
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
         self.stream_response = stream_response
+        self.reasoning_is_done = bool(reasoning_ended)
+        self._uses_dynamo_json_tool_call_fallback = uses_dynamo_json_tool_call_fallback
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
         # the reasoning open/close tags live in the prompt and the generated
@@ -658,12 +690,25 @@ class StreamingPostProcessor:
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,
             )
-            if reasoning_parser_class and not thinking_disabled
+            if reasoning_parser_class
+            and not thinking_disabled
+            and reasoning_ended is not True
             else None
         )
+        if self.reasoning_parser is not None:
+            if reasoning_ended is None:
+                self.reasoning_is_done = self.reasoning_parser.is_reasoning_end(
+                    prompt_token_ids
+                )
+            if not self.reasoning_is_done:
+                self.reasoning_parser.adjust_initial_state_from_prompt(prompt_token_ids)
         self._fast_plain_text = (
-            self.tool_parser is None and self.reasoning_parser is None
+            self.tool_parser is None
+            and self.reasoning_parser is None
+            and not self._uses_dynamo_json_tool_call_fallback
         )
+        self._reasoning_parser_streaming_started = False
+        self._tool_parser_streaming_started = False
 
         self._control_markers = tuple(
             t for t in getattr(tokenizer, "all_special_tokens", ()) if t
@@ -671,7 +716,6 @@ class StreamingPostProcessor:
 
         self.previous_text = ""
         self.previous_token_ids: list[int] = []
-        self.reasoning_is_done = False
         self.in_progress_tool_calls: dict[int, DeltaToolCall] = {}
         # Per-choice tracking (https://github.com/ai-dynamo/dynamo/issues/8636) of whether a tool_call delta was
         # emitted on that choice, keyed by `output.index`. Required because
@@ -683,6 +727,104 @@ class StreamingPostProcessor:
         # this correctly, so we accumulate text here and fall back to the
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
+        self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
+
+    def _decode_dynamo_json_fallback_tool_calls(
+        self, text: str
+    ) -> list[dict[str, Any]]:
+        """Convert Dynamo's JSON fallback wire format into OpenAI tool calls."""
+        try:
+            tool_calls = json.loads(text, parse_constant=_reject_non_finite_json)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(
+                "Dynamo JSON tool-call fallback was not valid JSON"
+            ) from exc
+
+        available_tool_names = {
+            tool.function.name for tool in self.request_for_sampling.tools or []
+        }
+        tool_choice = self.request_for_sampling.tool_choice
+        required_tool_name = None
+        if _is_named_tool_choice(tool_choice):
+            if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
+                required_tool_name = tool_choice.function.name
+            else:
+                required_tool_name = tool_choice["function"]["name"]
+            tool_calls = [
+                {
+                    "name": required_tool_name,
+                    "parameters": tool_calls,
+                }
+            ]
+        elif not isinstance(tool_calls, list) or not tool_calls:
+            raise ValueError(
+                "Dynamo JSON tool-call fallback must contain a tool-call array"
+            )
+
+        if (
+            self.request_for_sampling.parallel_tool_calls is False
+            and len(tool_calls) > 1
+        ):
+            raise ValueError(
+                "Dynamo JSON tool-call fallback returned multiple tool calls "
+                "when parallel_tool_calls is false"
+            )
+
+        parsed_tool_calls: list[dict[str, Any]] = []
+        for index, tool_call in enumerate(tool_calls):
+            if not isinstance(tool_call, dict):
+                raise TypeError(
+                    "Dynamo JSON tool-call fallback entries must be objects"
+                )
+            name = tool_call.get("name")
+            if "parameters" not in tool_call:
+                raise TypeError(
+                    "Dynamo JSON tool-call fallback entries must include parameters"
+                )
+            parameters = tool_call["parameters"]
+            if not isinstance(name, str) or name not in available_tool_names:
+                raise ValueError(
+                    "Dynamo JSON tool-call fallback named an unavailable tool"
+                )
+            if required_tool_name is not None and name != required_tool_name:
+                raise ValueError(
+                    "Dynamo JSON tool-call fallback did not use the required tool"
+                )
+            parsed_tool_calls.append(
+                DeltaToolCall(
+                    index=index,
+                    type="function",
+                    id=make_tool_call_id(),
+                    function=DeltaFunctionCall(
+                        name=name,
+                        arguments=json.dumps(parameters, separators=(",", ":")),
+                    ),
+                ).model_dump(exclude_none=True)
+            )
+        return parsed_tool_calls
+
+    def _process_dynamo_json_fallback_tool_calls(
+        self, output: Any
+    ) -> dict[str, Any] | None:
+        chunks = self._dynamo_json_fallback_chunks.setdefault(output.index, [])
+        if output.text:
+            chunks.append(output.text)
+        if not output.finish_reason:
+            return None
+
+        text = "".join(self._dynamo_json_fallback_chunks.pop(output.index))
+        delta: dict[str, Any]
+        try:
+            tool_calls = self._decode_dynamo_json_fallback_tool_calls(text)
+        except (TypeError, ValueError):
+            delta = {"role": "assistant", "content": text} if text else {}
+            return self._build_choice(output, delta)
+
+        delta = {
+            "role": "assistant",
+            "tool_calls": tool_calls,
+        }
+        return self._build_choice(output, delta)
 
     def _should_buffer_for_non_streaming_tool_parse(self) -> bool:
         return (
@@ -778,6 +920,30 @@ class StreamingPostProcessor:
             return None
         return delta_message
 
+    @staticmethod
+    def _merge_delta_messages(
+        current: DeltaMessage | None,
+        incoming: DeltaMessage | None,
+    ) -> DeltaMessage | None:
+        """Append a parser flush delta to the delta produced for this chunk."""
+        if incoming is None:
+            return current
+        if current is None:
+            return incoming
+        if incoming.content:
+            current.content = (current.content or "") + incoming.content
+        if incoming.reasoning:
+            current.reasoning = (current.reasoning or "") + incoming.reasoning
+        if incoming.tool_calls:
+            current.tool_calls = (current.tool_calls or []) + incoming.tool_calls
+        return current
+
+    @staticmethod
+    def _finish_engine_parser(parser: Any) -> DeltaMessage | None:
+        if parser is None or not parser.engine_based_streaming:
+            return None
+        return cast(_EngineBasedStreamingParser, parser).finish_streaming()
+
     def _add_tool_call_from_extracted(self, index: int, tool_call: Any) -> None:
         tool_delta = DeltaToolCall(
             index=index,
@@ -797,6 +963,9 @@ class StreamingPostProcessor:
         if self.tool_parser is None:
             return self._compose_delta_message(saved_reasoning, None)
 
+        # A buffered parse replaces the streaming path; do not flush stale
+        # engine-stream state again when finish_reason is processed.
+        self._tool_parser_streaming_started = False
         extracted = self.tool_parser.extract_tool_calls(text, self.request_for_sampling)
         if extracted.tools_called:
             for i, tool_call in enumerate(extracted.tool_calls):
@@ -817,6 +986,7 @@ class StreamingPostProcessor:
     ) -> DeltaMessage | None:
         if self.tool_parser is None:
             return None
+        self._tool_parser_streaming_started = True
         return self.tool_parser.extract_tool_calls_streaming(
             previous_text=self.previous_text,
             current_text=current_text,
@@ -923,6 +1093,8 @@ class StreamingPostProcessor:
         return self._build_choice(output, delta)
 
     def process_output(self, output: Any) -> dict[str, Any] | None:
+        if self._uses_dynamo_json_tool_call_fallback:
+            return self._process_dynamo_json_fallback_tool_calls(output)
         if self._should_buffer_for_non_streaming_tool_parse():
             return self._process_non_streaming_tool_output(output)
 
@@ -975,6 +1147,7 @@ class StreamingPostProcessor:
                 return None
 
         elif not self.reasoning_is_done and self.reasoning_parser:
+            self._reasoning_parser_streaming_started = True
             delta_message = self.reasoning_parser.extract_reasoning_streaming(
                 self.previous_text,
                 current_text,
@@ -989,9 +1162,21 @@ class StreamingPostProcessor:
             # buffer it for non-streaming extraction rather than feeding it
             # to the streaming tool parser which cannot handle the combined
             # reasoning-end + tool-start in a single chunk.
-            if self.reasoning_parser.is_reasoning_end_streaming(
-                current_token_ids, delta_token_ids
-            ):
+            if self.reasoning_parser.engine_based_streaming:
+                reasoning_ended = (
+                    self.reasoning_parser.has_engine_confirmed_reasoning_end()
+                )
+            else:
+                reasoning_ended = self.reasoning_parser.is_reasoning_end_streaming(
+                    current_token_ids, delta_token_ids
+                )
+
+            if reasoning_ended:
+                delta_message = self._merge_delta_messages(
+                    delta_message,
+                    self._finish_engine_parser(self.reasoning_parser),
+                )
+                self._reasoning_parser_streaming_started = False
                 self.reasoning_is_done = True
                 saved_reasoning = delta_message.reasoning if delta_message else None
                 post_content = (delta_message.content if delta_message else None) or ""
@@ -1061,37 +1246,56 @@ class StreamingPostProcessor:
                         delta_token_ids=delta_token_ids,
                     )
 
+        if output.finish_reason:
+            if self._reasoning_parser_streaming_started:
+                delta_message = self._merge_delta_messages(
+                    delta_message,
+                    self._finish_engine_parser(self.reasoning_parser),
+                )
+                self._reasoning_parser_streaming_started = False
+            if self._tool_parser_streaming_started:
+                delta_message = self._merge_delta_messages(
+                    delta_message,
+                    self._finish_engine_parser(self.tool_parser),
+                )
+                self._tool_parser_streaming_started = False
+
         choice = None
         if delta_message is None:
             if self.in_progress_tool_calls:
                 choice = self._emit_tool_calls_choice(output)
             elif output.finish_reason:
                 choice = self._build_choice(output, {})
-        elif delta_message.tool_calls:
-            self._merge_streaming_tool_calls(delta_message.tool_calls)
-            if output.finish_reason and self.in_progress_tool_calls:
-                # Tool calls and finish_reason arrived in the same chunk.
-                # Emit now — there will be no subsequent process_output call
-                # to drain the buffer.
+        else:
+            if delta_message.tool_calls:
+                self._merge_streaming_tool_calls(delta_message.tool_calls)
+
+            if delta_message.content or delta_message.reasoning:
+                delta = {"role": "assistant"}
+                content = delta_message.content
+                if self.in_progress_tool_calls and self._is_control_only_content(
+                    content
+                ):
+                    content = None
+                if content:
+                    delta["content"] = content
+                if delta_message.reasoning:
+                    delta["reasoning_content"] = delta_message.reasoning
+                if self.in_progress_tool_calls:
+                    delta["tool_calls"] = self._dump_in_progress_tool_calls()
+                    self.in_progress_tool_calls.clear()
+                if len(delta) > 1:
+                    choice = self._build_choice(output, delta)
+            elif delta_message.tool_calls:
+                if output.finish_reason and self.in_progress_tool_calls:
+                    # Tool calls and finish_reason arrived in the same chunk.
+                    # Emit now — there will be no subsequent process_output call
+                    # to drain the buffer.
+                    choice = self._emit_tool_calls_choice(output)
+            elif self.in_progress_tool_calls:
                 choice = self._emit_tool_calls_choice(output)
-        elif delta_message.content or delta_message.reasoning:
-            delta = {"role": "assistant"}
-            content = delta_message.content
-            if self.in_progress_tool_calls and self._is_control_only_content(content):
-                content = None
-            if content:
-                delta["content"] = content
-            if delta_message.reasoning:
-                delta["reasoning_content"] = delta_message.reasoning
-            if self.in_progress_tool_calls:
-                delta["tool_calls"] = self._dump_in_progress_tool_calls()
-                self.in_progress_tool_calls.clear()
-            if len(delta) > 1:
-                choice = self._build_choice(output, delta)
-        elif self.in_progress_tool_calls:
-            choice = self._emit_tool_calls_choice(output)
-        elif output.finish_reason:
-            choice = self._build_choice(output, {})
+            elif output.finish_reason:
+                choice = self._build_choice(output, {})
 
         self.previous_text = current_text
         self.previous_token_ids = current_token_ids
