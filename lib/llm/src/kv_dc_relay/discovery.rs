@@ -23,6 +23,7 @@ use super::identity::{
 use super::resolution::{ResolvedIndexerDomain, resolve_indexer_domain};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
+use crate::model_type::ModelType;
 use crate::worker_type::WorkerType;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
@@ -208,6 +209,10 @@ impl MaterializationConflict {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DomainWorkerTopology {
     pub(crate) worker_type: Option<WorkerType>,
+    /// Part of the request plane's WorkerSet identity: two same-role worker sets
+    /// serving different surfaces (for example Chat vs Completions) are distinct
+    /// routes there and must stay distinct readiness units here.
+    pub(crate) model_type: ModelType,
     pub(crate) needs: Vec<Vec<WorkerType>>,
 }
 
@@ -698,6 +703,7 @@ impl MembershipState {
                     worker_id,
                     DomainWorkerTopology {
                         worker_type: projection.card.worker_type,
+                        model_type: projection.card.model_type,
                         needs: projection.card.needs.clone(),
                     },
                 );

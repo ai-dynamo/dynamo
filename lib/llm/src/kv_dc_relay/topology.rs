@@ -18,6 +18,7 @@ use super::identity::{
     WorkerRole,
 };
 use crate::discovery::readiness::{ReadinessUnit, evaluate_readiness};
+use crate::model_type::ModelType;
 use crate::worker_type::WorkerType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,17 +388,21 @@ fn topology_units(
     membership: &EndpointMembership,
     live_workers: Option<&HashSet<WorkerId>>,
 ) -> Vec<ReadinessUnit> {
-    let mut groups = HashMap::<(Option<WorkerType>, Vec<Vec<WorkerType>>), usize>::new();
+    let mut groups = HashMap::<(Option<WorkerType>, ModelType, Vec<Vec<WorkerType>>), usize>::new();
     for (&worker_id, topology) in &membership.worker_topology {
         let live = live_workers.is_some_and(|workers| workers.contains(&worker_id));
         let live_count = groups
-            .entry((topology.worker_type, topology.needs.clone()))
+            .entry((
+                topology.worker_type,
+                topology.model_type,
+                topology.needs.clone(),
+            ))
             .or_default();
         *live_count += usize::from(live);
     }
     groups
         .into_iter()
-        .map(|((worker_type, needs), live_count)| ReadinessUnit {
+        .map(|((worker_type, _, needs), live_count)| ReadinessUnit {
             worker_type,
             live_count,
             needs,
@@ -422,28 +427,31 @@ fn collect_adapter_membership(
         // apply to adapters unchanged (an adapter on a live Aggregated route is ready
         // even when a disaggregated route also exists, and a Decode-only adapter still
         // needs an adapter-carrying Prefill peer).
-        let mut units = HashMap::<(Option<WorkerType>, Vec<Vec<WorkerType>>), usize>::new();
+        let mut units =
+            HashMap::<(Option<WorkerType>, ModelType, Vec<Vec<WorkerType>>), usize>::new();
         for worker_id in adapter_membership.workers.keys() {
             let Some(topology) = membership.worker_topology.get(worker_id) else {
                 continue;
             };
             let live = live_workers.is_some_and(|workers| workers.contains(worker_id));
             let live_count = units
-                .entry((topology.worker_type, topology.needs.clone()))
+                .entry((
+                    topology.worker_type,
+                    topology.model_type,
+                    topology.needs.clone(),
+                ))
                 .or_default();
             *live_count += usize::from(live);
         }
-        aggregate
-            .units
-            .extend(
-                units
-                    .into_iter()
-                    .map(|((worker_type, needs), live_count)| ReadinessUnit {
-                        worker_type,
-                        live_count,
-                        needs,
-                    }),
-            );
+        aggregate.units.extend(
+            units
+                .into_iter()
+                .map(|((worker_type, _, needs), live_count)| ReadinessUnit {
+                    worker_type,
+                    live_count,
+                    needs,
+                }),
+        );
     }
 }
 
@@ -532,7 +540,11 @@ mod tests {
             runtime_configs: HashMap::new(),
             worker_topology: HashMap::from([(
                 worker_id,
-                DomainWorkerTopology { worker_type, needs },
+                DomainWorkerTopology {
+                    worker_type,
+                    model_type: ModelType::Chat,
+                    needs,
+                },
             )]),
             adapters: HashMap::new(),
             conflicts: Vec::new(),
@@ -649,6 +661,42 @@ mod tests {
                 .keys()
                 .all(|(link_endpoint, _)| link_endpoint != &endpoint)
         );
+    }
+
+    #[test]
+    fn distinct_same_role_surfaces_on_one_endpoint_stay_ambiguous() {
+        let mut decode = endpoint(
+            "production.decode.generate",
+            "llama",
+            1,
+            Some(WorkerType::Decode),
+            vec![vec![WorkerType::Prefill]],
+        );
+        // A second Decode worker set serving a different surface: the request plane
+        // sees two WorkerSets of one role and gates the namespace as ambiguous.
+        decode.worker_topology.insert(
+            2,
+            DomainWorkerTopology {
+                worker_type: Some(WorkerType::Decode),
+                model_type: ModelType::Completions,
+                needs: vec![vec![WorkerType::Prefill]],
+            },
+        );
+        let prefill = endpoint(
+            "production.prefill.generate",
+            "llama",
+            3,
+            Some(WorkerType::Prefill),
+            vec![vec![WorkerType::Decode]],
+        );
+        let view = view(vec![decode, prefill]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let snapshot = publisher.snapshot();
+        let topology = entry(&snapshot, "llama");
+
+        assert_eq!(topology.state, TopologyReadinessState::Unavailable);
+        assert_eq!(topology.duplicate_role_endpoints, [WorkerRole::Decode]);
     }
 
     #[test]
