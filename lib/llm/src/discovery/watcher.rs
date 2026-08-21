@@ -668,6 +668,7 @@ where
                     prefill_enable_eagle,
                     worker_monitor.clone(),
                     Some(allocator_trim.clone()),
+                    router_config.encoder_cuda_to_cpu_ratio,
                 ))
             } else {
                 None
@@ -704,6 +705,7 @@ where
                         encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
+                        router_config.encoder_cuda_to_cpu_ratio,
                     )
                     .await
                     .context("build_preprocessed_routing")?,
@@ -839,8 +841,11 @@ where
                 let push_router = PushRouter::<
                     NvCreateEmbeddingRequest,
                     Annotated<NvCreateEmbeddingResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_monitor_and_ratio(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    router_config.encoder_cuda_to_cpu_ratio,
                 )
                 .await?;
                 worker_set.embeddings_engine = Some(Arc::new(push_router));
@@ -850,8 +855,11 @@ where
                 let push_router = PushRouter::<
                     NvCreateClassifyRequest,
                     Annotated<NvCreateClassifyResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_monitor_and_ratio(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    router_config.encoder_cuda_to_cpu_ratio,
                 )
                 .await?;
                 worker_set.classify_engine = Some(Arc::new(push_router));
@@ -861,8 +869,11 @@ where
                 let push_router = PushRouter::<
                     NvCreatePoolingRequest,
                     Annotated<NvCreatePoolingResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_monitor_and_ratio(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    router_config.encoder_cuda_to_cpu_ratio,
                 )
                 .await?;
                 worker_set.pooling_engine = Some(Arc::new(push_router));
@@ -872,8 +883,11 @@ where
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_monitor_and_ratio(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    router_config.encoder_cuda_to_cpu_ratio,
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
@@ -883,8 +897,11 @@ where
                 let completions_router = PushRouter::<
                     NvCreateCompletionRequest,
                     Annotated<NvCreateCompletionResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_monitor_and_ratio(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    router_config.encoder_cuda_to_cpu_ratio,
                 )
                 .await?;
                 worker_set.completions_engine = Some(Arc::new(completions_router));
@@ -894,7 +911,12 @@ where
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
+                >::from_client_with_monitor_and_ratio(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    router_config.encoder_cuda_to_cpu_ratio,
+                )
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
             }
@@ -903,7 +925,12 @@ where
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
+                >::from_client_with_monitor_and_ratio(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    router_config.encoder_cuda_to_cpu_ratio,
+                )
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
@@ -912,8 +939,11 @@ where
                 let audios_router = PushRouter::<
                     NvCreateAudioSpeechRequest,
                     Annotated<NvAudioSpeechResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_monitor_and_ratio(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    router_config.encoder_cuda_to_cpu_ratio,
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
@@ -924,8 +954,11 @@ where
                 let realtime_router = PushRouter::<
                     RealtimeClientEvent,
                     Annotated<RealtimeServerEvent>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_monitor_and_ratio(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    router_config.encoder_cuda_to_cpu_ratio,
                 )
                 .await?;
                 worker_set.realtime_engine = Some(Arc::new(realtime_router));
@@ -956,8 +989,11 @@ where
             let router = PushRouter::<
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
+            >::from_client_with_monitor_and_ratio(
+                client,
+                router_config.router_mode,
+                None,
+                router_config.encoder_cuda_to_cpu_ratio,
             )
             .await?;
 
@@ -980,8 +1016,11 @@ where
             let push_router = PushRouter::<
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
+            >::from_client_with_monitor_and_ratio(
+                client,
+                router_config.router_mode,
+                None,
+                router_config.encoder_cuda_to_cpu_ratio,
             )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));

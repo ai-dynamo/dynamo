@@ -194,6 +194,7 @@ where
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
+    encoder_cuda_to_cpu_ratio: Option<usize>,
     session_affinity_ttl: Option<std::time::Duration>,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
@@ -228,6 +229,7 @@ where
 {
     model_manager: Arc<ModelManager>,
     router_mode: RouterMode,
+    encoder_cuda_to_cpu_ratio: Option<usize>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,

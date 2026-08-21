@@ -19,7 +19,7 @@ use crate::{
     protocols::{EndpointId, maybe_error::MaybeError},
     routing_policy::{
         CandidateView, RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy,
-        RouteTarget,
+        RouteTarget, non_cpu_to_cpu_ratio,
     },
     traits::DistributedRuntimeProvider,
 };
@@ -197,6 +197,9 @@ where
 
     /// Optional typed request extractor for multimodal embedding cache keys.
     multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+
+    // Resolved at construction to avoid reading the environment per request.
+    non_cpu_to_cpu_ratio: usize,
 
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
@@ -563,6 +566,7 @@ where
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
+            non_cpu_to_cpu_ratio: non_cpu_to_cpu_ratio(None),
             _phantom: PhantomData,
         })
     }
@@ -578,7 +582,25 @@ where
         router_mode: RouterMode,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     ) -> anyhow::Result<Self> {
-        Self::from_client_with_state(client, router_mode, worker_monitor, None, None).await
+        Self::from_client_with_monitor_and_ratio(client, router_mode, worker_monitor, None).await
+    }
+
+    /// Creates a monitored router with an optional device-aware capacity ratio.
+    pub async fn from_client_with_monitor_and_ratio(
+        client: Client,
+        router_mode: RouterMode,
+        worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+        encoder_cuda_to_cpu_ratio: Option<usize>,
+    ) -> anyhow::Result<Self> {
+        Self::from_client_with_state_and_ratio(
+            client,
+            router_mode,
+            worker_monitor,
+            None,
+            None,
+            encoder_cuda_to_cpu_ratio,
+        )
+        .await
     }
 
     /// Create a new PushRouter with optional load monitoring and multimodal cache indexing.
@@ -588,6 +610,25 @@ where
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
         multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
         multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+    ) -> anyhow::Result<Self> {
+        Self::from_client_with_state_and_ratio(
+            client,
+            router_mode,
+            worker_monitor,
+            multimodal_cache_indexer,
+            multimodal_cache_key_extractor,
+            None,
+        )
+        .await
+    }
+
+    async fn from_client_with_state_and_ratio(
+        client: Client,
+        router_mode: RouterMode,
+        worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+        multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
+        multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+        encoder_cuda_to_cpu_ratio: Option<usize>,
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
 
@@ -637,6 +678,7 @@ where
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
+            non_cpu_to_cpu_ratio: non_cpu_to_cpu_ratio(encoder_cuda_to_cpu_ratio),
             _phantom: PhantomData,
         };
 
@@ -685,8 +727,15 @@ where
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
+            non_cpu_to_cpu_ratio: non_cpu_to_cpu_ratio(None),
             _phantom: PhantomData,
         })
+    }
+
+    /// Overrides the capacity ratio used by device-aware weighted routing.
+    pub fn with_non_cpu_to_cpu_ratio(mut self, ratio: usize) -> Self {
+        self.non_cpu_to_cpu_ratio = non_cpu_to_cpu_ratio(Some(ratio));
+        self
     }
 
     /// `ResourceExhausted` when workers are routable but all overloaded;
@@ -1080,11 +1129,6 @@ where
                 (instance.instance_id, device)
             })
             .collect::<HashMap<_, _>>();
-        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value >= 1)
-            .unwrap_or(8);
 
         let (request_cache_keys, cache_matched_candidates) =
             if let (Some(indexer), Some(extractor)) = (
@@ -1125,7 +1169,7 @@ where
             candidates,
             context: RouteContext {
                 required_cache_hits: request_cache_key_count,
-                non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
+                non_cpu_to_cpu_ratio: self.non_cpu_to_cpu_ratio,
             },
             embedding_cache_hit,
             request_cache_keys: request_cache_keys.len(),
@@ -1244,11 +1288,6 @@ where
                     .iter()
                     .map(|instance| (instance.instance_id, instance.device_type.clone()))
                     .collect();
-                let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .filter(|value| *value >= 1)
-                    .unwrap_or(8);
                 let candidates = instance_ids
                     .iter()
                     .map(|worker_id| RouteCandidate {
@@ -1270,7 +1309,7 @@ where
                         CandidateView::DeviceAware(&candidates),
                         RouteContext {
                             required_cache_hits: 0,
-                            non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
+                            non_cpu_to_cpu_ratio: self.non_cpu_to_cpu_ratio,
                         },
                     )
                     .map(|decision| decision.target.worker_id)

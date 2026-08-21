@@ -241,6 +241,7 @@ pub async fn build_preprocessed_routing(
         encoder_chooser,
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
+        None,
     )
     .await
 }
@@ -256,6 +257,7 @@ pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+    encoder_cuda_to_cpu_ratio: Option<usize>,
 ) -> anyhow::Result<PreprocessedRouting<Sel>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -303,6 +305,11 @@ where
         cache_key_extractor,
     )
     .await?;
+
+    let router = match encoder_cuda_to_cpu_ratio {
+        Some(ratio) => router.with_non_cpu_to_cpu_ratio(ratio),
+        None => router,
+    };
 
     // Eagerly register router request metrics so they appear as zeros even in
     // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
