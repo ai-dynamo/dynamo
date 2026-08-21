@@ -19,6 +19,7 @@ pub mod epp_standalone_config;
 pub mod inference_pool;
 pub mod metrics;
 pub mod peer_discovery;
+mod peer_http;
 pub mod picker;
 pub mod pod_discovery;
 pub mod proto;

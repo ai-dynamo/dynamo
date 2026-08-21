@@ -258,12 +258,13 @@ spec:
             # the vLLM engine's --max-num-batched-tokens.
             - name: DYN_EPP_MAX_NUM_BATCHED_TOKENS
               value: "8192"
-            # Replication: watch THIS Deployment's own Service
-            # (EndpointSlices) to find sibling EPP replicas and sync active load
-            # over its required named replica-agg port. Omit this env to run a
-            # single fully-local replica (and set replicas: 1).
+            # Replication: watch the peer Service (EndpointSlices) to find
+            # sibling EPP replicas and sync active load over its required named
+            # replica-agg port, and to recover the KV index over selection-http.
+            # Omit this env to run a single fully-local replica (and set
+            # replicas: 1).
             - name: DYN_EPP_PEER_SERVICE
-              value: dynamo-epp
+              value: dynamo-epp-peer
             # The reflector watches pods in the EPP's own namespace.
             - name: POD_NAMESPACE
               valueFrom:
@@ -282,6 +283,9 @@ spec:
             # ZMQ replica-sync between EPP replicas (embedded replication).
             - name: replica-agg
               containerPort: 9092
+            # Internal HTTP dump endpoint for joining EPP KV-index recovery.
+            - name: selection-http
+              containerPort: 9093
           readinessProbe:
             grpc:
               port: 9003
@@ -295,7 +299,11 @@ spec:
               drop:
                 - ALL
 ---
-# GAIE calls the gRPC port. EPP replicas use `replica-agg` for load-state sync.
+# GAIE calls the gRPC port on the request Service; EPP replicas talk to each
+# other over the dedicated peer Service below. Keeping the peer plane on its
+# own Service makes the EndpointSlice discovery (and its port contract)
+# explicit: the EPP reads `replica-agg` / `selection-http` from
+# `dynamo-epp-peer`, and the request Service carries only gRPC.
 apiVersion: v1
 kind: Service
 metadata:
@@ -308,9 +316,61 @@ spec:
       appProtocol: http2
       port: 9002
       targetPort: grpc
+---
+# Peer Service: `replica-agg` for lifecycle replica sync, `selection-http` for
+# startup KV-index recovery. The EPP watches THIS Service's EndpointSlices for
+# sibling replicas and resolves the named peer ports from its spec.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-epp-peer
+spec:
+  selector:
+    app: dynamo-epp
+  ports:
     - name: replica-agg
       port: 9092
       targetPort: replica-agg
+    - name: selection-http
+      port: 9093
+      targetPort: selection-http
+---
+# The peer Service's `selection-http` serves the KV-index snapshot
+# (`GET /dump`) without authentication, so it is reachable only from sibling
+# EPP pods; the same peer-only restriction applies to `replica-agg` lifecycle
+# sync. The GAIE gateway still reaches gRPC (9002) and the kubelet still probes
+# grpc-health (9003) from any source; KV events flow *out* of the EPP to
+# workers, so no inbound rule is needed for them. Clusters without a
+# NetworkPolicy CNI simply ignore this object; operators with their own network
+# baseline may drop or replace it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dynamo-epp
+  labels:
+    app: dynamo-epp
+spec:
+  podSelector:
+    matchLabels:
+      app: dynamo-epp
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: dynamo-epp
+      ports:
+        - protocol: TCP
+          port: replica-agg
+        - protocol: TCP
+          port: selection-http
+    - from: [] # any source: GAIE gateway + kubelet probes
+      ports:
+        - protocol: TCP
+          port: grpc
+        - protocol: TCP
+          port: grpc-health
 ---
 # InferencePool selects the raw vLLM pods and delegates endpoint selection to
 # the EPP. The EPP reads this object (read-only) to learn the pod selector and

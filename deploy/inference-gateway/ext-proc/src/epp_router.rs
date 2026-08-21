@@ -47,14 +47,8 @@ pub struct EppRouter {
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
-    /// Peer-discovery readiness (replicated mode only): `None` when replication
-    /// is off, else a flag that latches `true` after the initial peer-set sync
-    /// (EndpointSlice LIST + reconcile). ANDed with `reflector_ready` to form the
-    /// health signal, so a replica does not serve before its peers are discovered
-    /// and its replica-sync sockets are connected. Note: this proves only that
-    /// future load deltas will flow — it does NOT bootstrap the load already in
-    /// flight on peers; that converges from live deltas as pre-existing requests
-    /// drain (same warm-up shape as the KV index).
+    /// Replication bootstrap readiness (replicated mode only): initial peer
+    /// discovery plus KV-index recovery, or authoritative no-peer bootstrap.
     peer_ready: Option<Arc<AtomicBool>>,
     model_name: String,
     /// Bounds total concurrent in-flight `pick()`s. HTTP/2 stream multiplexing
@@ -69,15 +63,17 @@ pub struct EppRouter {
 impl EppRouter {
     /// Assemble the standalone runtime from the validated selector config.
     pub async fn from_selector(cfg: EppStandaloneConfig) -> Result<Self> {
-        let selector = Arc::new(Selector::new(&cfg).await?);
+        let selector = Selector::new(&cfg).await?;
+        Self::from_built_selector(cfg, selector).await
+    }
+
+    pub(crate) async fn from_built_selector(
+        cfg: EppStandaloneConfig,
+        selector: Selector,
+    ) -> Result<Self> {
+        let selector = Arc::new(selector);
         let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Ok(Self::from_selector_parts(
-            cfg,
-            renderer,
-            reflector,
-            reflector_ready,
-            selector,
-        ))
+        Self::from_selector_parts(cfg, renderer, reflector, reflector_ready, selector).await
     }
 
     /// Assemble a custom EPP image around a prebuilt selection service.
@@ -87,13 +83,7 @@ impl EppRouter {
     ) -> Result<Self> {
         let selector = Arc::new(Selector::from_service(&cfg, service).await?);
         let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Ok(Self::from_selector_parts(
-            cfg,
-            renderer,
-            reflector,
-            reflector_ready,
-            selector,
-        ))
+        Self::from_selector_parts(cfg, renderer, reflector, reflector_ready, selector).await
     }
 
     async fn dependencies(
@@ -111,23 +101,29 @@ impl EppRouter {
         Ok((renderer, reflector, reflector_ready))
     }
 
-    fn from_selector_parts(
+    async fn from_selector_parts(
         cfg: EppStandaloneConfig,
         renderer: VllmRenderClient,
         reflector: Arc<PodDiscovery>,
         reflector_ready: Arc<AtomicBool>,
         selector: Arc<Selector>,
-    ) -> Self {
+    ) -> Result<Self> {
         let peer_ready = selector.peer_ready();
 
         let defaults = RegistrationDefaults::from_config(&cfg);
         let adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
 
+        // Subscribe-first: the topology adapter registers workers (their ZMQ
+        // KV-event listeners begin buffering live events) before the peer dump,
+        // so recovery overlaps the live event stream instead of leaving a gap.
+        // `is_ready` stays false (and /dump stays 503) until recovery completes.
+        selector.start_peer_recovery().await?;
+
         // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
         // we do not block startup on a schedulable worker. A valid, empty pool is
         // ready immediately and returns 503 per-request until capacity appears.
-        Self {
+        Ok(Self {
             renderer,
             reflector,
             selector,
@@ -136,12 +132,11 @@ impl EppRouter {
             peer_ready,
             model_name: cfg.model_name,
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
-        }
+        })
     }
 
-    /// Overall EPP readiness for the gRPC health signal: the pod reflector is
-    /// ready (workers synced + pool resolved) AND, in replicated mode, the peer
-    /// set has finished its initial sync. Polled by the health mirror in `main`.
+    /// Overall EPP readiness: worker discovery is ready and replicated mode has
+    /// completed peer discovery plus KV-index recovery/bootstrap.
     pub fn is_ready(&self) -> bool {
         compute_ready(
             self.reflector_ready.load(Ordering::Acquire),
@@ -195,8 +190,7 @@ impl EppRouter {
     }
 }
 
-/// Overall EPP health: pod readiness AND, when replicated (`peer_ready = Some`),
-/// the initial peer sync. `None` means no replication → pod readiness alone.
+/// Overall EPP health: pod readiness AND replication bootstrap readiness.
 fn compute_ready(pod_ready: bool, peer_ready: Option<bool>) -> bool {
     pod_ready && peer_ready.unwrap_or(true)
 }
