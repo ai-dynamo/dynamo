@@ -57,26 +57,6 @@ fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
 /// this value by the threshold fraction) can never fire with realistic loads.
 const DEFAULT_MAX_TOKENS: u64 = 10_000_000;
 
-#[cfg(test)]
-fn compute_overloaded_instances(
-    worker_load_states: &DashMap<u64, WorkerLoadState>,
-    cfg: &LoadThresholdConfig,
-) -> Vec<u64> {
-    worker_load_states
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .value()
-                .is_overloaded(
-                    cfg.active_decode_blocks_threshold,
-                    cfg.active_prefill_tokens_threshold,
-                    cfg.active_prefill_tokens_threshold_frac,
-                )
-                .then_some(*entry.key())
-        })
-        .collect()
-}
-
 fn publish_overloaded_instances(client: &Client, overloaded_instances: &[u64]) {
     if client.set_overloaded_instances(overloaded_instances) {
         let counts = client.routing_instance_counts();
@@ -1043,7 +1023,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 mod tests {
     use super::{
         LoadObservation, LoadThresholdConfig, OverloadedWorkerTracker, RemoteActiveLoadSnapshot,
-        WorkerLoadState, compute_overloaded_instances, overload_reconciliation_needed,
+        WorkerLoadState, collect_overloaded_workers, overload_reconciliation_needed,
         publish_overloaded_instances_if_needed,
     };
     use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
@@ -1502,9 +1482,7 @@ mod tests {
             ..Default::default()
         };
 
-        let overloaded: HashSet<u64> = compute_overloaded_instances(&states, &cfg)
-            .into_iter()
-            .collect();
+        let overloaded = collect_overloaded_workers(&states, &cfg);
         assert_eq!(overloaded, HashSet::from([1]));
     }
 
