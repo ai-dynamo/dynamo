@@ -169,6 +169,9 @@ spec:
             value: expandable_segments:True
           - name: DD_TRACE_ENABLED
             value: 'false'
+          # Disables cuDNN for Conv2d in MoonViT patch-embed; prevents a cudnnCreate crash on GB200.
+          - name: GP_DISABLE_CUDNN
+            value: '1'
           image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-181a088d750c896fe0a575ebdbe72d7f000bfc4d-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
