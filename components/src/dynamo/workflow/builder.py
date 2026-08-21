@@ -13,6 +13,7 @@ from dynamo.workflow.types import (
     StageContract,
     ValueRef,
     WorkflowValidationError,
+    validate_contract_consistency,
     validate_name,
 )
 
@@ -47,6 +48,8 @@ class StageHandle:
             ) from error
 
     def __getattr__(self, name: str) -> ValueRef:
+        if name.startswith("_"):
+            raise AttributeError(name)
         reference = self._outputs.get(name)
         if (
             reference is not None
@@ -62,7 +65,11 @@ class StageHandle:
 
 
 class Workflow:
-    """Author a validated static workflow using declared stage contracts."""
+    """Author a static workflow with eager validation at each declaration.
+
+    These checks provide local feedback; :class:`WorkflowIR` remains the
+    canonical graph-validation boundary.
+    """
 
     def __init__(self, name: str) -> None:
         validate_name(name, "workflow name")
@@ -96,26 +103,14 @@ class Workflow:
             raise WorkflowValidationError(f"duplicate stage id {stage_id!r}")
         if not isinstance(contract, StageContract):
             raise WorkflowValidationError("stage contract must use StageContract")
-        prior = self._contracts.get(contract.id)
-        if prior is not None and prior != contract:
-            raise WorkflowValidationError(
-                f"contract id {contract.id!r} has conflicting schemas"
-            )
-        expected = set(contract.inputs)
-        actual = set(inputs)
-        if actual != expected:
-            raise WorkflowValidationError(
-                f"stage {stage_id!r} inputs differ from its contract; "
-                f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
-            )
+        validate_contract_consistency(self._contracts.get(contract.id), contract)
 
-        for reference in inputs.values():
+        stage = StageIR(id=stage_id, contract=contract, inputs=dict(inputs))
+        for reference in stage.inputs.values():
             self._validate_owned_reference(reference)
 
         self._contracts[contract.id] = contract
-        self._stages[stage_id] = StageIR(
-            id=stage_id, contract=contract, inputs=dict(inputs)
-        )
+        self._stages[stage_id] = stage
         return StageHandle(stage_id, contract, self._owner)
 
     def output(self, name: str, reference: ValueRef, /) -> None:

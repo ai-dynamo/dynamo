@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+import pickle
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -85,7 +87,9 @@ def test_stage_requires_contract_and_accepts_mapping_expansion() -> None:
     )
 
     class ContractProvider:
-        contract = StageContract(id="provider", outputs={"text"})
+        contract = StageContract(
+            id="provider", inputs={"input-value"}, outputs={"text"}
+        )
 
     workflow = Workflow("explicit-contract")
     value = workflow.input("value")
@@ -121,19 +125,42 @@ def test_ir_keeps_complete_name_only_contracts_inline() -> None:
     )
 
 
-def test_contracts_require_name_sets_and_are_immutable() -> None:
-    contract = StageContract(id="source", outputs={"text"})
+def test_stage_ir_inputs_must_match_its_contract() -> None:
+    contract = StageContract(id="consumer", inputs={"value"}, outputs={"value"})
 
-    assert contract.inputs == frozenset()
+    with pytest.raises(WorkflowValidationError, match=r"missing=\['value'\]"):
+        StageIR(id="consumer", contract=contract)
+    with pytest.raises(WorkflowValidationError, match=r"extra=\['extra'\]"):
+        StageIR(
+            id="consumer",
+            contract=contract,
+            inputs={
+                "value": ValueRef.for_input("value"),
+                "extra": ValueRef.for_input("value"),
+            },
+        )
+
+
+def test_contracts_require_name_sets_and_are_immutable() -> None:
+    contract = StageContract(id="source", inputs={"request"}, outputs={"text"})
+
+    assert contract.inputs == frozenset({"request"})
     assert contract.outputs == frozenset({"text"})
     with pytest.raises(FrozenInstanceError):
         contract.id = "changed"
     with pytest.raises(WorkflowValidationError, match="set of names"):
         StageContract(id="mapping", outputs={"text": object()})
     with pytest.raises(WorkflowValidationError, match="non-empty string"):
-        StageContract(id="empty-name", outputs={""})
+        StageContract(id="empty-name", inputs={"request"}, outputs={""})
+    with pytest.raises(WorkflowValidationError, match="at least one input"):
+        StageContract(id="no-input", outputs={"text"})
     with pytest.raises(WorkflowValidationError, match="at least one output"):
-        StageContract(id="no-output")
+        StageContract(id="no-output", inputs={"request"})
+
+
+def test_names_use_a_portable_ascii_grammar() -> None:
+    with pytest.raises(WorkflowValidationError, match="letters, digits"):
+        Workflow("é-stage")
 
 
 def test_workflow_inputs_require_name_sets() -> None:
@@ -165,6 +192,23 @@ def test_output_method_handles_attribute_collisions_and_invalid_names() -> None:
     assert producer.output("hyphen-name").output_name == "hyphen-name"
     with pytest.raises(WorkflowValidationError, match="no output"):
         producer.output("missing")
+
+
+def test_stage_handle_supports_copy_and_pickle() -> None:
+    workflow = Workflow("copy-handle")
+    seed = workflow.input("seed")
+    handle = workflow.stage(
+        "producer",
+        StageContract(id="producer", inputs={"seed"}, outputs={"text"}),
+        seed=seed,
+    )
+
+    copies = (
+        copy.copy(handle),
+        copy.deepcopy(handle),
+        pickle.loads(pickle.dumps(handle)),
+    )
+    assert all(cloned.text == handle.text for cloned in copies)
 
 
 def test_rejects_foreign_reference() -> None:
@@ -213,7 +257,7 @@ def test_ir_rejects_conflicting_inline_contracts() -> None:
         )
 
 
-def test_ir_rejects_cycles_unreachable_and_dead_stages() -> None:
+def test_ir_rejects_cycles_and_dead_stages() -> None:
     contract = StageContract(id="node", inputs={"value"}, outputs={"value"})
     cycle = (
         StageIR(
@@ -233,15 +277,6 @@ def test_ir_rejects_cycles_unreachable_and_dead_stages() -> None:
             inputs={"seed"},
             stages=cycle,
             outputs={"value": ValueRef.for_stage_output("a", "value")},
-        )
-
-    source = StageContract(id="source", outputs={"value"})
-    with pytest.raises(WorkflowValidationError, match="not reachable"):
-        WorkflowIR(
-            name="unreachable",
-            inputs={"seed"},
-            stages=(StageIR(id="source", contract=source),),
-            outputs={"value": ValueRef.for_stage_output("source", "value")},
         )
 
     dead_stage = StageIR(

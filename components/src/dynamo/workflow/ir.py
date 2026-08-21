@@ -15,6 +15,7 @@ from dynamo.workflow.types import (
     StageContract,
     ValueRef,
     WorkflowValidationError,
+    validate_contract_consistency,
     validate_name,
 )
 
@@ -49,12 +50,23 @@ class StageIR:
             if not isinstance(reference, ValueRef):
                 raise WorkflowValidationError(f"stage input {name!r} must use ValueRef")
             frozen[name] = reference
+        expected = set(self.contract.inputs)
+        actual = set(frozen)
+        if actual != expected:
+            raise WorkflowValidationError(
+                f"stage {self.id!r} inputs differ from its contract; "
+                f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+            )
         object.__setattr__(self, "inputs", MappingProxyType(frozen))
 
 
 @dataclass(frozen=True)
 class WorkflowIR:
-    """A validated, deterministic workflow graph without placement details."""
+    """The canonical validation boundary for a placement-neutral workflow graph.
+
+    Validation here does not assume construction through :class:`Workflow`, so
+    direct IR construction and future parsers receive the same graph guarantees.
+    """
 
     name: str
     inputs: FrozenSet[str]
@@ -103,33 +115,21 @@ class WorkflowIR:
                 raise WorkflowValidationError("workflow stages must use StageIR")
             if stage.id in by_id:
                 raise WorkflowValidationError(f"duplicate stage id {stage.id!r}")
-            prior_contract = contracts.get(stage.contract.id)
-            if prior_contract is not None and prior_contract != stage.contract:
-                raise WorkflowValidationError(
-                    f"contract id {stage.contract.id!r} has conflicting schemas"
-                )
+            validate_contract_consistency(
+                contracts.get(stage.contract.id), stage.contract
+            )
             contracts[stage.contract.id] = stage.contract
             by_id[stage.id] = stage
 
         dependencies: dict[str, set[str]] = {stage_id: set() for stage_id in by_id}
         consumers: dict[str, set[str]] = {stage_id: set() for stage_id in by_id}
-        input_reachable: set[str] = set()
 
         for stage in stages:
-            expected = set(stage.contract.inputs)
-            actual = set(stage.inputs)
-            if actual != expected:
-                raise WorkflowValidationError(
-                    f"stage {stage.id!r} inputs differ from its contract; "
-                    f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
-                )
             for reference in stage.inputs.values():
                 producer_stage = WorkflowIR._resolve_reference(
                     reference, workflow_inputs, by_id
                 )
-                if producer_stage is None:
-                    input_reachable.add(stage.id)
-                else:
+                if producer_stage is not None:
                     dependencies[stage.id].add(producer_stage)
                     consumers[producer_stage].add(stage.id)
 
@@ -152,16 +152,6 @@ class WorkflowIR:
             )
             raise WorkflowValidationError(
                 f"workflow contains a cycle involving {cyclic}"
-            )
-
-        reachable = set(input_reachable)
-        for stage_id in ordered_ids:
-            if dependencies[stage_id] & reachable:
-                reachable.add(stage_id)
-        unreachable = set(by_id) - reachable
-        if unreachable:
-            raise WorkflowValidationError(
-                f"stages are not reachable from workflow inputs: {sorted(unreachable)}"
             )
 
         live: set[str] = set()

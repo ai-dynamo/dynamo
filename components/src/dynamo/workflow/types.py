@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import FrozenSet, Optional
+
+_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 
 
 class WorkflowValidationError(ValueError):
@@ -19,23 +22,11 @@ def validate_name(name: str, kind: str) -> None:
 
     if not isinstance(name, str) or not name:
         raise WorkflowValidationError(f"{kind} must be a non-empty string")
-    _validate_utf8(name, kind)
-    if not name[0].isalpha() or not all(
-        char.isalnum() or char in "_-" for char in name
-    ):
+    if _NAME_PATTERN.fullmatch(name) is None:
         raise WorkflowValidationError(
             f"{kind} {name!r} must start with a letter and contain only letters, "
             "digits, '_' or '-'"
         )
-
-
-def _validate_utf8(value: str, kind: str) -> None:
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError as error:
-        raise WorkflowValidationError(
-            f"{kind} must contain valid Unicode scalar values"
-        ) from error
 
 
 @dataclass(frozen=True)
@@ -50,6 +41,8 @@ class StageContract:
         validate_name(self.id, "contract id")
         inputs = self._freeze_ports(self.inputs, "input port")
         outputs = self._freeze_ports(self.outputs, "output port")
+        if not inputs:
+            raise WorkflowValidationError("stage contracts require at least one input")
         if not outputs:
             raise WorkflowValidationError("stage contracts require at least one output")
         object.__setattr__(self, "inputs", inputs)
@@ -64,6 +57,17 @@ class StageContract:
             validate_name(name, kind)
             frozen.add(name)
         return frozenset(frozen)
+
+
+def validate_contract_consistency(
+    prior: Optional[StageContract], contract: StageContract
+) -> None:
+    """Require one port schema for each contract ID."""
+
+    if prior is not None and prior != contract:
+        raise WorkflowValidationError(
+            f"contract id {contract.id!r} has conflicting schemas"
+        )
 
 
 @dataclass(frozen=True)
