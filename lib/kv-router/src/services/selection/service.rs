@@ -382,27 +382,8 @@ impl SelectionService {
         self.core.dump_indexer_events().await
     }
 
-    /// Structured snapshot of the local KV index for a streaming peer dump: one
-    /// record per event. The caller serializes records one at a time instead of
-    /// building a single JSON object in memory.
-    pub async fn indexer_stream_records(
-        &self,
-    ) -> Result<Vec<crate::services::indexer::server::StreamDumpRecord>, String> {
-        self.core.dump_indexer_records().await
-    }
-
     pub async fn recover_indexer_from_peers(&self, peers: &[String]) -> anyhow::Result<bool> {
         self.core.recover_indexer_from_peers(peers).await
-    }
-
-    /// EPP peer recovery over the streaming NDJSON `/dump` format (one event per
-    /// line, applied as it arrives). Distinct from [`Self::recover_indexer_from_peers`],
-    /// which uses the single-JSON format for standalone indexer/selection peers.
-    pub async fn recover_indexer_from_peers_streaming(
-        &self,
-        peers: &[String],
-    ) -> anyhow::Result<bool> {
-        self.core.recover_indexer_from_peers_streaming(peers).await
     }
 
     pub async fn cancelled(&self) {
