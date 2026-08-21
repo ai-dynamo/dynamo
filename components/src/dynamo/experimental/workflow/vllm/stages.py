@@ -16,14 +16,10 @@ from dynamo.vllm.multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     VisionEncoderBackend,
 )
-from dynamo.experimental.workflow import StageContext, StageContract, ValueSpec
+from dynamo.experimental.workflow import StageContext, StageContract
 
 _IMAGE_URL_PORT = "image_url"
 _URL_VARIANT = "Url"
-
-REQUEST = ValueSpec(type="json")
-ENCODER_FEATURES = ValueSpec(type="tensor")
-ENCODER_METADATA = ValueSpec(type="json")
 
 
 class EncoderStage:
@@ -31,11 +27,8 @@ class EncoderStage:
 
     contract = StageContract(
         id="dynamo-vision-encoder",
-        inputs={"request": REQUEST},
-        outputs={
-            "encoder_features": ENCODER_FEATURES,
-            "encoder_metadata": ENCODER_METADATA,
-        },
+        inputs={"request"},
+        outputs={"encoder_features", "encoder_metadata"},
     )
 
     def __init__(
@@ -191,14 +184,16 @@ class EncoderStage:
 
 
 class DynamoVllmStage:
-    """Contract implemented by a stock aggregated Dynamo vLLM worker."""
+    """Contracts implemented by a stock aggregated Dynamo vLLM worker."""
 
-    contract = StageContract(
-        id="dynamo-vllm",
-        inputs={
-            "request": REQUEST,
-            "encoder_features": ENCODER_FEATURES,
-            "encoder_metadata": ENCODER_METADATA,
-        },
-        outputs={"chunk": ValueSpec(type="json")},
+    request_complete_contract = StageContract(
+        id="dynamo-vllm-request-complete",
+        inputs={"request"},
+        outputs={"completion"},
+    )
+
+    external_encoder_complete_contract = StageContract(
+        id="dynamo-vllm-external-encoder-complete",
+        inputs={"request", "encoder_features", "encoder_metadata"},
+        outputs={"completion"},
     )

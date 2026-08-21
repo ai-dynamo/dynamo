@@ -93,15 +93,10 @@ def test_remote_plan_uses_nixl_fanout_and_stock_generate_protocol():
     assert plan.bindings["encoder"].endpoint_id == ENCODER_ENDPOINT
     assert plan.bindings["classifier"].endpoint_id == CLASSIFIER_ENDPOINT
     assert plan.bindings["generator"].endpoint_id == GENERATOR_ENDPOINT
-    assert {edge.transfer_id: edge.carrier for edge in plan.edges} == {
-        "encoder.request": "inline",
-        "classifier.encoder_features": "nixl",
-        "generator.request": "inline",
-        "generator.encoder_features": "nixl",
-        "generator.encoder_metadata": "inline",
-        "response.completion": "inline",
-        "response.scores": "inline",
-    }
+    assert plan.bindings["encoder"].tensor_carrier == "nixl"
+    assert plan.bindings["classifier"].tensor_carrier == "nixl"
+    assert plan.bindings["generator"].tensor_carrier == "nixl"
+    assert not hasattr(plan, "edges")
 
 
 async def test_frontend_provider_binds_remote_plan_and_inline_response():
@@ -136,3 +131,6 @@ async def test_classifier_worker_serves_workflow_protocol_and_closes_carrier():
     assert runtime.endpoint_ids == [CLASSIFIER_ENDPOINT]
     assert runtime.created_endpoint.handler is not None
     assert carrier.close_calls == 1
+
+    def can_export(self, value: Any) -> bool:
+        return False

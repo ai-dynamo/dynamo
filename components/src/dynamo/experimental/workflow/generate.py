@@ -8,10 +8,15 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, Protocol
 
+from dynamo.common.external_encoder import ExternalEncoderResult
+from dynamo.experimental.workflow.nixl import NixlTensorRef
+from dynamo.experimental.workflow.remote import NixlCarriedValue
 from dynamo.experimental.workflow.runtime import StageContext, WorkflowExecutionError
 from dynamo.experimental.workflow.types import StageContract
 
 GENERATE_REQUEST_PORT = "request"
+GENERATE_FEATURES_PORT = "encoder_features"
+GENERATE_METADATA_PORT = "encoder_metadata"
 GENERATE_OUTPUT_PORT = "completion"
 
 
@@ -62,25 +67,58 @@ class GenerateEndpointInvoker:
         stage_id: str,
         inputs: Mapping[str, Any],
         context: StageContext,
-        *,
-        request_context: Any = None,
     ) -> GenerateEndpointStream:
         """Prepare the Generate request and return its owned token stream."""
 
+        context.raise_if_cancelled()
         request_value = inputs[GENERATE_REQUEST_PORT]
         if not isinstance(request_value, Mapping):
             raise WorkflowExecutionError("Generate endpoint request must be an object")
         request = dict(request_value)
         _validate_request_options(request)
+        if GENERATE_FEATURES_PORT in inputs or GENERATE_METADATA_PORT in inputs:
+            if set(inputs) != {
+                GENERATE_REQUEST_PORT,
+                GENERATE_FEATURES_PORT,
+                GENERATE_METADATA_PORT,
+            }:
+                raise WorkflowExecutionError(
+                    "external encoder Generate inputs must include request, "
+                    "encoder_features, and encoder_metadata"
+                )
+            if "encoder_result" in request:
+                raise WorkflowExecutionError(
+                    "Generate endpoint request already contains encoder_result"
+                )
+            features = inputs[GENERATE_FEATURES_PORT]
+            if not isinstance(features, NixlCarriedValue):
+                raise WorkflowExecutionError(
+                    "external encoder features must arrive through NIXL"
+                )
+            reference = NixlTensorRef.from_dict(features.value).to_dict()
+            metadata = inputs[GENERATE_METADATA_PORT]
+            try:
+                request["encoder_result"] = ExternalEncoderResult.from_parts(
+                    reference, metadata
+                ).to_dict()
+            except ValueError as error:
+                raise WorkflowExecutionError(str(error)) from error
+            for field_name in (
+                "multi_modal_data",
+                "multi_modal_uuids",
+                "mm_processor_kwargs",
+                "mm_routing_info",
+            ):
+                request.pop(field_name, None)
 
         transport_context = None
-        if request_context is not None:
-            detach = getattr(request_context, "detached", None)
+        if context.request_context is not None:
+            detach = getattr(context.request_context, "detached", None)
             if not callable(detach):
                 raise WorkflowExecutionError(
                     "request context cannot create a detached child context"
                 )
-            transport_context = detach(f"{context.attempt_id}:{stage_id}")
+            transport_context = detach(context.invocation_id)
 
         try:
             stream = await self._client.round_robin(
@@ -98,16 +136,9 @@ class GenerateEndpointInvoker:
         contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
-        *,
-        request_context: Any = None,
     ) -> Mapping[str, Any]:
         del contract
-        stream = await self.open(
-            stage_id,
-            inputs,
-            context,
-            request_context=request_context,
-        )
+        stream = await self.open(stage_id, inputs, context)
         try:
             completion = await collect_generation(stream, stage_id)
         except BaseException:

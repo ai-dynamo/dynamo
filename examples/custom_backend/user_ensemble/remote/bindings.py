@@ -31,7 +31,10 @@ def compile_remote_workflow() -> ExecutionPlan:
                     CLASSIFIER_ENDPOINT,
                     tensor_carrier="nixl",
                 ),
-                "generator": GenerateEndpointBinding(GENERATOR_ENDPOINT),
+                "generator": GenerateEndpointBinding(
+                    GENERATOR_ENDPOINT,
+                    tensor_carrier="nixl",
+                ),
                 "response": InlineBinding("response"),
             }
         ),
