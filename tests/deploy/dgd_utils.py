@@ -19,6 +19,8 @@ from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.utils.inference_endpoint import InferenceEndpoint
+from tests.utils.inference_endpoint import wait_until_serving as _wait_until_serving
 from tests.utils.test_output import resolve_test_output_path
 
 
@@ -1400,6 +1402,91 @@ class ManagedDeployment:
             result[original_name] = pods
 
         return result
+
+    def frontend_endpoint(
+        self,
+        *,
+        model: Optional[str] = None,
+        headers: Optional[dict] = None,
+        service_name: Optional[str] = None,
+        port: Optional[int] = None,
+    ) -> InferenceEndpoint:
+        """Port-forward the frontend and return an address tests can POST to.
+
+        This is the whole of what a deployment-agnostic test needs from a
+        Kubernetes deployment. Pod selection, port-forward setup and URL
+        construction were previously copy-pasted into each deploy test body;
+        keeping them here is what lets those tests reduce to "send payload,
+        assert on response".
+
+        The forward's lifetime is this deployment's ``async with`` block --
+        ``_cleanup`` stops every forward it handed out.
+
+        Args:
+            model: Model name to attach to the endpoint.
+            headers: Extra headers sent with every request (e.g. a Gateway API
+                ``Host`` header).
+            service_name: Component to forward. Defaults to the frontend.
+            port: Remote port. Defaults to the deployment spec's frontend port.
+
+        Raises:
+            RuntimeError: if no pod is available or the forward never came up.
+                Both are deployment failures, and a test that got a silent
+                ``None`` here would fail later as an opaque connection error.
+        """
+        service = service_name or self.frontend_service_name
+        remote_port = self.deployment_spec.port if port is None else port
+
+        pods = self.get_pods([service]).get(service, [])
+        if not pods:
+            raise RuntimeError(
+                f"No pods found for service '{service}' in deployment "
+                f"{self._deployment_name} (namespace {self.namespace})"
+            )
+
+        pod = pods[0]
+        self._logger.info(
+            "Port-forwarding %s pod %s:%d", service, pod.name, remote_port
+        )
+        port_forward = self.port_forward(pod, remote_port)
+        if port_forward is None:
+            raise RuntimeError(
+                f"Failed to establish port forward to {pod.name}:{remote_port}"
+            )
+
+        return InferenceEndpoint.from_port(
+            port_forward.local_port, model=model, headers=headers
+        )
+
+    async def wait_until_serving(
+        self,
+        *,
+        endpoint: Optional[InferenceEndpoint] = None,
+        model: Optional[str] = None,
+        timeout: float = 600.0,
+    ) -> InferenceEndpoint:
+        """Block until the deployment actually answers an inference request.
+
+        ``__aenter__`` only waits for the DynamoGraphDeployment ``Ready``
+        condition, which the operator can report while the model is still
+        loading. This adds the check that condition cannot make -- that a
+        request completes -- using the same gate the local-process backend uses.
+
+        Returns the endpoint, so callers can chain.
+        """
+        target = (
+            endpoint if endpoint is not None else self.frontend_endpoint(model=model)
+        )
+        # Run the blocking probe loop off the event loop so port-forward
+        # background threads and the kube client stay responsive.
+        await asyncio.to_thread(
+            _wait_until_serving,
+            target,
+            model=model,
+            timeout=timeout,
+            log=self._logger,
+        )
+        return target
 
     def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
         directory = os.path.join(self.log_dir, service_name)

@@ -18,20 +18,21 @@ import pytest
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.conftest import ServicePorts
-from tests.utils.client import send_request
 from tests.utils.constants import DefaultPort, DynamoPortRange
-from tests.utils.engine_process import (
-    EngineConfig,
-    EngineProcess,
-    ResponseValidationError,
-)
+from tests.utils.engine_process import EngineConfig, EngineProcess
 from tests.utils.payload_builder import (
     make_chat_health_check,
     make_completions_health_check,
     make_images_health_check,
 )
-from tests.utils.payloads import ChatPayload, CompletionPayload, ImagesPayload
+from tests.utils.payloads import (
+    BasePayload,
+    ChatPayload,
+    CompletionPayload,
+    ImagesPayload,
+)
 from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.verification import run_payloads
 
 DEFAULT_TIMEOUT = 10
 
@@ -335,6 +336,78 @@ def _install_test_only_packages(config: EngineConfig) -> None:
     _test_only_pip_done.add(spec)
 
 
+def _bind_payload_to_ports(
+    payload: BasePayload,
+    *,
+    frontend_port: int,
+    system_ports: list[int],
+) -> BasePayload:
+    """Address a payload at this test's dynamically allocated ports.
+
+    This is local-deployment addressing, not verification: payload definitions
+    use the ``DefaultPort`` values as placeholders for "the frontend" and
+    "worker system port N", and this resolves them to what the launch script
+    actually bound.
+
+    Payloads that target a worker system port are topology-dependent by
+    construction -- there is no single frontend URL that reaches them -- which
+    is why this mapping stays on the local-launch side rather than moving into
+    the deployment-agnostic runner.
+    """
+    # Copy so shared/parametrized payload instances are never mutated across
+    # cases.
+    payload = deepcopy(payload)
+
+    # Default behavior: requests go to the frontend port. Metrics may target
+    # either the frontend or worker system ports; map each DefaultPort
+    # placeholder to its per-test allocation.
+    if getattr(payload, "endpoint", "") == "/metrics":
+        if payload.port == DefaultPort.FRONTEND.value:
+            payload.port = frontend_port
+        elif payload.port == DefaultPort.SYSTEM1.value:
+            if len(system_ports) < 1:
+                raise RuntimeError(
+                    "Payload targets SYSTEM_PORT1 but no system ports were provided "
+                    f"(payload={payload.__class__.__name__})"
+                )
+            payload.port = system_ports[0]
+        elif payload.port == DefaultPort.SYSTEM2.value:
+            if len(system_ports) < 2:
+                raise RuntimeError(
+                    "Payload targets SYSTEM_PORT2 but only 1 system port was provided "
+                    f"(payload={payload.__class__.__name__})"
+                )
+            payload.port = system_ports[1]
+    else:
+        payload.port = frontend_port
+
+    # Optional extra system ports for specialized payloads (e.g. LoRA control-plane APIs).
+    # BasePayload always defines `system_ports` (usually empty); map defaults
+    # (SYSTEM_PORT1/2) to per-test system ports when present.
+    if payload.system_ports:
+        mapped_system_ports: list[int] = []
+        for p in payload.system_ports:
+            if p == DefaultPort.SYSTEM1.value:
+                if len(system_ports) < 1:
+                    raise RuntimeError(
+                        "Payload.system_ports includes SYSTEM_PORT1 but no system ports were provided "
+                        f"(payload={payload.__class__.__name__})"
+                    )
+                mapped_system_ports.append(system_ports[0])
+            elif p == DefaultPort.SYSTEM2.value:
+                if len(system_ports) < 2:
+                    raise RuntimeError(
+                        "Payload.system_ports includes SYSTEM_PORT2 but only 1 system port was provided "
+                        f"(payload={payload.__class__.__name__})"
+                    )
+                mapped_system_ports.append(system_ports[1])
+            else:
+                mapped_system_ports.append(p)
+        payload.system_ports = mapped_system_ports
+
+    return payload
+
+
 def run_serve_deployment(
     config: EngineConfig,
     request: Any,
@@ -361,6 +434,10 @@ def run_serve_deployment(
     logger.info("Using model: %s", config.model)
     logger.info("Script: %s", config.script_name)
 
+    # Before anything is launched, so a misclassification costs seconds rather
+    # than a full engine startup.
+    _assert_topology_marker(config, request)
+
     # Install any decoder a codec-stripped image needs for this test, before the
     # server launches, so the worker can import it. No-op unless the config opts in.
     _install_test_only_packages(config)
@@ -375,120 +452,31 @@ def run_serve_deployment(
         with EngineProcess.from_script(
             config, request, extra_env=merged_env
         ) as server_process:
-            for _payload in config.request_payloads:
-                logger.info("TESTING: Payload: %s", _payload.__class__.__name__)
+            # Address every payload, then hand the whole batch to the shared,
+            # deployment-free runner. Everything above this line is local-launch
+            # mechanics; everything below is verification that tests/deploy runs
+            # identically against a Kubernetes frontend.
+            bound_payloads = [
+                _bind_payload_to_ports(
+                    payload,
+                    frontend_port=dynamic_frontend_port,
+                    system_ports=dynamic_system_ports,
+                )
+                for payload in config.request_payloads
+            ]
 
-                # Make a per-iteration copy so tests can safely override ports/fields
-                # without mutating shared config instances across parametrized cases.
-                payload = deepcopy(_payload)
-                # inject model
-                if hasattr(payload, "with_model"):
-                    payload = payload.with_model(config.model)
-
-                # Default behavior: requests go to the frontend port. Metrics
-                # may target either the frontend or worker system ports; map
-                # each DefaultPort placeholder to its per-test allocation.
-                if getattr(payload, "endpoint", "") == "/metrics":
-                    if payload.port == DefaultPort.FRONTEND.value:
-                        payload.port = dynamic_frontend_port
-                    elif payload.port == DefaultPort.SYSTEM1.value:
-                        if len(dynamic_system_ports) < 1:
-                            raise RuntimeError(
-                                "Payload targets SYSTEM_PORT1 but no system ports were provided "
-                                f"(payload={payload.__class__.__name__})"
-                            )
-                        payload.port = dynamic_system_ports[0]
-                    elif payload.port == DefaultPort.SYSTEM2.value:
-                        if len(dynamic_system_ports) < 2:
-                            raise RuntimeError(
-                                "Payload targets SYSTEM_PORT2 but only 1 system port was provided "
-                                f"(payload={payload.__class__.__name__})"
-                            )
-                        payload.port = dynamic_system_ports[1]
-                else:
-                    payload.port = dynamic_frontend_port
-
-                # Optional extra system ports for specialized payloads (e.g. LoRA control-plane APIs).
-                # BasePayload always defines `system_ports` (usually empty); map defaults
-                # (SYSTEM_PORT1/2) to per-test system ports when present.
-                if payload.system_ports:
-                    mapped_system_ports: list[int] = []
-                    for p in payload.system_ports:
-                        if p == DefaultPort.SYSTEM1.value:
-                            if len(dynamic_system_ports) < 1:
-                                raise RuntimeError(
-                                    "Payload.system_ports includes SYSTEM_PORT1 but no system ports were provided "
-                                    f"(payload={payload.__class__.__name__})"
-                                )
-                            mapped_system_ports.append(dynamic_system_ports[0])
-                        elif p == DefaultPort.SYSTEM2.value:
-                            if len(dynamic_system_ports) < 2:
-                                raise RuntimeError(
-                                    "Payload.system_ports includes SYSTEM_PORT2 but only 1 system port was provided "
-                                    f"(payload={payload.__class__.__name__})"
-                                )
-                            mapped_system_ports.append(dynamic_system_ports[1])
-                        else:
-                            mapped_system_ports.append(p)
-                    payload.system_ports = mapped_system_ports
-
-                for iteration in range(payload.repeat_count):
-                    # Resolve an iteration-specific body once so validation
-                    # retries resend the same request.
-                    request_body = payload.body_for_iteration(iteration)
-                    # Re-issue the request (server stays up) on validation
-                    # failure when payload.max_attempts > 1. See tests/README.md
-                    # "Flaky Tests" for when this is appropriate. Backoff
-                    # factor 1.5 keeps the worst-case sleep budget bounded
-                    # for max_attempts up to ~6.
-                    last_err: Optional[ResponseValidationError] = None
-                    try:
-                        for attempt in range(payload.max_attempts):
-                            try:
-                                response = send_request(
-                                    url=payload.url(),
-                                    payload=request_body,
-                                    timeout=payload.timeout,
-                                    method=payload.method,
-                                    stream=payload.http_stream,
-                                )
-                                server_process.check_response(payload, response)
-                                last_err = None
-                                break
-                            except ResponseValidationError as e:
-                                last_err = e
-                                if attempt < payload.max_attempts - 1:
-                                    wait = 1.0 * (1.5**attempt)
-                                    logger.warning(
-                                        "%s request failed (attempt %d/%d): %s — retrying in %.1fs",
-                                        type(payload).__name__,
-                                        attempt + 1,
-                                        payload.max_attempts,
-                                        e,
-                                        wait,
-                                    )
-                                    time.sleep(wait)
-                    except Exception as e:
-                        # Transport / connection failures (and payload.url()
-                        # failures) aren't retried by design; the inner loop
-                        # only retries ResponseValidationError. Re-raise with
-                        # the server's last 80 log lines so a CI failure is
-                        # diagnosable in one pass rather than yielding a bare
-                        # ReadTimeout.
-                        raise RuntimeError(
-                            _format_request_failure(
-                                config=config,
-                                payload=payload,
-                                server_process=server_process,
-                                error=e,
-                            )
-                        ) from e
-                    if last_err is not None:
-                        raise last_err
-
-                # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
-                if hasattr(payload, "final_validation"):
-                    payload.final_validation()
+            run_payloads(
+                bound_payloads,
+                log=logger,
+                log_source=server_process,
+                model=config.model,
+                describe_failure=lambda payload, error: _format_request_failure(
+                    config=config,
+                    payload=payload,
+                    server_process=server_process,
+                    error=error,
+                ),
+            )
 
             if post_validation is not None:
                 post_validation()
@@ -496,14 +484,84 @@ def run_serve_deployment(
         _cleanup_prepared_deployment(prep)
 
 
+def topology_dependent_reason(config: EngineConfig) -> Optional[str]:
+    """Why ``config`` cannot run against an arbitrary frontend URL, or None.
+
+    A serve config is deployment-agnostic when every payload asserts only on
+    the HTTP response. It becomes topology-dependent when a payload:
+
+    * matches regexes against the server's own log file (``expected_log``);
+    * scrapes ``/metrics`` on a worker system port rather than the frontend; or
+    * addresses extra system ports directly (control-plane APIs),
+
+    or when the config gates readiness on per-worker ``/health`` endpoints.
+
+    None of those are reachable through a single frontend URL, so they need a
+    deployment handle. Deriving this from the config keeps the marker correct
+    as configs change, instead of relying on each config author to remember it.
+    """
+    if config.health_check_workers:
+        return "readiness probes per-worker /health on system ports"
+    for payload in config.request_payloads or ():
+        # Not `payload.expected_log`: a payload may only populate that field
+        # per iteration, at run time (see UuidPassthroughChatPayload).
+        if payload.declares_log_assertions():
+            return f"{type(payload).__name__} asserts on server logs"
+        if payload.system_ports:
+            return f"{type(payload).__name__} addresses worker system ports"
+        if (
+            getattr(payload, "endpoint", "") == "/metrics"
+            and payload.port != DefaultPort.FRONTEND.value
+        ):
+            return f"{type(payload).__name__} scrapes a worker /metrics port"
+    return None
+
+
+def _assert_topology_marker(config: EngineConfig, request: Any) -> None:
+    """Fail fast when a config needs a deployment handle but is not marked.
+
+    ``params_with_model_mark`` derives the marker for the parametrized config
+    dicts, but a test that builds its ``EngineConfig`` inline never goes through
+    it. Checking here -- before anything is launched -- covers both shapes and
+    keeps the classification honest as configs change, instead of letting it
+    drift silently into a marker nothing verifies.
+    """
+    reason = topology_dependent_reason(config)
+    if reason is None:
+        return
+    if request.node.get_closest_marker("topology_dependent") is not None:
+        return
+    pytest.fail(
+        f"EngineConfig {config.name!r} is deployment-coupled ({reason}) but the "
+        "test is not marked @pytest.mark.topology_dependent. Either add the "
+        "marker, or make the config assert only on the inference response. See "
+        "tests/README.md 'Deployment-agnostic tests'.",
+        pytrace=False,
+    )
+
+
+def marks_for_config(config_name: str, cfg: EngineConfig) -> list:
+    """Marks for one parametrized serve config.
+
+    Adds the model marker (so models can be collected after pytest filtering)
+    and, where the config's payloads require a deployment handle, the
+    ``topology_dependent`` marker.
+    """
+    marks = list(getattr(cfg, "marks", []))
+    marks.append(pytest.mark.model(cfg.model))
+    reason = topology_dependent_reason(cfg)
+    if reason is not None:
+        logger.debug("Config %s is topology_dependent: %s", config_name, reason)
+        marks.append(pytest.mark.topology_dependent)
+    return marks
+
+
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):
     """Return pytest params for a config dict, adding a model marker per param.
 
     This enables simple model collection after pytest filtering.
     """
-    params = []
-    for config_name, cfg in configs.items():
-        marks = list(getattr(cfg, "marks", []))
-        marks.append(pytest.mark.model(cfg.model))
-        params.append(pytest.param(config_name, marks=marks))
-    return params
+    return [
+        pytest.param(config_name, marks=marks_for_config(config_name, cfg))
+        for config_name, cfg in configs.items()
+    ]

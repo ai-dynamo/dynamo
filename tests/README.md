@@ -104,6 +104,97 @@ dynamo/
 
 Prefer API responses, structured response fields, metrics, or direct test helper APIs for functional and semantic assertions. If a router-internal fact is only exposed as a structured tracing event, keep parsing in a shared helper rather than duplicating ad hoc log scraping in tests.
 
+### Deployment-agnostic tests
+
+Dynamo is deployed two ways in CI, and most tests should not care which:
+
+| | In-container | Kubernetes |
+|---|---|---|
+| Where pytest runs | inside the runtime image, alongside the Dynamo processes | on a runner, against a vCluster |
+| How Dynamo starts | `bash examples/backends/<fw>/launch/<script>.sh` as a subprocess | a `DynamoGraphDeployment` CR applied by the operator |
+| Driver | `tests/utils/engine_process.py` (`EngineProcess`) | `tests/deploy/dgd_utils.py` (`ManagedDeployment`) |
+| Suites | `tests/serve/`, `tests/frontend/`, ... | `tests/deploy/`, `tests/fault_tolerance/deploy/` |
+
+**The default rule: a test receives a URL, sends a payload, and asserts on the
+response.** Everything about getting a deployment up -- launching it, waiting
+until it can actually serve inference, tearing it down -- belongs in `tests/utils`
+and in fixtures, not in the test body.
+
+The pieces:
+
+- **`tests/utils/inference_endpoint.py`** -- `InferenceEndpoint(base_url, model,
+  headers)` is the whole handle a deployment-agnostic test needs. It works for
+  `http://localhost:8000` (local process), `http://localhost:<ephemeral>`
+  (port-forwarded frontend), or `https://dynamo.example.com` (remote ingress).
+  `wait_until_serving(endpoint)` is the single definition of "deployed and able
+  to receive inference requests": it sends one real chat completion and retries
+  until it succeeds. Backends gate on their own liveness first (process/port
+  health, or the DGD `Ready` condition), then call this.
+- **`tests/utils/verification.py`** -- `run_payloads(payloads)` sends each
+  payload, validates each response, and applies `max_attempts` retries. It has
+  no knowledge of processes or pods, so `tests/serve` and `tests/deploy` share
+  one implementation.
+- **`payload.bind(endpoint)`** -- returns a copy of a payload addressed at an
+  endpoint. Use it instead of setting `host`/`port`.
+
+A deploy test therefore reads:
+
+```python
+async def test_deployment(deployed_endpoint):
+    payload = deployment_smoke_chat_payload(model=deployed_endpoint.model)
+    run_payloads([payload.bind(deployed_endpoint)])
+```
+
+#### When a test may be deployment-coupled
+
+Mark it `@pytest.mark.topology_dependent` when the thing under test is *how*
+Dynamo is deployed. Legitimate reasons:
+
+- the assertion is about **which worker** served a request (routing, KV-cache
+  reuse, disaggregated prefill/decode split);
+- it scrapes **`/metrics` on a worker system port** rather than the frontend;
+- it matches patterns against a **process or pod log** (`payload.expected_log`);
+- it **kills, pauses or scales** part of the deployment (fault tolerance);
+- it measures **performance** against a specific topology.
+
+None of those are reachable through a single frontend URL. Everything else
+should not carry the marker.
+
+For the parametrized `tests/serve` config dicts, the marker is derived from the
+config by `topology_dependent_reason()` in `tests/serve/common.py` -- you do not
+add it by hand. A test that builds its `EngineConfig` **inline in the test body**
+never goes through that derivation, so it must carry the marker itself.
+`tests/fault_tolerance/`, `tests/router/` and `tests/mm_router/` apply it
+directory-wide from their `conftest.py`.
+
+Three guardrails back the rule up:
+
+- `run_serve_deployment` fails the test, before launching anything, if a config
+  is deployment-coupled but the test is not marked. This is what catches the
+  inline-config case, and it names both the reason and the marker to add.
+- `run_payloads` raises if a payload sets `expected_log` and no `log_source` was
+  supplied, naming `topology_dependent` in the message.
+- The in-container CI jobs run with `... and not k8s` appended centrally in
+  `.github/actions/pytest{,-local}/action.yml`, so a cluster test can never be
+  collected into a job that has no cluster.
+
+> [!NOTE]
+> A payload that only populates `expected_log` at run time (per iteration, like
+> `UuidPassthroughChatPayload`) must override `declares_log_assertions()` to
+> return `True`. The derivation runs at collection time, when the field is still
+> empty.
+
+#### Keep the shared layer importable without `ai-dynamo`
+
+The Kubernetes deploy job runs pytest on a bare runner that installs only
+`container/deps/requirements.test.txt` -- **not** the `ai-dynamo` wheel. So
+`tests/utils/{client,inference_endpoint,payloads,payload_builder,verification}.py`
+and everything under `tests/deploy/` must not `import dynamo` at module scope;
+put the import inside the function that needs it (see the lazy
+`prometheus_names` proxy in `tests/utils/payloads.py`).
+`tests/utils/test_inference_endpoint.py` enforces this both statically and by
+importing the modules with `dynamo` blocked.
+
 ---
 
 ## Test Marking: How to Mark Tests
@@ -132,6 +223,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Framework               | vllm, trtllm, sglang                                             | Which backend the test runs against. Pair with a component marker. |
 | Component               | core, multimodal, router, kvbm, kvbm_concurrency, fault_tolerance, planner | Which part of the backend the test exercises. Pick exactly one of {core, multimodal, router, kvbm, fault_tolerance} per framework-tagged test (disjoint); use `kvbm_concurrency` additionally for KVBM stress tests. `planner` is its own component used by the planner test suite. |
 | Infrastructure          | k8s, deploy                                                      | Infrastructure/environment needs   |
+| Deployment coupling     | topology_dependent                                               | The test asserts on **how** Dynamo is deployed, not only on the inference response. See [Deployment-agnostic tests](#deployment-agnostic-tests). |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
 | Dependency add-ons      | lmcache                                                          | Optional dependency required by the test (paired with a framework marker, e.g. `vllm + lmcache`). |
 | Selector-only           | none                                                             | Defined in `pyproject.toml` for CI selector expressions (e.g. `pre_merge and none and gpu_1` to target tests with no framework marker). Not applied to individual tests. |

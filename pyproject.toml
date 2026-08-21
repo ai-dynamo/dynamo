@@ -360,6 +360,7 @@ markers = [
     "k8s: marks tests as requiring Kubernetes",
     "fault_tolerance: marks tests as fault tolerance tests",
     "deploy: marks tests as deployment tests",
+    "topology_dependent: marks tests whose assertions depend on HOW Dynamo is deployed — worker count, routing decisions, disaggregation, per-worker metrics on system ports, process/pod logs, scaling or fault injection. Tests WITHOUT this marker must be deployment-agnostic: they take a frontend URL, send a payload and assert on the response. See tests/README.md 'Deployment-agnostic tests'",
     "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
     "dynamocheckpoint: marks tests for the DynamoCheckpoint controller deploy path",

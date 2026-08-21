@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from copy import deepcopy
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import requests
 
@@ -55,6 +55,7 @@ def send_request(
     method: str = "POST",
     log_level: int = 20,
     stream: bool = False,
+    headers: Optional[Dict[str, str]] = None,
 ) -> requests.Response:
     """
     Send an HTTP request to the engine with detailed logging.
@@ -64,6 +65,8 @@ def send_request(
         payload: The request payload (for GET, sent as query params)
         timeout: Request timeout in seconds
         method: HTTP method ("POST" or "GET")
+        headers: Extra request headers. Needed by deployments that route on a
+            header (for example the Gateway API ``Host`` header).
 
     Returns:
         The response object
@@ -78,6 +81,10 @@ def send_request(
     sanitized_payload = _sanitize_payload_for_logging(payload)
     payload_json = json.dumps(sanitized_payload, indent=2)
 
+    # Keep the logged curl faithful to what is sent: a reproduction that omits
+    # a routing header (e.g. Host) silently hits a different backend.
+    header_args = "".join(f' \\\n  -H "{k}: {v}"' for k, v in (headers or {}).items())
+
     curl_command = ""
     if method_upper == "GET":
         curl_command = f'curl "{url}"'
@@ -85,8 +92,9 @@ def send_request(
             # For GET requests, payload is sent as query parameters
             query_params = "&".join(f"{k}={v}" for k, v in payload.items())
             curl_command += f"?{query_params}"
+        curl_command += header_args
     else:
-        curl_command = f'curl -X {method_upper} "{url}"'
+        curl_command = f'curl -X {method_upper} "{url}"' + header_args
         if method_upper == "POST":
             curl_command += (
                 ' \\\n  -H "Content-Type: application/json" \\\n  -d \''
@@ -98,13 +106,17 @@ def send_request(
     start_time = time.time()
     try:
         if method_upper == "GET":
-            response = requests.get(url, params=payload, timeout=timeout)
+            response = requests.get(
+                url, params=payload, timeout=timeout, headers=headers
+            )
         elif method_upper == "POST":
-            response = requests.post(url, json=payload, timeout=timeout, stream=stream)
+            response = requests.post(
+                url, json=payload, timeout=timeout, stream=stream, headers=headers
+            )
         else:
             # Fallback for other methods if needed
             response = requests.request(
-                method_upper, url, json=payload, timeout=timeout
+                method_upper, url, json=payload, timeout=timeout, headers=headers
             )
 
         elapsed = time.time() - start_time

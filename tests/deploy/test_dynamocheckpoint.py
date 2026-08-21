@@ -13,11 +13,13 @@ from typing import Any, Callable
 
 import aiohttp
 import pytest
-import requests
 from kubernetes_asyncio.client import exceptions as k8s_exceptions
 
+from tests.deploy.conftest import SERVING_READY_TIMEOUT_S
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
-from tests.utils.client import send_request, wait_for_model_availability
+from tests.utils.inference_endpoint import InferenceEndpoint, wait_until_serving
+from tests.utils.payload_builder import deployment_smoke_chat_payload
+from tests.utils.verification import run_payloads
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +28,13 @@ logger = logging.getLogger(__name__)
 # TIME_WAIT) via threading.excepthook. Under filterwarnings=error those would
 # fail this live-cluster test, so scope the suppression to this module only
 # rather than globally hiding unrelated background-thread crashes.
-pytestmark = pytest.mark.filterwarnings(
-    "ignore::pytest.PytestUnhandledThreadExceptionWarning"
-)
+pytestmark = [
+    pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning"),
+    # Scales a component to 0 and back, then waits for a specific restored pod
+    # carrying the checkpoint hash. That is an assertion about deployment
+    # shape, not about an inference response.
+    pytest.mark.topology_dependent,
+]
 
 TRANSIENT_K8S_EXCEPTIONS = (
     aiohttp.ClientError,
@@ -222,6 +228,11 @@ def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
     raise AssertionError(f"component {name!r} not found in DGD spec")
 
 
+def _checkpoint_manifest_path(backend: CheckpointBackendConfig) -> Path:
+    """Absolute path to the example manifest this backend deploys from."""
+    return Path(_get_workspace_dir()).joinpath(*backend.manifest)
+
+
 def _new_checkpoint_spec(
     backend: CheckpointBackendConfig,
     name: str,
@@ -232,7 +243,7 @@ def _new_checkpoint_spec(
     model_cache_pvc: str | None = None,
     model_cache_mount: str | None = None,
 ) -> DeploymentSpec:
-    spec_path = Path(_get_workspace_dir()).joinpath(*backend.manifest)
+    spec_path = _checkpoint_manifest_path(backend)
     deployment_spec = DeploymentSpec(str(spec_path))
     deployment_spec.name = name
     deployment_spec.namespace = namespace
@@ -505,63 +516,24 @@ async def _wait_for_restored_decode_pod(
     return restored
 
 
-def _assert_chat_response(response: requests.Response, expected_model: str) -> None:
-    if response.status_code != 200:
-        pytest.fail(
-            f"Expected status 200, got {response.status_code}. "
-            f"Response: {response.text[:500]}",
-            pytrace=False,
-        )
-    data = response.json()
-    if data.get("model") != expected_model:
-        pytest.fail(
-            f"Expected model {expected_model!r}, got response: {data}",
-            pytrace=False,
-        )
-    choices = data.get("choices", [])
-    if not choices:
-        pytest.fail(
-            f"Expected at least one chat choice, got response: {data}",
-            pytrace=False,
-        )
-    message = choices[0].get("message", {})
-    if message.get("role") != "assistant":
-        pytest.fail(
-            f"Expected assistant message, got response: {data}",
-            pytrace=False,
-        )
-    if not message.get("content"):
-        pytest.fail(
-            f"Expected non-empty assistant content, got response: {data}",
-            pytrace=False,
-        )
+def _assert_inference(endpoint: InferenceEndpoint) -> None:
+    """Wait until the deployment serves, then assert one chat completion.
 
-
-def _assert_inference(base_url: str, endpoint: str, model: str) -> None:
-    model_ready = wait_for_model_availability(
-        url=base_url,
-        endpoint=endpoint,
-        model=model,
-        logger=logger,
-        max_attempts=30,
+    Uses the same payload and the same assertions as every other functional
+    test; only the address differs. ``min_content_length=0`` keeps the original
+    bar for this test -- non-empty assistant content -- because a checkpoint
+    restore is what is under test here, not generation length.
+    """
+    wait_until_serving(endpoint, timeout=SERVING_READY_TIMEOUT_S, log=logger)
+    payload = deployment_smoke_chat_payload(
+        model=endpoint.model,
+        prompt=TEST_PROMPT,
+        max_tokens=DEFAULT_MAX_TOKENS,
+        temperature=DEFAULT_TEMPERATURE,
+        timeout=DEFAULT_REQUEST_TIMEOUT,
+        min_content_length=0,
     )
-    if not model_ready:
-        pytest.fail(f"model {model!r} did not become available", pytrace=False)
-
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": TEST_PROMPT}],
-        "max_tokens": DEFAULT_MAX_TOKENS,
-        "temperature": DEFAULT_TEMPERATURE,
-        "stream": False,
-    }
-    response = send_request(
-        f"{base_url}{endpoint}",
-        payload,
-        timeout=float(DEFAULT_REQUEST_TIMEOUT),
-        method="POST",
-    )
-    _assert_chat_response(response, expected_model=model)
+    run_payloads([payload.bind(endpoint)], log=logger)
 
 
 @pytest.mark.dynamocheckpoint
@@ -611,18 +583,12 @@ async def test_dgd_checkpoint_restore_deploy(
         namespace=namespace,
         skip_service_restart=skip_service_restart,
     ) as deployment:
-        frontend_pods = deployment.get_pods([backend.frontend_component]).get(
-            backend.frontend_component, []
+        endpoint = deployment.frontend_endpoint(
+            model=backend.model, service_name=backend.frontend_component
         )
-        if not frontend_pods:
-            pytest.fail(f"No frontend pods found for {deployment_name}", pytrace=False)
-        port_forward = deployment.port_forward(frontend_pods[0], deployment_spec.port)
-        if port_forward is None:
-            pytest.fail("failed to establish frontend port-forward", pytrace=False)
-        base_url = f"http://localhost:{port_forward.local_port}"
 
         logger.info("Validating inference before restore")
-        _assert_inference(base_url, deployment_spec.endpoint, backend.model)
+        _assert_inference(endpoint)
 
         _, checkpoint_hash = await _wait_for_checkpoint_ready(deployment, backend)
 
@@ -653,4 +619,4 @@ async def test_dgd_checkpoint_restore_deploy(
         await deployment._wait_for_ready(timeout=DGD_READY_TIMEOUT)
 
         logger.info("Validating inference after restore")
-        _assert_inference(base_url, deployment_spec.endpoint, backend.model)
+        _assert_inference(endpoint)

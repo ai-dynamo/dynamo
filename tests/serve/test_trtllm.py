@@ -819,6 +819,8 @@ def test_chat_only_aggregated_with_test_logits_processor(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
+# readiness gates on the worker's own /health system port
+@pytest.mark.topology_dependent
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm

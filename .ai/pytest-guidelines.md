@@ -227,6 +227,57 @@ def test_vllm_requests(start_serve_deployment, payload_fn):
 
 Extend shared code rather than forking a private copy.
 
+### DO NOT put deployment mechanics in a test body
+
+**Always flag** a test that finds a pod, opens a port-forward, builds
+`f"http://localhost:{port}"`, or polls for readiness inline. A test's body should
+be *send payload, assert on response*; how Dynamo got deployed is a fixture's
+job. This is what lets the same assertion run in-container and against a
+Kubernetes frontend.
+
+- **Address:** `InferenceEndpoint` (`tests/utils/inference_endpoint.py`) --
+  `base_url` plus optional model and headers.
+- **Readiness:** `wait_until_serving(endpoint)` -- one definition of "able to
+  receive inference requests", shared by both backends.
+- **Sending and asserting:** `run_payloads(payloads)`
+  (`tests/utils/verification.py`), with `payload.bind(endpoint)` to address them.
+- **Getting an endpoint:** `EngineProcess.endpoint()` locally, or
+  `ManagedDeployment.frontend_endpoint()` / `.wait_until_serving()` on
+  Kubernetes.
+
+```python
+# BAD -- deployment mechanics and a hand-rolled validator inside the test
+async def test_deployment(deployment_spec, namespace, request):
+    async with ManagedDeployment(...) as deployment:
+        pod = deployment.get_pods(["Frontend"])["Frontend"][0]
+        pf = deployment.port_forward(pod, deployment_spec.port)
+        base_url = f"http://localhost:{pf.local_port}"
+        assert wait_for_model_availability(url=base_url, ...)
+        response = send_request(f"{base_url}/v1/chat/completions", {...})
+        assert response.status_code == 200
+        assert len(response.json()["choices"][0]["message"]["content"]) >= 100
+
+# GOOD -- the fixture yields a URL; the test only verifies
+async def test_deployment(deployed_endpoint):
+    payload = deployment_smoke_chat_payload(model=deployed_endpoint.model)
+    run_payloads([payload.bind(deployed_endpoint)])
+```
+
+A test that genuinely needs a deployment handle -- routing, per-worker metrics,
+log assertions, fault injection, scaling, performance -- is the exception, and
+must carry `@pytest.mark.topology_dependent`. See
+[tests/README.md](../tests/README.md) "Deployment-agnostic tests".
+
+Two related constraints:
+
+- `tests/utils/{client,inference_endpoint,payloads,payload_builder,verification}.py`
+  and everything under `tests/deploy/` must not `import dynamo` at module scope:
+  the Kubernetes deploy job installs only `container/deps/requirements.test.txt`,
+  not the `ai-dynamo` wheel. Defer the import into the function that needs it.
+- In-container CI jobs append `and not k8s` centrally in
+  `.github/actions/pytest{,-local}/action.yml`; don't re-add it to individual
+  marker expressions.
+
 ---
 
 ## Markers
@@ -344,6 +395,13 @@ Timing comments let AI/automation understand requirements when shuffling test su
 - `deploy`, `planner` -- additional component markers (alongside `core` / `multimodal` /
   `router` / `kvbm` / `fault_tolerance`).
 - `k8s` -- requires Kubernetes.
+- `topology_dependent` -- the test depends on **how** Dynamo is deployed (routing,
+  per-worker metrics or `/health`, log patterns, fault injection, scaling,
+  performance) rather than only on the inference response, so it cannot run
+  against an arbitrary frontend URL. Derived for the parametrized `tests/serve`
+  config dicts and applied directory-wide for `tests/fault_tolerance`,
+  `tests/router`, `tests/mm_router`; a test that builds its `EngineConfig` inline
+  must add it by hand, and `run_serve_deployment` fails fast if it does not.
 
 ### Example
 

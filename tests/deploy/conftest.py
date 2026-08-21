@@ -14,8 +14,9 @@ from typing import AsyncIterator, Dict, List, Optional
 
 import pytest
 
-from tests.deploy.dgd_utils import DeploymentSpec, _get_workspace_dir
+from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
 from tests.deploy.dgdr_utils import DGDRTestConfig, ManagedDGDR
+from tests.utils.inference_endpoint import InferenceEndpoint
 
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
@@ -463,3 +464,72 @@ def deployment_spec(
         )
 
     return spec
+
+
+def _apply_ci_cluster_constraints(
+    spec: DeploymentSpec, target: DeploymentTarget
+) -> None:
+    """Adjust a spec for what the CI cluster can actually run.
+
+    These are properties of the cluster, not of the behaviour under test, so
+    they belong with deployment setup rather than inside a test body.
+    """
+    # NIXL_ERR_BACKEND: vCluster CI nodes lack RDMA/UCX for inter-pod KV
+    # transfer. Prefill workers crash in NixlWrapper.create_backend.
+    if target.framework == "vllm" and target.profile in ("disagg", "disagg_router"):
+        pytest.skip(
+            "NIXL_ERR_BACKEND: CI cluster lacks RDMA/UCX for inter-pod KV transfer"
+        )
+
+    # CI deploy cluster uses MIG-partitioned GPUs (~10 GiB slices); lower
+    # gpu-memory-utilization so vLLM 0.23.0+ flashinfer sampler warmup fits
+    # without triggering cudaMalloc -> NVML query, which is restricted on MIG.
+    # TODO (ops): remove this if CI transitions to e.g. CUDA MPS
+    if target.framework == "vllm":
+        spec.add_arg_to_service("VllmDecodeWorker", "--gpu-memory-utilization", "0.7")
+
+
+def spec_model(spec: DeploymentSpec) -> str:
+    """Model name declared by the first service in the spec that names one."""
+    model = next((s.model for s in spec.services if s.model), None)
+    if not model:
+        pytest.fail(f"Could not determine model name from deployment spec {spec.name}")
+    return model
+
+
+# How long to wait, after the DynamoGraphDeployment reports Ready, for the
+# deployment to answer an inference request. Ready can be reported while the
+# model is still loading from HuggingFace, so this covers a cold model pull.
+SERVING_READY_TIMEOUT_S = 600.0
+
+
+@pytest.fixture
+async def deployed_endpoint(
+    deployment_target: DeploymentTarget,
+    deployment_spec: DeploymentSpec,
+    namespace: str,
+    skip_service_restart: bool,
+    request: pytest.FixtureRequest,
+) -> AsyncIterator[InferenceEndpoint]:
+    """Deploy to Kubernetes and yield an address that serves inference.
+
+    Everything a deploy test used to do before its first assertion -- create the
+    DynamoGraphDeployment, wait for it, find the frontend pod, port-forward,
+    poll until the model answers -- happens here. Tests receive only a URL, so
+    their bodies are the same "send payload, assert on response" as any other
+    functional test.
+
+    The deployment is torn down when the test ends, including on failure.
+    """
+    _apply_ci_cluster_constraints(deployment_spec, deployment_target)
+    model = spec_model(deployment_spec)
+
+    async with ManagedDeployment(
+        log_dir=request.node.name,
+        deployment_spec=deployment_spec,
+        namespace=namespace,
+        skip_service_restart=skip_service_restart,
+    ) as deployment:
+        yield await deployment.wait_until_serving(
+            model=model, timeout=SERVING_READY_TIMEOUT_S
+        )
