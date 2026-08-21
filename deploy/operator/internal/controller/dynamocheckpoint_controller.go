@@ -339,6 +339,15 @@ func (r *CheckpointReconciler) failPendingCheckpoint(
 }
 
 func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
+	if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		if ckpt.Status.Message == checkpointDisabledMessage {
+			return ctrl.Result{}, nil
+		}
+		ckpt.Status.Message = checkpointDisabledMessage
+		r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", checkpointDisabledMessage)
+		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
+	}
+
 	if ckpt.Status.JobName == "" {
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
 		ckpt.Status.Message = "checkpoint job is missing from status"
@@ -377,14 +386,6 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		// not the source pod has appeared (k8s sets JobFailed/DeadlineExceeded on unschedulable Jobs).
 		if failed, message := checkpointJobFailed(job); failed {
 			return r.failCreating(ctx, ckpt, "JobFailed", message)
-		}
-		if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
-			if ckpt.Status.Message == checkpointDisabledMessage {
-				return ctrl.Result{}, nil
-			}
-			ckpt.Status.Message = checkpointDisabledMessage
-			r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", checkpointDisabledMessage)
-			return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 		}
 
 		pod, perr := r.findSourcePod(ctx, job)
@@ -700,7 +701,7 @@ func (r *CheckpointReconciler) FinalizeResource(ctx context.Context, ckpt *nvidi
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1alpha1.DynamoCheckpoint{}).
 		Owns(&batchv1.Job{}, builder.WithPredicates(predicate.Funcs{
 			// Ignore creation - we don't need to reconcile when we just created the Job
@@ -708,8 +709,11 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})).
-		Owns(&snapshotv1alpha1.PodSnapshot{}, builder.WithPredicates(predicate.Funcs{
+		}))
+
+	// Watch the external API only when Checkpoint is enabled and availability was verified.
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		controllerBuilder = controllerBuilder.Owns(&snapshotv1alpha1.PodSnapshot{}, builder.WithPredicates(predicate.Funcs{
 			// Ignore create (we just created it). Watch update (status mirror) and
 			// delete (re-enqueue to recreate / unblock). Delete is safe: reconcile
 			// exits at the deletion-timestamp guard before reaching observePodSnapshot.
@@ -717,7 +721,10 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
-		})).
+		}))
+	}
+
+	return controllerBuilder.
 		Watches(&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(mapSourcePodToCheckpoint),
 			builder.WithPredicates(predicate.Funcs{

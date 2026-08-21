@@ -255,6 +255,7 @@ def test_trtllm_kv_router_basic(
     )
 
 
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)

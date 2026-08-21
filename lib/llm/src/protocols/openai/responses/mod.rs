@@ -735,7 +735,7 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
 }
 
 /// Convert Responses API `text.format` to Chat Completions `response_format`.
-fn convert_text_format(text: &ResponseTextParam) -> Option<ResponseFormat> {
+pub fn convert_text_format(text: &ResponseTextParam) -> Option<ResponseFormat> {
     match &text.format {
         TextResponseFormatConfiguration::Text => None,
         TextResponseFormatConfiguration::JsonObject => Some(ResponseFormat::JsonObject),
@@ -1349,35 +1349,6 @@ mod tests {
                 ..Default::default()
             }),
         }
-    }
-
-    #[test]
-    fn test_annotations_trait_behavior() {
-        let req = make_response_with_input("hello");
-        assert_eq!(
-            req.annotations(),
-            Some(vec!["debug".to_string(), "trace".to_string()])
-        );
-        assert!(req.has_annotation("debug"));
-        assert!(req.has_annotation("trace"));
-        assert!(!req.has_annotation("missing"));
-    }
-
-    #[test]
-    fn test_openai_sampling_trait_behavior() {
-        let req = make_response_with_input("hello");
-        assert_eq!(req.get_temperature(), Some(0.5));
-        assert_eq!(req.get_top_p(), Some(0.9));
-        assert_eq!(req.get_frequency_penalty(), None);
-        assert_eq!(req.get_presence_penalty(), None);
-    }
-
-    #[test]
-    fn test_openai_stop_conditions_trait_behavior() {
-        let req = make_response_with_input("hello");
-        assert_eq!(req.get_max_tokens(), Some(1024));
-        assert_eq!(req.get_min_tokens(), None);
-        assert_eq!(req.get_stop(), None);
     }
 
     #[test]

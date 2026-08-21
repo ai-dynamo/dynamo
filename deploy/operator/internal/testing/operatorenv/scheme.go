@@ -10,6 +10,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -38,6 +39,7 @@ func newScheme() *runtime.Scheme {
 	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(scheme))
 	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(snapshotv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 	utilruntime.Must(lwsscheme.AddToScheme(scheme))

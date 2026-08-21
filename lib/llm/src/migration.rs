@@ -209,6 +209,8 @@ where
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     ) -> Result<ManyOut<Annotated<Resp>>> {
+        // NOTE: Keep the migration operator in the request path at limit zero. The limit controls
+        // replacement attempts; RetryManager continues to own the initial attempt uniformly.
         let (preprocessed_request, context) = request.transfer(());
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
@@ -263,7 +265,7 @@ where
     session_affinity: Option<SessionAffinityId>,
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
-    retries_left: u32,
+    retries_left: u64,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
@@ -307,6 +309,13 @@ where
         metrics: Arc<Metrics>,
         session_affinity: Option<SessionAffinityId>,
     ) -> Result<Self> {
+        // TODO: prompt_embeds take precedence over replayed token_ids. Disable migration for
+        // embedding prompts until a retry can represent an embedding-based continuation.
+
+        // TODO: Define a replay-capability contract for attempt-local decoder and sampler state.
+        // Stop-string matching, generated-token penalties, and thinking-token budgets are not
+        // currently checkpointed across workers.
+
         // Disable migration for structured-output (guided-decoding) requests.
         // Inference backends initialize the guided-decoding FSM (finite state machine) fresh
         // for every new request and only advance it on newly-generated tokens, not on
@@ -345,7 +354,7 @@ where
             session_affinity,
             next_generate: next,
             next_stream: None,
-            retries_left: retries_left + 1, // +1 to account for the initial attempt
+            retries_left: u64::from(retries_left) + 1, // +1 to account for the initial attempt
             max_seq_len,
             model_name,
             metrics,
@@ -390,6 +399,8 @@ where
                     self.metrics.inc_migration_ongoing_request(&self.model_name);
                     let migration_event =
                         MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
+                    // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
+                    // When no replacement is established, preserve the triggering stream error.
                     if let Err(err) = self.new_stream(Some(migration_event)).await {
                         tracing::warn!(error = ?err, "Cannot recreate stream");
                     } else {
@@ -607,13 +618,18 @@ where
             self.last_worker_link = Some(link.clone());
         }
         let token_ids = llm_engine_output.token_ids();
+        let output_len = u32::try_from(token_ids.len()).unwrap_or(u32::MAX);
         self.completed_tokens += token_ids.len();
-        if self.exceed_max_seq_len(token_ids.len() as u32) {
+        if self.exceed_max_seq_len(output_len) {
             return;
         }
+        // NOTE: A zero remaining token budget is not retry-budget exhaustion. Backends remain
+        // authoritative for deciding how generation terminates at max_tokens.
         if let Some(max_tokens) = self.request.stop_conditions.max_tokens {
-            self.request.stop_conditions.max_tokens =
-                Some(max_tokens.saturating_sub(token_ids.len() as u32));
+            self.request.stop_conditions.max_tokens = Some(max_tokens.saturating_sub(output_len));
+        }
+        if let Some(min_tokens) = self.request.stop_conditions.min_tokens {
+            self.request.stop_conditions.min_tokens = Some(min_tokens.saturating_sub(output_len));
         }
         for token_id in token_ids.iter() {
             self.request.token_ids.push(*token_id);
@@ -870,6 +886,7 @@ mod tests {
         token_offset: u32,
         call_count: Arc<AtomicU32>,
         context_id: String,
+        initial_min_tokens: Option<u32>,
     }
 
     impl MockEngine {
@@ -885,7 +902,13 @@ mod tests {
                 token_offset,
                 call_count: Arc::new(AtomicU32::new(0)),
                 context_id,
+                initial_min_tokens: None,
             }
+        }
+
+        fn with_min_tokens(mut self, min_tokens: u32) -> Self {
+            self.initial_min_tokens = Some(min_tokens);
+            self
         }
     }
 
@@ -933,6 +956,15 @@ mod tests {
                 expected_max_tokens,
                 preprocessed_request.stop_conditions.max_tokens
             );
+            if let Some(initial_min_tokens) = self.initial_min_tokens {
+                let expected_min_tokens =
+                    initial_min_tokens.saturating_sub(responses_already_generated as u32);
+                assert_eq!(
+                    preprocessed_request.stop_conditions.min_tokens,
+                    Some(expected_min_tokens),
+                    "min_tokens should be rebased for each replacement request"
+                );
+            }
 
             match &self.behavior {
                 MockBehavior::Success => {
@@ -1262,6 +1294,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maximum_migration_limit_does_not_overflow() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::Success,
+            1,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let request =
+            Context::with_id_and_metadata(create_mock_request(1), context_id, BTreeMap::new());
+        let migration = Migration::new(
+            u32::MAX,
+            None,
+            TEST_MODEL.to_string(),
+            Arc::new(Metrics::new()),
+        );
+
+        let responses = migration
+            .generate(request, mock_engine)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(responses.len(), 1);
+        assert!(responses[0].error.is_none());
+    }
+
+    #[tokio::test]
     async fn test_migration_preserves_session_affinity_across_retry() {
         let context_id = uuid::Uuid::new_v4().to_string();
         let mock_engine = Arc::new(MockEngine::new(
@@ -1457,6 +1520,36 @@ mod tests {
             ),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn retry_rebases_min_tokens_from_the_delivered_prefix() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mut request = create_mock_request(10);
+        request.stop_conditions.min_tokens = Some(7);
+        let mock_engine = Arc::new(
+            MockEngine::new(
+                MockBehavior::MidStreamFail { fail_after: 3 },
+                10,
+                100,
+                context_id.clone(),
+            )
+            .with_min_tokens(7),
+        );
+        let calls = mock_engine.call_count.clone();
+        let request = Context::with_id_and_metadata(request, context_id, BTreeMap::new());
+        let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+
+        let responses = migration
+            .generate(request, mock_engine)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(responses.len(), 10);
+        assert!(responses.iter().all(|response| response.error.is_none()));
     }
 
     /// Test case 4: New request migration - indefinite failure

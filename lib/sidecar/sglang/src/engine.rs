@@ -119,6 +119,7 @@ impl SglangSidecarEngine {
                 .or_else(|| discovery_string(&discovery.server_info, "tool_call_parser")),
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
             route_to_encoder: false,
+            enable_rl: common.enable_rl,
             ..Default::default()
         };
 
