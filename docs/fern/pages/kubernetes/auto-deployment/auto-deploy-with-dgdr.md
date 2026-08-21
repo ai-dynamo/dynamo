@@ -393,6 +393,13 @@ spec:
                   value: kv
 ```
 
+This override changes only the Frontend. Event-driven KV routing also requires backend worker KV
+event publication. With `autoApply: false`, inspect `.status.profilingResults.selectedConfig`.
+Add the complete backend argument list to the applicable aggregated or prefill components. This
+list must include `--kv-events-config`. In `v1beta1`, an override of `containers[].args` replaces
+the generated argument list. See [Using the Dynamo Frontend](../kv-aware-routing/dynamo-frontend.md)
+for the vLLM and SGLang arguments and worker roles.
+
 Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` to find the generated
 component names. An override can modify only components already present in that generated DGD; it
 cannot add a new worker, EPP, or other topology component.

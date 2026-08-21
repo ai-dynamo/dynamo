@@ -34,13 +34,20 @@ spec:
           - kv
 ```
 
-That alone gives you cache-aware routing using load signals. To make routing decisions from real cache contents, complete the next step.
+This configuration enables the router. It does not enable worker KV event publication. Complete the
+next step to route requests by actual cache contents. If you do not publish events, add
+`--no-router-kv-events` for approximate cache prediction. The router does not switch modes
+automatically.
 
 </Step>
 
 <Step title="Publish KV events from the workers">
 
-For the router to track which blocks each worker holds, workers must publish KV cache events. On a vLLM worker, add `--kv-events-config`:
+Workers must publish KV cache events so that the router can track their cache blocks. Add the
+backend configuration to each aggregated worker. For a standard disaggregated deployment, add it
+to each prefill worker.
+
+For vLLM:
 
 ```yaml
   - name: VllmPrefillWorker
@@ -56,13 +63,53 @@ For the router to track which blocks each worker holds, workers must publish KV 
           args:
           - --model
           - Qwen/Qwen3-32B
+          - --stream-interval
+          - "20"
           - --kv-events-config
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 ```
 
-This is the half that the [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md) does not show. Without it, the router falls back to load-only decisions even in `kv` mode.
+For SGLang:
 
-The Frontend and worker snippets above are drawn from the [disagg-kv-router recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml), where six prefill workers publish KV events and the Frontend routes across them.
+```yaml
+  - name: SglangPrefillWorker
+    type: prefill
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3-32B
+          - --stream-interval
+          - "20"
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+```
+
+Engine event publication requires `--kv-events-config`. The worker-local indexer does not
+activate the engine publisher. The engine publishes raw events to the Dynamo worker. The worker
+updates its worker-local indexer before it relays normalized updates to the router. This relay uses
+Dynamo's event plane. For workers that share a pod or network namespace, use a unique endpoint
+port.
+
+The backend JSON schemas differ. vLLM requires `"enable_kv_cache_events":true`. It can infer the
+ZMQ publisher and default endpoint. SGLang requires `"publisher":"zmq"` and an explicit
+`"endpoint"`. The `"topic"` field is optional. Do not copy the vLLM-only
+`{"enable_kv_cache_events":true}` form into an SGLang worker.
+
+`--stream-interval 20` is a starting value for host efficiency. KV routing does not require it. The
+value reduces host-side engine output processing and Dynamo bridge crossings. The tradeoff is
+coarser stream updates. See the [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md#recommended-stream-interval)
+and [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md#recommended-stream-interval)
+reference guides.
+
+The vLLM snippets above come from the [disagg-kv-router recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml).
+In this recipe, six prefill workers publish KV events and the Frontend routes across them.
 
 </Step>
 

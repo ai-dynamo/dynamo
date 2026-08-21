@@ -120,9 +120,44 @@ walkthrough, see [Metrics and Dashboards](../../../../../cli/operations/observab
 
 ### KV Events
 
-When configured with `--kv-events-config`, workers publish KV cache events (block creation/deletion) for the [KV-aware router](../../router/overview.md). Events are published via ZMQ from SGLang's scheduler and relayed through Dynamo's event plane.
+`--router-mode kv` configures the frontend router but does not enable SGLang's KV event publisher.
+For event-driven KV routing, pass `--kv-events-config` to every aggregated worker. In a standard
+disaggregated deployment, pass it to every prefill worker:
+
+```bash
+python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B \
+  --stream-interval 20 \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+```
+
+The SGLang JSON must include `"publisher":"zmq"` and an explicit `"endpoint"`. The `"topic"`
+field is optional. SGLang does not recognize `{"enable_kv_cache_events":true}` as event
+enablement. Do not reuse this vLLM-only form.
+
+Without `--kv-events-config`, SGLang does not publish KV events. The configuration makes SGLang emit
+raw cache events over ZMQ to its Dynamo worker. Dynamo normalizes and coalesces the events. It then
+updates the worker-local indexer and republishes the state updates to the router. This publication
+uses Dynamo's event plane. Dynamo enables the worker-local indexer after it creates the publisher.
+The worker-local indexer does not enable the SGLang event source.
+
+SGLang does not support Dynamo's experimental conditional-disaggregation bypass. Therefore,
+standard disaggregated deployments do not need KV event publication on decode workers. For workers
+that share a network namespace, use a unique ZMQ endpoint port.
+
+For approximate routing without engine events, omit `--kv-events-config` from all workers. Start
+the frontend with `--no-router-kv-events`. You can instead set `DYN_ROUTER_USE_KV_EVENTS=false`.
 
 For DP attention mode (`--enable-dp-attention`), the publisher handles multiple DP ranks per node, each with its own KV event stream.
+
+### Recommended Stream Interval
+
+Start with `--stream-interval 20` on SGLang workers. The default interval of `1` can produce one
+engine output for each generated token. An interval of `20` reduces host-side output processing
+and Dynamo bridge crossings under load. The tradeoff is coarser stream updates.
+
+The SGLang frontend processor has a separate default interval of `20`. To override this value, set
+`DYN_SGLANG_STREAM_INTERVAL` on the frontend. The worker flag does not propagate to the frontend.
+When fine-grained stream updates are more important than host efficiency, use a lower interval.
 
 ## Engine Routes
 

@@ -25,6 +25,8 @@ spec:
         - args:
           - --model-path
           - Qwen/Qwen3-0.6B
+          - --stream-interval
+          - "20"
           - --served-model-name
           - Qwen/Qwen3-0.6B
           - --page-size

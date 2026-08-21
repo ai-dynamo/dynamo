@@ -11,6 +11,47 @@ The standalone router provides configurable KV-aware routing for any set of work
 
 This component is **fully configurable** and works with any Dynamo backend (vLLM, TensorRT-LLM, SGLang, etc.) and any worker endpoint.
 
+## Required KV Event Configuration
+
+Event-driven KV routing requires configuration at the frontend and each event-producing worker:
+
+1. For the embedded router, start the frontend with `--router-mode kv`.
+   The standalone `python -m dynamo.router` process is already a KV router and does not accept
+   this flag.
+2. Start each aggregated worker with the backend `--kv-events-config` shown below.
+   In a standard disaggregated deployment, add this configuration to each prefill worker.
+
+The frontend flag does not enable the engine publisher. Without the worker flag, the worker-local
+indexer receives no engine KV events. The router then cannot track the worker's actual cache
+contents.
+
+**vLLM:**
+
+```bash
+python -m dynamo.vllm --model MODEL_NAME \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+```
+
+The vLLM JSON must set `"enable_kv_cache_events":true`. If you omit the other fields, vLLM uses
+the ZMQ publisher and its default endpoint. The complete form makes the transport and endpoint
+explicit.
+
+**SGLang:**
+
+```bash
+python -m dynamo.sglang --model-path MODEL_NAME \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+```
+
+The SGLang JSON must include `"publisher":"zmq"` and `"endpoint"`. The `"topic"` field is
+optional. The vLLM-only `{"enable_kv_cache_events":true}` form does not enable SGLang events.
+
+For workers that share a network namespace, use a unique endpoint port. The engine publishes raw
+events over ZMQ to its Dynamo worker. The worker updates its worker-local indexer. It sends
+normalized state updates to the router over Dynamo's separate event plane.
+
+To route without engine events, enable approximate cache prediction with `--no-router-kv-events`.
+
 ## Usage
 
 ### Command Line
@@ -73,11 +114,14 @@ python -m dynamo.router \
 # Start decode workers
 python -m dynamo.vllm --model MODEL_NAME --block-size 64 &
 
-# Start prefill workers
-python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode prefill &
+# Start prefill workers with KV event publication
+python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode prefill \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 ```
 
-For event-driven prefix-cache state, add the backend-specific KV event publishing flags to the workers that the router indexes. Use `--no-router-kv-events` on the router only when approximate cache-state prediction is acceptable.
+The prefill command includes the required vLLM event configuration. For SGLang or more workers,
+use the guidance in [Required KV Event Configuration](#required-kv-event-configuration).
+Use `--no-router-kv-events` only for approximate cache-state prediction.
 
 >[!Note]
 > **Why `--no-router-track-active-blocks` for prefill routing?**
