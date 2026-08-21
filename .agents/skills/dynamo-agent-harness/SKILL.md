@@ -28,7 +28,8 @@ Treat the [Agent Harnesses guide](https://github.com/ai-dynamo/dynamo/blob/main/
 
 ## Prerequisites
 
-- A reachable Dynamo endpoint whose `/v1/models` includes the requested model.
+- Deploy a supported configuration from the [Dynamo recipe catalog](https://github.com/ai-dynamo/dynamo/tree/main/recipes) on Kubernetes, then retain its reachable frontend URL and exact served model. This skill consumes that endpoint; it does not deploy Dynamo.
+- A successful `GET $DYNAMO_BASE_URL/v1/models` result containing `$DYNAMO_MODEL`.
 - `uv` and Node.js 22+.
 - Codex CLI `0.147.0` for the experimental Omnigent path. The helper resolves one executable, passes its absolute path to Omnigent, and rejects every other version.
 - `opencode` on `PATH` only when selecting the OpenCode harness.
@@ -40,10 +41,13 @@ Treat the [Agent Harnesses guide](https://github.com/ai-dynamo/dynamo/blob/main/
 Default to `verify`. Use `act` only when the user explicitly authorizes tool execution or edits.
 
 ```bash
+export DYNAMO_BASE_URL=http://127.0.0.1:8000
+export DYNAMO_MODEL=your-recipe-served-model
+
 .agents/skills/dynamo-agent-harness/scripts/drive_harness.py \
   --harness codex \
-  --base-url http://127.0.0.1:8000 \
-  --model zai-org/GLM-4.7-Flash \
+  --base-url "$DYNAMO_BASE_URL" \
+  --model "$DYNAMO_MODEL" \
   --cwd /absolute/worktree \
   --capability verify
 ```
@@ -76,8 +80,8 @@ Use the separate one-shot helper after preparing the exact Omnigent checkout doc
 export DYNAMO_API_KEY=dummy
 .agents/skills/dynamo-agent-harness/scripts/drive_omnigent.py run \
   --omnigent-repo /absolute/path/to/omnigent \
-  --base-url http://127.0.0.1:8000 \
-  --model zai-org/GLM-4.7-Flash \
+  --base-url "$DYNAMO_BASE_URL" \
+  --model "$DYNAMO_MODEL" \
   --cwd /absolute/worktree \
   --prompt "Inspect one file and report one verified fact."
 ```
@@ -119,4 +123,4 @@ Return:
 - Codex may warn that custom model metadata is unavailable; the driver fixes reasoning effort to `medium` so unsupported catalog defaults are not sent to Dynamo.
 - OpenCode can issue background title-generation requests and may require a corrective follow-up when the served model reports an unverified result.
 - The adapters are pinned in `scripts/drive_harness.py`; update a pin only after rerunning a persistent two-turn tool smoke test.
-- Omnigent is a separate experimental one-shot Responses path, not an ACP session. A shared one-GPU NScale deployment verified its stock Dynamo request compatibility, but this branch owns no Kubernetes manifest. It does not send `x-dynamo-session-final` and is not ThunderAgent lifecycle-qualified.
+- Omnigent is a separate experimental one-shot Responses path, not an ACP session. Dated Kubernetes qualification evidence verifies its stock Dynamo request compatibility, but this branch does not deploy its backend. It does not send `x-dynamo-session-final` and is not ThunderAgent lifecycle-qualified.

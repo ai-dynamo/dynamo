@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Omnigent compatibility assessment
 
-This experimental path runs one pinned Omnigent/Codex turn through a stock NVIDIA Dynamo Responses endpoint. It does not qualify Kubernetes deployment, persistent multi-turn reuse, or ThunderAgent lifecycle cleanup.
+This experimental path runs one pinned Omnigent/Codex turn through an existing stock NVIDIA Dynamo Responses endpoint. It consumes a Kubernetes deployment created from a supported Dynamo recipe; it does not create another backend, qualify persistent multi-turn reuse, or claim ThunderAgent lifecycle cleanup.
 
 ## Reproducibility tuple
 
@@ -18,6 +18,8 @@ This experimental path runs one pinned Omnigent/Codex turn through a stock NVIDI
 | Dynamo integration branch | `omnigent-well-lit-path`; record the exact `git rev-parse HEAD` used for each build or evidence bundle |
 
 The runner rejects a different or dirty Omnigent checkout. It resolves either `--codex-bin` or one `codex` executable from `PATH`, probes `codex --version`, passes the resolved absolute path through `OMNIGENT_CODEX_PATH`, and fails unless the result is exactly `codex-cli 0.147.0`. It bootstraps pinned `uv 0.11.8` through `uvx` inside the disposable runtime cache and does not update the system installation.
+
+Before preparing Omnigent, install the [Dynamo Kubernetes Platform](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx), deploy a supported configuration from the [Dynamo recipe catalog](../../../recipes/README.md), and retain the recipe frontend URL and exact served model. Verify that `GET $DYNAMO_BASE_URL/v1/models` contains `$DYNAMO_MODEL`; every live command below assumes that deployment remains running.
 
 Prepare the audited Omnigent checkout:
 
@@ -60,9 +62,9 @@ The audited local path does not require a Databricks workspace, model-serving en
 
 ## Local evidence — 2026-08-20
 
-A clean post-hardening capture against Omnigent commit `733234c303af7254597f99b14bda058878d3e8ca` and Codex CLI `0.147.0` completed with exit code 0. It observed two authenticated, streaming `POST /v1/responses` requests using the expected model: one main turn and one background title turn. Both had non-empty, distinct Codex `thread-id` values and `seatbelt` turn metadata, proving that the authored `darwin_seatbelt` bundle replaced the shorthand CLI's unsafe `none` sandbox. The assistant reply was consumed, invocation-scoped cleanup stopped one private daemon and the private local server, and the run left no `.codex-tmp` or disposable runtime behind. A final run through the one-GPU NScale stock backend (`Qwen/Qwen3-0.6B` at revision `c1899de289a04d12100db370d81485cdf75e47ca`, 32,768-token context) returned exactly `OMNIGENT_STOCK_OK` and exited 0 under the same scoped cleanup implementation. No `x-dynamo-session-final` request was observed. The environment allowlist, exact Codex probe, authored agent bundle, active-sandbox assertion, assistant-reply requirement, pre-existing-state rejection, and invocation-scoped teardown are covered by 20 deterministic tests.
+A clean post-hardening capture against Omnigent commit `733234c303af7254597f99b14bda058878d3e8ca` and Codex CLI `0.147.0` completed with exit code 0. It observed two authenticated, streaming `POST /v1/responses` requests using the expected model: one main turn and one background title turn. Both had non-empty, distinct Codex `thread-id` values and `seatbelt` turn metadata, proving that the authored `darwin_seatbelt` bundle replaced the shorthand CLI's unsafe `none` sandbox. The assistant reply was consumed, invocation-scoped cleanup stopped one private daemon and the private local server, and the run left no `.codex-tmp` or disposable runtime behind. A dated Kubernetes stock-backend run returned exactly `OMNIGENT_STOCK_OK` and exited 0 under the same scoped cleanup implementation. No `x-dynamo-session-final` request was observed. The environment allowlist, exact Codex probe, authored agent bundle, active-sandbox assertion, assistant-reply requirement, pre-existing-state rejection, and invocation-scoped teardown are covered by 20 deterministic tests.
 
-Classification: experimental stock-Dynamo compatibility path. The shared NScale deployment, not this branch, supplied the GPU backend. ThunderAgent finalization and persistent main-thread reuse are not qualified.
+Classification: experimental stock-Dynamo compatibility path. A separately deployed Dynamo recipe must supply the backend. ThunderAgent finalization and persistent main-thread reuse are not qualified.
 
 ## Verification
 
@@ -81,10 +83,12 @@ Run against a reachable Dynamo endpoint:
 
 ```bash
 export DYNAMO_API_KEY=dummy
+export DYNAMO_BASE_URL=http://127.0.0.1:8000
+export DYNAMO_MODEL=your-recipe-served-model
 .agents/skills/dynamo-agent-harness/scripts/drive_omnigent.py run \
   --omnigent-repo /absolute/path/to/omnigent \
-  --base-url http://127.0.0.1:8000 \
-  --model zai-org/GLM-4.7-Flash \
+  --base-url "$DYNAMO_BASE_URL" \
+  --model "$DYNAMO_MODEL" \
   --cwd /absolute/worktree \
   --prompt "Inspect one file and report one verified fact."
 ```
