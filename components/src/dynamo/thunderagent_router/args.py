@@ -9,7 +9,7 @@ import argparse
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
-from dynamo.common.configuration.utils import add_argument
+from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.router.args import (
     DynamoRouterArgGroup,
     DynamoRouterConfig,
@@ -36,6 +36,7 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     model_path: Optional[str] = None
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
+    publish_sglang_generate: bool = False
 
     def to_thunderagent_config(self) -> ThunderAgentConfig:
         return ThunderAgentConfig(
@@ -217,6 +218,15 @@ class ThunderAgentArgGroup(ArgGroup):
             "worker's --dyn-reasoning-parser. Only applies when --model-name "
             "is set.",
             arg_type=str,
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--publish-sglang-generate",
+            env_var="DYN_THUNDERAGENT_PUBLISH_SGLANG_GENERATE",
+            default=False,
+            help="Advertise SGLang's native /generate API through the "
+            "ThunderAgent router. Enable only when --endpoint targets a "
+            "Dynamo SGLang worker that publishes native generate support.",
         )
 
 
