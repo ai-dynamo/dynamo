@@ -30,6 +30,15 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) type KvCacheDomainKey = ResolvedIndexerDomain;
 
+/// Selects which Dynamo endpoints one Relay supervises.
+///
+/// The watch scope also fixes a naming invariant: request-facing model and
+/// adapter names must be unique across every namespace one Relay watches. A
+/// local ModelManager may resolve a name collision by its own first-wins
+/// order, but a Relay federates independently owned endpoints and has no safe
+/// canonical owner to choose, so a name claimed by conflicting targets is
+/// omitted from every endpoint (fail-closed, recorded as a serving conflict)
+/// rather than arbitrated per namespace.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KvDcRelayDiscoveryConfig {
     pub namespaces: Vec<String>,
@@ -458,6 +467,7 @@ struct MembershipState {
     warned_invalid_query_semantics: HashSet<ModelCardInstanceId>,
     warned_invalid_aliases: HashSet<(ModelCardInstanceId, String)>,
     warned_orphan_adapters: HashSet<ModelCardInstanceId>,
+    warned_ambiguous_names: HashSet<String>,
     #[cfg(test)]
     projection_count: usize,
 }
@@ -472,6 +482,7 @@ impl Default for MembershipState {
             warned_invalid_query_semantics: HashSet::new(),
             warned_invalid_aliases: HashSet::new(),
             warned_orphan_adapters: HashSet::new(),
+            warned_ambiguous_names: HashSet::new(),
             #[cfg(test)]
             projection_count: 0,
         }
@@ -861,6 +872,16 @@ impl MembershipState {
             .into_iter()
             .filter_map(|(name, owners)| (owners.len() > 1).then_some(name))
             .collect();
+        for name in &ambiguous_names {
+            if !self.warned_ambiguous_names.contains(name) {
+                tracing::warn!(
+                    model = name,
+                    "Request-facing name resolves to conflicting targets across this Relay's \
+                     watch scope; omitting it from every endpoint (names must be unique across \
+                     all watched namespaces)"
+                );
+            }
+        }
 
         let mut endpoints = HashMap::new();
         for (endpoint, mut builder) in builders {
@@ -959,6 +980,7 @@ impl MembershipState {
         self.warned_invalid_query_semantics = invalid_query_semantics;
         self.warned_invalid_aliases = invalid_aliases;
         self.warned_orphan_adapters = orphan_adapters;
+        self.warned_ambiguous_names = ambiguous_names;
         let endpoints = Arc::new(endpoints);
         self.previous = endpoints.clone();
         DcMembershipView { endpoints }
