@@ -146,8 +146,10 @@ matrix:
 A template selection names a source directory relative to the matrix and an
 output `path` relative to the generated overlay. The output path must be under
 `components/`; `path: components/efa` produces a normal local Component at
-`kustomize/overlays/<name>/components/efa/`. A standalone template directory
-contains `kustomization.yaml.j2` and may contain a plain `values.yaml` mapping.
+`kustomize/overlays/<name>/components/efa/`. Template output paths selected by
+one variant must be unique and must not contain one another. A standalone
+template directory contains `kustomization.yaml.j2` and may contain a plain
+`values.yaml` mapping.
 The Jinja source must render one Kustomize `Component`. It receives `values` and
 an indexed `base` rendered from the matrix `source`. `base` is indexed by
 lower-case Kind and `metadata.name`, for example

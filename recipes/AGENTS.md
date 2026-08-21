@@ -20,10 +20,12 @@ SPDX-License-Identifier: Apache-2.0
   `components` list. The matrix, recipe-local base and Components, and shared
   Components are source. A dimension value may also select `templates` and set
   `values`. Each template selection has a source relative to the matrix and a
-  generated `path` under the overlay's `components/` directory. Shared template
-  sources live in `recipes/kustomize/templates/`. A selected template directory
-  extends the direct `*.yaml` and `*.yaml.j2` files in its parent directory by
-  convention. Only direct files participate; never scan or copy subdirectories.
+  generated `path` under the overlay's `components/` directory. Generated paths
+  selected by one variant must be unique and non-overlapping. Shared
+  template sources live in `recipes/kustomize/templates/`. A selected template
+  directory extends the direct `*.yaml` and `*.yaml.j2` files in its parent
+  directory by convention. Only direct files participate; never scan or copy
+  subdirectories.
   Parent files are loaded first, then same-output-name files in the selected
   directory replace them (`patch.yaml` and `patch.yaml.j2` both produce
   `patch.yaml`, so either form replaces the other). Optional `values.yaml`

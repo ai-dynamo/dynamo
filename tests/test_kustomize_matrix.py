@@ -480,6 +480,47 @@ def test_template_path_is_a_nested_overlay_component_path(tmp_path):
         )
 
 
+def test_expand_matrix_rejects_overlapping_template_paths(tmp_path):
+    base = tmp_path / "base"
+    write_kustomization(base, "resources: []\n")
+    parent_template = tmp_path / "parent-template"
+    child_template = tmp_path / "child-template"
+    for template in (parent_template, child_template):
+        write_template(
+            template,
+            "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
+        )
+    matrix = tmp_path / ".kustomize-matrix.yaml"
+    matrix.write_text(
+        "source: base\n"
+        'nameTemplate: "${provider}-${fabric}"\n'
+        "matrix:\n"
+        "  provider:\n"
+        "    - name: aws\n"
+        "      templates:\n"
+        "        - source: parent-template\n"
+        "          path: components/fabric\n"
+        "  fabric:\n"
+        "    - name: efa\n"
+        "      templates:\n"
+        "        - source: child-template\n"
+        "          path: components/fabric/efa\n",
+        encoding="utf-8",
+    )
+
+    kustomize_matrix = load_matrix_module()
+    config = kustomize_matrix.load_matrix(str(matrix))
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "variant 'aws-efa' assigns overlapping local Component paths: "
+            "components/fabric and components/fabric/efa"
+        ),
+    ):
+        kustomize_matrix.expand_matrix(config)
+
+
 def test_unfold_rebases_external_component_paths(tmp_path, monkeypatch):
     recipe = tmp_path / "recipe"
     base = recipe / "kustomize/base"
