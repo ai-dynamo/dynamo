@@ -88,6 +88,11 @@ type DynamoComponentDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// Listing nodes answers one question for the elastic-EP follower: does any node
+// advertise an NVLink partition (nvidia.com/gpu.clique)? Without it the renderer
+// cannot tell a cluster that can satisfy the follower placement from one where it
+// would leave the pod Pending forever.
+//+kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete

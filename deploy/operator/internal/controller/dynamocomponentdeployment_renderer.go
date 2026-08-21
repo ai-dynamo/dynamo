@@ -38,6 +38,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
@@ -259,17 +260,12 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		return nil, errors.New("no containers found in base pod spec")
 	}
 
-	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
-
-	// Skip the follower for the same reason buildCliqueForRole skips RoleGMS: it runs a
-	// bare Ray join, not the Dynamo runtime, so it never registers a DynamoWorkerMetadata
-	// CR. Labelling it would only keep it in the discovery daemon's reflector store and
-	// wake its debounce loop on every scale-up/scale-down.
-	if role != dynamo.RoleFollower &&
-		commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, podAnnotations) {
-		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
-		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	if err := r.applyNVLinkTopologyCapability(ctx, role, podSpec); err != nil {
+		return nil, err
 	}
+
+	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
+	r.applyDiscoveryLabels(role, podAnnotations, podLabels)
 
 	if checkpointInfo != nil &&
 		(checkpointInfo.StartupPolicy == "" ||
@@ -308,6 +304,91 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		},
 		Spec: *podSpec,
 	}, nil
+}
+
+// applyDiscoveryLabels marks the pod for the Kubernetes discovery backend.
+//
+// The elastic-EP follower is skipped for the same reason buildCliqueForRole skips
+// RoleGMS: it runs a bare Ray join, not the Dynamo runtime, so it never registers a
+// DynamoWorkerMetadata CR. Labelling it would only keep it in the discovery daemon's
+// reflector store and wake its debounce loop on every scale-up/scale-down.
+func (r *dcdWorkloadRenderer) applyDiscoveryLabels(role dynamo.Role, podAnnotations, podLabels map[string]string) {
+	if role == dynamo.RoleFollower {
+		return
+	}
+	if !commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, podAnnotations) {
+		return
+	}
+	podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+	podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+}
+
+// applyNVLinkTopologyCapability keeps the follower's NVLink-partition affinity only on
+// clusters that can satisfy it.
+//
+// Synthesis stamps a *required* pod affinity on nvidia.com/gpu.clique so the follower
+// can only land in the leader's NVLink partition -- without it the scheduler may place
+// the follower in a different partition, where it joins the ComputeDomain and reports
+// healthy but has no NVLink route to the leader, so the EP collective fails only when it
+// runs and an apparently successful scale serves wrong or failing inference.
+//
+// That label is stamped by the DRA driver on GB200-class nodes. On hardware that never
+// carries it the required term can never be satisfied, so the follower would sit Pending
+// forever with nothing explaining why -- and admission enables this path from the vLLM
+// flags alone, so the user gets no signal that GB200 was required. Check the cluster
+// instead: keep the term where a partition exists to pin to, and drop it where none
+// does, leaving the follower to schedule normally.
+func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(ctx context.Context, role dynamo.Role, podSpec *corev1.PodSpec) error {
+	if role != dynamo.RoleFollower || podSpec.Affinity == nil || podSpec.Affinity.PodAffinity == nil {
+		return nil
+	}
+
+	terms := podSpec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	kept := make([]corev1.PodAffinityTerm, 0, len(terms))
+	var dropped bool
+	for _, term := range terms {
+		if term.TopologyKey != commonconsts.NodeLabelGPUClique {
+			kept = append(kept, term)
+			continue
+		}
+		supported, err := r.clusterHasNVLinkDomain(ctx)
+		if err != nil {
+			return errors.Wrap(err, "failed to determine whether the cluster exposes NVLink partitions")
+		}
+		if supported {
+			kept = append(kept, term)
+			continue
+		}
+		dropped = true
+	}
+	if !dropped {
+		return nil
+	}
+
+	log.FromContext(ctx).Info(
+		"no node exposes an NVLink partition label; scheduling the elastic-EP follower without partition affinity",
+		"topologyKey", commonconsts.NodeLabelGPUClique,
+	)
+	podSpec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution = kept
+	// Leave no empty PodAffinity behind: an affinity with no terms is meaningless and
+	// only makes the rendered pod spec harder to read.
+	if len(kept) == 0 {
+		podSpec.Affinity.PodAffinity = nil
+	}
+	return nil
+}
+
+// clusterHasNVLinkDomain reports whether any node advertises an NVLink partition.
+// Bounded to a single item: the question is existence, not which nodes.
+func (r *dcdWorkloadRenderer) clusterHasNVLinkDomain(ctx context.Context) (bool, error) {
+	nodes := &corev1.NodeList{}
+	if err := r.reader.List(ctx, nodes,
+		client.HasLabels{commonconsts.NodeLabelGPUClique},
+		client.Limit(1),
+	); err != nil {
+		return false, err
+	}
+	return len(nodes.Items) > 0, nil
 }
 
 func (r *dcdWorkloadRenderer) generateService(

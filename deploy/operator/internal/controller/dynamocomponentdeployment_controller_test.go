@@ -940,6 +940,105 @@ func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *tes
 	}
 }
 
+// The follower's NVLink-partition affinity is required, so it can only be honoured on
+// hardware that advertises partitions. Keeping it on a cluster with no such nodes would
+// leave the follower Pending forever with no explanation; dropping it there lets the pod
+// schedule normally. Both behaviours are asserted so neither can regress silently.
+func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing.T) {
+	tests := []struct {
+		name           string
+		nodeHasClique  bool
+		wantCliqueTerm bool
+	}{
+		{name: "cluster advertises NVLink partitions: pin the follower", nodeHasClique: true, wantCliqueTerm: true},
+		{name: "cluster has none: schedule normally instead of Pending forever", nodeHasClique: false, wantCliqueTerm: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := scheme.Scheme
+			require.NoError(t, v1alpha1.AddToScheme(s))
+			require.NoError(t, appsv1.AddToScheme(s))
+			require.NoError(t, corev1.AddToScheme(s))
+
+			t.Log("Build a follower DCD carrying both placement terms, as synthesis stamps them")
+			alpha := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "mydgd-decode-flw",
+					Namespace:   "default",
+					Annotations: map[string]string{commonconsts.KubeAnnotationElasticEPFollower: commonconsts.KubeLabelValueTrue},
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:     "decode-flw",
+						ComponentType:   commonconsts.ComponentTypeWorker,
+						DynamoNamespace: ptr.To("default"),
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{Name: commonconsts.MainContainerName, Image: "test-image:latest"},
+							PodSpec: &corev1.PodSpec{
+								Affinity: &corev1.Affinity{
+									PodAffinity: &corev1.PodAffinity{
+										RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+											{TopologyKey: commonconsts.NodeLabelGPUClique},
+										},
+									},
+									PodAntiAffinity: &corev1.PodAntiAffinity{
+										RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+											{TopologyKey: "kubernetes.io/hostname"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			dcd := betaDCD(t, alpha)
+
+			objects := []client.Object{dcd}
+			if tt.nodeHasClique {
+				objects = append(objects, &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "gb200-0",
+						Labels: map[string]string{commonconsts.NodeLabelGPUClique: "clique-a"},
+					},
+				})
+			}
+
+			r := &DynamoComponentDeploymentReconciler{
+				Client:        fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build(),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+				},
+			}
+
+			t.Log("Render the follower pod template against that cluster")
+			podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
+				context.Background(), dcd, dynamo.RoleFollower, noContainerGPUs())
+			require.NoError(t, err)
+
+			t.Log("The partition affinity survives only where a partition exists to pin to")
+			var gotClique bool
+			if aff := podTemplate.Spec.Affinity; aff != nil && aff.PodAffinity != nil {
+				for _, term := range aff.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
+					if term.TopologyKey == commonconsts.NodeLabelGPUClique {
+						gotClique = true
+					}
+				}
+			}
+			require.Equal(t, tt.wantCliqueTerm, gotClique)
+
+			t.Log("The one-pod-per-node anti-affinity is unaffected either way")
+			require.NotNil(t, podTemplate.Spec.Affinity)
+			require.NotNil(t, podTemplate.Spec.Affinity.PodAntiAffinity)
+			require.Len(t, podTemplate.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
+		})
+	}
+}
+
 // The follower runs a bare Ray join, not the Dynamo runtime, so it never registers a
 // DynamoWorkerMetadata CR. Discovery labels would only keep it in the daemon's reflector
 // store and wake its debounce loop on every scale-up/scale-down.
