@@ -52,7 +52,7 @@ spec:
             value: '1'
           - name: VLLM_USE_V2_MODEL_RUNNER
             value: '0'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-181a088d750c896fe0a575ebdbe72d7f000bfc4d-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           securityContext:
@@ -104,10 +104,10 @@ spec:
               --mm-encoder-attn-backend TORCH_SDPA \
               --attention-backend FLASHINFER_MLA \
               --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
-              --moe-backend flashinfer_trtllm \
+              --moe-backend auto \
               --kda-prefill-backend flashkda \
               --kernel-config '{"enable_cutedsl_warmup":true}' \
-              --max-num-seqs 256 \
+              --max-num-seqs 1907 \
               --max-num-batched-tokens 16384 \
               --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024,2048,4096,5120,6144,6656,7168,7680,8192]}' \
               --block-size 64 \
@@ -163,7 +163,10 @@ spec:
             value: '1'
           - name: PYTORCH_ALLOC_CONF
             value: expandable_segments:True
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+          # vLLM 0.27.1: CUDA-graph estimation steals 7 GiB from KV cache by default; disable it.
+          - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+            value: '0'
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-181a088d750c896fe0a575ebdbe72d7f000bfc4d-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           resources:
