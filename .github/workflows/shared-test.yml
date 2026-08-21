@@ -16,8 +16,14 @@ on:
         type: string
       amd_runner:
         description: 'Runner to execute tests on (amd64 only)'
-        required: true
+        required: false
         type: string
+        default: 'prod-tester-amd-gpu-v2'
+      arm_runner:
+        description: 'Runner to execute tests on (arm64 only)'
+        required: false
+        type: string
+        default: 'prod-tester-arm-v2'
       target_tag_plain:
         description: 'Plain runtime image tag prefix from the build workflow'
         required: true
@@ -35,6 +41,11 @@ on:
         required: false
         type: string
         default: '/workspace'
+      models_dir:
+        description: 'Pre-populated model-cache directory passed to pytest as --models-dir'
+        required: false
+        type: string
+        default: ''
       kvbm_mla_backend:
         description: 'KVBM MLA attention backend exported for KVBM tests'
         required: false
@@ -74,6 +85,11 @@ on:
         required: false
         type: boolean
         default: true
+      gpu_test_platforms:
+        description: 'Platforms whose matrix entries should run GPU tests, as a JSON array'
+        required: false
+        type: string
+        default: '["amd64"]'
       gpu_test_markers:
         description: 'GPU pytest markers. Selects the full GPU pool. When run_gpu_parallel_tests=true, profiled tests run in the parallel stage and are excluded from the sequential stage by appending "and not profiled_vram_gib".'
         required: false
@@ -137,7 +153,7 @@ jobs:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
-    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
+    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || inputs.arm_runner }}
     container:
       image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
@@ -217,12 +233,13 @@ jobs:
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          models_dir: ${{ inputs.models_dir }}
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
       - name: Run GPU tests (parallel)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
+        if: ${{ inputs.run_gpu_tests && inputs.run_gpu_parallel_tests && contains(fromJSON(inputs.gpu_test_platforms), matrix.platform) }}
         uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
@@ -231,6 +248,7 @@ jobs:
           test_type: "pre_merge_gpu_parallel"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          models_dir: ${{ inputs.models_dir }}
           # parallel_mode=auto + max_vram_gib hands off to the VRAM-aware
           # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
           parallel_mode: 'auto'
@@ -243,7 +261,7 @@ jobs:
         # but require checkout to have succeeded so an infra/prereq failure (e.g. the
         # container/pod never coming online) skips this step cleanly instead of trying
         # to run the local pytest-local action against an un-checked-out workspace.
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_gpu_tests && contains(fromJSON(inputs.gpu_test_platforms), matrix.platform) }}
         uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
@@ -253,6 +271,7 @@ jobs:
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          models_dir: ${{ inputs.models_dir }}
           parallel_mode: 'none'
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'

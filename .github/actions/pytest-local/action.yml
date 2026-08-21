@@ -58,6 +58,10 @@ inputs:
     description: 'Path to the HF home directory on the runner. When set, the HF_HOME environment variable is set to this path.'
     required: false
     default: '/models'
+  models_dir:
+    description: 'Pre-populated model-cache directory passed to pytest as --models-dir. Empty keeps the existing online pre-download behavior.'
+    required: false
+    default: ''
   gpu_tests:
     description: 'Is this a GPU test job?'
     required: false
@@ -156,6 +160,12 @@ runs:
         fi
         echo "HF_HOME=${HF_HOME}" >> $GITHUB_ENV
 
+        MODELS_DIR_OPT=""
+        if [[ -n "${{ inputs.models_dir }}" ]]; then
+          MODELS_DIR_OPT="--models-dir=${{ inputs.models_dir }}"
+          echo "📚 Using pre-populated model cache: ${{ inputs.models_dir }}"
+        fi
+
         # HOME must stay at GITHUB_WORKSPACE: ARC, upload-artifact, and checkout require it.
         # The ARC runner uid (1001) may have no /etc/passwd entry, causing the shell
         # to set HOME=/ by default. Pin HOME to GITHUB_WORKSPACE so downstream code
@@ -180,7 +190,7 @@ runs:
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD="python -m pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="python -m pytest ${MODELS_DIR_OPT} -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
           # Determine parallelization based on parallel_mode input
@@ -223,7 +233,7 @@ runs:
             export PYTHONPATH="${CONTAINER_WORKSPACE}/components/src:${CONTAINER_WORKSPACE}/lib/bindings/python/src${PYTHONPATH:+:${PYTHONPATH}}"
           fi
 
-          PYTEST_CMD="python -m pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="python -m pytest ${MODELS_DIR_OPT} ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"

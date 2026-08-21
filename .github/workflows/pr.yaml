@@ -138,16 +138,19 @@ jobs:
       - vllm-dev-build
       - vllm-test
       - vllm-multi-gpu-test
+      - vllm-gb200-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-dev-build
       - sglang-test
       - sglang-multi-gpu-test
+      - sglang-gb200-test
       - sglang-copy-to-acr
       - trtllm-build
       - trtllm-dev-build
       - trtllm-test
       - trtllm-multi-gpu-test
+      - trtllm-gb200-test
       - trtllm-copy-to-acr
       - vllm-efa-build
       - sglang-efa-build
@@ -795,6 +798,32 @@ jobs:
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
+  # TODO: remove after GB200 validation and move this lane to nightly-ci.yml (DYN-4049).
+  vllm-gb200-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: vllm
+      test_type: GB200 Test
+      # 2x GB200 ARM64 lane; validates the nightly single- and dual-GPU test pool.
+      arm_runner: aws-dev-01-tester-arm-gpu-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["arm64"]'
+      models_dir: /models
+      enable_coverage: true
+      run_sanity_check: false
+      gpu_test_platforms: '["arm64"]'
+      gpu_test_markers: vllm and (gpu_1 or gpu_2)
+      gpu_test_timeout_minutes: 240
+      run_gpu_parallel_tests: true
+      # Admit large-memory profiles while retaining headroom below GB200 capacity.
+      gpu_parallel_max_vram_gib: '180'
+    secrets: inherit
+
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
@@ -838,6 +867,32 @@ jobs:
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
+  # TODO: remove after GB200 validation and move this lane to nightly-ci.yml (DYN-4049).
+  sglang-gb200-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: sglang
+      test_type: GB200 Test
+      # 2x GB200 ARM64 lane; validates the nightly single- and dual-GPU test pool.
+      arm_runner: aws-dev-01-tester-arm-gpu-v2
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["arm64"]'
+      models_dir: /models
+      enable_coverage: true
+      run_sanity_check: false
+      gpu_test_platforms: '["arm64"]'
+      gpu_test_markers: sglang and (gpu_1 or gpu_2)
+      gpu_test_timeout_minutes: 240
+      run_gpu_parallel_tests: true
+      # Admit large-memory profiles while retaining headroom below GB200 capacity.
+      gpu_parallel_max_vram_gib: '180'
+    secrets: inherit
+
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
@@ -879,6 +934,32 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  # TODO: remove after GB200 validation and move this lane to nightly-ci.yml (DYN-4049).
+  trtllm-gb200-test:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: trtllm
+      test_type: GB200 Test
+      # 2x GB200 ARM64 lane; validates the nightly single- and dual-GPU test pool.
+      arm_runner: aws-dev-01-tester-arm-gpu-v2
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["arm64"]'
+      models_dir: /models
+      enable_coverage: true
+      run_sanity_check: false
+      gpu_test_platforms: '["arm64"]'
+      gpu_test_markers: trtllm and (gpu_1 or gpu_2)
+      gpu_test_timeout_minutes: 240
+      run_gpu_parallel_tests: true
+      # Admit large-memory profiles while retaining headroom below GB200 capacity.
+      gpu_parallel_max_vram_gib: '180'
     secrets: inherit
 
   planner-test:
