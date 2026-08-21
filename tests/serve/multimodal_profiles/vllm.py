@@ -285,10 +285,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         suffix="nixl_push",
                         payload=make_image_payload(["green"]),
                         extra_script_args=["--kv-push"],
-                        # TEMPORARY: pre_merge to prove this case on the PR that
-                        # introduces it. Drop this line to inherit the topology's
-                        # post_merge mark once CI has shown it green.
-                        marks=[pytest.mark.pre_merge],
                     ),
                 ],
             ),
