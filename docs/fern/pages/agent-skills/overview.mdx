@@ -1,0 +1,50 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Agent Skills
+subtitle: The Dynamo repository ships instructions that AI coding agents pick up automatically.
+---
+
+Dynamo ships **agent skills**: repository-native instruction files that AI coding agents such
+as Claude Code, Codex, and Cursor discover and follow on their own. You don't install anything
+or name a skill. Clone the repo, point your agent at it, describe what you want in plain
+language, and the relevant skills activate.
+
+```text
+"Optimize this Dynamo deployment for my target SLO."
+"Deploy GLM-5.2 on my 4-GPU node and confirm it serves traffic."
+"My time to first token (TTFT) doubled after I raised concurrency. Diagnose it and fix the config."
+```
+
+## Deployment skills
+
+Skills for deploying and diagnosing DynamoGraphDeployments: `deploy-dynamo-recipe`,
+`troubleshoot-dynamo`, `dynamo-router-starter`, and `dynamo-interconnect-check`. Ask your
+agent to deploy a model or investigate a broken deployment and these guide the work. Sources
+live under
+[`.agents/skills/`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills).
+
+## Performance optimization skills
+
+An end-to-end optimization loop for tuning a Dynamo deployment against a stated goal. The
+agent captures an immutable baseline and workload contract, deploys and smoke-tests it,
+benchmarks with AIPerf, proposes one evidence-backed change at a time, reviews each proposal
+before spending GPU time, and iterates within budgets you set (GPU-hours, wall clock, and failed
+deploys; the agent asks if you don't state them). The final handoff includes the recommended
+configuration, reproduction commands, limitations, and preserved raw evidence.
+
+The workflow spine is documented in
+[`agent-docs/guides/optimization/optimize-loop.md`](https://github.com/ai-dynamo/dynamo/blob/3e522d8ef0b4b96ae75126c1f5e7c71ae6923dcf/agent-docs/guides/optimization/optimize-loop.md),
+with benchmark-validity and evidence rules under
+[`agent-docs/rules/`](https://github.com/ai-dynamo/dynamo/tree/3e522d8ef0b4b96ae75126c1f5e7c71ae6923dcf/agent-docs/rules).
+Harnesses that support isolated sub-agents (Codex) run the loop's roles as separate agents;
+other harnesses run the same roles in one agent.
+
+## Practical notes
+
+- For long unattended runs, the agent will tell you when to enable your harness's goal or
+  budget mode; if you enable it manually, wait until the agent's opening questions are answered.
+- Benchmarking and optimization consume real GPU time. State your budgets; the agent tracks
+  consumption against them and reports it.
+- Never provide secrets to the agent or allow credentials into run artifacts.
+
