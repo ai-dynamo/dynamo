@@ -644,8 +644,8 @@ impl Model {
 
     // -- Worker monitoring (aggregated across WorkerSets) --
 
-    /// Get load threshold config from the first WorkerSet that has a monitor.
-    /// When `config` is Some, updates ALL monitors (each WorkerSet has its own).
+    /// Get load threshold config from the first WorkerSet with a threshold handle.
+    /// When `config` is Some, updates every handle. WorkerSets may share a handle.
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
