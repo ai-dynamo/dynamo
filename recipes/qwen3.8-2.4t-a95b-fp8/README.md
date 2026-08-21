@@ -148,7 +148,7 @@ worker passes the repo id (`Qwen/Qwen3.8-2.4T-A95B-FP8`) to `--model` and resolv
 kubectl apply -f vllm/agg-gb300-chat/deploy.yaml -n ${NAMESPACE}
 
 kubectl wait --for=condition=Ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=qwen38max-agg \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen38max-agg-chat \
   -n ${NAMESPACE} --timeout=7200s
 ```
 
@@ -158,7 +158,7 @@ only reports ready once all four nodes have joined the TP group.
 ### 5. Smoke test
 
 ```bash
-kubectl port-forward svc/qwen38max-agg-frontend 8000:8000 -n ${NAMESPACE} &
+kubectl port-forward svc/qwen38max-agg-chat-frontend 8000:8000 -n ${NAMESPACE} &
 ```
 
 #### Text
@@ -208,10 +208,11 @@ Expected: `choices[0].message.tool_calls[0].function.name` is `get_weather` and 
 
 Non-obvious knobs, all already set in the manifest:
 
-- **Model resolution.** Each worker pod mounts the `model-cache` PVC at `/model-cache` with
-  `HF_HOME=/model-cache` and passes the repo id (`Qwen/Qwen3.8-2.4T-A95B-FP8`) to `--model`, so vLLM loads
-  the checkpoint out of the PVC's Hugging Face cache. `envFrom: hf-token-secret` covers the hub lookup
-  at startup. The frontend does not mount the PVC.
+- **Model resolution.** Both the frontend and worker pods mount the `model-cache` PVC at `/model-cache`
+  with `HF_HOME=/model-cache`. Workers pass the repo id (`Qwen/Qwen3.8-2.4T-A95B-FP8`) to `--model` and
+  resolve the checkpoint from the PVC's Hugging Face cache. `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`
+  are set so no network token lookup occurs at runtime — the `hf-token-secret` is only needed by the
+  model-download Job.
 - **Async scheduling off.** `--no-async-scheduling` is required for these fixed serving shapes.
 - **Event-driven KV routing.** Both workers publish KV events (`--kv-events-config` over ZMQ), and the
   frontend uses `--router-mode kv --router-kv-events`. Missing either worker flag can silently route
