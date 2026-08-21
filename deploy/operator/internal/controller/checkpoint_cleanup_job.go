@@ -68,6 +68,7 @@ func buildCheckpointCleanupJob(
 					Labels: map[string]string{
 						snapshotprotocol.CheckpointIDLabel: checkpointID,
 					},
+					Annotations: snapshotprotocol.DisableCheckpointJobSidecarInjection(nil),
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
