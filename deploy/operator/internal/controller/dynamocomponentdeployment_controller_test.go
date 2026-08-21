@@ -731,6 +731,50 @@ func TestDynamoComponentDeploymentReconciler_generateService_DottedDeleteStub(t 
 	require.Equal(t, testNormalizedDCDName, service.Name)
 }
 
+func TestStandaloneDCDServiceRenderingCharacterization(t *testing.T) {
+	t.Log("Arrange a standalone frontend DCD and its service-rendering configuration")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "frontend",
+			Namespace: "default",
+			UID:       "frontend-uid",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoComponent: "frontend",
+				commonconsts.KubeLabelDynamoNamespace: "dynamo-graph",
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "frontend",
+				ComponentType: v1beta1.ComponentTypeFrontend,
+			},
+		},
+	}
+	r := &DynamoComponentDeploymentReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}
+
+	t.Log("Act through the existing standalone DCD Service renderer")
+	service, toDelete, err := r.generateService(context.Background(), generateResourceOption{
+		dynamoComponentDeployment: dcd,
+	})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+
+	t.Log("Assert standalone DCD naming, selector, port, and propagated metadata")
+	require.Equal(t, "frontend", service.Name)
+	require.Equal(t, dcd.Namespace, service.Namespace)
+	require.Equal(t, map[string]string{
+		commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeFrontend,
+		commonconsts.KubeLabelDynamoNamespace:     "dynamo-graph",
+		commonconsts.KubeLabelDynamoComponent:     "frontend",
+	}, service.Spec.Selector)
+	require.Equal(t, commonconsts.DynamoServicePortName, service.Spec.Ports[0].Name)
+	require.Equal(t, int32(commonconsts.DynamoServicePort), service.Spec.Ports[0].Port)
+	require.Equal(t, dynamo.GetDCDKubeLabels(dcd), service.Labels)
+	require.Equal(t, dynamo.GetDCDKubeAnnotations(dcd), service.Annotations)
+}
+
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {
 	t.Log("Build a multinode DCD and the dependencies shared by reconciliation and rendering")
 	s := scheme.Scheme

@@ -584,3 +584,51 @@ func TestGroveServiceDoesNotPreserveDisaggregatedSetSelector(t *testing.T) {
 	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(service), service))
 	require.NotContains(t, service.Spec.Selector, disaggregatedsetv1.SetNameLabelKey)
 }
+
+func TestGroveServiceRenderingCharacterization(t *testing.T) {
+	t.Log("Arrange a frontend component for the Grove stable-resource reconciler")
+	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "graph-uid"},
+		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {
+					ComponentType:   consts.ComponentTypeFrontend,
+					DynamoNamespace: ptr.To("dynamo-graph"),
+				},
+			},
+		},
+	})
+	component := &dgd.Spec.Components[0]
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd).
+		Build()
+	reconciler := newGroveStableResourcesReconciler(
+		kubeClient, events.NewFakeRecorder(10), &configv1alpha1.OperatorConfiguration{},
+	)
+
+	t.Log("Act through the existing Grove component-service path")
+	_, err := reconciler.reconcileComponentService(t.Context(), dgd, dgd, component, false)
+	require.NoError(t, err)
+
+	t.Log("Assert the stable Service name, selector, port, metadata, and DGD ownership")
+	service := &corev1.Service{}
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKey{
+		Namespace: dgd.Namespace,
+		Name:      dynamo.GetDCDResourceName(dgd, component.ComponentName, ""),
+	}, service))
+	dynamoNamespace := dgd.GetDynamoNamespaceForComponent(component)
+	require.Equal(t, map[string]string{
+		consts.KubeLabelDynamoComponentType: consts.ComponentTypeFrontend,
+		consts.KubeLabelDynamoNamespace:     dynamoNamespace,
+		consts.KubeLabelDynamoComponent:     "frontend",
+	}, service.Spec.Selector)
+	require.Equal(t, consts.DynamoServicePortName, service.Spec.Ports[0].Name)
+	require.Equal(t, int32(consts.DynamoServicePort), service.Spec.Ports[0].Port)
+	require.Empty(t, service.Labels)
+	require.Equal(t, "1", service.Annotations[commoncontroller.NvidiaAnnotationGenerationKey])
+	require.NotEmpty(t, service.Annotations[commoncontroller.NvidiaAnnotationHashKey])
+	require.Len(t, service.OwnerReferences, 1)
+	require.Equal(t, dgd.UID, service.OwnerReferences[0].UID)
+}
