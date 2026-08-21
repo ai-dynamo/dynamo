@@ -948,6 +948,7 @@ The default model is `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`.
 | --- | --- | --- |
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
 | `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `MODEL` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Model identifier or path. |
 
 **Command-line flags:** `--model` sets the model identifier or path.
 
@@ -956,6 +957,30 @@ The default model is `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`.
 ```bash
 ./launch/agg_omni_audio.sh
 ```
+
+The same script serves Nemotron Audex, which runs a two-stage pipeline: stage 0 is the thinker that
+emits speech codec tokens, and stage 1 decodes those tokens to a 16 kHz mono waveform.
+
+```bash
+./launch/agg_omni_audio.sh --model nvidia/Nemotron-Labs-Audex-2B
+```
+
+Audex serves a single built-in voice, so the request contract differs from Qwen3-TTS: the handler
+accepts `voice` only when it is omitted or set to `default`, rejects `ref_audio` and `ref_text`,
+and accepts an optional `cfg_scale` for classifier-free guidance. The printed curl example adapts to the selected model. See
+[Text-to-Audio](../../use-cases/diffusion/workflows/text-to-audio.md) for the request format.
+
+<Note>
+Both Audex checkpoints report the same model type, so the 30B-A3B needs an explicit stage
+configuration. Otherwise auto-detection selects the 2B-tuned file. vLLM-Omni ships the
+configuration, so resolve it from the installed package and pass it through to the worker:
+
+```bash
+AUDEX_30B_CFG=$(python -c 'import pathlib, vllm_omni; print(pathlib.Path(vllm_omni.__file__).parent / "deploy/audex_tts_30b.yaml")')
+./launch/agg_omni_audio.sh --model nvidia/Nemotron-Labs-Audex-30B-A3B \
+    --stage-configs-path "$AUDEX_30B_CFG"
+```
+</Note>
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_audio.sh)
 </Accordion>

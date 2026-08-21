@@ -13,6 +13,8 @@ Text-to-audio (TTS) generation runs a vLLM-Omni worker with `--output-modalities
 |---|---|
 | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Default model; predefined speakers |
 | `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` | Describe a voice via `instructions` |
+| `nvidia/Nemotron-Labs-Audex-2B` | Single built-in voice; optional `cfg_scale` guidance |
+| `nvidia/Nemotron-Labs-Audex-30B-A3B` | Same contract as the 2B; needs an explicit stage config |
 
 ## Launch
 
@@ -20,6 +22,21 @@ Launch using the provided script with `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`:
 
 ```bash
 bash examples/backends/vllm/launch/agg_omni_audio.sh
+```
+
+The same script serves Nemotron Audex, which runs a two-stage pipeline: stage 0 is the thinker that emits speech codec tokens, and stage 1 decodes those tokens to a 16 kHz mono waveform.
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_audio.sh --model nvidia/Nemotron-Labs-Audex-2B
+```
+
+Both Audex checkpoints report the same model type, so the 30B-A3B needs an explicit stage configuration. Otherwise auto-detection selects the 2B-tuned file. vLLM-Omni ships the configuration, so resolve it from the installed package and pass it through to the worker:
+
+```bash
+AUDEX_30B_CFG=$(python -c 'import pathlib, vllm_omni; print(pathlib.Path(vllm_omni.__file__).parent / "deploy/audex_tts_30b.yaml")')
+bash examples/backends/vllm/launch/agg_omni_audio.sh \
+  --model nvidia/Nemotron-Labs-Audex-30B-A3B \
+  --stage-configs-path "$AUDEX_30B_CFG"
 ```
 
 ## Generate Speech
@@ -66,6 +83,21 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 ```
 
 </Tab>
+<Tab title="Audex (guided speech)">
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nvidia/Nemotron-Labs-Audex-2B",
+    "input": "Hey, this is generated using Dynamo!",
+    "cfg_scale": 1.5
+  }' --output audex.wav
+```
+
+Audex serves a single built-in voice, so it accepts `voice` only when omitted or set to `default`, and rejects `ref_audio` and `ref_text` instead of synthesizing a different-sounding result. The Qwen3-TTS fields `language`, `instructions`, and `task_type` do not apply. Omit `cfg_scale`, or set it to `1.0`, to decode without guidance.
+
+</Tab>
 </Tabs>
 
 ## Parameters
@@ -105,8 +137,11 @@ The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/pro
 <ParamField path="max_new_tokens" type="int" default="2048">
   Maximum tokens to generate (1–4096).
 </ParamField>
+<ParamField path="cfg_scale" type="float">
+  Classifier-free guidance scale for Nemotron Audex (1.0–10.0). `1.0` disables guidance, and omitting the field decodes unguided. Ignored by other audio models.
+</ParamField>
 
-Available voices and languages are loaded dynamically from the model's `config.json` at startup. Non-Qwen3-TTS audio models (e.g., MiMo-Audio) use a generic text prompt and ignore TTS-specific parameters.
+Available voices and languages are loaded dynamically from the model's `config.json` at startup. Nemotron Audex builds its own prompt and accepts only `input`, `model`, `response_format`, `max_new_tokens`, and `cfg_scale`; speech models additionally tolerate `voice` when it is omitted or `default`, while text-to-audio rejects `voice` outright. Other non-Qwen3-TTS audio models (e.g., MiMo-Audio) use a generic text prompt and ignore TTS-specific parameters.
 
 > [!NOTE]
 > Audio streaming (`stream: true`) and the Base task (voice cloning) are not yet supported.

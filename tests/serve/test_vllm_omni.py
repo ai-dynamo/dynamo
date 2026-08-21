@@ -194,6 +194,58 @@ vllm_omni_configs = {
             ),
         ],
     ),
+    "omni_audex": VLLMOmniConfig(
+        name="omni_audex",
+        directory=vllm_dir,
+        # Audex shares the audio launch script; only the model differs.
+        script_name="agg_omni_audio.sh",
+        script_args=["--model", "nvidia/Nemotron-Labs-Audex-2B"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            # Profiled with tests/utils/profile_pytest.py on 1x H200: peak
+            # 117.6 GiB, unchanged at every probed KV cap (9-75 GiB). vLLM-Omni's
+            # audex_tts.yaml sizes each stage as a fraction of *total* device
+            # memory (0.4 for the thinker, 0.25 for code2wav) and the aggregated
+            # worker forwards no engine memory args to AsyncOmni, so neither
+            # --kv-cache-memory-bytes nor --gpu-memory-utilization can cap the
+            # footprint from the CLI. Both VRAM markers are therefore omitted:
+            # the H200 number is card-relative, not a portable requirement.
+            # Re-enable once per-stage memory overrides are plumbed through
+            # omni's _build_omni_kwargs, then re-profile on a 24 GiB card.
+            pytest.mark.skip(
+                reason="Audex peaked at 117.6 GiB on 1x H200; the shipped stage "
+                "config sizes stages as a fraction of total device memory and "
+                "the worker cannot cap it, so it exceeds CI capacity (24GB)"
+            ),
+        ],
+        model="nvidia/Nemotron-Labs-Audex-2B",
+        request_payloads=[
+            AudioSpeechPayload(
+                body={
+                    "model": "nvidia/Nemotron-Labs-Audex-2B",
+                    "input": "Hey, this is generated using Dynamo!",
+                    # Audex is the only audio model that takes cfg_scale, and it
+                    # travels as a top-level protocol field: unknown fields are
+                    # dropped silently, so a plumbing regression would leave
+                    # guidance unapplied without failing the request.
+                    "cfg_scale": 1.5,
+                },
+                repeat_count=1,
+                # Stage 1 emits cumulative waveform snapshots, the first of
+                # which is empty. Mis-assembling that stream yields a short or
+                # silent WAV that still parses, so check the waveform itself:
+                # this prompt decodes to ~2.3s at rms ~0.055.
+                min_duration_s=1.0,
+                min_rms=0.01,
+                expected_sample_rate=16000,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     # Known flake (post-merge): URL check fails after 600s with "StageDiffusionProc
     # died during handshake (exit code 143)" — the diffusion child process is
     # SIGTERM'd before the handshake completes. Bumping the timeout will not fix this;

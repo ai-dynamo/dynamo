@@ -280,6 +280,58 @@ class AudioFormatter:
         self._media_fs = media_fs
         self._media_http_url = media_http_url
         self._AudioData = AudioData  # stored for use in format()
+        # Per-request waveform snapshots; see observe_chunk(). This formatter
+        # instance is shared across concurrent requests, so state is keyed by
+        # request id rather than held as single-request attributes.
+        self._pending: Dict[str, tuple] = {}
+
+    def observe_chunk(self, stage_output: Any, request_id: str) -> bool:
+        """Record one streamed audio payload; True if it carried samples.
+
+        Chunk-streaming decoders (``async_chunk``) emit audio repeatedly as the
+        codec decodes, and each payload is a *cumulative* snapshot of the
+        waveform so far, not the newly decoded frames alone. So the last
+        non-empty payload is the complete result, and the payloads must be
+        neither concatenated (which would repeat the audio) nor taken as they
+        arrive: empty payloads occur mid-stream, including as the very first
+        one, and encoding such a payload yields a header-only, silent file.
+        """
+        mm_output = (
+            stage_output.multimodal_output
+            if hasattr(stage_output, "multimodal_output")
+            else stage_output
+        )
+        if is_empty_payload(mm_output):
+            return False
+        try:
+            audio_np, sample_rate = self._extract_audio_tensor(mm_output)
+        except (ValueError, TypeError, RuntimeError):
+            # Same failure modes format() treats as expected. An unusable
+            # mid-stream snapshot is skipped rather than failing the request:
+            # if none is ever usable, take_pending() yields a zero-length
+            # waveform and format_audio() reports the failure at end of stream.
+            return False
+        if np.size(audio_np) == 0:
+            return False
+
+        # Snapshots only grow, but keep the longest rather than the latest so a
+        # truncated trailing payload cannot drop already-decoded audio.
+        previous, _ = self._pending.get(request_id, (None, None))
+        if previous is not None and np.size(previous) > np.size(audio_np):
+            return True
+        self._pending[request_id] = (audio_np, sample_rate)
+        return True
+
+    def take_pending(self, request_id: str) -> tuple:
+        """Release the complete waveform recorded for one request."""
+        audio_np, sample_rate = self._pending.pop(request_id, (None, 24000))
+        if audio_np is None:
+            return np.zeros((0,), dtype=np.float32), sample_rate
+        return audio_np, sample_rate
+
+    def discard_pending(self, request_id: str) -> None:
+        """Drop a request's state (abort/error paths) so it cannot leak."""
+        self._pending.pop(request_id, None)
 
     async def format(
         self, stage_output: Any, request_id: str, **ctx: Any
@@ -292,14 +344,32 @@ class AudioFormatter:
         if is_empty_payload(mm_output):
             return self._error_response(request_id, "No audio generated")
 
+        try:
+            audio_np, sample_rate = self._extract_audio_tensor(mm_output)
+        except (ValueError, TypeError, RuntimeError) as e:
+            # The concrete failure modes of the extractor: a missing audio key
+            # or a ragged array (ValueError), a payload that is not tensor-like
+            # (TypeError), and a torch.cat shape mismatch (RuntimeError).
+            logger.error("Failed to process audio for request %s: %s", request_id, e)
+            return self._error_response(request_id, str(e))
+
+        return await self.format_audio(audio_np, sample_rate, request_id, **ctx)
+
+    async def format_audio(
+        self, audio_np: Any, sample_rate: int, request_id: str, **ctx: Any
+    ) -> Dict[str, Any] | None:
+        """Encode an already-extracted waveform into a response payload."""
         response_format = ctx.get("response_format")
         output_format = ctx.get("output_format")
         speed = ctx.get("speed", 1.0)
 
+        if audio_np is None or np.size(audio_np) == 0:
+            # A silent, header-only file is not a successful synthesis; surface
+            # it as an error rather than handing back an empty WAV.
+            return self._error_response(request_id, "No audio generated")
+
         try:
             start_time = time.time()
-            audio_np, sample_rate = self._extract_audio_tensor(mm_output)
-
             encode_fmt = "wav" if output_format is None else output_format
             assert encode_fmt is not None
             audio_bytes, media_type = await asyncio.to_thread(
@@ -475,6 +545,12 @@ class OutputFormatter:
             ),
             "audio": AudioFormatter(model_name, media_fs, media_http_url),
         }
+        self.audio: AudioFormatter = self._formatters["audio"]
+
+    @staticmethod
+    def is_audio_output(stage_output: Any) -> bool:
+        """True when this stage output is a final audio payload."""
+        return getattr(stage_output, "final_output_type", None) == "audio"
 
     async def format(
         self,

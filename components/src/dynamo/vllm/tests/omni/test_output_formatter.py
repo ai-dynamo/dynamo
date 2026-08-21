@@ -369,6 +369,117 @@ class TestAudioFormatterFormat:
         assert result["data"][0]["b64_json"] is not None
 
 
+class TestAudioFormatterObserveChunk:
+    """Chunk-streaming decoders emit the waveform repeatedly, each payload a
+    cumulative snapshot and some of them empty, so the response must come from
+    the complete snapshot rather than from whichever payload arrived last."""
+
+    @pytest.fixture
+    def formatter(self):
+        """A bare AudioFormatter with no media sink configured."""
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        return AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+
+    @staticmethod
+    def _chunk(samples, sr=24000):
+        """One streamed audio payload holding the given samples."""
+        import numpy as np
+
+        return {"audio": np.asarray(samples, dtype=np.float32), "sr": sr}
+
+    def test_cumulative_snapshots_are_not_concatenated(self, formatter):
+        """Each payload already contains the earlier audio; joining repeats it."""
+        import numpy as np
+
+        formatter.observe_chunk(self._chunk([0.1, 0.2]), "req-1")
+        formatter.observe_chunk(self._chunk([0.1, 0.2, 0.3]), "req-1")
+
+        audio_np, sr = formatter.take_pending("req-1")
+        assert sr == 24000
+        np.testing.assert_allclose(audio_np, [0.1, 0.2, 0.3])
+
+    def test_empty_payload_does_not_discard_audio(self, formatter):
+        """Empty payloads occur mid-stream and carry no waveform."""
+        import numpy as np
+
+        formatter.observe_chunk(self._chunk([0.1, 0.2]), "req-1")
+        assert formatter.observe_chunk(self._chunk([]), "req-1") is False
+
+        audio_np, _ = formatter.take_pending("req-1")
+        np.testing.assert_allclose(audio_np, [0.1, 0.2])
+
+    def test_leading_empty_payload_does_not_become_the_result(self, formatter):
+        """The first payload of a stream can be the empty one."""
+        import numpy as np
+
+        assert formatter.observe_chunk(self._chunk([]), "req-1") is False
+        formatter.observe_chunk(self._chunk([0.1, 0.2]), "req-1")
+
+        np.testing.assert_allclose(formatter.take_pending("req-1")[0], [0.1, 0.2])
+
+    def test_shorter_late_payload_cannot_truncate_the_result(self, formatter):
+        """Snapshots are kept by length, so a short late one cannot win."""
+        import numpy as np
+
+        formatter.observe_chunk(self._chunk([0.1, 0.2, 0.3]), "req-1")
+        formatter.observe_chunk(self._chunk([0.1]), "req-1")
+
+        np.testing.assert_allclose(formatter.take_pending("req-1")[0], [0.1, 0.2, 0.3])
+
+    def test_missing_audio_payload_is_skipped(self, formatter):
+        """A payload with no audio key is skipped rather than raising."""
+        import numpy as np
+
+        assert formatter.observe_chunk({"sr": 24000}, "req-1") is False
+        assert np.size(formatter.take_pending("req-1")[0]) == 0
+
+    def test_state_is_isolated_per_request(self, formatter):
+        """One shared formatter serves concurrent requests."""
+        import numpy as np
+
+        formatter.observe_chunk(self._chunk([0.1]), "req-1")
+        formatter.observe_chunk(self._chunk([0.9]), "req-2")
+
+        np.testing.assert_allclose(formatter.take_pending("req-1")[0], [0.1])
+        np.testing.assert_allclose(formatter.take_pending("req-2")[0], [0.9])
+
+    def test_take_pending_releases_the_state(self, formatter):
+        """A second take must not replay the first request's audio."""
+        import numpy as np
+
+        formatter.observe_chunk(self._chunk([0.1]), "req-1")
+        formatter.take_pending("req-1")
+        assert np.size(formatter.take_pending("req-1")[0]) == 0
+
+    def test_discard_pending_is_safe_when_nothing_recorded(self, formatter):
+        """Error and abort paths discard state that may never have existed."""
+        formatter.discard_pending("never-seen")  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_observed_audio_encodes_to_one_response(self, formatter):
+        """The buffered snapshots encode to a single completed response."""
+        formatter.observe_chunk(self._chunk([0.1] * 1200), "req-1")
+        formatter.observe_chunk(self._chunk([0.1] * 2400), "req-1")
+
+        audio_np, sr = formatter.take_pending("req-1")
+        result = await formatter.format_audio(audio_np, sr, "req-1")
+
+        assert result["status"] == "completed"
+        assert len(result["data"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_zero_length_audio_is_an_error_not_a_silent_file(self, formatter):
+        """A header-only file would otherwise be reported as a success."""
+        import numpy as np
+
+        result = await formatter.format_audio(
+            np.zeros((0,), dtype=np.float32), 24000, "req-1"
+        )
+        assert result["status"] == "failed"
+        assert "No audio generated" in result["error"]
+
+
 # ── OutputFormatter dispatcher ─────────────────────────────
 
 
